@@ -1,15 +1,17 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**Two features LANDED on main this session:** Phosphor-Terminal restyle (`a8bfef8`) and the
-**units→lessons nav** (`0e2fc54`) — both squash-merged, branches + worktrees removed, render-verified
-on nomad-b at 800x480. Pick up the pending content/lessons work — recommended next:
-1. **Remaining lessons + HIL** (see Pending): M5 legal, M9-M12, U5/U6, decode backends,
-   counter-surveillance (Rayhunter panel + Flock) — none built yet. NOTE: predict prompts must stay
-   short (~35-40 words) or they overflow predict's 800x480 — render-check each one. Choice keys/labels
-   that are YAML booleans (yes/no/true/false) now fail loud at load — quote them.
-2. **UX specs needed from MC** before building: gain/provenance/ppm panels, exam UI, legal UI
-   (backends exist; exam pool is 100% done). These are touch-UI layout/taste calls.
+**Session landed:** Phosphor restyle (`a8bfef8`), units→lessons nav (`0e2fc54`), parser bool guard
+(`ca3ba48`), light-touch comrade voice (`d2d4ae9`), and **M5 "The One Rule" legal lesson** (`bceb085`,
+MC-reviewed) — all squash-merged, render-verified on nomad-b. The clean autonomous queue is cleared;
+everything remaining needs hardware or a UX decision from MC:
+1. **Remaining lessons need HIL**: M9-M12 (OOK/FSK/LoRa/PSK), U5 M13-M16 (decode), U6 M17-M18 — all
+   use the radios, so they need authoring + a real run on nomad-b. M5 was the only no-RF lesson.
+   NOTE: predict prompts must stay short (~35-40 words) for 800x480; quote YAML-boolean choice keys
+   (the loader now rejects bare yes/no/true/false).
+2. **UX decisions needed from MC** before building: exam UI (backend + NCVEC pool 100% done, but
+   needs: questions/session, immediate-reveal vs score-at-end, and the 3 NCVEC diagram JPGs);
+   gain/provenance/ppm panels; legal/other UIs. Reuse the predict-chip + tile patterns.
 
 The units nav: home = 6 unit tiles (U1 Instrument .. U6 Under the Hood), `/unit/{id}` lists that
 unit's loaded lessons, unbuilt units show an honest "no lessons here yet" (no lock, D16). Unit map
@@ -135,6 +137,11 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 - Light-touch "comrade" voice pass LANDED (`d2d4ae9`): one address at the frame opening + the
   "your turn" beat of all 7 packs; teaching copy + predict prompts untouched. MC's call: light, not
   full persona. Render-verified lesson 2 FRAME on nomad-b. (Fuller lesson copy comes with new lessons.)
+- M5 "The One Rule" legal lesson LANDED (`bceb085`, MC-reviewed): U2's lesson, no-RF; listening is
+  broad/lawful, transmitting is licensed (D16 framing, jurisdiction caveat). Shipped with a general
+  console fix — a no-hardware lesson renders as text with a chips-only predict (gated on
+  `lesson.needs_hardware`). TDD; render-verified M5 frame + predict on nomad-b. Unit 2 is no longer
+  empty in the nav.
 - Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
 - Phosphor-Terminal restyle LANDED on main (`a8bfef8`): home + FRAME + PREDICT render-verified on
   nomad-b at 800x480; Russo One (Latin + Cyrillic) loads; ☭ renders as a glyph (via system
