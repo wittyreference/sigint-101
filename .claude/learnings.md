@@ -57,3 +57,31 @@ the ~360px stage area, leaving almost nothing for a multi-line title.
 **How to apply.** Write predict prompts to ~35-40 words. The fix that landed: trim the prompt, hold
 the title at the 18px floor (predict-scoped font-size), and reclaim chrome height (statusbar
 `--bar-h` 72→66, rail `--rail-h` 48→40). Render-check every new lesson's predict screen at 800x480.
+
+## 2026-10-26: HIL render recipe for a LIVE panel (server on nomad-b, not the droplet)
+**Finding.** The waterfall and the gain meter are LIVE (poll `/api/spectrum`). A droplet-served
+render shows the honest "no radio" state — the droplet has no SDR. To see a live panel with real
+data the server must run ON nomad-b (its checkout is `/home/spec5/sigint-101`, has a `.venv` and
+`rtl_power`). Recipe that worked: (1) on nomad-b `git fetch origin <branch> && git checkout -b
+<branch> FETCH_HEAD`; (2) hold the server open as a droplet background task:
+`ssh spec5@100.108.20.20 'cd /home/spec5/sigint-101 && exec .venv/bin/uvicorn sigint101.app:app
+--host 127.0.0.1 --port 8008'` (backgrounding uvicorn *inside* a one-shot ssh fails with exit 255 —
+hold the connection open instead); (3) warm the sweep: `curl /api/spectrum` then wait ~8s for real
+rows; (4) to show a hidden instrument stage, POST a prediction (`/api/predict?lesson_id=N`) so the
+first SEALED stage (observe) becomes the visible one, then screenshot `/lesson/N` DIRECTLY — a
+headless iframe wrapper renders blank, but a real stage renders; (5) restore nomad-b: kill procs,
+`git checkout main && git branch -D <branch>`, remove any scp'd wrapper. ssh to nomad-b is flaky on
+long/compound commands (intermittent 255) — keep each ssh call simple and retry.
+**How to apply.** Any live-data panel (gain/provenance/ppm, the waterfall) is a HIL check — verify
+structure + no-radio on the droplet, then the live reading on nomad-b with this recipe.
+
+## 2026-10-26: the demo/try/observe instrument stages were over-subscribed at 800x480
+**Finding.** Only home/FRAME/predict were ever render-verified. The instrument stages (waterfall +
+tune + a long "I-do/you-do" narration + Next-step footer + title + eyebrow) overflowed 800x480 on
+EVERY instrument lesson (reproduced on M1, which has no gain panel) — the narration spilled over the
+controls. Measured: 0px was left for the narration after the fixed chrome. Fixed (`592bf84`) by
+moving Next-step onto the tune strip, compacting the tune, scrolling the narration, and trimming M2's
+copy.
+**How to apply.** Render-verify EVERY stage of a lesson at 800x480, not just the first — a stage
+that is hidden-by-default (demo/try/observe behind the predict gate) is easy to never look at. The
+other instrument lessons (M1,M3,M4,M6,M7,M8) still need their copy trimmed (they scroll meanwhile).

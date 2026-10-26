@@ -100,8 +100,11 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   2026-2030 pool (409 + errata). `make selftest` = 304 tests, 94%, pristine; `make lint` clean.
 
 ## Pending work
-- Wire gain/provenance/ppm panels + exam + legal UIs.
-- Remaining lessons M5 (legal), M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
+- Trim the demo/try/observe copy on the OTHER instrument lessons (M1, M3, M4, M6, M7, M8) the way M2
+  was trimmed — they fit the new instrument layout but their long copy scrolls until trimmed.
+- Wire the provenance (M3) + ppm (M4) panels, the same way the gain meter (M2) was done.
+- Exam-sim mode (scored practice exam) + results screen; legal/other UIs.
+- Remaining lessons M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
   + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
 - Commit 3 NCVEC diagram JPGs for the exam UI.
 
@@ -147,6 +150,11 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   retrieval card; tap + commit → `/exam/review` marks the correct option (bright + check) and a
   wrong pick (dashed + cross), with the FCC ref. Reuses the predict-chip pattern + the Leitner
   store. TDD; render-verified on nomad-b. Exam-sim mode + results screen + 3 diagram JPGs deferred.
+- Gain/SNR meter (M2) + instrument-stage fit LANDED (`592bf84`, MC-reviewed): a vertical level meter
+  (floor/peak lines, shaded SNR gap) beside the waterfall, live off the same sweep. The demo/try/
+  observe stages now fit 800x480 — Next-step on the tune strip, scrolling narration (they were
+  over-subscribed and never render-verified). **HIL-verified on nomad-b**: the live meter read
+  PEAK -14.7 / FLOOR ~-49 / SNR 34.0 dB off a real FM sweep.
 - Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
 - Phosphor-Terminal restyle LANDED on main (`a8bfef8`): home + FRAME + PREDICT render-verified on
   nomad-b at 800x480; Russo One (Latin + Cyrillic) loads; ☭ renders as a glyph (via system
