@@ -111,7 +111,7 @@ Report results. If checks are still running, tell the user and ask if they want 
 Ask the user for confirmation, then:
 
 `--squash`, never `--merge`: a GitHub-side merge commit is built on GitHub's servers and
-stamps the account's primary email (the Twilio one), bypassing the local identity hook.
+stamps the account's primary email, bypassing the local identity hook.
 A squash takes its author from the commits being squashed. See CLAUDE.md, identity invariant.
 
 ```bash

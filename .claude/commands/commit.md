@@ -86,7 +86,7 @@ git commit -m "$(cat <<'EOF'
 - Detail 1
 - Detail 2
 
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 EOF
 )"
 ```
