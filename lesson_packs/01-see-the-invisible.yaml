@@ -55,7 +55,7 @@ stages:
     off a real station: frequency across, brightness is power, time goes down.
 
 # The predict stage offers three keyboard-free, tap-to-choose answers (no on-screen keyboard
-# at the predict gate). The loader does not parse `choices` yet; it is carried here for the
+# at the predict gate). The loader parses and validates `choices` (key and label, fail-closed); it is carried here for the
 # touch console. These stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
