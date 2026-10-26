@@ -1,0 +1,21 @@
+# Fixture consolidation pack for the app integration tests. Deliberately self-contained — the
+# real lesson_packs/ are authored in parallel, so the suite must never depend on their content.
+# Sentinels (OPERATE_SENTINEL etc.) let a test prove sealed bodies are absent before a commit.
+id: 1
+slug: fixture-gain-snr
+title: Fixture Gain and SNR
+concept: the gap over the noise floor is the signal
+type: consolidation
+hardware: []
+stages:
+  predict: "Turn the gain up. What happens to the gap over the floor?"
+  operate: "OPERATE_SENTINEL operate the radio and watch the floor"
+  observe: "OBSERVE_SENTINEL the station blooms and the floor climbs with it"
+  explain: "EXPLAIN_SENTINEL SNR is the gap; past a point gain lifts both"
+choices:
+  - key: a
+    label: "The gap grows"
+  - key: b
+    label: "The gap holds"
+  - key: c
+    label: "The gap shrinks past a point"

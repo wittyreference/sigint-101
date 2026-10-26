@@ -223,3 +223,34 @@ def test_a_non_mapping_pack_file_is_refused(tmp_path):
     _write(tmp_path / "bad.yaml", "- just\n- a\n- list\n")
     with pytest.raises(LessonError, match="must be a mapping"):
         load_lessons(tmp_path)
+
+
+# --- optional keyboard-free predict choices -----------------------------------
+
+
+def test_choices_default_to_empty_when_a_pack_omits_them():
+    # A pack need not carry choices; without them the predict gate simply renders no chips.
+    assert parse_lesson(_consolidation()).choices == []
+
+
+def test_choices_parse_onto_the_lesson_in_order():
+    lesson = parse_lesson(_consolidation(choices=[
+        {"key": "a", "label": "The gap grows"},
+        {"key": "b", "label": "The gap holds"},
+    ]))
+    assert lesson.choices == [
+        {"key": "a", "label": "The gap grows"},
+        {"key": "b", "label": "The gap holds"},
+    ]
+
+
+def test_choices_must_be_a_list():
+    with pytest.raises(LessonError, match="must be a list"):
+        parse_lesson(_consolidation(choices="a,b,c"))
+
+
+def test_a_choice_needs_both_a_key_and_a_label():
+    # The key is what the commit records and the label is what the learner reads; a chip
+    # missing either would be unrecordable or unreadable, so the pack is refused at load.
+    with pytest.raises(LessonError, match="choice"):
+        parse_lesson(_consolidation(choices=[{"key": "a"}]))

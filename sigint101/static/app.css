@@ -643,6 +643,20 @@ body {
   border: 1px solid var(--warn);
 }
 
+/* Live sweep — the waterfall above is real rtl_power data. */
+.badge--live {
+  background: color-mix(in srgb, var(--ok) 22%, var(--wf-bg));
+  color: var(--ok);
+  border: 1px solid var(--ok);
+}
+
+/* No radio (or no console) — the panel is honestly empty, not a sample pretending to be live. */
+.badge--na {
+  background: color-mix(in srgb, var(--crit) 22%, var(--wf-bg));
+  color: var(--crit);
+  border: 1px solid var(--crit);
+}
+
 .waterfall__axis {
   position: absolute;
   left: 0;

@@ -27,7 +27,7 @@
   <div class="tiles">
     {% for u in units %}
       {% set pct = ((u.lessons_done / u.lessons_total * 100) | round | int) if u.lessons_total else 0 %}
-      <a class="tile tile--{{ u.status }}" href="/unit/{{ u.code | lower }}"
+      <a class="tile tile--{{ u.status }}" href="/lesson/{{ u.id }}"
          {% if u.status == 'locked' %}aria-disabled="true"{% endif %}>
         <div class="tile__head">
           <span class="tile__code">{{ u.code }}</span>

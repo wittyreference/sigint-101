@@ -68,6 +68,7 @@ class Lesson:
     quiz: list
     artifact: str
     panels: list
+    choices: list
 
     @property
     def needs_hardware(self) -> bool:
@@ -167,6 +168,21 @@ def parse_lesson(data: dict) -> Lesson:
         if name not in KNOWN_PANELS:
             raise LessonError(f"{ctx}: unknown panel '{name}' — the console has no such panel")
 
+    # Choices are the keyboard-free predict options a pack may carry: one tappable chip per
+    # entry, each a {key, label}. The key is what the commit records, the label is what the
+    # learner reads. Optional — a pack without them renders no chips — but when present every
+    # entry needs both, or a chip would be unlabelled or its tap unrecordable.
+    choices_in = data.get("choices", [])
+    if not isinstance(choices_in, list):
+        raise LessonError(f"{ctx}: 'choices' must be a list of predict options")
+    choices = []
+    for choice in choices_in:
+        key = str(choice.get("key", "")).strip() if isinstance(choice, dict) else ""
+        label = str(choice.get("label", "")).strip() if isinstance(choice, dict) else ""
+        if not key or not label:
+            raise LessonError(f"{ctx}: each predict choice needs a non-empty 'key' and 'label'")
+        choices.append({"key": key, "label": label})
+
     # Optional fields default to empty rather than None so the templates can iterate them
     # without guarding every one, and a pack can omit what it does not use. Only the stages
     # this type requires are carried onto the Lesson; any extra keys in the pack are dropped.
@@ -183,6 +199,7 @@ def parse_lesson(data: dict) -> Lesson:
         quiz=list(data.get("quiz", [])),
         artifact=str(data.get("artifact", "")),
         panels=list(panels),
+        choices=choices,
     )
 
 

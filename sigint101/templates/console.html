@@ -118,65 +118,16 @@
 {% endblock %}
 
 {% block scripts %}
+<!-- The live waterfall: polls /api/spectrum and draws one pixel per rtl_power bin, replacing the
+     SAMPLE badge with the live (or clearly-labelled no-radio) state. It never invents a signal. -->
+<script src="/static/waterfall.js"></script>
 <script>
-  // First-cut console behaviour. The real rtl_power renderer and server tuning wire in
-  // later; here the waterfall is a labelled SAMPLE and tuning only moves the readout.
+  // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
+  // between the lesson's rendered stage panels. The waterfall itself is drawn by
+  // /static/waterfall.js, so nothing here paints the canvas — a placeholder spectrogram would be
+  // invented signal, which the RF honesty invariant forbids once the real renderer exists.
   (function () {
-    var app = document.querySelector(".app");
-
-    // --- paint a static sample spectrogram so the canvas isn't blank -----------
-    // Honest placeholder: it is drawn once, never claims to be live, and carries the
-    // SAMPLE badge. The real renderer draws one pixel per rtl_power bin.
-    function ramp(theme, v) {
-      // v in 0..1 -> rgb string. red-night stays red-only to protect night vision.
-      if (theme === "red-night") {
-        var r = Math.round(30 + v * 225);
-        return "rgb(" + r + ",0,0)";
-      }
-      // dark / sunlight: a cool-to-hot spectrogram ramp.
-      var stops = [
-        [5, 8, 20], [12, 52, 97], [20, 140, 150],
-        [70, 200, 90], [240, 205, 70], [240, 90, 60]
-      ];
-      var p = v * (stops.length - 1), i = Math.floor(p), f = p - i;
-      var a = stops[i], b = stops[Math.min(i + 1, stops.length - 1)];
-      return "rgb(" + Math.round(a[0] + (b[0] - a[0]) * f) + "," +
-        Math.round(a[1] + (b[1] - a[1]) * f) + "," +
-        Math.round(a[2] + (b[2] - a[2]) * f) + ")";
-    }
-
-    function paint(canvas) {
-      var ctx = canvas.getContext && canvas.getContext("2d");
-      if (!ctx) return;
-      var theme = (app && app.getAttribute("data-theme")) || "dark";
-      var W = canvas.width, H = canvas.height;
-      ctx.clearRect(0, 0, W, H);
-      // A couple of steady carriers + a wandering one, over a low noise floor.
-      var carriers = [0.34, 0.52, 0.78];
-      for (var y = 0; y < H; y++) {
-        for (var x = 0; x < W; x++) {
-          var fx = x / W;
-          var v = 0.10 + 0.10 * Math.random();            // noise floor
-          for (var c = 0; c < carriers.length; c++) {
-            var cx = carriers[c] + (c === 2 ? 0.05 * Math.sin((y / H) * 6.28) : 0);
-            var d = Math.abs(fx - cx);
-            v += (c === 1 ? 0.85 : 0.6) * Math.exp(-(d * d) / 0.00035);
-          }
-          if (v > 1) v = 1;
-          ctx.fillStyle = ramp(theme, v);
-          ctx.fillRect(x, y, 1, 1);
-        }
-      }
-    }
-
-    var canvases = document.querySelectorAll("canvas.waterfall[data-sample]");
-    function paintAll() { canvases.forEach(paint); }
-    paintAll();
-    // Repaint on theme change so the ramp follows the theme (esp. red-night).
-    var toggle = document.querySelector("[data-theme-toggle]");
-    if (toggle) toggle.addEventListener("click", function () { setTimeout(paintAll, 0); });
-
-    // --- tune readout: +/- buttons and tap-to-tune (display only for now) ------
+    // --- tune readout: +/- buttons and tap-to-tune (display only) ------
     var STEP_MHZ = 0.1;
     document.querySelectorAll(".stage-panel").forEach(function (panel) {
       var freqEl = panel.querySelector("[data-freq]");
@@ -202,7 +153,6 @@
     var panels = Array.prototype.slice.call(document.querySelectorAll(".stage-panel"));
     function show(idx) {
       panels.forEach(function (p, i) { p.hidden = (i !== idx); });
-      paintAll();
     }
     document.querySelectorAll("[data-nav='next']").forEach(function (btn) {
       btn.addEventListener("click", function () {
