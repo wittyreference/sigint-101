@@ -14,7 +14,7 @@ panels: []
 
 stages:
   frame: >-
-    Tonight you turn a dead-looking band into clean aircraft traffic three ways at once — the right
+    Tonight, comrade, you turn a dead-looking band into clean aircraft traffic three ways at once — the right
     length, the right aim, and shoving a too-loud neighbour out of the radio's ear — and you learn
     that a missing signal sometimes means too much of the wrong thing, not too little antenna.
   demo: >-
@@ -34,7 +34,7 @@ stages:
     trouble was never too little signal at 1090 — it was far too much signal down at 100, so loud it
     was overloading the front end and blinding the radio everywhere at once.
   try: >-
-    Now you run all three. With the radio on 1090, first set the legs to that 6.9-centimetre
+    Now you run all three, comrade. With the radio on 1090, first set the legs to that 6.9-centimetre
     quarter-wave and read the SNR; then rotate the dipole from flat to standing vertical and watch
     the number climb to its best; then slide the FM-notch filter into the cable and watch what
     happens to the floor. Change one thing at a time and keep the SNR readout in view, so you can say

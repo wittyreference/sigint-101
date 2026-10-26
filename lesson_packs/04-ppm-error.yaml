@@ -14,7 +14,7 @@ panels: [ppm]
 
 stages:
   frame: >-
-    Tonight you meet the lie your built-in radio tells on every frequency — a big, known error
+    Tonight, comrade, you meet the lie your built-in radio tells on every frequency — a big, known error
     baked into its cheap clock — and you prove it's the radio and not you by standing a second
     radio right next to it.
   demo: >-
@@ -29,7 +29,7 @@ stages:
     it reads essentially zero. Same sky, same signal, two radios: one off by +164 ppm, the other
     dead on. The error lives in the radio, not in the air.
   try: >-
-    Now you see it with your own eyes. Keep the station tuned on the built-in radio and read where
+    Now you see it with your own eyes, comrade. Keep the station tuned on the built-in radio and read where
     its center lands — it sits roughly +17 kHz high of where the book says it should be. Now switch
     to the V3 and read the same station: it drops straight onto the published frequency, dead
     center. You didn't move the dial between them; the only thing that changed was which radio was
