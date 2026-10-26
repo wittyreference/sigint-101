@@ -88,9 +88,11 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   ESP32 / Espressif USB-JTAG on `/dev/ttyACM1` — good for the later counter-surveillance track).
 - Dev on the droplet (D14); these are acceptance targets over SSH. **No browser on the droplet** —
   render on nomad-b's Chromium.
-- **ppm (M4):** `ppm.py` honesty verified on hardware (refuses a ppm with no clear pilot); happy
-  path blocked — nomad-b currently recovers **no FM stereo pilot** (antenna; MC's physical call to
-  fix — try the kit antenna or a known strong local stereo station).
+- **ppm (M4):** panel LANDED (`cdbfb53`); `ppm.py` + the panel honesty verified on hardware
+  (refuses a ppm with no clear pilot). Happy path still blocked — **nomad-b recovers no FM stereo
+  pilot**: a fresh HIL measured even the strongest local station (96.0 MHz, 17 dB) at only a
+  **1.5 dB pilot ratio**, far below the 15 dB needed. This is reception, not code — MC's physical
+  call (kit antenna / a known strong *stereo* station). The real-ppm measurement awaits a pilot.
 
 ## Where the build stands
 - Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `0e2fc54`. Stack: FastAPI +
@@ -102,7 +104,6 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 ## Pending work
 - Trim the demo/try/observe copy on the OTHER instrument lessons (M1, M3, M4, M6, M7, M8) the way M2
   was trimmed — they fit the new instrument layout but their long copy scrolls until trimmed.
-- Wire the ppm (M4) panel, the same way the gain meter (M2) and provenance panel (M3) were done.
 - Exam-sim mode (scored practice exam) + results screen; legal/other UIs.
 - Remaining lessons M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
   + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
@@ -155,6 +156,11 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   observe stages now fit 800x480 — Next-step on the tune strip, scrolling narration (they were
   over-subscribed and never render-verified). **HIL-verified on nomad-b**: the live meter read
   PEAK -14.7 / FLOOR ~-49 / SNR 34.0 dB off a real FM sweep.
+- ppm panel (M4) LANDED (`cdbfb53`, MC-reviewed): measure-on-demand — the Measure button captures
+  the tuned station's 19 kHz pilot via `/api/ppm/measure` and shows the crystal error, or an honest
+  "no clear pilot". HIL-verified on nomad-b: the measurement runs and honestly refuses (no
+  recoverable pilot there yet — see HIL targets). All three instrument panels (gain/provenance/ppm)
+  are now built.
 - Provenance panel (M3) LANDED (`53b0e79`, MC-reviewed): a verdict-first panel (HEALTHY/DEGRADED/
   NO BASELINE/NO RADIO) off the live reference vs. a captured baseline, with a Capture button; new
   `/api/provenance` + `/api/provenance/baseline` routes. **HIL-verified on nomad-b**: HEALTHY off a
