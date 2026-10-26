@@ -1,21 +1,25 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**Phosphor-Terminal restyle is LANDED on main (`a8bfef8`, squash-merged; branch + worktree removed).**
-Render-verified on nomad-b at 800x480: Russo One loads (Latin + Cyrillic), ☭ (U+262D) renders as a
-glyph, Back shows "HOME" full, and the predict screen fits (Commit button on-screen). Pick up the
-pending content/nav work — recommended next:
+**Two features LANDED on main this session:** Phosphor-Terminal restyle (`a8bfef8`) and the
+**units→lessons nav** (`0e2fc54`) — both squash-merged, branches + worktrees removed, render-verified
+on nomad-b at 800x480. Pick up the pending content/lessons work — recommended next:
 1. **"comrade" content pass** over `lesson_packs/*.yaml` — small, additive, no backend change.
    Only the chrome copy and lesson 1's predict prompt are done; the "you" voice in the rest of the
-   lesson copy still needs the pass. Each lesson edit goes through a worktree (`sigint101/` gate);
-   `lesson_packs/` itself is outside the gate but land it on the feature branch anyway.
-2. **units→lessons nav** (backend, TDD): home shows 6 unit tiles → a unit's lesson list → lesson.
-   `app.py` currently builds one tile per lesson with no unit grouping; needs a unit model + a
-   `/unit/{id}` route.
-Then: remaining lessons + HIL (see Pending).
+   lesson copy still needs the pass. NOTE: predict prompts must stay short (~35-40 words) or they
+   overflow predict's 800x480 — render-check each one. Edits go through a worktree.
+2. **Remaining lessons + HIL** (see Pending): M5 legal, M9-M12, U5/U6, decode backends,
+   counter-surveillance (Rayhunter panel + Flock) — none built yet.
+
+The units nav: home = 6 unit tiles (U1 Instrument .. U6 Under the Hood), `/unit/{id}` lists that
+unit's loaded lessons, unbuilt units show an honest "no lessons here yet" (no lock, D16). Unit map
+is `sigint101/units.py` (U1=M1-4, U2=M5, U3=M6-7, U4=M8-12, U5=M13-16, U6=M17-18). A new lesson pack
+only shows up once its id is in that map — a contract test enforces every pack lands in a unit.
+**Counter-surveillance (Rayhunter/Flock) is a separate track, NOT one of the 6 units** — surface it
+as a 7th track tile only if MC asks.
 
 ## Render-verify recipe (no browser on the droplet — render on nomad-b's Chromium)
-From the worktree `/home/mc/workspaces/sigint-101-phosphor`:
+From the feature worktree (or main for a read-only render):
 ```
 mkdir -p data
 nohup .venv/bin/uvicorn sigint101.app:app --host 0.0.0.0 --port 8008 >/tmp/uv.log 2>&1 &
@@ -86,17 +90,14 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   fix — try the kit antenna or a known strong local stereo station).
 
 ## Where the build stands
-- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `a8bfef8`. Stack: FastAPI +
+- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `0e2fc54`. Stack: FastAPI +
   Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
-- 12 modules; console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
+- 13 modules (added `units.py`); console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
   honest 503). 7 lesson packs (M1-M4, M6-M7, M8). Exam trainer backend on the verified NCVEC
-  2026-2030 pool (409 + errata). `make selftest` = 290 tests, 94%, pristine; `make lint` clean.
+  2026-2030 pool (409 + errata). `make selftest` = 301 tests, 94%, pristine; `make lint` clean.
 
-## Pending work (after the restyle lands)
+## Pending work
 - "comrade" content pass over `lesson_packs/*.yaml` (the "you" references in lesson copy).
-- **units→lessons nav** (home shows 6 unit tiles → a unit's lesson list → lesson). Backend change:
-  app.py currently builds one tile per lesson with no unit grouping; needs a unit model + a
-  `/unit/{id}` route (TDD).
 - Wire gain/provenance/ppm panels + exam + legal UIs.
 - Remaining lessons M5 (legal), M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
   + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
@@ -106,6 +107,11 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 - All `sigint101/` edits go through a worktree (worktree-gate). Docs (STATUS/CLAUDE.md) are outside
   the gate and land on main. Merge with **--squash**. Stage files by name. Never `--no-verify`.
   Git identity must be **Michael Carpenter <mc8805@outlook.com>** (repo-local, hook-enforced).
+- **Worktree setup:** `git worktree add ../sigint-101-<name> -b feat/<name>`, then
+  `ln -s /home/mc/workspaces/sigint-101/.venv <worktree>/.venv` and `mkdir <worktree>/data`.
+  No editable install — `pytest.ini` has `pythonpath = .`, so running `.venv/bin/pytest` FROM the
+  worktree imports the worktree's `sigint101/` (not main's). `.venv`/`data/` are gitignored; never
+  `git add` the symlink. Lesson YAML is cached at server start — restart uvicorn after editing a pack.
 - Shell is **zsh**: unquoted `$var` does NOT word-split (`set -- $x` / `$NB cmd` break) — inline or use arrays.
 - `pkill -f "pattern"` matches its own command line — use the bracket trick `"[p]attern"`.
 - Render on nomad-b (no Chrome on the droplet). `rtl_power` "[R82XX] PLL not locked!" + "User
@@ -120,7 +126,10 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   lessons' predict copy should be written to fit; the content pass should check each one renders.
 
 ## Done / verified
-- Logic (droplet): 290 tests green, 94%, pristine.
+- Logic (droplet): 301 tests green, 94%, pristine.
+- Units→lessons nav LANDED on main (`0e2fc54`): home shows 6 unit tiles, `/unit/{id}` lists a unit's
+  lessons, unbuilt units render an honest empty page (no lock). Render-verified on nomad-b at 800x480
+  (home, /unit/1 Instrument, /unit/5 Decode empty); 301 tests green, lint clean. TDD throughout.
 - Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
 - Phosphor-Terminal restyle LANDED on main (`a8bfef8`): home + FRAME + PREDICT render-verified on
   nomad-b at 800x480; Russo One (Latin + Cyrillic) loads; ☭ renders as a glyph (via system
