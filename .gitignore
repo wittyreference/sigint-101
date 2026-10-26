@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.coverage
+.pytest_cache/
+.claude/pending-actions.md
+.claude/logs/
+.claude/.sessions/
+.claude/worktrees/
+data/*.db

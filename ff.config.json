@@ -1,0 +1,21 @@
+{
+  "project": { "name": "sigint101", "language": "python", "sourceDirectories": ["sigint101/"] },
+  "testing": {
+    "command": ".venv/bin/pytest -q",
+    "coverageCommand": ".venv/bin/pytest --cov=sigint101 --cov-report=term-missing",
+    "coverageThreshold": 80,
+    "testFilePatterns": ["**/test_*.py", "**/*_test.py", "tests/**"]
+  },
+  "linting": { "command": ".venv/bin/ruff check .", "fixCommand": ".venv/bin/ruff check --fix" },
+  "deployment": { "command": null, "preChecks": ["test", "lint", "coverage"] },
+  "credentialPatterns": [
+    {"pattern":"(?:password|passwd|pwd)\\s*[:=]\\s*[\"'][^\"']{8,}[\"']","name":"Hardcoded password","excludePattern":"(os\\.environ|getenv)"},
+    {"pattern":"(?:api[_-]?key|apikey)\\s*[:=]\\s*[\"'][^\"']{16,}[\"']","name":"API key","excludePattern":"(os\\.environ|getenv)"},
+    {"pattern":"AKIA[0-9A-Z]{16}","name":"AWS Access Key ID"},
+    {"pattern":"sk-[a-zA-Z0-9]{20,}","name":"API key (sk-)"}
+  ],
+  "fileHeaders": { "enabled": true, "pattern": "ABOUTME:", "requiredLines": 2, "fileExtensions": [".py"], "sourceOnly": true },
+  "docMappings": {},
+  "requiredEnvVars": [],
+  "trackedDirectories": ["sigint101/", "tests/", "lesson_packs/"]
+}

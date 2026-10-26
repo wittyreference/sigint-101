@@ -1,0 +1,5 @@
+line-length = 100
+exclude = [".venv", ".claude"]
+
+[lint]
+select = ["E", "W", "F", "I"]
