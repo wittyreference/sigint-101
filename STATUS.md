@@ -94,14 +94,14 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
 - 13 modules (added `units.py`); console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
   honest 503). 7 lesson packs (M1-M4, M6-M7, M8). Exam trainer backend on the verified NCVEC
-  2026-2030 pool (409 + errata). `make selftest` = 301 tests, 94%, pristine; `make lint` clean.
+  2026-2030 pool (409 + errata). `make selftest` = 304 tests, 94%, pristine; `make lint` clean.
 
 ## Pending work
 - "comrade" content pass over `lesson_packs/*.yaml` (the "you" references in lesson copy).
 - Wire gain/provenance/ppm panels + exam + legal UIs.
 - Remaining lessons M5 (legal), M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
   + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
-- Commit 3 NCVEC diagram JPGs for the exam UI; harden lessons.py choices parser vs YAML bool-coercion.
+- Commit 3 NCVEC diagram JPGs for the exam UI.
 
 ## Gotchas (learned this session)
 - All `sigint101/` edits go through a worktree (worktree-gate). Docs (STATUS/CLAUDE.md) are outside
@@ -126,10 +126,13 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   lessons' predict copy should be written to fit; the content pass should check each one renders.
 
 ## Done / verified
-- Logic (droplet): 301 tests green, 94%, pristine.
+- Logic (droplet): 304 tests green, 94%, pristine.
 - Units→lessons nav LANDED on main (`0e2fc54`): home shows 6 unit tiles, `/unit/{id}` lists a unit's
   lessons, unbuilt units render an honest empty page (no lock). Render-verified on nomad-b at 800x480
-  (home, /unit/1 Instrument, /unit/5 Decode empty); 301 tests green, lint clean. TDD throughout.
+  (home, /unit/1 Instrument, /unit/5 Decode empty); 304 tests green, lint clean. TDD throughout.
+- Lesson-pack loader hardened (`ca3ba48`): `parse_lesson` now refuses a predict choice key/label
+  that YAML coerced to a bool (unquoted yes/no/true/false), so an authoring slip fails loud at load
+  instead of becoming a silent "True"/"False" chip. TDD; 304 tests green.
 - Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
 - Phosphor-Terminal restyle LANDED on main (`a8bfef8`): home + FRAME + PREDICT render-verified on
   nomad-b at 800x480; Russo One (Latin + Cyrillic) loads; ☭ renders as a glyph (via system

@@ -27,9 +27,10 @@ where `yes|no|Yes|No|on|off|true|false` are booleans, and `lessons.py` then `str
 The loader's key+label check still passed (both non-empty), so the test stayed green while the
 learner would have seen "True / False" chips instead of "Yes / No".
 **How to apply.** Quote any lesson-choice key or label that is a YAML 1.1 boolean word
-(`yes/no/on/off/true/false`, any case) — e.g. `{key: "yes", label: "Yes"}`. A key/label
-non-emptiness test will not catch the coercion; eyeball the parsed `choices` (or assert exact
-values) whenever a chip reads True/False.
+(`yes/no/on/off/true/false`, any case) — e.g. `{key: "yes", label: "Yes"}`. **The loader now fails
+loud on this** (`ca3ba48`): `parse_lesson` refuses a bool choice key/label with a message telling you
+to quote it, so an unquoted word is caught at load instead of silently becoming a "True"/"False"
+chip. (The guard is bool-only — numeric keys still str-coerce; eyeball those.)
 
 ## 2026-10-26: ☭ (U+262D) renders via system fallback, not our bundled fonts
 **Finding.** The eyebrow/predict hammer-and-sickle (`content:"\262D"` / `&#9773;`) renders fine on
