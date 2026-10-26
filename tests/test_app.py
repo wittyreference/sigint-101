@@ -1,10 +1,12 @@
 # ABOUTME: Integration tests for the FastAPI console — its routes and the server-side
 # ABOUTME: commit-before-reveal gate, driven through the TestClient against a fixture pack.
 
+import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from sigint101 import exam
 from sigint101.app import create_app
 from sigint101.hardware import RadioProbe
 from sigint101.spectrum import Sweeper, SweepRow, validate_span
@@ -301,3 +303,59 @@ def test_tune_accepts_a_valid_span_when_a_radio_is_present(tmp_path):
     assert body["tuned"] is True
     assert body["low"] == 100_000_000
     assert body["high"] == 104_000_000
+
+
+# --- exam trainer: one study card, commit-before-reveal (like the predict gate) ---------
+
+# A known-good pool question to drive the answer/review endpoints with, independent of which card
+# /exam happens to surface first (that ordering is the store's business, not these tests').
+_Q = exam.load_pool().get("T1A01")
+
+
+def test_exam_serves_a_study_card_with_tap_choices_and_no_answer(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/exam")
+    assert resp.status_code == 200
+    # It surfaces a real pool question (its id is in the eyebrow) with four tap choices.
+    served = re.search(r"EXAM &middot; (T\w+)", resp.text).group(1)
+    assert exam.load_pool().get(served) is not None
+    assert resp.text.count('name="choice"') == 4
+    # Commit-before-reveal: the correct answer is not marked until the learner has answered.
+    assert "exam-reveal" not in resp.text
+
+
+def test_exam_answering_records_and_reveals_the_result(tmp_path):
+    with _client(tmp_path) as client:
+        posted = client.post("/api/exam/answer?question_id=T1A01",
+                             data={"choice": _Q.answer},
+                             headers={"content-type": "application/x-www-form-urlencoded"},
+                             follow_redirects=False)
+        # The gate redirects to the review of the card just answered, with no JavaScript.
+        assert posted.status_code == 303
+        review = client.get(posted.headers["location"])
+    assert review.status_code == 200
+    assert "exam-reveal" in review.text
+    # The correct option is marked, and a right answer reads as correct.
+    assert "exam-chip--correct" in review.text
+    assert "Correct" in review.text
+
+
+def test_exam_a_wrong_answer_still_reveals_the_right_one(tmp_path):
+    wrong = next(letter for letter in "ABCD" if letter != _Q.answer)
+    with _client(tmp_path) as client:
+        posted = client.post("/api/exam/answer?question_id=T1A01",
+                             data={"choice": wrong},
+                             headers={"content-type": "application/x-www-form-urlencoded"},
+                             follow_redirects=False)
+        review = client.get(posted.headers["location"])
+    assert review.status_code == 200
+    assert "exam-chip--correct" in review.text   # the right answer is always shown
+    assert "exam-chip--chosen" in review.text     # and the learner's miss is marked
+
+
+def test_exam_answer_for_an_unknown_question_is_404(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.post("/api/exam/answer?question_id=NOPE99",
+                           data={"choice": "A"},
+                           headers={"content-type": "application/x-www-form-urlencoded"})
+    assert resp.status_code == 404

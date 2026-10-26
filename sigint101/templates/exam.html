@@ -1,0 +1,56 @@
+<!-- ABOUTME: Exam trainer study card — one NCVEC pool question at a time, tapped to answer, with
+     ABOUTME: commit-before-reveal: the correct option is only marked on the review after answering. -->
+{% extends "base.html" %}
+
+{% block title %}{{ title|default('Exam Trainer') }}{% endblock %}
+
+{% block content %}
+<section class="exam">
+  <div class="stage-panel__eyebrow">&#9773; EXAM &middot; {{ question.id }} &middot; {{ question.group }}</div>
+
+  <h1 class="exam__question">{{ question.question }}</h1>
+
+  {% if question.figure %}
+    <p class="exam__figure-note">Refers to diagram {{ question.figure }} &mdash; not shown here yet.</p>
+  {% endif %}
+
+  {% if not reviewed %}
+    {# ---- Answer card: tap a choice, then commit. No typing (keyboard-free gate). ---- #}
+    <form class="predict" method="post" action="/api/exam/answer?question_id={{ question.id }}">
+      <fieldset class="predict-chips exam-chips">
+        <legend class="sr-only">Tap your answer, then commit &mdash; no typing</legend>
+        {% for letter, text in question.options.items()|sort %}
+          <label class="predict-chip exam-chip">
+            <input type="radio" name="choice" value="{{ letter }}" {% if loop.first %}required{% endif %}>
+            <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
+            <span class="predict-chip__label">{{ text }}</span>
+          </label>
+        {% endfor %}
+      </fieldset>
+      <div class="predict__actions">
+        <span class="predict__hint">Tap your answer, comrade &mdash; then commit.</span>
+        <button class="btn btn--primary btn-commit" type="submit">Commit answer</button>
+      </div>
+    </form>
+  {% else %}
+    {# ---- Review: the right option is marked; a wrong pick is flagged too. ---- #}
+    <div class="exam-chips exam-chips--reviewed">
+      {% for letter, text in question.options.items()|sort %}
+        <div class="predict-chip exam-chip
+                    {%- if letter == question.answer %} exam-chip--correct{% endif %}
+                    {%- if letter == chosen and letter != question.answer %} exam-chip--chosen{% endif %}">
+          <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
+          <span class="predict-chip__label">{{ text }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    <div class="exam-reveal">
+      <p class="exam-result">
+        {% if correct %}Correct, comrade.{% else %}Not quite — the answer is {{ question.answer }}.{% endif %}
+        {% if question.fcc_refs %}<span class="exam-refs">[{{ question.fcc_refs|join(', ') }}]</span>{% endif %}
+      </p>
+      <a class="btn btn--primary" href="/exam">Next card</a>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .events import log_event
+from .exam import ExamStore, load_pool
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
 from .progress import Progress
@@ -129,7 +131,7 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
-               sweeper_factory=None) -> FastAPI:
+               sweeper_factory=None, pool_path=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -163,11 +165,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.progress = Progress(Path(data_dir) / "progress.db")
         app.state.events_path = Path(data_dir) / "events.jsonl"
         app.state.sweeper = build_sweeper()
+        # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
+        # spaced-retrieval store, persisted beside the lesson progress so study history
+        # survives a kiosk power-cut the same way.
+        app.state.exam_pool = load_pool(pool_path)
+        app.state.exam_store = ExamStore(Path(data_dir) / "exam.db")
         try:
             yield
         finally:
             app.state.sweeper.stop()
             app.state.progress.close()
+            app.state.exam_store.close()
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -274,6 +282,60 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.progress.mark_completed(lesson_id)
         log_event(app.state.events_path, "completed", {"lesson": lesson_id})
         return {"completed": True, "lesson": lesson_id}
+
+    def _next_card_id() -> str:
+        """The id of the card to study next: the weakest one due now, else the first in the pool.
+
+        `due` ranks never-seen and lapsed cards weakest-first, so a fresh learner walks the pool in
+        order and a returning one meets their shakiest cards first. The fallback only bites when
+        every card is in its waiting interval, which is a good problem — any card then serves.
+        """
+        pool = app.state.exam_pool
+        due = app.state.exam_store.due([q.id for q in pool.questions], now=time.time())
+        return due[0] if due else pool.questions[0].id
+
+    @app.get("/exam", response_class=HTMLResponse)
+    def exam_card(request: Request):
+        """The exam trainer's study card: the weakest card due now, tapped to answer.
+
+        The correct answer is never placed in the question HTML — commit-before-reveal, the same
+        rule the lesson predict gate keeps. The reveal lives on /exam/review, after an answer is in.
+        """
+        question = app.state.exam_pool.get(_next_card_id())
+        return templates.TemplateResponse(
+            request=request,
+            name="exam.html",
+            context={"title": "Exam Trainer", "back_href": "/", "back_label": "Home",
+                     "question": question, "reviewed": False},
+        )
+
+    @app.post("/api/exam/answer")
+    async def exam_answer(question_id: str, request: Request):
+        """Record one tap answer and redirect to its review — no JS, like the predict gate."""
+        question = app.state.exam_pool.get(question_id)
+        if question is None:
+            raise HTTPException(status_code=404, detail=f"question {question_id} not found")
+        choice = (await _field(request, "choice")).strip().upper()
+        correct = choice == question.answer
+        app.state.exam_store.record(question_id, correct)
+        log_event(app.state.events_path, "exam_answer",
+                  {"question": question_id, "choice": choice, "correct": correct})
+        return RedirectResponse(f"/exam/review/{question_id}?choice={choice}", status_code=303)
+
+    @app.get("/exam/review/{question_id}", response_class=HTMLResponse)
+    def exam_review(request: Request, question_id: str, choice: str = ""):
+        """Show the answered card with the right option revealed and the learner's choice marked."""
+        question = app.state.exam_pool.get(question_id)
+        if question is None:
+            raise HTTPException(status_code=404, detail=f"question {question_id} not found")
+        chosen = choice.strip().upper()
+        return templates.TemplateResponse(
+            request=request,
+            name="exam.html",
+            context={"title": "Exam Trainer", "back_href": "/", "back_label": "Home",
+                     "question": question, "reviewed": True,
+                     "chosen": chosen, "correct": chosen == question.answer},
+        )
 
     @app.get("/api/spectrum")
     def spectrum(limit: int | None = None):

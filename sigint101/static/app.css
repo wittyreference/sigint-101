@@ -1109,3 +1109,85 @@ body {
     transition: none !important;
   }
 }
+
+/* ===== Exam trainer (study card) ========================================= */
+.exam {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px var(--gutter);
+  overflow: hidden;
+}
+.exam__question {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1.3;
+  margin: 0;
+  color: var(--fg);
+  text-shadow: var(--glow);
+  /* A long pool question scrolls on its own; the tap chips and commit stay put below it. */
+  overflow-y: auto;
+  min-height: 0;
+}
+.exam__figure-note {
+  margin: 0;
+  font-size: 15px;
+  color: var(--fg-dim);
+}
+/* Four options, two across — keeps the touch targets wide and the card inside 800x480. */
+.exam-chips {
+  grid-template-columns: repeat(2, 1fr);
+}
+.exam-chips--reviewed {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, 1fr);
+}
+/* The correct option reads by brightness AND a check glyph, never colour alone. */
+.exam-chip--correct {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--sel-ink);
+}
+.exam-chip--correct .predict-chip__label,
+.exam-chip--correct .predict-chip__key {
+  color: var(--sel-ink);
+}
+.exam-chip--correct::after {
+  content: "\2713";
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  font-size: 18px;
+  color: var(--sel-ink);
+}
+/* The learner's wrong pick: a dashed outline and a cross glyph. */
+.exam-chip--chosen {
+  border-style: dashed;
+}
+.exam-chip--chosen::after {
+  content: "\2717";
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  font-size: 18px;
+}
+.exam-reveal {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.exam-result {
+  margin: 0;
+  font-size: 19px;
+  color: var(--fg);
+}
+.exam-refs {
+  color: var(--fg-dim);
+  font-size: 15px;
+}
