@@ -33,6 +33,11 @@ counter-surveillance (Flock/ESP32 + Rayhunter), kiosk/provisioning/updater, the 
     the dongle (no leaked `rtl_power`).
   - `spectrum.py` parser (`parse_line` + `merge_chunks`) verified against genuine `rtl_power` CSV
     captured from both spec5 and nomad-b.
+  - `ppm.py` fail-closed honesty verified on real hardware: it refuses to report a ppm without a
+    clear 19 kHz pilot. Happy path blocked by conditions, not code — nomad-b currently recovers no
+    FM stereo pilot (one strong carrier ~96 MHz at pilot-ratio <=1.7 dB; other stations 16+ dB
+    weaker), most likely antenna match or a mono/spur signal. The host system clock reads
+    -22.3 ppm (NTP-synchronised) — a separate crystal from the SDR, not the SDR's error.
 - Modules (12): events, progress, hardware (no-mock probe), lessons, spectrum (sweeper),
   provenance, ppm, flipper, subfile, exam, app, `__init__`.
 - Console: serves the touch shell end-to-end; commit-before-reveal server-side; `/api/spectrum`
@@ -65,7 +70,9 @@ counter-surveillance (Flock/ESP32 + Rayhunter), kiosk/provisioning/updater, the 
 - Commit the 3 NCVEC diagram images (T1/T2/T3 JPGs) for the exam-trainer UI's 12 figure questions.
 - Harden `lessons.py` choices parser against YAML bool-coercion of keys (coerce key/label to str).
 - Wire the gain/provenance/ppm panels + exam + legal UIs (taste now decided).
-- ppm (M4) HIL on nomad-b: measure the real FM-pilot ppm error on its built-in SDR.
+- M4 ppm needs a recoverable FM stereo pilot: nomad-b's antenna sees FM carriers but yields no
+  pilot (<=1.7 dB) right now. Retry with the kit antenna or a known strong local stereo station
+  (physical — MC), then record nomad-b's real ppm. ppm.py itself is verified (honesty path).
 
 ## Done / verified
 - Logic-level (droplet): ~290 tests green, 94% cov, pristine; console runs all shipped lessons
