@@ -9,9 +9,10 @@ everything remaining needs hardware or a UX decision from MC:
    use the radios, so they need authoring + a real run on nomad-b. M5 was the only no-RF lesson.
    NOTE: predict prompts must stay short (~35-40 words) for 800x480; quote YAML-boolean choice keys
    (the loader now rejects bare yes/no/true/false).
-2. **UX decisions needed from MC** before building: exam UI (backend + NCVEC pool 100% done, but
-   needs: questions/session, immediate-reveal vs score-at-end, and the 3 NCVEC diagram JPGs);
-   gain/provenance/ppm panels; legal/other UIs. Reuse the predict-chip + tile patterns.
+2. **Exam trainer study card LANDED** (`aa2cc5a`): `/exam` study card + `/exam/review`, spaced
+   retrieval. Still open (MC decides): **exam-sim mode** (scored 35-Q practice via build_exam/
+   score_exam), a results screen, and the 3 NCVEC diagram JPGs (figure Qs note "not shown yet").
+3. **Other UIs** need a UX steer from MC: gain/provenance/ppm panels, legal/other. Reuse predict-chip.
 
 The units nav: home = 6 unit tiles (U1 Instrument .. U6 Under the Hood), `/unit/{id}` lists that
 unit's loaded lessons, unbuilt units show an honest "no lessons here yet" (no lock, D16). Unit map
@@ -142,6 +143,10 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   console fix — a no-hardware lesson renders as text with a chips-only predict (gated on
   `lesson.needs_hardware`). TDD; render-verified M5 frame + predict on nomad-b. Unit 2 is no longer
   empty in the nav.
+- Exam trainer study card LANDED (`aa2cc5a`, MC-reviewed): `/exam` serves the weakest spaced-
+  retrieval card; tap + commit → `/exam/review` marks the correct option (bright + check) and a
+  wrong pick (dashed + cross), with the FCC ref. Reuses the predict-chip pattern + the Leitner
+  store. TDD; render-verified on nomad-b. Exam-sim mode + results screen + 3 diagram JPGs deferred.
 - Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
 - Phosphor-Terminal restyle LANDED on main (`a8bfef8`): home + FRAME + PREDICT render-verified on
   nomad-b at 800x480; Russo One (Latin + Cyrillic) loads; ☭ renders as a glyph (via system
