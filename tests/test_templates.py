@@ -255,6 +255,44 @@ def test_a_sealed_stage_requested_without_a_commit_stays_sealed():
     assert "OBSERVE_BODY_marker" not in leaked
 
 
+# --- no-hardware (knowledge) lessons: no radio chrome -------------------------
+
+
+def _rules_lesson():
+    """A no-RF knowledge lesson (the legal rules): the intro shape, but no hardware or panels."""
+    return parse_lesson({
+        "id": 5, "slug": "the-rules", "title": "The Rules", "type": "intro",
+        "concept": "listening is broad; transmitting is licensed — know the line",
+        "panels": [], "hardware": [],
+        "stages": {
+            "frame": "FRAME_RULES_marker the one rule",
+            "demo": "DEMO_RULES_marker walk a scenario",
+            "try": "TRY_RULES_marker sort these",
+            "predict": "You find an unencrypted dispatch channel. Legal to listen?",
+            "observe": "OBSERVE_RULES_marker reflect",
+            "explain": "EXPLAIN_RULES_marker the law",
+        },
+    })
+
+
+def test_a_no_hardware_lesson_renders_no_radio_chrome():
+    # A lesson with no hardware (the legal rules) must not draw a waterfall on its demo/try/observe
+    # stages, nor the frozen radio frame on predict — there is no radio to show.
+    html = _console(lesson=_rules_lesson(), current_stage="demo")
+    assert "<canvas" not in html
+    assert "SIGNAL HIDDEN" not in html
+    # The stage body still renders as plain text, and the keyboard-free predict chips still work.
+    assert "DEMO_RULES_marker" in html
+    assert "predict-chip" in html
+
+
+def test_a_hardware_lesson_still_renders_the_radio():
+    # The guard is scoped to no-hardware lessons: a radio lesson keeps its waterfall + frozen frame.
+    html = _console(lesson=_intro_lesson(), current_stage="demo")
+    assert "<canvas" in html
+    assert "SIGNAL HIDDEN" in html
+
+
 # --- the home / tile screen ---------------------------------------------------
 
 

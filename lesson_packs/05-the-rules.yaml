@@ -1,0 +1,64 @@
+# ABOUTME: Lesson pack M5 "The One Rule" — the legal/ethics line (no RF): listening is broad and
+# ABOUTME: lawful, transmitting is licensed; taught as knowledge and an on-ramp, never a lockout (D16).
+
+id: 5
+slug: the-rules
+title: "The One Rule"
+type: intro
+concept: >-
+  Listening is broad and lawful; transmitting is licensed — the one line to know is between
+  receiving and transmitting.
+requires_tx: false
+hardware: []
+panels: []
+
+stages:
+  frame: >-
+    Tonight, comrade, the one rule — the single line that keeps this instrument a gift and not a
+    problem. The radio in your hands can hear almost the whole spectrum and can talk on part of it,
+    and the law treats those two powers very differently. Learn where the line sits once, and you
+    never have to guess again.
+  demo: >-
+    Here is the whole of it, and it is simpler than people fear. Receiving — listening — is broad
+    and, in most places, lawful: you may tune and watch nearly anything your radio can hear, the way
+    you have all course. There are two honest limits on listening: you may not break encryption to
+    read what was scrambled, and you may not pass on or act on certain private communications you
+    happen to catch, such as cellular. Transmitting is the other power, and it is the licensed one:
+    keying up on the amateur bands needs an amateur licence, and every band has its own rule for who
+    may talk and how loud. Some bands — the ISM bands your LoRa and Meshtastic use — are open to
+    short-range transmitting with no personal licence, inside set power limits. So the line is
+    simple: listen freely, transmit only where you are authorised.
+  try: >-
+    Your turn, comrade — sort these four in your head before the next screen. One: you watch an
+    unencrypted aircraft channel scroll by. Two: you record a neighbour's encrypted phone call and
+    descramble it. Three: you key up on a ham repeater with no licence. Four: you send a text to a
+    friend's Meshtastic node on the LoRa band. Which sit on the safe side of the line — and which
+    one is the single power the whole rule is really about?
+  predict: >-
+    You listened to the local ham repeater all evening. Now you key up and transmit on it yourself,
+    with no licence. Is that legal? Lock it in — the rest stays hidden until you do.
+  observe: >-
+    Hold your guess against the one line. Of the four you just sorted and the one you just answered,
+    which were receiving and which were transmitting — and once you knew which side a thing was on,
+    did the answer get easier?
+  explain: >-
+    Here is the straight answer, comrade: no — keying up unlicensed on a ham repeater is not legal,
+    and it is the clearest case of the rule. Listening to that repeater all evening was fine;
+    transmitting on it is the licensed power, and the amateur bands want a licence first. Walk the
+    four back. Watching the aircraft channel is receiving — fine. Descrambling the neighbour's phone
+    breaks encryption and intrudes on a private call, the one listening limit — not fine. The ham
+    repeater is transmitting unlicensed — not fine. The Meshtastic text is transmitting too, but on
+    an ISM band that allows short-range use with no personal licence, so it is fine inside its power
+    limits. One line explains all of it: receiving is broad and lawful, transmitting is licensed.
+    None of this is a wall around your radio — the exam trainer in this course is the on-ramp, and
+    an amateur licence opens the transmit side for real. The rule is knowledge you carry, not a lock
+    on the gift. Specifics vary by country and, for listening, by state — treat this as the shape of
+    the law, and check your local rules before you rely on it.
+
+# The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
+# predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
+# learner reads. Keys are quoted so a YAML-boolean word could never coerce them to True/False.
+choices:
+  - {key: "legal", label: "Legal — it's just one call"}
+  - {key: "illegal", label: "Illegal — transmitting needs a licence"}
+  - {key: "identify", label: "Legal if you give your name first"}

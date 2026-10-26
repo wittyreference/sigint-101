@@ -52,7 +52,10 @@
             <h1 class="stage-panel__title">&#9773; {{ lesson.stages['predict'] }}</h1>
             {# Frozen context frame (MC's call): the instrument chrome, dimmed, with NO signal
                drawn — orients the learner to the band without revealing where the station lands.
-               No canvas here, so there is nothing to invent; the frequency axis is chrome. #}
+               No canvas here, so there is nothing to invent; the frequency axis is chrome. Only a
+               lesson that uses the radio shows it; a no-hardware lesson (the rules) predicts with
+               the question and the chips alone. #}
+            {% if lesson.needs_hardware %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
                 <div class="waterfall__empty">
@@ -68,6 +71,7 @@
                 </div>
               </div>
             </div>
+            {% endif %}
             <form class="predict{% if prediction_committed %} predict--committed{% endif %}"
                   method="post" action="{{ commit_url|default('#') }}">
               <fieldset class="predict-chips">
@@ -93,8 +97,10 @@
               </div>
             </form>
 
-          {% elif stage in INSTRUMENT %}
-            {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. ---- #}
+          {% elif stage in INSTRUMENT and lesson.needs_hardware %}
+            {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson
+               with no hardware (e.g. the legal rules) has no radio, so its instrument-named stages
+               fall through to the plain text branch below instead of drawing a waterfall. ---- #}
             <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
             <div class="instrument">
               <div class="waterfall-wrap">
