@@ -1,19 +1,18 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**Finish and land the Phosphor-Terminal console restyle.** The work is committed and pushed on
-branch **`feat/phosphor-restyle`** (worktree: `/home/mc/workspaces/sigint-101-phosphor`), but the
-latest commit (Russo One titles, ☭ labels, "comrade" voice, Back-button fix) is **not yet
-render-verified**. Steps:
-1. **Render-verify on nomad-b** at 800x480 (commands below). Confirm: Russo One loads on the big
-   titles; the hammer-and-sickle **☭ (U+262D) renders as a glyph, not a tofu box** (if it tofus,
-   swap the CSS `content:"\262D "` and the template `&#9773;` for an inline SVG hammer-sickle); the
-   Back button shows "HOME" fully (no "HO..." clip); the predict screen still fits.
-2. If good, **squash-merge into main and push**:
-   `git -C /home/mc/workspaces/sigint-101 merge --squash feat/phosphor-restyle` → commit → push.
-   Then remove the worktree (`cd /home/mc/workspaces` first) and delete the branch.
-3. Then continue: the **"comrade" content pass** over `lesson_packs/*.yaml` (only chrome copy was
-   done); the **units→lessons nav** (backend change, see below); remaining lessons + HIL.
+**Phosphor-Terminal restyle is LANDED on main (`a8bfef8`, squash-merged; branch + worktree removed).**
+Render-verified on nomad-b at 800x480: Russo One loads (Latin + Cyrillic), ☭ (U+262D) renders as a
+glyph, Back shows "HOME" full, and the predict screen fits (Commit button on-screen). Pick up the
+pending content/nav work — recommended next:
+1. **"comrade" content pass** over `lesson_packs/*.yaml` — small, additive, no backend change.
+   Only the chrome copy and lesson 1's predict prompt are done; the "you" voice in the rest of the
+   lesson copy still needs the pass. Each lesson edit goes through a worktree (`sigint101/` gate);
+   `lesson_packs/` itself is outside the gate but land it on the feature branch anyway.
+2. **units→lessons nav** (backend, TDD): home shows 6 unit tiles → a unit's lesson list → lesson.
+   `app.py` currently builds one tile per lesson with no unit grouping; needs a unit model + a
+   `/unit/{id}` route.
+Then: remaining lessons + HIL (see Pending).
 
 ## Render-verify recipe (no browser on the droplet — render on nomad-b's Chromium)
 From the worktree `/home/mc/workspaces/sigint-101-phosphor`:
@@ -27,12 +26,17 @@ ssh spec5@100.108.20.20 '/usr/bin/chromium --headless=new --no-sandbox --disable
 scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 ```
 - `/` = home (tiles); `/lesson/1` = FRAME stage (eyebrow ☭ + Russo title + Back).
-- The **predict** screen is JS-navigated (not a static shot). To see it, write a standalone
-  `sigint101/static/_predicttest.html` that mirrors console.html's predict stage, render
-  `/static/_predicttest.html`, then **delete it before committing**. (A prior one was used and removed.)
-- Kill the server after: `pkill -f "[u]vicorn.sigint101"` (bracket avoids self-match).
+- The **predict** screen is JS-navigated (not a static shot). Best way to render it faithfully:
+  write a throwaway `sigint101/static/_predictview.html` that loads `/lesson/1` in a same-origin
+  iframe and flips the visible `.stage-panel` to the one with `data-stage="predict"` (the predict
+  panel is server-rendered into the page, just `hidden`) — that screenshots the real production DOM.
+  Add `getBoundingClientRect().bottom` of `.btn-commit` to confirm it is <=480. **Delete it before
+  committing.** (Lesson YAML is cached at server start — restart uvicorn after editing a pack.)
+- Kill the server after: `pkill -f "[u]vicorn.sigint101"` (bracket avoids self-match). Note: a
+  `nohup ... &` from a Bash tool call dies when the call returns — run the server via the harness
+  background runner (run_in_background) instead.
 
-## What the restyle contains (feat/phosphor-restyle)
+## What the restyle contains (landed on main @ a8bfef8)
 - **`sigint101/static/app.css`** rethemed to the "Phosphor Terminal" (MC picked direction A of three):
   PT Mono everywhere (self-hosted OFL woff2 in `static/fonts/`, full Cyrillic, offline);
   double-line box-drawing borders; scanline+vignette+glow in the phosphor themes; blinking block
@@ -43,16 +47,20 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   home tile names) — legible Soviet-industrial display, not fake-Cyrillic.
 - **Frozen-context predict frame** (MC's taste call): a dimmed, data-free instrument outline on the
   predict stage — orients to the band without revealing the answer; no canvas, nothing invented.
-  Predict chips are a horizontal auto-fit grid so the frame fits 800x480.
-- **☭ (U+262D)** on every section-label eyebrow (CSS) and the predict question (template).
-- **"comrade"** in the predict chrome copy (hint + committed note) — fuller pass pending.
+  Predict chips are a horizontal auto-fit grid.
+- **☭ (U+262D)** on every section-label eyebrow (CSS `content`) and the predict question (template).
+- **"comrade"** in the predict chrome copy (hint + committed note) — fuller lesson-copy pass pending.
 - **Bug fixed** (found by the first real render): hidden stage-panels overlapped because
   `.stage-panel{display:flex}` beat the UA `[hidden]` rule — added `.stage-panel[hidden]{display:none}`.
-- Captions raised to >=18px. **Verified so far:** `make selftest` green (290 tests, 94% cov, lint
-  clean); home + lesson FRAME + predict rendered on nomad-b at 800x480 for the *base* commit
-  (6a3c603). The *refinement* commit (bdf0507) is test-green but **not render-checked yet**.
-- Commits: `6a3c603` (base) and `bdf0507` (refinements) on `feat/phosphor-restyle`; both on main's
-  `dc94248`. Preview of all three directions (what MC chose from):
+- **Predict-fit fix** (this session): the predict prompt doubles as its `<h1>` stage title, so at
+  800x480 the long question pushed the chips + Commit button ~200px off-screen (Commit unreachable).
+  Fixed per MC's calls — (a) trimmed lesson 1's predict prompt to its setup + question, (b) held the
+  predict title at the 18px floor (predict-scoped `font-size`), (c) reclaimed chrome height from the
+  statusbar (`--bar-h` 72→66) and stage rail (`--rail-h` 48→40). Commit button now lands at y=478.
+  Tradeoff MC accepted: the Back button is now 66px tall (just under the 72px touch floor).
+- Captions raised to >=18px. **Verified:** `make selftest` green (290 tests, 94% cov, pristine);
+  `make lint` clean; home + FRAME + PREDICT render clean on nomad-b at 800x480; Russo One (Latin +
+  Cyrillic) loads; ☭ renders as a glyph. Preview of all three directions (what MC chose from):
   https://claude.ai/artifact/1MnyjjtpDXizFRZVnDnzNh
 
 ## Both owner gates are CLEARED
@@ -60,7 +68,7 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   fleet hosts. Droplet can SSH spec5, pi5, nomad-b.
 - **Taste answers:** waterfall-with-no-radio = badged SAMPLE recording; home nav = units→lessons→
   lesson (not yet built — see pending); predict = frozen context frame (built); console look =
-  Phosphor Terminal (being built).
+  Phosphor Terminal (LANDED @ a8bfef8).
 
 ## HIL targets (MC's call) — nomad-b is PRIMARY
 - **nomad-b** (hostname `spec5b`, `100.108.20.20`, user `spec5`) = PRIMARY acceptance target: stock
@@ -78,7 +86,7 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   fix — try the kit antenna or a known strong local stereo station).
 
 ## Where the build stands
-- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `dc94248`. Stack: FastAPI +
+- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `a8bfef8`. Stack: FastAPI +
   Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
 - 12 modules; console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
   honest 503). 7 lesson packs (M1-M4, M6-M7, M8). Exam trainer backend on the verified NCVEC
@@ -102,9 +110,18 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 - `pkill -f "pattern"` matches its own command line — use the bracket trick `"[p]attern"`.
 - Render on nomad-b (no Chrome on the droplet). `rtl_power` "[R82XX] PLL not locked!" + "User
   cancel, exiting" are benign (appear on healthy nomad-b too).
+- **☭ (U+262D) renders via a SYSTEM-FONT FALLBACK, not our bundled fonts.** The PT Mono @font-face
+  `unicode-range` excludes U+262D, so the glyph comes from whatever monospace the renderer falls
+  back to (DejaVu Sans Mono on nomad-b, which has it). This works on nomad-b but is NOT guaranteed
+  on the actual kiosk Pi if its fontconfig lacks a glyph for U+262D — it would tofu. **TODO before
+  kiosk ship:** confirm U+262D on the real kiosk image, or bundle an inline SVG hammer-sickle.
+- **Predict is the tightest screen at 800x480.** Keep predict prompts SHORT (~35-40 words): the
+  prompt is the stage `<h1>`, and chips (72px touch) + Commit + frozen frame leave little room. New
+  lessons' predict copy should be written to fit; the content pass should check each one renders.
 
 ## Done / verified
 - Logic (droplet): 290 tests green, 94%, pristine.
 - Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
-- Restyle base (6a3c603) render-verified on nomad-b at 800x480; refinements (bdf0507) test-green,
-  render pending.
+- Phosphor-Terminal restyle LANDED on main (`a8bfef8`): home + FRAME + PREDICT render-verified on
+  nomad-b at 800x480; Russo One (Latin + Cyrillic) loads; ☭ renders as a glyph (via system
+  fallback — see Gotchas); predict fits with the title at 18px; tests 290 green/94%, lint clean.
