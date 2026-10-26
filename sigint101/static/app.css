@@ -1,92 +1,137 @@
-/* ABOUTME: Offline touch-console stylesheet for the 800x480 kiosk — status bar, lesson
-   ABOUTME: console, tile home, and the dark / sunlight / red-night themes (no CDN, no webfonts). */
+/* ABOUTME: Offline touch-console stylesheet for the 800x480 kiosk — the "Phosphor Terminal" look:
+   ABOUTME: a 1980s Soviet CRT (PT Mono, box-drawing, glow) in dark / sunlight / red-night themes. */
 
 /* ----------------------------------------------------------------------------
    Design plan
-   - Layout: a fixed 800x480 instrument. One persistent 72px status bar on top,
-     one content area below; every screen is one task. Big blocky targets.
-   - Type: system sans for prose (>=18px), system mono for every readout and the
-     tune display, so columns of digits line up and the whole thing reads like a
-     field radio rather than a web page. No webfonts — the kiosk is offline.
-   - Color: tokens only, redefined per theme on .app[data-theme]. Dark is the
-     default instrument look; sunlight is a genuine high-contrast light set for
-     direct sun; red-night is red-on-black with NO other hue, so state is told by
-     brightness + glyph + label, never by color alone (keeps night vision).
+   - Look: a monochrome phosphor terminal (15IE / DVK lineage). PT Mono throughout,
+     double-line box-drawing borders, uppercase tracked labels, a faint scanline +
+     vignette and text bloom, a blinking block cursor on the live control. Character
+     comes from the terminal grammar itself, so legibility never pays for it.
+   - Layout: a fixed 800x480 instrument. One 72px status bar on top (Back always
+     here), one content area below; every screen is one task. Big blocky targets.
+   - Color: tokens only, redefined per theme on .app[data-theme]. Dark is green P1
+     phosphor on near-black (the full CRT look); sunlight is a genuine high-contrast
+     dark-green-on-cream set for direct sun with NO glow; red-night is red-on-black
+     with no other hue, so state is told by brightness + glyph + word, never color.
+   - Fonts: PT Mono (ParaType, SIL OFL, full Cyrillic) self-hosted for offline use,
+     so Cyrillic accents render on the device with no network.
 ---------------------------------------------------------------------------- */
 
+@font-face{font-family:'PT Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/ptmono-cyrillic-ext.woff2') format('woff2');unicode-range:U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;}
+@font-face{font-family:'PT Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/ptmono-cyrillic.woff2') format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}
+@font-face{font-family:'PT Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/ptmono-latin-ext.woff2') format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;}
+@font-face{font-family:'PT Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/ptmono-latin.woff2') format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}
+
+/* Russo One — a legible Soviet-industrial display face (SIL OFL), self-hosted for offline use,
+   full Cyrillic. Used only for the large titles, to lean into the look while staying readable
+   Latin (never fake-Cyrillic letter substitution). */
+@font-face{font-family:'Russo One';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/russoone-cyrillic.woff2') format('woff2');unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;}
+@font-face{font-family:'Russo One';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/russoone-latin-ext.woff2') format('woff2');unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;}
+@font-face{font-family:'Russo One';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/russoone-latin.woff2') format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;}
+
+:root {
+  /* PT Mono for the terminal body; Russo One for the large titles only. */
+  --font-ui: 'PT Mono', ui-monospace, 'DejaVu Sans Mono', 'Liberation Mono', Consolas, monospace;
+  --font-mono: 'PT Mono', ui-monospace, 'DejaVu Sans Mono', 'Liberation Mono', Consolas, monospace;
+  --font-display: 'Russo One', 'PT Sans Narrow', 'DejaVu Sans', sans-serif;
+}
+
 /* ===== Theme tokens ======================================================= */
-/* Dark — the default. Bare .app also carries it so a themeless render is dark. */
+/* Dark — green P1 phosphor on near-black. Bare .app also carries it so a
+   themeless render is the dark CRT. */
 .app,
 .app[data-theme="dark"] {
-  --bg: #0a0e13;
-  --surface: #121a22;
-  --surface-2: #1b2631;
-  --surface-3: #243441;
-  --border: #2b3a48;
-  --border-strong: #3d5366;
-  --fg: #e9eff5;
-  --fg-dim: #a6b6c4;
-  --fg-mute: #6b7e8f;
-  --accent: #3fd8c6;
-  --accent-dim: #1d7d73;
-  --accent-ink: #04130f;
-  --ok: #5fd98a;
-  --warn: #f2b350;
-  --crit: #ff6b6b;
-  --wf-bg: #05080b;
-  --wf-grid: #16303a;
-  --shadow: 0 2px 0 rgba(0, 0, 0, 0.45), 0 10px 28px rgba(0, 0, 0, 0.38);
-  --focus: #8df0e4;
+  --bg: #040806;
+  --surface: #07110b;
+  --surface-2: #06100a;
+  --surface-3: #0a1a11;
+  --border: #1a7e3f;
+  --border-strong: #2ee66a;
+  --fg: #2ee66a;
+  --fg-dim: #1f9e4e;
+  --fg-mute: #15713a;
+  --accent: #2ee66a;
+  --accent-dim: #1a7e3f;
+  --accent-ink: #03140a;
+  --ok: #2ee66a;
+  --warn: #ffcf4d;
+  --crit: #ff5b5b;
+  --wf-bg: #040806;
+  --wf-grid: #0f3a20;
+  --glow: 0 0 6px rgba(46, 230, 106, 0.5);
+  --glow-strong: 0 0 11px rgba(46, 230, 106, 0.6);
+  --sel-bg: #2ee66a;
+  --sel-ink: #03140a;
+  --scan: rgba(0, 0, 0, 0.26);
+  --vig: 1;
+  --bloom: rgba(46, 230, 106, 0.12);
+  --shadow: none;
+  --focus: #9affc3;
   color-scheme: dark;
 }
 
-/* Sunlight — high-contrast light for outdoors: near-black ink on white,
-   dark saturated accent, heavier borders so edges survive glare. */
+/* Sunlight — high-contrast daylight: dark-green ink on phosphor-cream, heavier
+   borders, NO glow (it dies in sun). Still mono, still box-drawing — the look
+   survives as a printed terminal listing. */
 .app[data-theme="sunlight"] {
-  --bg: #ffffff;
-  --surface: #eef1f4;
-  --surface-2: #e2e7ec;
-  --surface-3: #d2dae1;
-  --border: #8d9ba7;
-  --border-strong: #5c6a76;
-  --fg: #07111a;
-  --fg-dim: #30404a;
-  --fg-mute: #55646f;
-  --accent: #0b6b61;
-  --accent-dim: #0b6b61;
-  --accent-ink: #ffffff;
+  --bg: #eef3e6;
+  --surface: #e5ebd7;
+  --surface-2: #e9efdd;
+  --surface-3: #dde5cd;
+  --border: #4a6b50;
+  --border-strong: #0b3d1f;
+  --fg: #0b3d1f;
+  --fg-dim: #30503a;
+  --fg-mute: #4a6350;
+  --accent: #0b3d1f;
+  --accent-dim: #0b3d1f;
+  --accent-ink: #eef3e6;
   --ok: #0a6b34;
-  --warn: #8a4b00;
+  --warn: #4a3400;
   --crit: #b3261e;
   --wf-bg: #0a1016;
   --wf-grid: #223742;
+  --glow: none;
+  --glow-strong: none;
+  --sel-bg: #0b3d1f;
+  --sel-ink: #eef3e6;
+  --scan: transparent;
+  --vig: 0;
+  --bloom: transparent;
   --shadow: 0 1px 0 rgba(0, 0, 0, 0.08), 0 6px 18px rgba(17, 34, 51, 0.16);
-  --focus: #0b6b61;
+  --focus: #0b3d1f;
   color-scheme: light;
 }
 
-/* Red-night — red on black only. Good = brighter red, warn = dimmer red;
-   the glyph and the word carry the meaning, never the hue. */
+/* Red-night — red on black only. Brighter red = good, dimmer = warn; the glyph
+   and the word carry the meaning, never the hue (keeps night vision). */
 .app[data-theme="red-night"] {
   --bg: #000000;
-  --surface: #0b0101;
-  --surface-2: #160303;
-  --surface-3: #210606;
-  --border: #3a0b0b;
-  --border-strong: #5c1515;
-  --fg: #ff5b5b;
-  --fg-dim: #c23c3c;
-  --fg-mute: #7e2727;
-  --accent: #ff3b3b;
-  --accent-dim: #7a1515;
-  --accent-ink: #1a0000;
+  --surface: #0a0303;
+  --surface-2: #080202;
+  --surface-3: #160303;
+  --border: #8f2a2a;
+  --border-strong: #ff4b4b;
+  --fg: #ff4b4b;
+  --fg-dim: #bc3838;
+  --fg-mute: #7e2525;
+  --accent: #ff4b4b;
+  --accent-dim: #8f2a2a;
+  --accent-ink: #0a0303;
   --ok: #ff7d7d;
   --warn: #b33232;
   --crit: #ff2020;
-  --wf-bg: #070000;
+  --wf-bg: #050000;
   --wf-grid: #2a0707;
-  --shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
-  --focus: #ff7d7d;
+  --glow: 0 0 6px rgba(255, 75, 75, 0.5);
+  --glow-strong: 0 0 11px rgba(255, 75, 75, 0.6);
+  --sel-bg: #ff4b4b;
+  --sel-ink: #0a0303;
+  --scan: rgba(0, 0, 0, 0.3);
+  --vig: 1;
+  --bloom: rgba(255, 75, 75, 0.12);
+  --shadow: none;
+  --focus: #ff9a9a;
   color-scheme: dark;
 }
 
@@ -103,26 +148,19 @@ body {
 
 body {
   /* The themed surface lives on .app, which fills the viewport; this literal only
-     shows if .app is ever smaller than the screen, so keep it a neutral near-black. */
-  background: #05080b;
-  color: #e9eff5;
-  font-family: var(--font-ui, system-ui, -apple-system, "Segoe UI", Roboto,
-      "DejaVu Sans", "Noto Sans", sans-serif);
+     shows if .app is ever smaller than the screen, so keep it the CRT near-black. */
+  background: #040806;
+  color: #2ee66a;
+  font-family: var(--font-ui);
   font-size: 18px;
   line-height: 1.45;
+  letter-spacing: 0.02em;
   /* Kiosk: no text selection, no double-tap zoom, no tap flash. */
   -webkit-user-select: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
   overscroll-behavior: none;
-}
-
-:root {
-  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "DejaVu Sans",
-    "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "DejaVu Sans Mono", "Cascadia Code", "Roboto Mono",
-    "Liberation Mono", Consolas, monospace;
 }
 
 /* ===== App frame ========================================================== */
@@ -135,10 +173,30 @@ body {
   overflow: hidden; /* 800x480, never scrolls */
   background: var(--bg);
   color: var(--fg);
+  font-family: var(--font-mono);
+  box-shadow: 0 0 26px var(--bloom);
   --touch: 76px;
-  --gutter: 20px;
-  --bar-h: 72px;
-  --rail-h: 52px;
+  --gutter: 18px;
+  --bar-h: 66px;
+  --rail-h: 40px;
+}
+
+/* Keep mono digits razor-sharp under the glow; emphasis is size/spacing/inverse. */
+.app b,
+.app strong {
+  font-weight: 400;
+}
+
+/* CRT overlay: scanlines + vignette, lit only in the phosphor themes. Never
+   intercepts a tap, and sits above content but below nothing interactive. */
+.app::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  background: repeating-linear-gradient(0deg, var(--scan) 0 1px, transparent 1px 3px);
+  box-shadow: inset 0 0 90px rgba(0, 0, 0, calc(0.6 * var(--vig)));
 }
 
 .sr-only {
@@ -160,14 +218,16 @@ body {
   font: inherit;
   color: var(--fg);
   background: var(--surface-2);
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  border: 3px double var(--border-strong);
+  border-radius: 0;
   min-height: var(--touch);
   padding: 0 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
+  letter-spacing: 0.08em;
+  text-shadow: var(--glow);
   cursor: pointer;
 }
 
@@ -176,10 +236,27 @@ body {
 }
 
 .btn--primary {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 400;
+}
+
+/* Blinking block cursor — the live control is "ready for input". */
+.btn--primary::after {
+  content: "\2588";
+  margin-left: 2px;
+  animation: blink 1.06s steps(1) infinite;
+}
+
+/* In sunlight the primary key fills solid (no glow to carry it) and the cursor rests. */
+.app[data-theme="sunlight"] .btn--primary {
   background: var(--accent);
   color: var(--accent-ink);
-  border-color: var(--accent);
-  font-weight: 700;
+}
+.app[data-theme="sunlight"] .btn--primary::after {
+  animation: none;
+  opacity: 0.45;
 }
 
 .btn:disabled {
@@ -212,7 +289,9 @@ body {
   gap: 10px;
   padding: 0 var(--gutter);
   background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 3px double var(--border-strong);
+  position: relative;
+  z-index: 2;
 }
 
 .btn-back,
@@ -226,30 +305,39 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  min-width: 72px;
-  padding: 0 8px;
+  flex: none;          /* never shrink — Back stays whole, no "HO..." clip */
+  padding: 0 14px;
+  text-shadow: var(--glow);
   cursor: pointer;
 }
 
 .btn-back {
-  margin-left: -8px;
+  border-right: 3px double var(--border);
+}
+
+.btn-theme {
+  min-width: 56px;     /* icon only — keeps the right edge from padding out */
+  justify-content: center;
+  border-left: 3px double var(--border);
 }
 
 .btn-back__label {
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 16px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 .statusbar__title {
   flex: 1 1 auto;
   min-width: 0;
   align-self: center;
-  font-size: 19px;
-  font-weight: 650;
-  letter-spacing: 0.01em;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-shadow: var(--glow);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -259,22 +347,25 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: none;
 }
 
-/* Chip (ppm corrected / RAW) — dot + word; the word is the signal, not the hue */
+/* Chip (ppm corrected / RAW) — word + dot; the word is the signal, not the hue */
 .chip {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   height: 40px;
   padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  border: 2px solid var(--border-strong);
   background: var(--surface-2);
+  color: var(--fg);
   font-family: var(--font-mono);
   font-size: 13px;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
+  text-shadow: var(--glow);
   white-space: nowrap;
 }
 
@@ -282,7 +373,6 @@ body {
   content: "";
   width: 10px;
   height: 10px;
-  border-radius: 50%;
   background: var(--fg-mute);
   flex: none;
 }
@@ -317,13 +407,14 @@ body {
 
 .readout__label {
   font-size: 11px;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--fg-mute);
 }
 
 .readout__value {
   color: var(--fg);
+  text-shadow: var(--glow);
 }
 
 .batt {
@@ -337,7 +428,7 @@ body {
   width: 34px;
   height: 18px;
   border: 2px solid var(--fg-dim);
-  border-radius: 3px;
+  border-radius: 0;
 }
 
 .batt__glyph::after {
@@ -348,7 +439,6 @@ body {
   width: 3px;
   height: 8px;
   background: var(--fg-dim);
-  border-radius: 0 2px 2px 0;
 }
 
 .batt__fill {
@@ -356,7 +446,6 @@ body {
   inset: 2px;
   width: 60%;
   background: var(--ok);
-  border-radius: 1px;
 }
 
 .batt--low .batt__fill {
@@ -374,6 +463,8 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+  z-index: 1;
 }
 
 /* ===== Stage rail (the predict -> ... -> explain loop) ==================== */
@@ -382,41 +473,41 @@ body {
   height: var(--rail-h);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   padding: 0 var(--gutter);
   background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 3px double var(--border-strong);
   overflow: hidden;
+  position: relative;
+  z-index: 2;
 }
 
 .rail-pip {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  height: 34px;
-  padding: 0 12px;
-  border-radius: 8px;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--fg-mute);
   font-family: var(--font-mono);
-  font-size: 12.5px;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
 }
 
 .rail-pip__dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
   background: var(--fg-mute);
   flex: none;
 }
 
 .rail-pip--active {
   color: var(--accent);
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+  border: 2px solid var(--accent);
+  text-shadow: var(--glow);
 }
 .rail-pip--active .rail-pip__dot {
   background: var(--accent);
@@ -424,14 +515,15 @@ body {
 
 .rail-pip--done {
   color: var(--ok);
-  border-color: var(--accent-dim);
+  border-color: var(--border);
 }
 .rail-pip--done .rail-pip__dot {
   background: var(--ok);
 }
 
 .rail-pip--locked {
-  opacity: 0.6;
+  color: var(--fg-mute);
+  border-style: dashed;
 }
 .rail-pip--locked .rail-pip__dot {
   background: transparent;
@@ -443,11 +535,16 @@ body {
 }
 
 .rail__gate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-family: var(--font-mono);
   font-size: 12px;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--warn);
+  border: 2px solid var(--warn);
+  padding: 4px 9px;
 }
 
 /* ===== Stage view ========================================================= */
@@ -462,25 +559,58 @@ body {
   inset: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px var(--gutter);
+  gap: 10px;
+  padding: 12px var(--gutter);
   overflow: hidden;
 }
 
+/* One stage at a time: the template renders every unsealed panel and toggles the
+   `hidden` attribute to switch between them, so `hidden` must beat the panel's own
+   display (an element with display:flex ignores the UA [hidden] rule otherwise). */
+.stage-panel[hidden] {
+  display: none;
+}
+
 .stage-panel__eyebrow {
-  font-size: 12px;
-  letter-spacing: 0.12em;
+  font-size: 13px;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--fg-mute);
+  color: var(--fg-dim);
   font-family: var(--font-mono);
+}
+/* Hammer-and-sickle on every section label (MC's call). */
+.stage-panel__eyebrow::before {
+  content: "\262D ";
+  color: var(--accent);
 }
 
 .stage-panel__title {
+  font-family: var(--font-display);
   font-size: 25px;
-  font-weight: 700;
+  font-weight: 400;
   line-height: 1.2;
+  letter-spacing: 0.01em;
   text-wrap: balance;
+  text-shadow: var(--glow);
   margin: 0;
+}
+
+/* The predict prompt doubles as its stage title, so it runs much longer than the other
+   one-line titles. Shrink it to the 18px body floor (still Russo One) and tighten this
+   screen's own spacing so the question, the frozen context frame, the tap chips and the
+   Commit button all fit the fixed 800x480. Spacing overrides are scoped to predict so the
+   other, roomier stages keep their larger display titles and padding. */
+.stage-panel[data-stage="predict"] {
+  gap: 4px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.stage-panel[data-stage="predict"] .stage-panel__title {
+  font-size: 18px;
+  line-height: 1.2;
+}
+.stage-panel[data-stage="predict"] .predict {
+  gap: 6px;
 }
 
 .stage-panel__body {
@@ -503,11 +633,12 @@ body {
   border: 0;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  /* Three choices fill one row; more wrap. Horizontal keeps vertical room for the
+     frozen context frame above, within the fixed 480px. */
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 10px;
-  flex: 1 1 auto;
-  min-height: 0;
+  align-content: start;
 }
 
 .predict-chip {
@@ -517,9 +648,9 @@ body {
   gap: 16px;
   min-height: var(--touch);
   padding: 10px 18px;
-  border: 2px solid var(--border-strong);
-  border-radius: 14px;
+  border: 3px double var(--border-strong);
   background: var(--surface-2);
+  color: var(--fg);
   cursor: pointer;
 }
 
@@ -534,32 +665,38 @@ body {
   flex: none;
   width: 44px;
   height: 44px;
-  border-radius: 10px;
   display: grid;
   place-items: center;
   background: var(--surface-3);
-  border: 1px solid var(--border-strong);
+  border: 2px solid var(--border-strong);
   font-family: var(--font-mono);
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--fg-dim);
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--fg);
+  text-shadow: var(--glow);
 }
 
 .predict-chip__label {
   font-size: 19px;
-  line-height: 1.25;
+  line-height: 1.2;
   color: var(--fg);
 }
 
 .predict-chip:has(input:checked) {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, var(--surface-2));
+  border-color: var(--sel-bg);
+  background: var(--sel-bg);
+  color: var(--sel-ink);
+}
+
+.predict-chip:has(input:checked) .predict-chip__label {
+  color: var(--sel-ink);
 }
 
 .predict-chip:has(input:checked) .predict-chip__key {
-  background: var(--accent);
-  color: var(--accent-ink);
-  border-color: var(--accent);
+  background: transparent;
+  color: var(--sel-ink);
+  border-color: var(--sel-ink);
+  text-shadow: none;
 }
 
 .predict-chip:has(input:focus-visible) {
@@ -568,6 +705,7 @@ body {
 }
 
 .predict__actions {
+  margin-top: auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -575,12 +713,12 @@ body {
 }
 
 .predict__hint {
-  font-size: 14px;
-  color: var(--fg-mute);
+  font-size: 18px;
+  color: var(--fg-dim);
 }
 
 .btn-commit {
-  min-width: 220px;
+  min-width: 240px;
 }
 
 .predict--committed .predict-chip {
@@ -589,9 +727,10 @@ body {
 
 .predict__committed-note {
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 15px;
   color: var(--ok);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  text-shadow: var(--glow);
 }
 
 /* ===== Instrument (waterfall + tune) ===================================== */
@@ -606,9 +745,8 @@ body {
 .waterfall-wrap {
   position: relative;
   flex: 1 1 auto;
-  min-height: 150px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  min-height: 120px;
+  border: 3px double var(--border-strong);
   overflow: hidden;
   background: var(--wf-bg);
 }
@@ -618,7 +756,55 @@ body {
   width: 100%;
   height: 100%;
   /* CSS fallback so an empty canvas still reads as a spectrogram frame */
-  background: linear-gradient(0deg, var(--wf-bg), var(--wf-bg));
+  background: var(--wf-bg);
+}
+
+/* Frozen predict instrument — dimmed chrome, NO signal drawn (orient, don't reveal). */
+.instrument--frozen {
+  flex: 0 0 auto;
+}
+.waterfall-wrap--frozen {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  opacity: 0.8;
+}
+.waterfall-wrap--frozen .waterfall__empty {
+  flex: none;
+  height: 40px;
+  position: relative;
+  background:
+    linear-gradient(0deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.18)),
+    repeating-linear-gradient(90deg, var(--wf-grid) 0 1px, transparent 1px 64px);
+}
+.waterfall-wrap--frozen .waterfall__empty::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 1px dashed var(--border);
+  opacity: 0.55;
+}
+.waterfall__sealed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: var(--fg-mute);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  text-align: center;
+}
+.waterfall__sealed span {
+  font-size: 15px;
+}
+.waterfall__sealed small {
+  font-size: 12px;
+  letter-spacing: 0.16em;
 }
 
 .badge {
@@ -629,7 +815,6 @@ body {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border-radius: 6px;
   font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: 0.1em;
@@ -640,21 +825,21 @@ body {
 .badge--sample {
   background: color-mix(in srgb, var(--warn) 22%, var(--wf-bg));
   color: var(--warn);
-  border: 1px solid var(--warn);
+  border: 2px solid var(--warn);
 }
 
 /* Live sweep — the waterfall above is real rtl_power data. */
 .badge--live {
   background: color-mix(in srgb, var(--ok) 22%, var(--wf-bg));
   color: var(--ok);
-  border: 1px solid var(--ok);
+  border: 2px solid var(--ok);
 }
 
 /* No radio (or no console) — the panel is honestly empty, not a sample pretending to be live. */
 .badge--na {
   background: color-mix(in srgb, var(--crit) 22%, var(--wf-bg));
   color: var(--crit);
-  border: 1px solid var(--crit);
+  border: 2px solid var(--crit);
 }
 
 .waterfall__axis {
@@ -664,12 +849,25 @@ body {
   bottom: 0;
   display: flex;
   justify-content: space-between;
-  padding: 2px 8px;
+  align-items: center;
+  padding: 3px 10px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
   color: var(--fg-dim);
   background: color-mix(in srgb, var(--wf-bg) 70%, transparent);
   pointer-events: none;
+}
+.waterfall__axis b {
+  color: var(--fg);
+  text-shadow: var(--glow);
+}
+
+/* In the frozen frame the axis sits in normal flow, not over a canvas. */
+.waterfall-wrap--frozen .waterfall__axis {
+  position: static;
+  flex: none;
+  border-top: 1px solid var(--border);
 }
 
 .tune {
@@ -684,14 +882,14 @@ body {
   height: var(--touch);
   flex: none;
   font-size: 34px;
-  font-weight: 700;
-  border-radius: 14px;
+  font-weight: 400;
   background: var(--surface-2);
-  border: 2px solid var(--border-strong);
+  border: 3px double var(--border-strong);
   color: var(--fg);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  text-shadow: var(--glow);
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
@@ -709,18 +907,19 @@ body {
   align-items: center;
   justify-content: center;
   padding: 4px 10px;
-  border-radius: 12px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 3px double var(--border-strong);
 }
 
 .tune__freq {
   font-family: var(--font-mono);
   font-size: 38px;
-  font-weight: 700;
+  font-weight: 400;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
   line-height: 1;
   color: var(--accent);
+  text-shadow: var(--glow);
 }
 
 .tune__freq span {
@@ -730,11 +929,12 @@ body {
 }
 
 .tune__caption {
-  font-size: 12px;
-  letter-spacing: 0.08em;
+  font-size: 18px;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
-  color: var(--fg-mute);
+  color: var(--fg-dim);
   margin-top: 2px;
+  text-align: center;
 }
 
 .stage-foot {
@@ -743,15 +943,17 @@ body {
   justify-content: flex-end;
 }
 
-/* ===== Home / tiles (PortaPack-style grid) =============================== */
+/* ===== Home / tiles (boot-menu grid) ===================================== */
 .tiles {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   grid-auto-rows: 1fr;
-  gap: 14px;
+  gap: 12px;
   padding: 14px var(--gutter);
+  position: relative;
+  z-index: 1;
 }
 
 .tile {
@@ -759,10 +961,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 14px 16px;
-  border-radius: 16px;
+  padding: 12px 14px;
   background: var(--surface-2);
-  border: 1px solid var(--border);
+  border: 3px double var(--border);
   color: var(--fg);
   text-align: left;
   text-decoration: none;
@@ -779,25 +980,29 @@ body {
 
 .tile__code {
   font-family: var(--font-mono);
-  font-size: 13px;
-  letter-spacing: 0.1em;
-  color: var(--fg-mute);
+  font-size: 15px;
+  letter-spacing: 0.12em;
+  color: var(--fg-dim);
+  text-shadow: var(--glow);
 }
 
 .tile__glyph {
-  width: 40px;
-  height: 40px;
+  width: 38px;
+  height: 38px;
   stroke: var(--accent);
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 .tile__name {
-  font-size: 21px;
-  font-weight: 700;
-  line-height: 1.1;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1.14;
+  letter-spacing: 0.02em;
+  text-shadow: var(--glow);
   margin-top: auto;
 }
 
@@ -807,14 +1012,14 @@ body {
   gap: 8px;
   font-family: var(--font-mono);
   font-size: 13px;
+  letter-spacing: 0.06em;
   color: var(--fg-dim);
 }
 
 .tile__bar {
   flex: 1 1 auto;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--surface-3);
+  height: 8px;
+  border: 1px solid var(--border);
   overflow: hidden;
 }
 
@@ -824,17 +1029,52 @@ body {
   background: var(--accent);
 }
 
+/* Active row = highlighted selection bar + blinking cursor (boot-menu grammar). */
 .tile--active {
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--sel-bg);
+  border-color: var(--sel-bg);
+  color: var(--sel-ink);
+}
+.tile--active .tile__code,
+.tile--active .tile__name {
+  color: var(--sel-ink);
+  text-shadow: none;
+}
+.tile--active .tile__meta {
+  color: var(--sel-ink);
+  opacity: 0.85;
+}
+.tile--active .tile__glyph {
+  stroke: var(--sel-ink);
+}
+.tile--active .tile__bar {
+  border-color: var(--sel-ink);
+}
+.tile--active .tile__bar > span {
+  background: var(--sel-ink);
+}
+.tile--active .tile__head::before {
+  content: "\25B6";
+  font-size: 13px;
+  margin-right: 2px;
+  animation: blink 1.06s steps(1) infinite;
 }
 
+.tile--done {
+  border-color: var(--border-strong);
+}
 .tile--done .tile__glyph {
   stroke: var(--ok);
 }
 
 .tile--locked {
-  opacity: 0.55;
+  color: var(--fg-mute);
+  border-style: dashed;
+}
+.tile--locked .tile__code,
+.tile--locked .tile__name {
+  color: var(--fg-mute);
+  text-shadow: none;
 }
 .tile--locked .tile__glyph {
   stroke: var(--fg-mute);
@@ -849,6 +1089,11 @@ body {
 }
 
 /* ===== Motion ============================================================= */
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;

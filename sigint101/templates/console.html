@@ -49,7 +49,25 @@
 
           {% if stage == 'predict' %}
             {# ---- Keyboard-free predict gate: tap a chip, then commit. No text input. ---- #}
-            <h1 class="stage-panel__title">{{ lesson.stages['predict'] }}</h1>
+            <h1 class="stage-panel__title">&#9773; {{ lesson.stages['predict'] }}</h1>
+            {# Frozen context frame (MC's call): the instrument chrome, dimmed, with NO signal
+               drawn — orients the learner to the band without revealing where the station lands.
+               No canvas here, so there is nothing to invent; the frequency axis is chrome. #}
+            <div class="instrument instrument--frozen">
+              <div class="waterfall-wrap waterfall-wrap--frozen">
+                <div class="waterfall__empty">
+                  <div class="waterfall__sealed">
+                    <span>&mdash; SIGNAL HIDDEN &mdash;</span>
+                    <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                  </div>
+                </div>
+                <div class="waterfall__axis" aria-hidden="true">
+                  <span>{{ "%.1f"|format(mhz - 1.3) }}</span>
+                  <b>{{ "%.3f"|format(mhz) }} MHz</b>
+                  <span>{{ "%.1f"|format(mhz + 1.3) }}</span>
+                </div>
+              </div>
+            </div>
             <form class="predict{% if prediction_committed %} predict--committed{% endif %}"
                   method="post" action="{{ commit_url|default('#') }}">
               <fieldset class="predict-chips">
@@ -67,9 +85,9 @@
               </fieldset>
               <div class="predict__actions">
                 {% if prediction_committed %}
-                  <span class="predict__committed-note">Prediction committed &mdash; the rest is unlocked</span>
+                  <span class="predict__committed-note">Prediction committed, comrade &mdash; the rest is unlocked</span>
                 {% else %}
-                  <span class="predict__hint">Tap a choice. Nothing past this unlocks until you commit.</span>
+                  <span class="predict__hint">Tap a choice, comrade. Nothing unlocks until you commit.</span>
                   <button class="btn btn--primary btn-commit" type="submit">Commit prediction</button>
                 {% endif %}
               </div>
