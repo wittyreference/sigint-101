@@ -1,0 +1,66 @@
+# ABOUTME: Lesson pack M2 "Turn It Up" — the gain/SNR intro; SNR is the gap between a signal and
+# ABOUTME: the noise floor, and more gain lifts both at once, so it is not more signal.
+
+id: 2
+slug: gain-and-snr
+title: "Turn It Up"
+type: intro
+concept: >-
+  SNR is the gap between a signal and the noise floor; more gain is not more signal.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [gain]
+
+stages:
+  frame: >-
+    Tonight you learn the one number that decides whether you can hear a signal at all — the
+    gap between it and the noise — and why the knob everyone reaches for first, gain, is not
+    that number.
+  demo: >-
+    Watch this — you don't touch anything yet. Tune the strong FM station you found last time
+    and look at the gain panel. I'll start with gain all the way down, at 0 dB. See how the
+    whole picture sits low: that rough, grassy band smeared across the bottom is the noise
+    floor — the radio's own hiss, always there — and the station's stripe pokes up a little
+    above it. Two numbers matter, and the panel shows both: the level of the floor, and the
+    level of the peak. The distance between them — peak minus floor — is the only number worth
+    chasing, and it has a name: the signal-to-noise ratio, SNR. Now watch as I step the gain
+    up: 10 dB, 20, on toward the top. Both lines climb together — the floor rises, the peak
+    rises. The gap opens up quickly at first, then somewhere in the middle it stops growing,
+    and if I shove it to maximum the gap can actually close a little. Three things on the
+    screen: the floor, the peak, and the gap between them.
+  try: >-
+    Now you drive. Step the gain yourself from the bottom up, and stop at three settings — low,
+    middle, and maximum. At each one, read all three numbers off the panel and jot them down:
+    the floor, the peak, and the gap. Don't chase the tallest peak; just record what you see at
+    each step. The only goal is three honest rows of numbers.
+  predict: >-
+    You've watched that gap open up and then stall. Before you push to the very top, make the
+    call: going from your middle setting to maximum gain, will the gap get WIDER, stay about the
+    SAME, or get NARROWER? Lock in your answer — the rest of the lesson stays hidden until you do.
+  observe: >-
+    Now take the gain to maximum and hold it against your middle setting. Tell me what actually
+    happened, not what you hoped: did the floor and the peak move together or separately — and
+    did the gap between them grow, hold steady, or close up as you reached the top?
+  explain: >-
+    Here's what you were looking at. Gain is just an amplifier, and an amplifier cannot tell
+    signal from noise — it multiplies both at once. So when you turned it up, the station's peak
+    and the noise floor rose together, and past the middle the gap barely moved; at the very top
+    it often shrinks, because the radio starts adding hiss of its own. That gap is SNR, and the
+    gap — not the height of the peak — is what decides whether you can actually hear something.
+    Picture one friend talking in a loud restaurant: what matters isn't how loudly they talk,
+    it's how far their voice rises above the room. Turning up a hearing aid lifts your friend and
+    the whole room together, so past a point it stops helping — that is gain. The way to a bigger
+    gap is a better or better-placed antenna, or getting closer to the signal, not more gain. One
+    last handle: these numbers are in decibels, which measure a ratio — every 10 dB is ten times
+    the power — so SNR is simply a subtraction, the gap you read straight off the screen. The
+    best gain setting is the one where that gap is widest, which is almost always somewhere in the
+    middle, not pinned at the top.
+
+# The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
+# predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
+# learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
+# behind the predict commit, so showing the choices never spoils the reveal.
+choices:
+  - {key: wider, label: Wider}
+  - {key: same, label: About the same}
+  - {key: narrower, label: Narrower}

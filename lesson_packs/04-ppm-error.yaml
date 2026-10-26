@@ -1,0 +1,72 @@
+# ABOUTME: Lesson pack M4 "The Number on the Dial" — the ppm-error intro; the built-in radio has a
+# ABOUTME: large known frequency error, and the kit's 1 ppm RTL-SDR V3 is the control that proves it.
+
+id: 4
+slug: ppm-error
+title: "The Number on the Dial"
+type: intro
+concept: >-
+  The built-in radio has a large, known frequency error (~+164 ppm) that even drifts as the Pi
+  warms; the kit's RTL-SDR V3 (1 ppm TCXO) is the control that proves it's the radio, not you.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [ppm]
+
+stages:
+  frame: >-
+    Tonight you meet the lie your built-in radio tells on every frequency — a big, known error
+    baked into its cheap clock — and you prove it's the radio and not you by standing a second
+    radio right next to it.
+  demo: >-
+    Watch this — you don't touch anything yet. Tune the strong FM station from Lesson 1. Every FM
+    station quietly broadcasts a steady little tone called the stereo pilot at exactly 19 kHz above
+    its center — a landmark you can trust. Watch where our built-in radio thinks that pilot sits:
+    it's off, by the same amount every time. I measure that offset two ways — once off the pilot,
+    once with `make ppm-reference` against the Pi's own clock — and both land on the same answer:
+    about +164 ppm. Parts per million: 164 Hz of error for every million Hz — every MHz — you tune
+    to. Now the part that matters most. I plug in the kit's RTL-SDR V3, which carries a far better
+    clock — a TCXO, good to about one part per million — and I measure the very same station on it:
+    it reads essentially zero. Same sky, same signal, two radios: one off by +164 ppm, the other
+    dead on. The error lives in the radio, not in the air.
+  try: >-
+    Now you see it with your own eyes. Keep the station tuned on the built-in radio and read where
+    its center lands — it sits roughly +17 kHz high of where the book says it should be. Now switch
+    to the V3 and read the same station: it drops straight onto the published frequency, dead
+    center. You didn't move the dial between them; the only thing that changed was which radio was
+    listening. Seventeen kHz is nothing inside a fat 200 kHz FM channel — which is exactly why you
+    never noticed it until tonight.
+  predict: >-
+    You've seen the built-in radio sit about +17 kHz high at 100 MHz. Here's the call. That error
+    is measured per MHz, so it scales with the frequency you tune to. When you go up to 1090 MHz —
+    where aircraft report their positions — will that same radio's error, counted in kHz, be
+    BIGGER, about the SAME, or SMALLER than it was down at 100 MHz? Lock in your answer — the rest
+    of the lesson stays hidden until you do.
+  observe: >-
+    Reason it out from the one number you already have, then say what you expect: at 1090 MHz —
+    about eleven times higher than that FM station — roughly how far off would the built-in radio
+    land, and would that much error still tuck inside a channel, or would it throw you clean off
+    the signal?
+  explain: >-
+    Here's why. A single cheap crystal clocks both the part that tunes the radio and the part that
+    samples it, so if that crystal runs a millionth fast, every frequency the radio prints comes out
+    a millionth wrong — the same +164 ppm everywhere. But because the error is per MHz, the kHz grow
+    right along with the frequency: +17 kHz at 100 MHz becomes about +179 kHz at 1090 MHz — more
+    than ten times bigger, because 1090 is more than ten times higher. So the honest answer is
+    BIGGER. That much offset is invisible inside a 200 kHz FM channel and absolutely fatal in a 12.5
+    kHz one: at 1090 MHz you'd tune to the published frequency and the planes simply wouldn't be
+    there. This is the trap that convinces beginners they did something wrong or that the device is
+    broken. They didn't, and it isn't — when a signal isn't where the book says, suspect the radio's
+    own known error first. You proved where the error lives by standing the V3 beside it: same
+    signal, +164 ppm on the built-in, near zero on the V3's TCXO clock. Carry two things out of
+    tonight: your built-in radio runs about +164 ppm, and there is a one-tap correction that tells
+    the radio about its own error so every frequency downstream lands where it belongs. Turn it on,
+    and the number on the dial finally tells the truth.
+
+# The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
+# predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
+# learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
+# behind the predict commit, so showing the choices never spoils the reveal.
+choices:
+  - {key: bigger, label: Bigger}
+  - {key: same, label: About the same}
+  - {key: smaller, label: Smaller}

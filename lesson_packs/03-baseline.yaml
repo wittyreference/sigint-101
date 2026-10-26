@@ -1,0 +1,70 @@
+# ABOUTME: Lesson pack M3 "Know Your Instrument" — the baseline intro; a deaf receiver and a quiet
+# ABOUTME: band draw the same waterfall, and only a baseline against a known reference tells them apart.
+
+id: 3
+slug: baseline
+title: "Know Your Instrument"
+type: intro
+concept: >-
+  A receiver can go deaf and look identical to a quiet band; only a baseline against a known
+  reference catches it.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [provenance]
+
+stages:
+  frame: >-
+    Tonight you learn the most unsettling thing a radio can do — fail so quietly that a broken
+    receiver and an empty sky look exactly alike on the screen — and the one plain habit that
+    catches it.
+  demo: >-
+    Watch this — you don't touch anything yet. Before we hunt for a single signal, I'm going to
+    do the thing that looks boring and is actually the whole job: write down the state of the
+    instrument itself. Open the provenance panel. It isn't showing you a signal — it's showing
+    you the radio: which radio this is, the gain it's set to, the temperature of its chip, whether
+    its power is clean, and the one reading that matters most tonight — the level of a known
+    reference, the strong local FM station you found in Lesson 1. That station is always on and
+    always in the same place, so its level is something you can hold the radio against. I capture
+    all of it right now as tonight's baseline: a dated snapshot of a healthy radio looking at a
+    signal it should always hear. That dull little snapshot is the thing that will one day tell
+    you the truth.
+  try: >-
+    Now you capture yours. Point the radio at that same reference station and tap capture on the
+    provenance panel — that stamps tonight's baseline with today's date: the radio, its settings,
+    its temperature, and the reference level, all in one record. Here is the part that is itself
+    the lesson: do this again tomorrow night, and the night after. You're not waiting for anything
+    to happen yet — you're building the record that lets you notice when something does.
+  predict: >-
+    You've now saved a baseline against a known reference. Here's the call. Imagine weeks from now
+    this receiver slowly goes deaf — a corroded connector, a dying front end — and you aim it at a
+    stretch of band with nothing on it. Next to a band that is simply quiet tonight, how would that
+    broken-radio picture look: IDENTICAL, a LITTLE different, or OBVIOUSLY different? Lock in your
+    answer — the rest of the lesson stays hidden until you do.
+  observe: >-
+    Put your own empty-band waterfall next to your captured baseline and look hard. Tell me
+    honestly: from the empty waterfall alone — the grass, the dark, the flat floor — can you
+    actually tell whether the radio is working or stone deaf? If the band itself can't answer that,
+    what is the one thing on your screen that can?
+  explain: >-
+    Here's the hard truth you just reasoned your way toward. A dead front end and an empty sky draw
+    the same waterfall — flat floor, no stripes, nothing at all. "Quiet band" and "deaf radio" are
+    indistinguishable from the picture alone, which means a blank waterfall never, on its own,
+    proves that nothing is on the air; it can just as easily mean this radio has stopped hearing.
+    The only thing that resolves it is the reading you captured tonight: the reference. If your
+    known station still sits at the level your baseline recorded, the radio is healthy and the band
+    is genuinely quiet. If that reference has dropped or vanished while nothing else changed, the
+    radio has gone deaf — and you would never have known without the baseline to compare against.
+    That is why you logged the radio, the gain, the temperature, the power: that context is
+    provenance, and provenance is what makes one reading comparable to the next. A number on the
+    screen is not ground truth; a number sitting beside the known-good baseline that produced it is.
+    Keep the baseline, trust the reference, and the instrument cannot go deaf on you without getting
+    caught.
+
+# The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
+# predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
+# learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
+# behind the predict commit, so showing the choices never spoils the reveal.
+choices:
+  - {key: identical, label: Identical}
+  - {key: little, label: A little different}
+  - {key: obvious, label: Obviously different}
