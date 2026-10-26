@@ -17,5 +17,6 @@
   "fileHeaders": { "enabled": true, "pattern": "ABOUTME:", "requiredLines": 2, "fileExtensions": [".py"], "sourceOnly": true },
   "docMappings": {},
   "requiredEnvVars": [],
-  "trackedDirectories": ["sigint101/", "tests/", "lesson_packs/"]
+  "trackedDirectories": ["sigint101/", "tests/", "lesson_packs/"],
+  "worktree": { "guardedPaths": ["sigint101/"] }
 }

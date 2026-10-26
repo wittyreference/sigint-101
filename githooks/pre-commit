@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# ABOUTME: Pre-commit git-identity guard — fails closed unless the author email is the
+# ABOUTME: expected personal address, so no commit is ever stamped with the wrong identity.
+
+set -euo pipefail
+
+# SIGINT 101 is personal work on a personal machine, and the work/personal split is
+# deliberate. An author line is baked into the commit and only history rewriting takes it
+# back out, so this is cheaper to catch here than to undo later. The guard fails closed:
+# an unset identity or any address other than the expected one blocks the commit.
+REQUIRED="mc8805@outlook.com"
+
+email="$(git config user.email 2>/dev/null || true)"
+
+if [ -z "$email" ]; then
+    echo "sigint101: refusing to commit with no git identity set." >&2
+    echo "           git config user.email '$REQUIRED'" >&2
+    exit 1
+fi
+
+shopt -s nocasematch
+if [[ "$email" != "$REQUIRED" ]]; then
+    echo "sigint101: refusing to commit as <$email>." >&2
+    echo "           this repo requires the personal identity <$REQUIRED>." >&2
+    echo "           git config user.email '$REQUIRED'" >&2
+    exit 1
+fi
