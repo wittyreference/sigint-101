@@ -85,3 +85,12 @@ copy.
 **How to apply.** Render-verify EVERY stage of a lesson at 800x480, not just the first — a stage
 that is hidden-by-default (demo/try/observe behind the predict gate) is easy to never look at. The
 other instrument lessons (M1,M3,M4,M6,M7,M8) still need their copy trimmed (they scroll meanwhile).
+
+## 2026-10-26: a per-stage live panel must drive ALL its panels, not querySelector the first
+**Finding.** prov.js used `document.querySelector("[data-prov-panel]")` and updated only the first
+match. But an M3 lesson renders the panel on every instrument stage (demo/try/observe), and the
+first in the DOM is the hidden demo stage — so the VISIBLE (observe) panel never updated and showed
+its placeholder "—". The waterfall already avoids this with `querySelectorAll` (one poll feeds all
+canvases, so a hidden stage is already correct when you step to it).
+**How to apply.** Any live panel driven by a poll must `querySelectorAll` and update every instance,
+exactly like waterfall.js — a lesson shows the same panel on each of its instrument stages.

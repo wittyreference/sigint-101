@@ -102,7 +102,7 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 ## Pending work
 - Trim the demo/try/observe copy on the OTHER instrument lessons (M1, M3, M4, M6, M7, M8) the way M2
   was trimmed — they fit the new instrument layout but their long copy scrolls until trimmed.
-- Wire the provenance (M3) + ppm (M4) panels, the same way the gain meter (M2) was done.
+- Wire the ppm (M4) panel, the same way the gain meter (M2) and provenance panel (M3) were done.
 - Exam-sim mode (scored practice exam) + results screen; legal/other UIs.
 - Remaining lessons M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
   + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
@@ -155,6 +155,10 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   observe stages now fit 800x480 — Next-step on the tune strip, scrolling narration (they were
   over-subscribed and never render-verified). **HIL-verified on nomad-b**: the live meter read
   PEAK -14.7 / FLOOR ~-49 / SNR 34.0 dB off a real FM sweep.
+- Provenance panel (M3) LANDED (`53b0e79`, MC-reviewed): a verdict-first panel (HEALTHY/DEGRADED/
+  NO BASELINE/NO RADIO) off the live reference vs. a captured baseline, with a Capture button; new
+  `/api/provenance` + `/api/provenance/baseline` routes. **HIL-verified on nomad-b**: HEALTHY off a
+  real sweep (REF -13.2 vs base -12.5, temp 37C, power OK).
 - Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
 - Phosphor-Terminal restyle LANDED on main (`a8bfef8`): home + FRAME + PREDICT render-verified on
   nomad-b at 800x480; Russo One (Latin + Cyrillic) loads; ☭ renders as a glyph (via system
