@@ -1,81 +1,110 @@
 # SIGINT 101 — STATUS
 
-## NEXT ACTION
-Both owner gates are cleared — tailnet SSH is open (all three fleet hosts reachable) and the three
-shell taste questions are answered. Immediate next: (1) **land the UI** — the 1980s-Soviet-terminal
-restyle (three directions rendering now; MC picks, then port the winner into `app.css`'s three
-themes) plus the taste calls: home navigates **units -> lessons -> lesson**, the offline waterfall
-shows a **badged SAMPLE recording**, and Predict shows a dimmed, data-free **"frozen context"
-instrument frame** (live data only after commit); then wire the gain/provenance/ppm panels + exam +
-legal UIs. (2) **Continue per-module HIL on nomad-b**: ppm (M4) next, then the pi5 Flipper (Unit 3)
-and nomad-b LoRa/GPS. Remaining build: M5 (legal card-sort), M9-M18 + decode backends,
-counter-surveillance (Flock/ESP32 + Rayhunter), kiosk/provisioning/updater, the Flipper FAP.
+## NEXT ACTION (resume here)
+**Finish and land the Phosphor-Terminal console restyle.** The work is committed and pushed on
+branch **`feat/phosphor-restyle`** (worktree: `/home/mc/workspaces/sigint-101-phosphor`), but the
+latest commit (Russo One titles, ☭ labels, "comrade" voice, Back-button fix) is **not yet
+render-verified**. Steps:
+1. **Render-verify on nomad-b** at 800x480 (commands below). Confirm: Russo One loads on the big
+   titles; the hammer-and-sickle **☭ (U+262D) renders as a glyph, not a tofu box** (if it tofus,
+   swap the CSS `content:"\262D "` and the template `&#9773;` for an inline SVG hammer-sickle); the
+   Back button shows "HOME" fully (no "HO..." clip); the predict screen still fits.
+2. If good, **squash-merge into main and push**:
+   `git -C /home/mc/workspaces/sigint-101 merge --squash feat/phosphor-restyle` → commit → push.
+   Then remove the worktree (`cd /home/mc/workspaces` first) and delete the branch.
+3. Then continue: the **"comrade" content pass** over `lesson_packs/*.yaml` (only chrome copy was
+   done); the **units→lessons nav** (backend change, see below); remaining lessons + HIL.
 
-## HIL targets (MC's call, 2026-10-26)
-- **nomad-b = PRIMARY acceptance target** (hostname `spec5b`, 100.108.20.20). It is the stock
-  Nomad 2 Recon twin — closest to the gift: built-in RTL2832U SDR + working antenna, MeshAdv HAT
-  serial (`/dev/serial0`, `/dev/ttyAMA0`) for LoRa/GPS, working LoRa jack.
-- **spec5 = degraded secondary** (100.90.68.20): busted RX antenna + dead LoRa jack. Still useful
-  as a genuine "deaf receiver" fixture for the deaf-vs-empty honesty lesson (M3).
-- **pi5 = Flipper target** (100.126.132.9), for Unit 3.
-- Dev stays on the droplet (D14); these are acceptance targets reached over SSH.
+## Render-verify recipe (no browser on the droplet — render on nomad-b's Chromium)
+From the worktree `/home/mc/workspaces/sigint-101-phosphor`:
+```
+mkdir -p data
+nohup .venv/bin/uvicorn sigint101.app:app --host 0.0.0.0 --port 8008 >/tmp/uv.log 2>&1 &
+# then on nomad-b (reaches the droplet over tailnet; 800x480 = kiosk size):
+ssh spec5@100.108.20.20 '/usr/bin/chromium --headless=new --no-sandbox --disable-gpu \
+  --hide-scrollbars --force-device-scale-factor=1 --window-size=800,480 --virtual-time-budget=6000 \
+  --screenshot=/tmp/s.png http://100.92.112.54:8008/lesson/1'
+scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
+```
+- `/` = home (tiles); `/lesson/1` = FRAME stage (eyebrow ☭ + Russo title + Back).
+- The **predict** screen is JS-navigated (not a static shot). To see it, write a standalone
+  `sigint101/static/_predicttest.html` that mirrors console.html's predict stage, render
+  `/static/_predicttest.html`, then **delete it before committing**. (A prior one was used and removed.)
+- Kill the server after: `pkill -f "[u]vicorn.sigint101"` (bracket avoids self-match).
 
-## Where things stand (2026-10-26)
-- Repo live + green: github.com/wittyreference/sigint-101 (main @ 4de85fc). `make selftest`
-  ~290 tests, 94% coverage, lint clean, pristine (droplet).
-- **HIL: P0 acceptance PASSED on nomad-b (real hardware):**
-  - `make selftest` on real aarch64: Python suite green, 94.17% coverage. Only gap: the
-    node-dependent JS meta-test (the panel JS runs in Chromium on-device, not node; it is verified
-    on the droplet where node lives). node is a test tool, not a device runtime dependency.
-  - Live app (`sigint101.app:app`): `/api/hardware` detects the real RTL2832U; `/api/spectrum`
-    serves a live sweep (88-108 MHz, 257 bins, local FM station at 95.97 MHz, 29.6 dB SNR), with
-    honest empty rows before the first pass; `/` and `/lesson/1` render 200; graceful stop releases
-    the dongle (no leaked `rtl_power`).
-  - `spectrum.py` parser (`parse_line` + `merge_chunks`) verified against genuine `rtl_power` CSV
-    captured from both spec5 and nomad-b.
-  - `ppm.py` fail-closed honesty verified on real hardware: it refuses to report a ppm without a
-    clear 19 kHz pilot. Happy path blocked by conditions, not code — nomad-b currently recovers no
-    FM stereo pilot (one strong carrier ~96 MHz at pilot-ratio <=1.7 dB; other stations 16+ dB
-    weaker), most likely antenna match or a mono/spur signal. The host system clock reads
-    -22.3 ppm (NTP-synchronised) — a separate crystal from the SDR, not the SDR's error.
-- Modules (12): events, progress, hardware (no-mock probe), lessons, spectrum (sweeper),
-  provenance, ppm, flipper, subfile, exam, app, `__init__`.
-- Console: serves the touch shell end-to-end; commit-before-reveal server-side; `/api/spectrum`
-  honest 503 with no radio; canvas waterfall (one px per bin).
-- Curriculum (7 packs): M1-M4 (Unit 1), M6-M7 (Unit 3), M8 (AM vs FM).
-- Exam trainer backend: official NCVEC 2026-2030 Technician pool, 409/409 + 2026-02-19 errata
-  verified; Leitner scheduler; 35-Q exams, pass 26/35; fail-closed. UI pending.
+## What the restyle contains (feat/phosphor-restyle)
+- **`sigint101/static/app.css`** rethemed to the "Phosphor Terminal" (MC picked direction A of three):
+  PT Mono everywhere (self-hosted OFL woff2 in `static/fonts/`, full Cyrillic, offline);
+  double-line box-drawing borders; scanline+vignette+glow in the phosphor themes; blinking block
+  cursor on the live control. Three themes keep their jobs: **dark** = green P1 CRT, **sunlight** =
+  high-contrast dark-green-on-cream no-glow, **red-night** = red-on-black only (state by
+  brightness+glyph+word). `data-theme` values are **dark / sunlight / red-night**.
+- **Russo One** (OFL, self-hosted) on the large titles only (statusbar title, stage-panel title,
+  home tile names) — legible Soviet-industrial display, not fake-Cyrillic.
+- **Frozen-context predict frame** (MC's taste call): a dimmed, data-free instrument outline on the
+  predict stage — orients to the band without revealing the answer; no canvas, nothing invented.
+  Predict chips are a horizontal auto-fit grid so the frame fits 800x480.
+- **☭ (U+262D)** on every section-label eyebrow (CSS) and the predict question (template).
+- **"comrade"** in the predict chrome copy (hint + committed note) — fuller pass pending.
+- **Bug fixed** (found by the first real render): hidden stage-panels overlapped because
+  `.stage-panel{display:flex}` beat the UA `[hidden]` rule — added `.stage-panel[hidden]{display:none}`.
+- Captions raised to >=18px. **Verified so far:** `make selftest` green (290 tests, 94% cov, lint
+  clean); home + lesson FRAME + predict rendered on nomad-b at 800x480 for the *base* commit
+  (6a3c603). The *refinement* commit (bdf0507) is test-green but **not render-checked yet**.
+- Commits: `6a3c603` (base) and `bdf0507` (refinements) on `feat/phosphor-restyle`; both on main's
+  `dc94248`. Preview of all three directions (what MC chose from):
+  https://claude.ai/artifact/1MnyjjtpDXizFRZVnDnzNh
 
-## Taste decisions (MC, 2026-10-26)
-- Waterfall with no live radio: **badged SAMPLE recording** (real capture, marked SAMPLE, mints no
-  reception badge).
-- Home nav: **units -> lessons -> lesson** (6 unit tiles; drill into a unit's lessons).
-- Predict: **frozen context frame** — dimmed, data-free instrument outline during predict; live
-  data only after commit (MC's pick over the instrument-free default).
-- Console look: **1980s Soviet terminal**, readability/functionality preserved (restyle in
-  progress; three directions rendering for MC to pick).
+## Both owner gates are CLEARED
+- **Tailnet SSH open:** acls `tag:dev -> tag:fleet:22` added; droplet key authorized on all three
+  fleet hosts. Droplet can SSH spec5, pi5, nomad-b.
+- **Taste answers:** waterfall-with-no-radio = badged SAMPLE recording; home nav = units→lessons→
+  lesson (not yet built — see pending); predict = frozen context frame (built); console look =
+  Phosphor Terminal (being built).
 
-## Access (un-parked 2026-10-26)
-- Tailnet ACL: added `tag:dev -> tag:fleet:22` (claude-factory can SSH the fleet; narrows the
-  MESH-15 "claude-factory destination-only" Q6a to the fleet only, plus the matching test edit).
-- Droplet key authorized on spec5 (already present), and pushed onto pi5 and nomad-b via jump hosts
-  (spec5 -> pi5; pi5 -> nomad-b).
+## HIL targets (MC's call) — nomad-b is PRIMARY
+- **nomad-b** (hostname `spec5b`, `100.108.20.20`, user `spec5`) = PRIMARY acceptance target: stock
+  Nomad 2 Recon twin, built-in RTL2832U + working antenna, MeshAdv HAT serial (`/dev/serial0`,
+  `/dev/ttyAMA0`), working LoRa jack. **P0 acceptance PASSED** here: live `/api/hardware` +
+  `/api/spectrum` (real FM sweep, ~96 MHz, ~29 dB SNR), pages 200, clean dongle release.
+- **spec5** (`100.90.68.20`) = degraded secondary: **busted RX antenna + dead LoRa jack**. Useful
+  as a "deaf receiver" fixture for the M3 deaf-vs-empty lesson.
+- **pi5** (`100.126.132.9`, user `mc`) = Flipper target, but **no Flipper attached** (it has an
+  ESP32 / Espressif USB-JTAG on `/dev/ttyACM1` — good for the later counter-surveillance track).
+- Dev on the droplet (D14); these are acceptance targets over SSH. **No browser on the droplet** —
+  render on nomad-b's Chromium.
+- **ppm (M4):** `ppm.py` honesty verified on hardware (refuses a ppm with no clear pilot); happy
+  path blocked — nomad-b currently recovers **no FM stereo pilot** (antenna; MC's physical call to
+  fix — try the kit antenna or a known strong local stereo station).
 
-## Follow-ups (logged, not yet done)
-- Soviet-terminal console restyle: assemble the three rendered directions, MC picks, port into
-  `app.css` three themes (+ the three taste calls above).
-- spec5 busted antenna / dead LoRa jack: physical fix is MC's. Optionally repurpose spec5 as the
-  M3 deaf-radio fixture.
-- (optional) install node on nomad-b to make `make selftest` fully green on the acceptance box.
-- Commit the 3 NCVEC diagram images (T1/T2/T3 JPGs) for the exam-trainer UI's 12 figure questions.
-- Harden `lessons.py` choices parser against YAML bool-coercion of keys (coerce key/label to str).
-- Wire the gain/provenance/ppm panels + exam + legal UIs (taste now decided).
-- M4 ppm needs a recoverable FM stereo pilot: nomad-b's antenna sees FM carriers but yields no
-  pilot (<=1.7 dB) right now. Retry with the kit antenna or a known strong local stereo station
-  (physical — MC), then record nomad-b's real ppm. ppm.py itself is verified (honesty path).
+## Where the build stands
+- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `dc94248`. Stack: FastAPI +
+  Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
+- 12 modules; console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
+  honest 503). 7 lesson packs (M1-M4, M6-M7, M8). Exam trainer backend on the verified NCVEC
+  2026-2030 pool (409 + errata). `make selftest` = 290 tests, 94%, pristine; `make lint` clean.
+
+## Pending work (after the restyle lands)
+- "comrade" content pass over `lesson_packs/*.yaml` (the "you" references in lesson copy).
+- **units→lessons nav** (home shows 6 unit tiles → a unit's lesson list → lesson). Backend change:
+  app.py currently builds one tile per lesson with no unit grouping; needs a unit model + a
+  `/unit/{id}` route (TDD).
+- Wire gain/provenance/ppm panels + exam + legal UIs.
+- Remaining lessons M5 (legal), M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
+  + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
+- Commit 3 NCVEC diagram JPGs for the exam UI; harden lessons.py choices parser vs YAML bool-coercion.
+
+## Gotchas (learned this session)
+- All `sigint101/` edits go through a worktree (worktree-gate). Docs (STATUS/CLAUDE.md) are outside
+  the gate and land on main. Merge with **--squash**. Stage files by name. Never `--no-verify`.
+  Git identity must be **Michael Carpenter <mc8805@outlook.com>** (repo-local, hook-enforced).
+- Shell is **zsh**: unquoted `$var` does NOT word-split (`set -- $x` / `$NB cmd` break) — inline or use arrays.
+- `pkill -f "pattern"` matches its own command line — use the bracket trick `"[p]attern"`.
+- Render on nomad-b (no Chrome on the droplet). `rtl_power` "[R82XX] PLL not locked!" + "User
+  cancel, exiting" are benign (appear on healthy nomad-b too).
 
 ## Done / verified
-- Logic-level (droplet): ~290 tests green, 94% cov, pristine; console runs all shipped lessons
-  end-to-end; commit-before-reveal server-side; spectrum 503 honest; exam pool verified; no module
-  fabricates a signal, a device, or a question.
-- Real hardware (nomad-b): P0 acceptance passed — see the HIL block above.
+- Logic (droplet): 290 tests green, 94%, pristine.
+- Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
+- Restyle base (6a3c603) render-verified on nomad-b at 800x480; refinements (bdf0507) test-green,
+  render pending.
