@@ -1,0 +1,85 @@
+# ABOUTME: Lesson pack M8 "Two Shapes: AM vs FM" — the modulation intro; which property of the wave
+# ABOUTME: carries the message, height (AM) or pitch (FM), is a shape you can read before you listen.
+
+id: 8
+slug: am-vs-fm
+title: "Two Shapes: AM vs FM"
+type: intro
+concept: >-
+  Modulation is which property of a wave carries the message — its height (AM) or its pitch (FM) —
+  and the two draw different shapes on the waterfall, so you can tell them apart by sight, and by
+  sound, before you ever listen.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: []
+
+stages:
+  frame: >-
+    Tonight you learn to read a signal's modulation — the trick it uses to carry a message — straight
+    off its shape on the waterfall, so you can call AM from FM on sight, before you ever turn up the
+    sound.
+  demo: >-
+    Watch this — you don't touch anything yet. I'm putting two signals in front of you, one after the
+    other. First the airband — the aircraft voice band, 118 to 137 MHz — and I'll park on a
+    controller's channel. See that: a single hard, bright line sitting dead still at the center. That's
+    the carrier, a pure steady tone with no message written on it yet. Now a pilot keys up and talks —
+    watch the brightness bloom and flicker right around that line, in time with the words, then fall
+    back to the bare line the moment they stop. The line itself never moves; only the brightness riding
+    on it comes and goes, and the whole thing is skinny, under ten kHz wide. That's AM — amplitude
+    modulation — the message written in height: louder voice, brighter paint, the carrier holding
+    still underneath. Now I jump down to broadcast FM, the music band from Lesson 1, and it's a
+    completely different animal. A fat block of light about 200 kHz wide — more than twenty times wider
+    than that airband channel — and instead of sitting still it writhes, the bright part darting side
+    to side across the channel as the music rises and falls. The height barely changes; it's the
+    sideways wiggle that carries the song. That's FM — frequency modulation — the message written in
+    pitch. Two shapes: AM, a still line that flickers bright; FM, a wide band that wiggles. You can
+    tell them apart with the sound all the way off.
+  try: >-
+    Now it's your turn, and the whole job is your eyes — leave the volume down. Tap between the two
+    presets I've set: the airband controller channel and the FM music station. Flip back and forth a
+    few times and just watch the shapes. On the airband, find the thin bright carrier line and wait for
+    it to flicker when someone talks; on FM, find the wide block and watch it wiggle side to side. Then
+    say which is which out loud before you move on: point at the narrow one that flickers in place and
+    name it AM, point at the wide one that wiggles and name it FM. Don't listen yet — the point tonight
+    is that the shape already told you, and you want to learn to trust the shape.
+  predict: >-
+    You just watched the airband carrier flare bright every time the controller spoke. Here's the call,
+    about what happens in the gaps — between words, when nobody is talking. Does a carrier go quiet and
+    vanish from the screen in that silence, leaving empty band until the next word, or does it stay
+    lit? Pick the one whose carrier you think disappears between words: the AM airband voice, the FM
+    music station, or neither of them. Lock in your answer — the rest of the lesson stays hidden until
+    you do.
+  observe: >-
+    Go back to the airband and really watch the carrier through a whole exchange, not just while
+    someone is talking. Wait for a gap — the moment after the controller finishes and before the next
+    transmission — and keep your eye fixed on that center line. Tell me what the line itself does in
+    the silence: does it blink out and leave empty screen until the next word, or does it stay lit and
+    steady, with only the brightness around it dropping away? And ask yourself why they'd call it a
+    carrier in the first place — what would it have to do, in the quiet, to earn that name?
+  explain: >-
+    Here's the straight answer: neither — the carrier does not vanish. Watch an AM carrier through the
+    quiet and you'll see the center line stay lit and rock-steady between words; what comes and goes is
+    only the brightness riding on it. That's the whole idea of amplitude modulation: a steady carrier
+    is transmitted the entire time, holding its spot on the dial, and the voice is written onto it as
+    changes in height — louder sound, taller signal, more brightness blooming around the line. Take the
+    voice away in a gap and you haven't taken the carrier away; you've just stopped writing on it, so
+    it drops back to the bare, even line. That is literally why it's called a carrier: it carries the
+    message, and it's still there in the silence, holding the channel open for the next word. FM holds
+    its carrier too — its message is written in pitch, the sideways wiggle, so between notes the energy
+    just settles toward the center rather than blinking out. So the two shapes you learned tonight each
+    ride on a carrier that stays: AM is a still line that flickers bright because height carries the
+    message; FM is a wide band that wiggles because pitch carries it. Read the shape and you've named
+    the modulation before a single sound reaches your ears — and when you do finally listen, AM's
+    scratchy voice and FM's clean hi-fi only confirm what the shape already told you. One honest
+    footnote, because a carrier that vanishes is a real thing, just not here: there's a simpler code,
+    on-off keying — Morse with a flashlight — that switches its carrier all the way off and on, and
+    you'll meet it next lesson. Tonight's carriers stay lit; that one won't.
+
+# The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
+# predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
+# learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
+# behind the predict commit, so showing the choices never spoils the reveal.
+choices:
+  - {key: am, label: AM}
+  - {key: fm, label: FM}
+  - {key: neither, label: Neither}
