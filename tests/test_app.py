@@ -359,3 +359,37 @@ def test_exam_answer_for_an_unknown_question_is_404(tmp_path):
                            data={"choice": "A"},
                            headers={"content-type": "application/x-www-form-urlencoded"})
     assert resp.status_code == 404
+
+
+# --- provenance panel (M3): the radio's account of itself + baseline (deaf vs. empty) ---------
+
+
+def test_provenance_reports_the_radios_account_of_itself(tmp_path):
+    with _client(tmp_path, sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.get("/api/provenance")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "provenance" in body and "baseline" in body
+    # The sweep covers the reference (106.5 MHz), so its level is a real reading, not None.
+    assert body["provenance"]["ref_db"] is not None
+    # Nothing captured yet, so there is no baseline to judge the radio against.
+    assert body["baseline"]["has_baseline"] is False
+
+
+def test_capturing_a_baseline_then_comparing_reads_not_degraded(tmp_path):
+    with _client(tmp_path, sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        cap = client.post("/api/provenance/baseline")
+        assert cap.status_code == 200 and cap.json()["recorded"] is True
+        resp = client.get("/api/provenance")
+    baseline = resp.json()["baseline"]
+    assert baseline["has_baseline"] is True
+    # The reference has not dropped against the baseline it was just taken from.
+    assert baseline["degraded"] is False
+
+
+def test_baseline_capture_without_a_reference_is_refused(tmp_path):
+    # No radio means no reference level, so there is nothing honest to record a baseline from.
+    with _client(tmp_path, probe=_absent) as client:
+        resp = client.post("/api/provenance/baseline")
+    assert resp.status_code == 400
+    assert resp.json()["recorded"] is False

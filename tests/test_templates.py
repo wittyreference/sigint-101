@@ -318,6 +318,28 @@ def test_a_lesson_without_the_gain_panel_has_no_gain_meter():
     assert "gain-meter" not in html
 
 
+def _provenance_lesson():
+    """An intro lesson that declares the provenance panel (M3's, deaf-vs-empty)."""
+    return parse_lesson({
+        "id": 3, "slug": "baseline", "title": "Know Your Instrument", "type": "intro",
+        "concept": "a deaf radio looks like a quiet band; only a baseline catches it",
+        "panels": ["provenance"], "hardware": ["rtlsdr"],
+        "stages": {"frame": "f", "demo": "DEMO watch the baseline", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_a_provenance_lesson_shows_the_provenance_panel():
+    html = _console(lesson=_provenance_lesson(), current_stage="demo")
+    assert "prov-panel" in html
+    assert "data-prov-verdict" in html and "Capture baseline" in html
+
+
+def test_a_lesson_without_provenance_has_no_provenance_panel():
+    html = _console(lesson=_intro_lesson(), current_stage="demo")
+    assert "prov-panel" not in html
+
+
 # --- the home / tile screen ---------------------------------------------------
 
 

@@ -24,6 +24,12 @@ from .exam import ExamStore, load_pool
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
 from .progress import Progress
+from .provenance import (
+    compare_to_baseline,
+    gather_provenance,
+    read_baseline,
+    record_baseline_sample,
+)
 from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
 from .units import UNITS, get_unit
 
@@ -336,6 +342,57 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "question": question, "reviewed": True,
                      "chosen": chosen, "correct": chosen == question.answer},
         )
+
+    def _current_row():
+        """The latest real sweep row, lazily starting the sweeper, or None when there is no radio.
+
+        Mirrors /api/spectrum's lazy start so the provenance panel works on its own: a reference
+        level can only be read from a sweep the hardware actually produced, never invented.
+        """
+        sweeper = app.state.sweeper
+        if not sweeper.running:
+            try:
+                sweeper.start()
+            except SpectrumUnavailable:
+                return None
+        rows = sweeper.rows(1)
+        return rows[-1] if rows else None
+
+    def _snapshot():
+        """The radio's account of itself now — None fields where the hardware cannot answer."""
+        return gather_provenance(
+            serial=os.environ.get(RTLSDR_SERIAL_ENV),
+            gain=app.state.sweeper.gain,
+            row=_current_row(),
+        )
+
+    @app.get("/api/provenance")
+    def provenance_view():
+        """The instrument's state plus how its reference level compares to the captured baseline.
+
+        A degraded verdict is the deaf-vs-empty signal of M3: the reference has dropped well below
+        the baseline while nothing else moved. With no baseline yet, the comparison says so rather
+        than guessing a verdict.
+        """
+        snapshot = _snapshot()
+        verdict = compare_to_baseline(snapshot["ref_db"], read_baseline(app.state.events_path))
+        return {"provenance": snapshot, "baseline": verdict}
+
+    @app.post("/api/provenance/baseline")
+    def provenance_baseline():
+        """Record one baseline sample — refused when the sweep has no reference level to record.
+
+        A baseline against a reference the hardware never read would be a number to trust later
+        that was never measured; the honest answer is to refuse, the same way the spectrum route
+        refuses to fake a sweep.
+        """
+        snapshot = _snapshot()
+        if snapshot["ref_db"] is None:
+            reason = "no reference level — the sweep must cover the reference before a baseline"
+            log_event(app.state.events_path, "baseline_refused", {"reason": reason})
+            return JSONResponse(status_code=400, content={"recorded": False, "reason": reason})
+        record_baseline_sample(app.state.events_path, snapshot)
+        return {"recorded": True, "ref_db": snapshot["ref_db"]}
 
     @app.get("/api/spectrum")
     def spectrum(limit: int | None = None):

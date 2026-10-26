@@ -134,6 +134,22 @@
                   </div>
                 </aside>
                 {% endif %}
+                {% if 'provenance' in lesson.panels %}
+                {# Provenance panel (M3): the radio's account of itself and, led large, whether its
+                   reference level still matches the captured baseline — a dropped reference is the
+                   deaf-vs-empty signal. Driven live by prov.js; honest "no radio" when nothing reads. #}
+                <aside class="prov-panel" data-prov-panel aria-label="Provenance and baseline">
+                  <div class="prov__title">PROVENANCE</div>
+                  <div class="prov__verdict" data-prov-verdict>&mdash;</div>
+                  <div class="prov__ref">REF <b data-prov-ref>&mdash;</b> &middot; base <span data-prov-base>&mdash;</span></div>
+                  <div class="prov__meta">
+                    <span>gain <b data-prov-gain>&mdash;</b></span>
+                    <span>temp <b data-prov-temp>&mdash;</b></span>
+                    <span>pwr <b data-prov-power>&mdash;</b></span>
+                  </div>
+                  <button class="btn btn--primary prov__capture" type="button" data-prov-capture>Capture baseline</button>
+                </aside>
+                {% endif %}
               </div>
               <div class="tune">
                 <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
@@ -172,6 +188,7 @@
 <!-- The live waterfall: polls /api/spectrum and draws one pixel per rtl_power bin, replacing the
      SAMPLE badge with the live (or clearly-labelled no-radio) state. It never invents a signal. -->
 <script src="/static/waterfall.js"></script>
+<script src="/static/prov.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by

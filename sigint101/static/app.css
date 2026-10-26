@@ -862,6 +862,57 @@ body {
   text-align: center;
 }
 
+/* ===== Provenance panel (M3) ============================================= */
+/* Compact so it fits the fixed instrument band: the verdict leads, the reference comparison and a
+   small instrument readout sit under it, and a capture button records the baseline. */
+.prov-panel {
+  flex: 0 0 182px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 3px double var(--border-strong);
+  background: var(--surface);
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  min-height: 0;
+  overflow: hidden;
+}
+.prov__title {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--fg-dim);
+  text-align: center;
+}
+/* The verdict is the lesson — read by word + glyph + brightness, never colour alone. */
+.prov__verdict {
+  font-size: 15px;
+  line-height: 1.05;
+  text-align: center;
+  color: var(--fg);
+  text-shadow: var(--glow);
+}
+.prov__verdict--ok { color: var(--ok); }
+.prov__verdict--bad { color: var(--sel-bg); }
+.prov__verdict--na { color: var(--fg-mute); }
+.prov__ref { font-size: 12px; color: var(--fg-dim); text-align: center; }
+.prov__ref b { color: var(--fg); }
+.prov__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.prov__meta b { color: var(--fg); }
+.prov__capture {
+  margin-top: auto;
+  min-height: 38px;
+  padding: 0 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 /* Frozen predict instrument — dimmed chrome, NO signal drawn (orient, don't reveal). */
 .instrument--frozen {
   flex: 0 0 auto;
