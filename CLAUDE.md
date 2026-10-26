@@ -94,3 +94,13 @@ capable instrument, not a locked toy.
 - **Stack:** FastAPI + Jinja2 + polling JS + offline CSS + SQLite progress + append-only JSONL
   events, on a Pi 4 / Bookworm / aarch64 board (Chromium `--kiosk`).
 - **Hand-over:** 2026-11-08.
+
+## Corrections
+
+- When a decision needs MC, **ask ONE focused question at a time** and act on the answer — not a
+  multi-option menu dump. (Session 2026-10-26.)
+- **Be autonomous: don't hand back checks or wait.** Finish the phase, move to the next thing, and
+  only pause for what genuinely NEEDS MC's input (taste, a physical/hardware step, an irreversible
+  action). This reinforces the global "do it without asking" rule. (Session 2026-10-26.)
+- **nomad-b (user `spec5` @ 100.108.20.20, host `spec5b`) is the WORKING HIL target**; spec5
+  (100.90.68.20) is the deaf one (busted RX antenna). Don't conflate them. (Session 2026-10-26.)

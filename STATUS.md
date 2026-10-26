@@ -1,18 +1,26 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**Session landed:** Phosphor restyle (`a8bfef8`), units→lessons nav (`0e2fc54`), parser bool guard
-(`ca3ba48`), light-touch comrade voice (`d2d4ae9`), and **M5 "The One Rule" legal lesson** (`bceb085`,
-MC-reviewed) — all squash-merged, render-verified on nomad-b. The clean autonomous queue is cleared;
-everything remaining needs hardware or a UX decision from MC:
-1. **Remaining lessons need HIL**: M9-M12 (OOK/FSK/LoRa/PSK), U5 M13-M16 (decode), U6 M17-M18 — all
-   use the radios, so they need authoring + a real run on nomad-b. M5 was the only no-RF lesson.
-   NOTE: predict prompts must stay short (~35-40 words) for 800x480; quote YAML-boolean choice keys
-   (the loader now rejects bare yes/no/true/false).
-2. **Exam trainer study card LANDED** (`aa2cc5a`): `/exam` study card + `/exam/review`, spaced
-   retrieval. Still open (MC decides): **exam-sim mode** (scored 35-Q practice via build_exam/
-   score_exam), a results screen, and the 3 NCVEC diagram JPGs (figure Qs note "not shown yet").
-3. **Other UIs** need a UX steer from MC: gain/provenance/ppm panels, legal/other. Reuse predict-chip.
+**MC's plan: (1) trim the remaining instrument lessons' copy, then (2) build exam-sim mode.**
+1. **Instrument-lesson copy trim** (no hardware, content only): trim the demo/try/observe narration
+   on **M1, M3, M4, M6, M7, M8** the way M2 was trimmed (`592bf84`), so each fits the fixed 800x480
+   instrument stage cleanly (they work now but their long copy scrolls in a small band until trimmed).
+   Edit `lesson_packs/*.yaml`; keep predict prompts short (~35-40 words); render-check each stage at
+   800x480 (POST a predict to reveal observe; see render recipe). Land through a worktree, --squash.
+2. **Exam-sim mode**: a scored 35-question practice exam (NCVEC blueprint) alongside the study card,
+   wiring `build_exam` + `score_exam` (both already in `exam.py`) with a results/score screen. No
+   hardware; reuse the exam-chip pattern from `/exam`. Ask MC ONE question on session/results shape first.
+
+**This session landed (11 features, all squash-merged; HIL where live):** Phosphor restyle + predict
+fit (`a8bfef8`), units→lessons nav (`0e2fc54`), parser bool guard (`ca3ba48`), comrade voice
+(`d2d4ae9`), M5 legal lesson (`bceb085`), exam study card (`aa2cc5a`), instrument-stage fit + gain/SNR
+meter (`592bf84`), provenance panel (`53b0e79`), ppm panel (`cdbfb53`). All three instrument panels
+(gain/provenance/ppm) built + HIL-verified on nomad-b (gain SNR 34 dB; provenance HEALTHY; ppm honest
+no-pilot). main @ `fe16b0b`.
+
+**Blocked on MC (physical, not code):** nomad-b recovers no FM stereo pilot — the strongest local
+station (96.0 MHz, 17 dB) measured only a **1.5 dB pilot ratio** (<15 needed), so M4's real-ppm
+measurement + the ppm-correction feature await the kit antenna / a known strong *stereo* station.
 
 The units nav: home = 6 unit tiles (U1 Instrument .. U6 Under the Hood), `/unit/{id}` lists that
 unit's loaded lessons, unbuilt units show an honest "no lessons here yet" (no lock, D16). Unit map
@@ -25,14 +33,22 @@ as a 7th track tile only if MC asks.
 From the feature worktree (or main for a read-only render):
 ```
 mkdir -p data
-nohup .venv/bin/uvicorn sigint101.app:app --host 0.0.0.0 --port 8008 >/tmp/uv.log 2>&1 &
-# then on nomad-b (reaches the droplet over tailnet; 800x480 = kiosk size):
+# Start the server via the HARNESS background runner (run_in_background), NOT `nohup ... &` — a
+# nohup child dies when the Bash tool call returns (see learnings). Then on nomad-b (reaches the
+# droplet over tailnet; user spec5 on host spec5b = nomad-b; 800x480 = kiosk size):
 ssh spec5@100.108.20.20 '/usr/bin/chromium --headless=new --no-sandbox --disable-gpu \
   --hide-scrollbars --force-device-scale-factor=1 --window-size=800,480 --virtual-time-budget=6000 \
   --screenshot=/tmp/s.png http://100.92.112.54:8008/lesson/1'
 scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 ```
 - `/` = home (tiles); `/lesson/1` = FRAME stage (eyebrow ☭ + Russo title + Back).
+- **To render a hidden instrument stage (demo/try/observe)** — e.g. to check a panel or the copy fit —
+  POST a prediction first so a sealed stage becomes the visible one, then screenshot `/lesson/N`
+  directly (no iframe): `curl -X POST "http://127.0.0.1:8008/api/predict?lesson_id=N" -d
+  "prediction=<any choice key>" -H "content-type: application/x-www-form-urlencoded"` → observe shows.
+- **A LIVE panel (gain/provenance/ppm, the waterfall) needs real data → run the server ON nomad-b**,
+  not the droplet (no SDR there). Full HIL recipe (checkout the branch at `/home/spec5/sigint-101`,
+  hold the ssh open running uvicorn, warm the sweep, render localhost, restore) is in `.claude/learnings.md`.
 - The **predict** screen is JS-navigated (not a static shot). Best way to render it faithfully:
   write a throwaway `sigint101/static/_predictview.html` that loads `/lesson/1` in a same-origin
   iframe and flips the visible `.stage-panel` to the one with `data-stage="predict"` (the predict
@@ -98,8 +114,8 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 - Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `0e2fc54`. Stack: FastAPI +
   Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
 - 13 modules (added `units.py`); console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
-  honest 503). 7 lesson packs (M1-M4, M6-M7, M8). Exam trainer backend on the verified NCVEC
-  2026-2030 pool (409 + errata). `make selftest` = 304 tests, 94%, pristine; `make lint` clean.
+  honest 503). 8 lesson packs (M1-M8). Exam trainer backend on the verified NCVEC
+  2026-2030 pool (409 + errata). `make selftest` = 325 tests + 15 node (JS) tests, 94%, pristine; `make lint` clean.
 
 ## Pending work
 - Trim the demo/try/observe copy on the OTHER instrument lessons (M1, M3, M4, M6, M7, M8) the way M2
@@ -132,7 +148,7 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   lessons' predict copy should be written to fit; the content pass should check each one renders.
 
 ## Done / verified
-- Logic (droplet): 304 tests green, 94%, pristine.
+- Logic (droplet): 325 tests green (+ 15 node JS tests), 94%, pristine.
 - Units→lessons nav LANDED on main (`0e2fc54`): home shows 6 unit tiles, `/unit/{id}` lists a unit's
   lessons, unbuilt units render an honest empty page (no lock). Render-verified on nomad-b at 800x480
   (home, /unit/1 Instrument, /unit/5 Decode empty); 304 tests green, lint clean. TDD throughout.
