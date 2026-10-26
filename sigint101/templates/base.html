@@ -1,0 +1,87 @@
+<!-- ABOUTME: Kiosk page skeleton for the 800x480 touch console: the persistent status
+     ABOUTME: bar (ppm chip, SNR, battery, theme toggle), an always-visible Back, and a content block. -->
+<!DOCTYPE html>
+<html lang="en" data-theme="{{ theme|default('dark') }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=800, height=480, initial-scale=1, user-scalable=no">
+  <title>{% block page_title %}{{ title|default('SIGINT 101') }}{% endblock %} · SIGINT 101</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app" data-theme="{{ theme|default('dark') }}">
+
+    {# ---- Persistent status bar: Back is always here, on every screen ---- #}
+    <header class="statusbar">
+      <a class="btn-back" href="{{ back_href|default('/') }}" aria-label="Back to {{ back_label|default('home') }}">
+        <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+        <span class="btn-back__label">{{ back_label|default('Back') }}</span>
+      </a>
+
+      <div class="statusbar__title">{% block title %}{{ title|default('SIGINT 101') }}{% endblock %}</div>
+
+      <div class="statusbar__status">
+        {# ppm corrected / RAW — the word carries the state, the dot only echoes it #}
+        <span class="chip chip--ppm chip--{{ 'ok' if ppm_corrected else 'warn' }}"
+              title="Clock-error correction">
+          {% if ppm_corrected %}PPM CORRECTED{% else %}PPM RAW{% if ppm_value %} +{{ ppm_value }}{% endif %}{% endif %}
+        </span>
+
+        <span class="readout readout--snr" title="Signal-to-noise ratio">
+          <span class="readout__label">SNR</span>
+          <span class="readout__value">{% if snr_db is none %}&mdash;{% else %}{{ snr_db }} dB{% endif %}</span>
+        </span>
+
+        <span class="readout readout--batt batt" title="Battery">
+          <span class="batt__glyph">
+            <span class="batt__fill" style="width: {{ battery_pct|default(100) }}%"></span>
+          </span>
+          {% if battery_charging %}<span class="batt__bolt" aria-hidden="true">&#9889;</span>{% endif %}
+          <span class="readout__value">{{ battery_pct|default(100) }}%</span>
+        </span>
+
+        <button class="btn-theme" type="button" data-theme-toggle
+                aria-label="Switch theme (dark, sunlight, red-night)">
+          <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="8"/>
+            <path d="M12 4v16" fill="none"/>
+            <path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+
+  <script>
+    // Theme toggle: cycle dark -> sunlight -> red-night, remembered per kiosk.
+    (function () {
+      var ORDER = ["dark", "sunlight", "red-night"];
+      var app = document.querySelector(".app");
+      if (!app) return;
+      try {
+        var saved = localStorage.getItem("sigint101.theme");
+        if (saved && ORDER.indexOf(saved) !== -1) {
+          app.setAttribute("data-theme", saved);
+          document.documentElement.setAttribute("data-theme", saved);
+        }
+      } catch (e) { /* private mode: fall back to the server-set theme */ }
+
+      var btn = document.querySelector("[data-theme-toggle]");
+      if (btn) {
+        btn.addEventListener("click", function () {
+          var cur = app.getAttribute("data-theme") || "dark";
+          var next = ORDER[(ORDER.indexOf(cur) + 1) % ORDER.length];
+          app.setAttribute("data-theme", next);
+          document.documentElement.setAttribute("data-theme", next);
+          try { localStorage.setItem("sigint101.theme", next); } catch (e) { /* ignore */ }
+        });
+      }
+    })();
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

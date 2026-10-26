@@ -1,0 +1,49 @@
+<!-- ABOUTME: Home screen — a PortaPack-style grid of unit tiles over the persistent status
+     ABOUTME: bar, each tile showing its unit glyph, name, lesson progress, and lock/active state. -->
+{% extends "base.html" %}
+
+{# Monochrome line glyphs so they tint from the theme (red in red-night). #}
+{% macro glyph(name) %}
+  {% if name == 'waterfall' %}
+    <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20V11M8 20V5M13 20v-8M18 20V8"/></svg>
+  {% elif name == 'rules' %}
+    <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M6 20h12M5 8h14M5 8l-2.5 5a3 3 0 0 0 5 0zM19 8l-2.5 5a3 3 0 0 0 5 0z"/></svg>
+  {% elif name == 'antenna' %}
+    <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2"/><path d="M12 7v14M8 21h8M7.5 9a6 6 0 0 1 9 0M9.5 11a3 3 0 0 1 5 0"/></svg>
+  {% elif name == 'wave' %}
+    <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12c2-7 4-7 6 0s4 7 6 0 4-7 6 0"/></svg>
+  {% elif name == 'decode' %}
+    <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9V5h4M15 5h4v4M19 15v4h-4M9 19H5v-4"/><circle cx="12" cy="12" r="3"/></svg>
+  {% elif name == 'gear' %}
+    <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+  {% else %}
+    <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/></svg>
+  {% endif %}
+{% endmacro %}
+
+{% block title %}{{ title|default('SIGINT 101') }}{% endblock %}
+
+{% block content %}
+  <div class="tiles">
+    {% for u in units %}
+      {% set pct = ((u.lessons_done / u.lessons_total * 100) | round | int) if u.lessons_total else 0 %}
+      <a class="tile tile--{{ u.status }}" href="/unit/{{ u.code | lower }}"
+         {% if u.status == 'locked' %}aria-disabled="true"{% endif %}>
+        <div class="tile__head">
+          <span class="tile__code">{{ u.code }}</span>
+          {% if u.status == 'locked' %}
+            <svg class="tile__lock" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+          {% elif u.status == 'done' %}
+            <svg class="tile__lock" viewBox="0 0 24 24" aria-hidden="true" style="stroke: var(--ok)"><path d="M5 12l4 4 10-10"/></svg>
+          {% endif %}
+        </div>
+        {{ glyph(u.glyph) }}
+        <div class="tile__name">{{ u.name }}</div>
+        <div class="tile__meta">
+          <span class="tile__bar"><span style="width: {{ pct }}%"></span></span>
+          <span>{{ u.lessons_done }}/{{ u.lessons_total }}</span>
+        </div>
+      </a>
+    {% endfor %}
+  </div>
+{% endblock %}

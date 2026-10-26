@@ -1,0 +1,215 @@
+<!-- ABOUTME: Lesson screen — walks one stage at a time of the predict->...->explain loop for
+     ABOUTME: both pack shapes, keeps the keyboard-free predict gate, and seals every stage past predict. -->
+{% extends "base.html" %}
+
+{# Headings per stage; the lesson's own stage string is the body beneath them. #}
+{% set HEADINGS = {
+  'frame': 'The setup',
+  'demo': 'Watch it happen',
+  'try': 'Your turn',
+  'predict': 'Predict first',
+  'operate': 'Operate the radio',
+  'observe': 'Observe',
+  'explain': 'What happened',
+} %}
+{# Stages that put you in front of the radio get the waterfall + tune controls. #}
+{% set INSTRUMENT = ['demo', 'try', 'operate', 'observe'] %}
+{% set cur = current_stage if current_stage else lesson.stage_order[0] %}
+{% set mhz = (tuned_hz|default(100300000)) / 1000000 %}
+
+{% block title %}{{ lesson.title }}{% endblock %}
+
+{% block content %}
+  {# ---- Stage rail: progress through the loop; sealed stages read as locked ---- #}
+  <nav class="rail" aria-label="Lesson progress">
+    {% for stage in lesson.stage_order %}
+      {% set sealed = stage in lesson.sealed_stages %}
+      {% set pip_class = 'rail-pip--active' if stage == cur
+          else ('rail-pip--done' if (prediction_committed and stage == 'predict')
+          else ('rail-pip--locked' if (sealed and not prediction_committed) else '')) %}
+      <span class="rail-pip {{ pip_class }}">
+        <span class="rail-pip__dot"></span>{{ stage }}
+      </span>
+    {% endfor %}
+    <span class="rail-sep"></span>
+    {% if not prediction_committed %}<span class="rail__gate">Locked until you predict</span>{% endif %}
+  </nav>
+
+  {# ---- One stage at a time. Sealed stages are not rendered at all until a
+         prediction is committed: commit-before-reveal is enforced server-side,
+         so the answer is never in the page for the learner to peek at. ---- #}
+  <div class="stage">
+    {% for stage in lesson.stage_order %}
+      {% set sealed = stage in lesson.sealed_stages %}
+      {% if (not sealed) or prediction_committed %}
+        <section class="stage-panel" data-stage="{{ stage }}"{% if stage != cur %} hidden{% endif %}>
+          <div class="stage-panel__eyebrow">
+            Step {{ loop.index }} of {{ loop.length }} &middot; {{ stage|upper }} &middot; {{ lesson.concept }}
+          </div>
+
+          {% if stage == 'predict' %}
+            {# ---- Keyboard-free predict gate: tap a chip, then commit. No text input. ---- #}
+            <h1 class="stage-panel__title">{{ lesson.stages['predict'] }}</h1>
+            <form class="predict{% if prediction_committed %} predict--committed{% endif %}"
+                  method="post" action="{{ commit_url|default('#') }}">
+              <fieldset class="predict-chips">
+                <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
+                {% for c in predict_choices %}
+                  <label class="predict-chip">
+                    <input type="radio" name="prediction" value="{{ c.key }}"
+                           {% if committed_choice == c.key %}checked{% endif %}
+                           {% if prediction_committed %}disabled{% endif %}
+                           {% if loop.first %}required{% endif %}>
+                    <span class="predict-chip__key" aria-hidden="true">{{ "ABCDEFGH"[loop.index0] }}</span>
+                    <span class="predict-chip__label">{{ c.label }}</span>
+                  </label>
+                {% endfor %}
+              </fieldset>
+              <div class="predict__actions">
+                {% if prediction_committed %}
+                  <span class="predict__committed-note">Prediction committed &mdash; the rest is unlocked</span>
+                {% else %}
+                  <span class="predict__hint">Tap a choice. Nothing past this unlocks until you commit.</span>
+                  <button class="btn btn--primary btn-commit" type="submit">Commit prediction</button>
+                {% endif %}
+              </div>
+            </form>
+
+          {% elif stage in INSTRUMENT %}
+            {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. ---- #}
+            <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
+            <div class="instrument">
+              <div class="waterfall-wrap">
+                <canvas class="waterfall" width="760" height="200" data-tune data-sample="1"
+                        aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
+                <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
+                <div class="waterfall__axis" aria-hidden="true">
+                  <span>{{ "%.1f"|format(mhz - 1.3) }}</span>
+                  <span>{{ "%.3f"|format(mhz) }} MHz</span>
+                  <span>{{ "%.1f"|format(mhz + 1.3) }}</span>
+                </div>
+              </div>
+              <div class="tune">
+                <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
+                <div class="tune__dial">
+                  <div class="tune__freq" data-freq>{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
+                  <div class="tune__caption">Tap the waterfall to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz steps</div>
+                </div>
+                <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
+
+          {% else %}
+            {# ---- Text stage (frame, explain). ---- #}
+            <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
+            <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+          {% endif %}
+
+          {% if stage != 'predict' %}
+            <footer class="stage-foot">
+              <button class="btn btn--primary" type="button" data-nav="next">Next step</button>
+            </footer>
+          {% endif %}
+        </section>
+      {% endif %}
+    {% endfor %}
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // First-cut console behaviour. The real rtl_power renderer and server tuning wire in
+  // later; here the waterfall is a labelled SAMPLE and tuning only moves the readout.
+  (function () {
+    var app = document.querySelector(".app");
+
+    // --- paint a static sample spectrogram so the canvas isn't blank -----------
+    // Honest placeholder: it is drawn once, never claims to be live, and carries the
+    // SAMPLE badge. The real renderer draws one pixel per rtl_power bin.
+    function ramp(theme, v) {
+      // v in 0..1 -> rgb string. red-night stays red-only to protect night vision.
+      if (theme === "red-night") {
+        var r = Math.round(30 + v * 225);
+        return "rgb(" + r + ",0,0)";
+      }
+      // dark / sunlight: a cool-to-hot spectrogram ramp.
+      var stops = [
+        [5, 8, 20], [12, 52, 97], [20, 140, 150],
+        [70, 200, 90], [240, 205, 70], [240, 90, 60]
+      ];
+      var p = v * (stops.length - 1), i = Math.floor(p), f = p - i;
+      var a = stops[i], b = stops[Math.min(i + 1, stops.length - 1)];
+      return "rgb(" + Math.round(a[0] + (b[0] - a[0]) * f) + "," +
+        Math.round(a[1] + (b[1] - a[1]) * f) + "," +
+        Math.round(a[2] + (b[2] - a[2]) * f) + ")";
+    }
+
+    function paint(canvas) {
+      var ctx = canvas.getContext && canvas.getContext("2d");
+      if (!ctx) return;
+      var theme = (app && app.getAttribute("data-theme")) || "dark";
+      var W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      // A couple of steady carriers + a wandering one, over a low noise floor.
+      var carriers = [0.34, 0.52, 0.78];
+      for (var y = 0; y < H; y++) {
+        for (var x = 0; x < W; x++) {
+          var fx = x / W;
+          var v = 0.10 + 0.10 * Math.random();            // noise floor
+          for (var c = 0; c < carriers.length; c++) {
+            var cx = carriers[c] + (c === 2 ? 0.05 * Math.sin((y / H) * 6.28) : 0);
+            var d = Math.abs(fx - cx);
+            v += (c === 1 ? 0.85 : 0.6) * Math.exp(-(d * d) / 0.00035);
+          }
+          if (v > 1) v = 1;
+          ctx.fillStyle = ramp(theme, v);
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+
+    var canvases = document.querySelectorAll("canvas.waterfall[data-sample]");
+    function paintAll() { canvases.forEach(paint); }
+    paintAll();
+    // Repaint on theme change so the ramp follows the theme (esp. red-night).
+    var toggle = document.querySelector("[data-theme-toggle]");
+    if (toggle) toggle.addEventListener("click", function () { setTimeout(paintAll, 0); });
+
+    // --- tune readout: +/- buttons and tap-to-tune (display only for now) ------
+    var STEP_MHZ = 0.1;
+    document.querySelectorAll(".stage-panel").forEach(function (panel) {
+      var freqEl = panel.querySelector("[data-freq]");
+      if (!freqEl) return;
+      var mhz = parseFloat(freqEl.textContent) || 100.3;
+      function render() { freqEl.innerHTML = mhz.toFixed(3) + "<span>MHz</span>"; }
+      panel.querySelectorAll(".tune-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          mhz += (parseInt(btn.getAttribute("data-tune-step"), 10) || 0) * STEP_MHZ;
+          render();
+        });
+      });
+      var wf = panel.querySelector("canvas.waterfall[data-tune]");
+      if (wf) wf.addEventListener("click", function (ev) {
+        var rect = wf.getBoundingClientRect();
+        var frac = (ev.clientX - rect.left) / rect.width;      // 0..1 across the span
+        mhz = (mhz - 1.3) + frac * 2.6;                         // map tap to the shown span
+        render();
+      });
+    });
+
+    // --- step-to-step navigation among the rendered panels --------------------
+    var panels = Array.prototype.slice.call(document.querySelectorAll(".stage-panel"));
+    function show(idx) {
+      panels.forEach(function (p, i) { p.hidden = (i !== idx); });
+      paintAll();
+    }
+    document.querySelectorAll("[data-nav='next']").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var cur = panels.findIndex(function (p) { return !p.hidden; });
+        if (cur > -1 && cur < panels.length - 1) show(cur + 1);
+      });
+    });
+  })();
+</script>
+{% endblock %}

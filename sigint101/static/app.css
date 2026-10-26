@@ -1,0 +1,843 @@
+/* ABOUTME: Offline touch-console stylesheet for the 800x480 kiosk — status bar, lesson
+   ABOUTME: console, tile home, and the dark / sunlight / red-night themes (no CDN, no webfonts). */
+
+/* ----------------------------------------------------------------------------
+   Design plan
+   - Layout: a fixed 800x480 instrument. One persistent 72px status bar on top,
+     one content area below; every screen is one task. Big blocky targets.
+   - Type: system sans for prose (>=18px), system mono for every readout and the
+     tune display, so columns of digits line up and the whole thing reads like a
+     field radio rather than a web page. No webfonts — the kiosk is offline.
+   - Color: tokens only, redefined per theme on .app[data-theme]. Dark is the
+     default instrument look; sunlight is a genuine high-contrast light set for
+     direct sun; red-night is red-on-black with NO other hue, so state is told by
+     brightness + glyph + label, never by color alone (keeps night vision).
+---------------------------------------------------------------------------- */
+
+/* ===== Theme tokens ======================================================= */
+/* Dark — the default. Bare .app also carries it so a themeless render is dark. */
+.app,
+.app[data-theme="dark"] {
+  --bg: #0a0e13;
+  --surface: #121a22;
+  --surface-2: #1b2631;
+  --surface-3: #243441;
+  --border: #2b3a48;
+  --border-strong: #3d5366;
+  --fg: #e9eff5;
+  --fg-dim: #a6b6c4;
+  --fg-mute: #6b7e8f;
+  --accent: #3fd8c6;
+  --accent-dim: #1d7d73;
+  --accent-ink: #04130f;
+  --ok: #5fd98a;
+  --warn: #f2b350;
+  --crit: #ff6b6b;
+  --wf-bg: #05080b;
+  --wf-grid: #16303a;
+  --shadow: 0 2px 0 rgba(0, 0, 0, 0.45), 0 10px 28px rgba(0, 0, 0, 0.38);
+  --focus: #8df0e4;
+  color-scheme: dark;
+}
+
+/* Sunlight — high-contrast light for outdoors: near-black ink on white,
+   dark saturated accent, heavier borders so edges survive glare. */
+.app[data-theme="sunlight"] {
+  --bg: #ffffff;
+  --surface: #eef1f4;
+  --surface-2: #e2e7ec;
+  --surface-3: #d2dae1;
+  --border: #8d9ba7;
+  --border-strong: #5c6a76;
+  --fg: #07111a;
+  --fg-dim: #30404a;
+  --fg-mute: #55646f;
+  --accent: #0b6b61;
+  --accent-dim: #0b6b61;
+  --accent-ink: #ffffff;
+  --ok: #0a6b34;
+  --warn: #8a4b00;
+  --crit: #b3261e;
+  --wf-bg: #0a1016;
+  --wf-grid: #223742;
+  --shadow: 0 1px 0 rgba(0, 0, 0, 0.08), 0 6px 18px rgba(17, 34, 51, 0.16);
+  --focus: #0b6b61;
+  color-scheme: light;
+}
+
+/* Red-night — red on black only. Good = brighter red, warn = dimmer red;
+   the glyph and the word carry the meaning, never the hue. */
+.app[data-theme="red-night"] {
+  --bg: #000000;
+  --surface: #0b0101;
+  --surface-2: #160303;
+  --surface-3: #210606;
+  --border: #3a0b0b;
+  --border-strong: #5c1515;
+  --fg: #ff5b5b;
+  --fg-dim: #c23c3c;
+  --fg-mute: #7e2727;
+  --accent: #ff3b3b;
+  --accent-dim: #7a1515;
+  --accent-ink: #1a0000;
+  --ok: #ff7d7d;
+  --warn: #b33232;
+  --crit: #ff2020;
+  --wf-bg: #070000;
+  --wf-grid: #2a0707;
+  --shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+  --focus: #ff7d7d;
+  color-scheme: dark;
+}
+
+/* ===== Reset / kiosk base ================================================= */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* The themed surface lives on .app, which fills the viewport; this literal only
+     shows if .app is ever smaller than the screen, so keep it a neutral near-black. */
+  background: #05080b;
+  color: #e9eff5;
+  font-family: var(--font-ui, system-ui, -apple-system, "Segoe UI", Roboto,
+      "DejaVu Sans", "Noto Sans", sans-serif);
+  font-size: 18px;
+  line-height: 1.45;
+  /* Kiosk: no text selection, no double-tap zoom, no tap flash. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  overscroll-behavior: none;
+}
+
+:root {
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "DejaVu Sans",
+    "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "DejaVu Sans Mono", "Cascadia Code", "Roboto Mono",
+    "Liberation Mono", Consolas, monospace;
+}
+
+/* ===== App frame ========================================================== */
+.app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* 800x480, never scrolls */
+  background: var(--bg);
+  color: var(--fg);
+  --touch: 76px;
+  --gutter: 20px;
+  --bar-h: 72px;
+  --rail-h: 52px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Shared tappable surface */
+.btn {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  min-height: var(--touch);
+  padding: 0 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.glyph {
+  width: 26px;
+  height: 26px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+
+/* ===== Status bar ========================================================= */
+.statusbar {
+  flex: none;
+  height: var(--bar-h);
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 0 var(--gutter);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.btn-back,
+.btn-theme {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 72px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.btn-back {
+  margin-left: -8px;
+}
+
+.btn-back__label {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+}
+
+.statusbar__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: center;
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar__status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Chip (ppm corrected / RAW) — dot + word; the word is the signal, not the hue */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.chip::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+  flex: none;
+}
+
+.chip--ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.chip--ok::before {
+  background: var(--ok);
+}
+
+.chip--warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.chip--warn::before {
+  background: var(--warn);
+}
+
+/* Readouts (SNR, battery) */
+.readout {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.readout__label {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.readout__value {
+  color: var(--fg);
+}
+
+.batt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.batt__glyph {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  border: 2px solid var(--fg-dim);
+  border-radius: 3px;
+}
+
+.batt__glyph::after {
+  content: "";
+  position: absolute;
+  right: -5px;
+  top: 4px;
+  width: 3px;
+  height: 8px;
+  background: var(--fg-dim);
+  border-radius: 0 2px 2px 0;
+}
+
+.batt__fill {
+  position: absolute;
+  inset: 2px;
+  width: 60%;
+  background: var(--ok);
+  border-radius: 1px;
+}
+
+.batt--low .batt__fill {
+  background: var(--warn);
+}
+
+.batt__bolt {
+  color: var(--warn);
+}
+
+/* ===== Content area ======================================================= */
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ===== Stage rail (the predict -> ... -> explain loop) ==================== */
+.rail {
+  flex: none;
+  height: var(--rail-h);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--gutter);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.rail-pip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rail-pip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+  flex: none;
+}
+
+.rail-pip--active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+}
+.rail-pip--active .rail-pip__dot {
+  background: var(--accent);
+}
+
+.rail-pip--done {
+  color: var(--ok);
+  border-color: var(--accent-dim);
+}
+.rail-pip--done .rail-pip__dot {
+  background: var(--ok);
+}
+
+.rail-pip--locked {
+  opacity: 0.6;
+}
+.rail-pip--locked .rail-pip__dot {
+  background: transparent;
+  border: 1.5px solid var(--fg-mute);
+}
+
+.rail-sep {
+  flex: 1 1 auto;
+}
+
+.rail__gate {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+/* ===== Stage view ========================================================= */
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.stage-panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px var(--gutter);
+  overflow: hidden;
+}
+
+.stage-panel__eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+}
+
+.stage-panel__title {
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-wrap: balance;
+  margin: 0;
+}
+
+.stage-panel__body {
+  font-size: 20px;
+  color: var(--fg-dim);
+  max-width: 62ch;
+  margin: 0;
+}
+
+/* ===== Predict gate (keyboard-free) ====================================== */
+.predict {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.predict-chips {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.predict-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: var(--touch);
+  padding: 10px 18px;
+  border: 2px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+/* The radio drives selection by tap; it is never shown, so no keyboard appears. */
+.predict-chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.predict-chip__key {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--fg-dim);
+}
+
+.predict-chip__label {
+  font-size: 19px;
+  line-height: 1.25;
+  color: var(--fg);
+}
+
+.predict-chip:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-2));
+}
+
+.predict-chip:has(input:checked) .predict-chip__key {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+
+.predict-chip:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.predict__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.predict__hint {
+  font-size: 14px;
+  color: var(--fg-mute);
+}
+
+.btn-commit {
+  min-width: 220px;
+}
+
+.predict--committed .predict-chip {
+  cursor: default;
+}
+
+.predict__committed-note {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--ok);
+  letter-spacing: 0.04em;
+}
+
+/* ===== Instrument (waterfall + tune) ===================================== */
+.instrument {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.waterfall-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 150px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--wf-bg);
+}
+
+.waterfall {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* CSS fallback so an empty canvas still reads as a spectrogram frame */
+  background: linear-gradient(0deg, var(--wf-bg), var(--wf-bg));
+}
+
+.badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* A placeholder render must never pass for real signal (RF honesty invariant). */
+.badge--sample {
+  background: color-mix(in srgb, var(--warn) 22%, var(--wf-bg));
+  color: var(--warn);
+  border: 1px solid var(--warn);
+}
+
+.waterfall__axis {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--wf-bg) 70%, transparent);
+  pointer-events: none;
+}
+
+.tune {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tune-btn {
+  width: var(--touch);
+  height: var(--touch);
+  flex: none;
+  font-size: 34px;
+  font-weight: 700;
+  border-radius: 14px;
+  background: var(--surface-2);
+  border: 2px solid var(--border-strong);
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.tune-btn:active {
+  transform: translateY(1px);
+}
+
+.tune__dial {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.tune__freq {
+  font-family: var(--font-mono);
+  font-size: 38px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.tune__freq span {
+  font-size: 18px;
+  color: var(--fg-dim);
+  margin-left: 6px;
+}
+
+.tune__caption {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  margin-top: 2px;
+}
+
+.stage-foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ===== Home / tiles (PortaPack-style grid) =============================== */
+.tiles {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: 1fr;
+  gap: 14px;
+  padding: 14px var(--gutter);
+}
+
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tile__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tile__code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  color: var(--fg-mute);
+}
+
+.tile__glyph {
+  width: 40px;
+  height: 40px;
+  stroke: var(--accent);
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tile__name {
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.1;
+  margin-top: auto;
+}
+
+.tile__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+
+.tile__bar {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.tile__bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.tile--active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.tile--done .tile__glyph {
+  stroke: var(--ok);
+}
+
+.tile--locked {
+  opacity: 0.55;
+}
+.tile--locked .tile__glyph {
+  stroke: var(--fg-mute);
+}
+
+.tile__lock {
+  width: 20px;
+  height: 20px;
+  stroke: var(--fg-mute);
+  fill: none;
+  stroke-width: 2;
+}
+
+/* ===== Motion ============================================================= */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

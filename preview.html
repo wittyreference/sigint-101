@@ -1,0 +1,1127 @@
+<!-- ABOUTME: Self-contained static preview of the SIGINT 101 touch console (Home / Predict /
+     ABOUTME: Operate screens) at 800x480 with a dark/sunlight/red-night switcher. No server, no CDN. -->
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>SIGINT 101 Console</title>
+<style>
+
+/* ---- Preview chrome (studio backdrop around the device) ---- */
+* { box-sizing: border-box; }
+body { margin: 0; }
+.studio {
+  min-height: 100%;
+  background: radial-gradient(1100px 560px at 50% -12%, #16222e, #090d12 62%), #090d12;
+  color: #e9eff5;
+  font-family: var(--font-ui, system-ui, -apple-system, "Segoe UI", Roboto, "DejaVu Sans", sans-serif);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+.studio__head { text-align: center; }
+.studio__head h1 { margin: 0; font-size: 22px; letter-spacing: 0.01em; text-wrap: balance; }
+.studio__head p { margin: 5px 0 0; color: #9fb0bf; font-size: 13px; font-family: var(--font-mono); }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+.seg { display: inline-flex; background: #121a22; border: 1px solid #2b3a48; border-radius: 12px; padding: 4px; gap: 4px; }
+.seg button { appearance: none; -webkit-appearance: none; border: 0; background: transparent; color: #a6b6c4; font: inherit; font-size: 15px; padding: 10px 15px; min-height: 48px; border-radius: 9px; cursor: pointer; }
+.seg button.is-active { background: #243441; color: #e9eff5; }
+.seg button:active { transform: translateY(1px); }
+.frame-outer { width: 100%; max-width: 860px; overflow: hidden; }
+.frame { width: 824px; transform-origin: top left; }
+.bezel { width: 824px; padding: 12px; background: #05080b; border: 1px solid #223140; border-radius: 22px; box-shadow: 0 24px 60px rgba(0,0,0,0.55); box-sizing: border-box; }
+.device { width: 800px; height: 480px; overflow: hidden; border-radius: 10px; }
+.deck { display: block; width: 100%; height: 100%; font-family: var(--font-ui, system-ui, sans-serif); font-size: 18px; line-height: 1.45; color: var(--fg); -webkit-user-select: none; user-select: none; }
+.studio__note { color: #6b7e8f; font-size: 12px; font-family: var(--font-mono); text-align: center; max-width: 62ch; line-height: 1.6; }
+
+/* ABOUTME: Offline touch-console stylesheet for the 800x480 kiosk — status bar, lesson
+   ABOUTME: console, tile home, and the dark / sunlight / red-night themes (no CDN, no webfonts). */
+
+/* ----------------------------------------------------------------------------
+   Design plan
+   - Layout: a fixed 800x480 instrument. One persistent 72px status bar on top,
+     one content area below; every screen is one task. Big blocky targets.
+   - Type: system sans for prose (>=18px), system mono for every readout and the
+     tune display, so columns of digits line up and the whole thing reads like a
+     field radio rather than a web page. No webfonts — the kiosk is offline.
+   - Color: tokens only, redefined per theme on .app[data-theme]. Dark is the
+     default instrument look; sunlight is a genuine high-contrast light set for
+     direct sun; red-night is red-on-black with NO other hue, so state is told by
+     brightness + glyph + label, never by color alone (keeps night vision).
+---------------------------------------------------------------------------- */
+
+/* ===== Theme tokens ======================================================= */
+/* Dark — the default. Bare .app also carries it so a themeless render is dark. */
+.deck,
+.deck[data-theme="dark"] {
+  --bg: #0a0e13;
+  --surface: #121a22;
+  --surface-2: #1b2631;
+  --surface-3: #243441;
+  --border: #2b3a48;
+  --border-strong: #3d5366;
+  --fg: #e9eff5;
+  --fg-dim: #a6b6c4;
+  --fg-mute: #6b7e8f;
+  --accent: #3fd8c6;
+  --accent-dim: #1d7d73;
+  --accent-ink: #04130f;
+  --ok: #5fd98a;
+  --warn: #f2b350;
+  --crit: #ff6b6b;
+  --wf-bg: #05080b;
+  --wf-grid: #16303a;
+  --shadow: 0 2px 0 rgba(0, 0, 0, 0.45), 0 10px 28px rgba(0, 0, 0, 0.38);
+  --focus: #8df0e4;
+  color-scheme: dark;
+}
+
+/* Sunlight — high-contrast light for outdoors: near-black ink on white,
+   dark saturated accent, heavier borders so edges survive glare. */
+.deck[data-theme="sunlight"] {
+  --bg: #ffffff;
+  --surface: #eef1f4;
+  --surface-2: #e2e7ec;
+  --surface-3: #d2dae1;
+  --border: #8d9ba7;
+  --border-strong: #5c6a76;
+  --fg: #07111a;
+  --fg-dim: #30404a;
+  --fg-mute: #55646f;
+  --accent: #0b6b61;
+  --accent-dim: #0b6b61;
+  --accent-ink: #ffffff;
+  --ok: #0a6b34;
+  --warn: #8a4b00;
+  --crit: #b3261e;
+  --wf-bg: #0a1016;
+  --wf-grid: #223742;
+  --shadow: 0 1px 0 rgba(0, 0, 0, 0.08), 0 6px 18px rgba(17, 34, 51, 0.16);
+  --focus: #0b6b61;
+  color-scheme: light;
+}
+
+/* Red-night — red on black only. Good = brighter red, warn = dimmer red;
+   the glyph and the word carry the meaning, never the hue. */
+.deck[data-theme="red-night"] {
+  --bg: #000000;
+  --surface: #0b0101;
+  --surface-2: #160303;
+  --surface-3: #210606;
+  --border: #3a0b0b;
+  --border-strong: #5c1515;
+  --fg: #ff5b5b;
+  --fg-dim: #c23c3c;
+  --fg-mute: #7e2727;
+  --accent: #ff3b3b;
+  --accent-dim: #7a1515;
+  --accent-ink: #1a0000;
+  --ok: #ff7d7d;
+  --warn: #b33232;
+  --crit: #ff2020;
+  --wf-bg: #070000;
+  --wf-grid: #2a0707;
+  --shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+  --focus: #ff7d7d;
+  color-scheme: dark;
+}
+
+/* ===== Reset / kiosk base ================================================= */
+* {
+  box-sizing: border-box;
+}
+
+
+:root {
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "DejaVu Sans",
+    "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "DejaVu Sans Mono", "Cascadia Code", "Roboto Mono",
+    "Liberation Mono", Consolas, monospace;
+}
+
+/* ===== App frame ========================================================== */
+.app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* 800x480, never scrolls */
+  background: var(--bg);
+  color: var(--fg);
+  --touch: 76px;
+  --gutter: 20px;
+  --bar-h: 72px;
+  --rail-h: 52px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Shared tappable surface */
+.btn {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  min-height: var(--touch);
+  padding: 0 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.glyph {
+  width: 26px;
+  height: 26px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+
+/* ===== Status bar ========================================================= */
+.statusbar {
+  flex: none;
+  height: var(--bar-h);
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 0 var(--gutter);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.btn-back,
+.btn-theme {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 72px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.btn-back {
+  margin-left: -8px;
+}
+
+.btn-back__label {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+}
+
+.statusbar__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: center;
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar__status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Chip (ppm corrected / RAW) — dot + word; the word is the signal, not the hue */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.chip::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+  flex: none;
+}
+
+.chip--ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.chip--ok::before {
+  background: var(--ok);
+}
+
+.chip--warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.chip--warn::before {
+  background: var(--warn);
+}
+
+/* Readouts (SNR, battery) */
+.readout {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.readout__label {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.readout__value {
+  color: var(--fg);
+}
+
+.batt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.batt__glyph {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  border: 2px solid var(--fg-dim);
+  border-radius: 3px;
+}
+
+.batt__glyph::after {
+  content: "";
+  position: absolute;
+  right: -5px;
+  top: 4px;
+  width: 3px;
+  height: 8px;
+  background: var(--fg-dim);
+  border-radius: 0 2px 2px 0;
+}
+
+.batt__fill {
+  position: absolute;
+  inset: 2px;
+  width: 60%;
+  background: var(--ok);
+  border-radius: 1px;
+}
+
+.batt--low .batt__fill {
+  background: var(--warn);
+}
+
+.batt__bolt {
+  color: var(--warn);
+}
+
+/* ===== Content area ======================================================= */
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ===== Stage rail (the predict -> ... -> explain loop) ==================== */
+.rail {
+  flex: none;
+  height: var(--rail-h);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--gutter);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.rail-pip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rail-pip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+  flex: none;
+}
+
+.rail-pip--active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+}
+.rail-pip--active .rail-pip__dot {
+  background: var(--accent);
+}
+
+.rail-pip--done {
+  color: var(--ok);
+  border-color: var(--accent-dim);
+}
+.rail-pip--done .rail-pip__dot {
+  background: var(--ok);
+}
+
+.rail-pip--locked {
+  opacity: 0.6;
+}
+.rail-pip--locked .rail-pip__dot {
+  background: transparent;
+  border: 1.5px solid var(--fg-mute);
+}
+
+.rail-sep {
+  flex: 1 1 auto;
+}
+
+.rail__gate {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+/* ===== Stage view ========================================================= */
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.stage-panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px var(--gutter);
+  overflow: hidden;
+}
+
+.stage-panel__eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+}
+
+.stage-panel__title {
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-wrap: balance;
+  margin: 0;
+}
+
+.stage-panel__body {
+  font-size: 20px;
+  color: var(--fg-dim);
+  max-width: 62ch;
+  margin: 0;
+}
+
+/* ===== Predict gate (keyboard-free) ====================================== */
+.predict {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.predict-chips {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.predict-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: var(--touch);
+  padding: 10px 18px;
+  border: 2px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+/* The radio drives selection by tap; it is never shown, so no keyboard appears. */
+.predict-chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.predict-chip__key {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--fg-dim);
+}
+
+.predict-chip__label {
+  font-size: 19px;
+  line-height: 1.25;
+  color: var(--fg);
+}
+
+.predict-chip:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-2));
+}
+
+.predict-chip:has(input:checked) .predict-chip__key {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+
+.predict-chip:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.predict__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.predict__hint {
+  font-size: 14px;
+  color: var(--fg-mute);
+}
+
+.btn-commit {
+  min-width: 220px;
+}
+
+.predict--committed .predict-chip {
+  cursor: default;
+}
+
+.predict__committed-note {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--ok);
+  letter-spacing: 0.04em;
+}
+
+/* ===== Instrument (waterfall + tune) ===================================== */
+.instrument {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.waterfall-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 150px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--wf-bg);
+}
+
+.waterfall {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* CSS fallback so an empty canvas still reads as a spectrogram frame */
+  background: linear-gradient(0deg, var(--wf-bg), var(--wf-bg));
+}
+
+.badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* A placeholder render must never pass for real signal (RF honesty invariant). */
+.badge--sample {
+  background: color-mix(in srgb, var(--warn) 22%, var(--wf-bg));
+  color: var(--warn);
+  border: 1px solid var(--warn);
+}
+
+.waterfall__axis {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--wf-bg) 70%, transparent);
+  pointer-events: none;
+}
+
+.tune {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tune-btn {
+  width: var(--touch);
+  height: var(--touch);
+  flex: none;
+  font-size: 34px;
+  font-weight: 700;
+  border-radius: 14px;
+  background: var(--surface-2);
+  border: 2px solid var(--border-strong);
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.tune-btn:active {
+  transform: translateY(1px);
+}
+
+.tune__dial {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.tune__freq {
+  font-family: var(--font-mono);
+  font-size: 38px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.tune__freq span {
+  font-size: 18px;
+  color: var(--fg-dim);
+  margin-left: 6px;
+}
+
+.tune__caption {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  margin-top: 2px;
+}
+
+.stage-foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ===== Home / tiles (PortaPack-style grid) =============================== */
+.tiles {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: 1fr;
+  gap: 14px;
+  padding: 14px var(--gutter);
+}
+
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tile__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tile__code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  color: var(--fg-mute);
+}
+
+.tile__glyph {
+  width: 40px;
+  height: 40px;
+  stroke: var(--accent);
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tile__name {
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.1;
+  margin-top: auto;
+}
+
+.tile__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+
+.tile__bar {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.tile__bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.tile--active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.tile--done .tile__glyph {
+  stroke: var(--ok);
+}
+
+.tile--locked {
+  opacity: 0.55;
+}
+.tile--locked .tile__glyph {
+  stroke: var(--fg-mute);
+}
+
+.tile__lock {
+  width: 20px;
+  height: 20px;
+  stroke: var(--fg-mute);
+  fill: none;
+  stroke-width: 2;
+}
+
+/* ===== Motion ============================================================= */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+</style>
+
+<div class="studio">
+  <header class="studio__head">
+    <h1>SIGINT 101 &mdash; Touch Console</h1>
+    <p>First-cut shell &middot; 800&times;480 kiosk &middot; three themes</p>
+  </header>
+
+  <div class="controls">
+    <div class="seg" role="group" aria-label="Screen">
+      <button type="button" data-screen-btn="home" class="is-active">Home</button>
+      <button type="button" data-screen-btn="predict">Predict gate</button>
+      <button type="button" data-screen-btn="operate">Operate</button>
+    </div>
+    <div class="seg" role="group" aria-label="Theme">
+      <button type="button" data-theme-btn="dark" class="is-active">Dark</button>
+      <button type="button" data-theme-btn="sunlight">Sunlight</button>
+      <button type="button" data-theme-btn="red-night">Red-night</button>
+    </div>
+  </div>
+
+  <div class="frame-outer">
+    <div class="frame">
+      <div class="bezel">
+        <div class="device">
+          <div class="deck" data-theme="dark" id="deck">
+    <div class="app" data-screen="home">
+      <header class="statusbar">
+        <a class="btn-back" href="#" aria-label="Back to Home"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span class="btn-back__label">Home</span></a>
+        <div class="statusbar__title">SIGINT 101</div>
+        <div class="statusbar__status">
+          <span class="chip chip--ppm chip--warn">PPM RAW +164</span>
+          <span class="readout readout--snr"><span class="readout__label">SNR</span><span class="readout__value">&mdash;</span></span>
+          <span class="readout readout--batt batt"><span class="batt__glyph"><span class="batt__fill" style="width:82%"></span></span><span class="readout__value">82%</span></span>
+          <button class="btn-theme" type="button" data-theme-toggle aria-label="Switch theme"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></svg></button>
+        </div>
+      </header>
+      <main class="content">
+        <div class="tiles">
+        <a class="tile tile--active" href="#">
+          <div class="tile__head"><span class="tile__code">U1</span></div>
+          <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20V11M8 20V5M13 20v-8M18 20V8"/></svg>
+          <div class="tile__name">Instrument</div>
+          <div class="tile__meta"><span class="tile__bar"><span style="width:25%"></span></span><span>1/4</span></div>
+        </a>
+        <a class="tile tile--available" href="#">
+          <div class="tile__head"><span class="tile__code">U2</span></div>
+          <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M6 20h12M5 8h14M5 8l-2.5 5a3 3 0 0 0 5 0zM19 8l-2.5 5a3 3 0 0 0 5 0z"/></svg>
+          <div class="tile__name">Rules</div>
+          <div class="tile__meta"><span class="tile__bar"><span style="width:0%"></span></span><span>0/1</span></div>
+        </a>
+        <a class="tile tile--locked" href="#">
+          <div class="tile__head"><span class="tile__code">U3</span><svg class="tile__lock" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2"/><path d="M12 7v14M8 21h8M7.5 9a6 6 0 0 1 9 0M9.5 11a3 3 0 0 1 5 0"/></svg>
+          <div class="tile__name">Antennas</div>
+          <div class="tile__meta"><span class="tile__bar"><span style="width:0%"></span></span><span>0/2</span></div>
+        </a>
+        <a class="tile tile--locked" href="#">
+          <div class="tile__head"><span class="tile__code">U4</span><svg class="tile__lock" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12c2-7 4-7 6 0s4 7 6 0 4-7 6 0"/></svg>
+          <div class="tile__name">Modulation</div>
+          <div class="tile__meta"><span class="tile__bar"><span style="width:0%"></span></span><span>0/5</span></div>
+        </a>
+        <a class="tile tile--locked" href="#">
+          <div class="tile__head"><span class="tile__code">U5</span><svg class="tile__lock" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9V5h4M15 5h4v4M19 15v4h-4M9 19H5v-4"/><circle cx="12" cy="12" r="3"/></svg>
+          <div class="tile__name">Decode</div>
+          <div class="tile__meta"><span class="tile__bar"><span style="width:0%"></span></span><span>0/4</span></div>
+        </a>
+        <a class="tile tile--locked" href="#">
+          <div class="tile__head"><span class="tile__code">U6</span><svg class="tile__lock" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <svg class="tile__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+          <div class="tile__name">Under the Hood</div>
+          <div class="tile__meta"><span class="tile__bar"><span style="width:0%"></span></span><span>0/2</span></div>
+        </a>
+        </div>
+      </main>
+    </div>
+    <div class="app" data-screen="predict" hidden>
+      <header class="statusbar">
+        <a class="btn-back" href="#" aria-label="Back to Unit 1"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span class="btn-back__label">Unit 1</span></a>
+        <div class="statusbar__title">Gain and SNR</div>
+        <div class="statusbar__status">
+          <span class="chip chip--ppm chip--warn">PPM RAW +164</span>
+          <span class="readout readout--snr"><span class="readout__label">SNR</span><span class="readout__value">14 dB</span></span>
+          <span class="readout readout--batt batt"><span class="batt__glyph"><span class="batt__fill" style="width:82%"></span></span><span class="readout__value">82%</span></span>
+          <button class="btn-theme" type="button" data-theme-toggle aria-label="Switch theme"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></svg></button>
+        </div>
+      </header>
+      <main class="content">
+        <nav class="rail" aria-label="Lesson progress">
+          <span class="rail-pip rail-pip--active"><span class="rail-pip__dot"></span>predict</span>
+          <span class="rail-pip rail-pip--locked"><span class="rail-pip__dot"></span>operate</span>
+          <span class="rail-pip rail-pip--locked"><span class="rail-pip__dot"></span>observe</span>
+          <span class="rail-pip rail-pip--locked"><span class="rail-pip__dot"></span>explain</span>
+          <span class="rail-sep"></span>
+          <span class="rail__gate">Locked until you predict</span>
+        </nav>
+        <div class="stage">
+          <section class="stage-panel" data-stage="predict">
+            <div class="stage-panel__eyebrow">Step 1 of 4 &middot; PREDICT &middot; the gap over the noise floor is the signal</div>
+            <h1 class="stage-panel__title">Turn the gain up. What happens to the gap over the floor?</h1>
+            <form class="predict" onsubmit="return false">
+              <fieldset class="predict-chips">
+                <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
+            <label class="predict-chip"><input type="radio" name="prediction" value="a" required><span class="predict-chip__key" aria-hidden="true">A</span><span class="predict-chip__label">The gap grows &mdash; the station pulls away from the floor</span></label>
+            <label class="predict-chip"><input type="radio" name="prediction" value="b"><span class="predict-chip__key" aria-hidden="true">B</span><span class="predict-chip__label">The gap holds &mdash; station and floor rise together</span></label>
+            <label class="predict-chip"><input type="radio" name="prediction" value="c"><span class="predict-chip__key" aria-hidden="true">C</span><span class="predict-chip__label">The gap shrinks past a point &mdash; both max out</span></label>
+              </fieldset>
+              <div class="predict__actions">
+                <span class="predict__hint">Tap a choice. Nothing past this unlocks until you commit.</span>
+                <button class="btn btn--primary btn-commit" type="button" data-commit>Commit prediction</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      </main>
+    </div>
+    <div class="app" data-screen="operate" hidden>
+      <header class="statusbar">
+        <a class="btn-back" href="#" aria-label="Back to Unit 1"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span class="btn-back__label">Unit 1</span></a>
+        <div class="statusbar__title">Gain and SNR</div>
+        <div class="statusbar__status">
+          <span class="chip chip--ppm chip--ok">PPM CORRECTED</span>
+          <span class="readout readout--snr"><span class="readout__label">SNR</span><span class="readout__value">14 dB</span></span>
+          <span class="readout readout--batt batt"><span class="batt__glyph"><span class="batt__fill" style="width:82%"></span></span><span class="readout__value">82%</span></span>
+          <button class="btn-theme" type="button" data-theme-toggle aria-label="Switch theme"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></svg></button>
+        </div>
+      </header>
+      <main class="content">
+        <nav class="rail" aria-label="Lesson progress">
+          <span class="rail-pip rail-pip--done"><span class="rail-pip__dot"></span>predict</span>
+          <span class="rail-pip rail-pip--active"><span class="rail-pip__dot"></span>operate</span>
+          <span class="rail-pip"><span class="rail-pip__dot"></span>observe</span>
+          <span class="rail-pip"><span class="rail-pip__dot"></span>explain</span>
+          <span class="rail-sep"></span>
+        </nav>
+        <div class="stage">
+          <section class="stage-panel" data-stage="operate">
+            <div class="stage-panel__eyebrow">Step 2 of 4 &middot; OPERATE &middot; the gap over the noise floor is the signal</div>
+            <h1 class="stage-panel__title">Operate the radio</h1>
+            <div class="instrument">
+              <div class="waterfall-wrap">
+                <canvas class="waterfall" width="760" height="200" data-tune data-sample="1" aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
+                <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
+                <div class="waterfall__axis" aria-hidden="true"><span>99.0</span><span>100.300 MHz</span><span>101.6</span></div>
+              </div>
+              <div class="tune">
+                <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
+                <div class="tune__dial"><div class="tune__freq" data-freq>100.300<span>MHz</span></div><div class="tune__caption">Tap the waterfall to tune &middot; 100 kHz steps</div></div>
+                <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+              </div>
+              <p class="stage-panel__body">Turn the gain and watch the gap over the floor &mdash; the noise climbs with the signal.</p>
+            </div>
+            <footer class="stage-foot"><button class="btn btn--primary" type="button">Next step</button></footer>
+          </section>
+        </div>
+      </main>
+    </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="studio__note">
+    Static design preview &mdash; sample lesson data, no live radio. The waterfall is a labelled
+    SAMPLE; the real render draws one pixel per rtl_power bin. Tap a choice then Commit to see the seal open.
+  </footer>
+</div>
+
+<script>
+
+  (function () {
+    var deck = document.getElementById("deck");
+    var ORDER = ["dark", "sunlight", "red-night"];
+
+    function setTheme(t) {
+      deck.setAttribute("data-theme", t);
+      document.querySelectorAll("[data-theme-btn]").forEach(function (b) {
+        b.classList.toggle("is-active", b.getAttribute("data-theme-btn") === t);
+      });
+      setTimeout(paintAll, 0);
+    }
+    document.querySelectorAll("[data-theme-btn]").forEach(function (b) {
+      b.addEventListener("click", function () { setTheme(b.getAttribute("data-theme-btn")); });
+    });
+    document.querySelectorAll("[data-theme-toggle]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var cur = deck.getAttribute("data-theme") || "dark";
+        setTheme(ORDER[(ORDER.indexOf(cur) + 1) % ORDER.length]);
+      });
+    });
+
+    function showScreen(name) {
+      document.querySelectorAll(".app[data-screen]").forEach(function (a) {
+        a.hidden = (a.getAttribute("data-screen") !== name);
+      });
+      document.querySelectorAll("[data-screen-btn]").forEach(function (b) {
+        b.classList.toggle("is-active", b.getAttribute("data-screen-btn") === name);
+      });
+      setTimeout(paintAll, 0);
+    }
+    document.querySelectorAll("[data-screen-btn]").forEach(function (b) {
+      b.addEventListener("click", function () { showScreen(b.getAttribute("data-screen-btn")); });
+    });
+    // Commit on the predict gate reveals the operate stage, as a real commit would.
+    document.querySelectorAll("[data-commit]").forEach(function (b) {
+      b.addEventListener("click", function () { showScreen("operate"); });
+    });
+
+    // ---- static SAMPLE spectrogram (honest placeholder; never claims to be live) ----
+    function ramp(theme, v) {
+      if (theme === "red-night") { var r = Math.round(30 + v * 225); return "rgb(" + r + ",0,0)"; }
+      var stops = [[5,8,20],[12,52,97],[20,140,150],[70,200,90],[240,205,70],[240,90,60]];
+      var p = v * (stops.length - 1), i = Math.floor(p), f = p - i;
+      var a = stops[i], b = stops[Math.min(i + 1, stops.length - 1)];
+      return "rgb(" + Math.round(a[0]+(b[0]-a[0])*f) + "," + Math.round(a[1]+(b[1]-a[1])*f) + "," + Math.round(a[2]+(b[2]-a[2])*f) + ")";
+    }
+    function paint(canvas) {
+      var ctx = canvas.getContext && canvas.getContext("2d");
+      if (!ctx) return;
+      var theme = deck.getAttribute("data-theme") || "dark";
+      var W = canvas.width, H = canvas.height, carriers = [0.34, 0.52, 0.78];
+      for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
+        var fx = x / W, v = 0.10 + 0.10 * Math.random();
+        for (var c = 0; c < carriers.length; c++) {
+          var cx = carriers[c] + (c === 2 ? 0.05 * Math.sin((y / H) * 6.28) : 0);
+          var d = Math.abs(fx - cx);
+          v += (c === 1 ? 0.85 : 0.6) * Math.exp(-(d * d) / 0.00035);
+        }
+        if (v > 1) v = 1;
+        ctx.fillStyle = ramp(theme, v);
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    function paintAll() { document.querySelectorAll("canvas.waterfall[data-sample]").forEach(paint); }
+
+    // ---- tune readout (display only) ----
+    document.querySelectorAll(".stage-panel").forEach(function (panel) {
+      var freqEl = panel.querySelector("[data-freq]");
+      if (!freqEl) return;
+      var mhz = parseFloat(freqEl.textContent) || 100.3;
+      function render() { freqEl.innerHTML = mhz.toFixed(3) + "<span>MHz</span>"; }
+      panel.querySelectorAll(".tune-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () { mhz += (parseInt(btn.getAttribute("data-tune-step"),10)||0) * 0.1; render(); });
+      });
+      var wf = panel.querySelector("canvas.waterfall[data-tune]");
+      if (wf) wf.addEventListener("click", function (ev) {
+        var rect = wf.getBoundingClientRect();
+        mhz = (mhz - 1.3) + ((ev.clientX - rect.left) / rect.width) * 2.6; render();
+      });
+    });
+
+    // ---- scale the 800x480 device to fit the viewport ----
+    function fit() {
+      var outer = document.querySelector(".frame-outer");
+      var frame = document.querySelector(".frame");
+      var scale = Math.min(1, outer.clientWidth / 824);
+      frame.style.transform = "scale(" + scale + ")";
+      outer.style.height = (504 * scale) + "px";
+    }
+    window.addEventListener("resize", fit);
+    fit();
+    paintAll();
+  })();
+
+</script>
