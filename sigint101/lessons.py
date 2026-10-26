@@ -177,8 +177,20 @@ def parse_lesson(data: dict) -> Lesson:
         raise LessonError(f"{ctx}: 'choices' must be a list of predict options")
     choices = []
     for choice in choices_in:
-        key = str(choice.get("key", "")).strip() if isinstance(choice, dict) else ""
-        label = str(choice.get("label", "")).strip() if isinstance(choice, dict) else ""
+        raw_key = choice.get("key") if isinstance(choice, dict) else None
+        raw_label = choice.get("label") if isinstance(choice, dict) else None
+        # YAML 1.1 parses bare yes/no/true/false/on/off as booleans, so an unquoted choice word
+        # (`key: yes`) arrives here as a Python bool, not a string. str()-coercing it would yield a
+        # "True"/"False" chip — a silent wrong label the non-empty check below cannot catch. Refuse
+        # the bool and name the fix; a quoted word in the pack stays a string and loads normally.
+        for role, value in (("key", raw_key), ("label", raw_label)):
+            if isinstance(value, bool):
+                raise LessonError(
+                    f'{ctx}: predict choice {role} {value!r} is a YAML boolean — quote it in the '
+                    f'pack (e.g. {role}: "yes") so it stays text, not True/False'
+                )
+        key = str(raw_key).strip() if raw_key is not None else ""
+        label = str(raw_label).strip() if raw_label is not None else ""
         if not key or not label:
             raise LessonError(f"{ctx}: each predict choice needs a non-empty 'key' and 'label'")
         choices.append({"key": key, "label": label})

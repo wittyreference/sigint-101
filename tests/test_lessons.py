@@ -254,3 +254,26 @@ def test_a_choice_needs_both_a_key_and_a_label():
     # missing either would be unrecordable or unreadable, so the pack is refused at load.
     with pytest.raises(LessonError, match="choice"):
         parse_lesson(_consolidation(choices=[{"key": "a"}]))
+
+
+def test_a_choice_key_coerced_to_a_yaml_boolean_is_refused():
+    # YAML 1.1 parses bare yes/no/true/false/on/off as booleans, so a pack written with
+    # `key: yes` hands parse_lesson the bool True, not the string "yes". Left alone it would
+    # str()-coerce to a "True" chip — a silent wrong label the key/label check cannot catch
+    # (both are non-empty). Refuse it, telling the author to quote the word.
+    with pytest.raises(LessonError, match="quote"):
+        parse_lesson(_consolidation(choices=[{"key": True, "label": "Yes"}]))
+
+
+def test_a_choice_label_coerced_to_a_yaml_boolean_is_refused():
+    with pytest.raises(LessonError, match="quote"):
+        parse_lesson(_consolidation(choices=[{"key": "n", "label": False}]))
+
+
+def test_quoted_yes_no_choices_still_load():
+    # The fix rejects the *bool*, not the word: quoting in the pack yields real strings that load.
+    lesson = parse_lesson(_consolidation(choices=[
+        {"key": "yes", "label": "Yes"},
+        {"key": "no", "label": "No"},
+    ]))
+    assert lesson.choices == [{"key": "yes", "label": "Yes"}, {"key": "no", "label": "No"}]
