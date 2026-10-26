@@ -4,12 +4,12 @@
 **Two features LANDED on main this session:** Phosphor-Terminal restyle (`a8bfef8`) and the
 **units→lessons nav** (`0e2fc54`) — both squash-merged, branches + worktrees removed, render-verified
 on nomad-b at 800x480. Pick up the pending content/lessons work — recommended next:
-1. **"comrade" content pass** over `lesson_packs/*.yaml` — small, additive, no backend change.
-   Only the chrome copy and lesson 1's predict prompt are done; the "you" voice in the rest of the
-   lesson copy still needs the pass. NOTE: predict prompts must stay short (~35-40 words) or they
-   overflow predict's 800x480 — render-check each one. Edits go through a worktree.
-2. **Remaining lessons + HIL** (see Pending): M5 legal, M9-M12, U5/U6, decode backends,
-   counter-surveillance (Rayhunter panel + Flock) — none built yet.
+1. **Remaining lessons + HIL** (see Pending): M5 legal, M9-M12, U5/U6, decode backends,
+   counter-surveillance (Rayhunter panel + Flock) — none built yet. NOTE: predict prompts must stay
+   short (~35-40 words) or they overflow predict's 800x480 — render-check each one. Choice keys/labels
+   that are YAML booleans (yes/no/true/false) now fail loud at load — quote them.
+2. **UX specs needed from MC** before building: gain/provenance/ppm panels, exam UI, legal UI
+   (backends exist; exam pool is 100% done). These are touch-UI layout/taste calls.
 
 The units nav: home = 6 unit tiles (U1 Instrument .. U6 Under the Hood), `/unit/{id}` lists that
 unit's loaded lessons, unbuilt units show an honest "no lessons here yet" (no lock, D16). Unit map
@@ -97,7 +97,6 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   2026-2030 pool (409 + errata). `make selftest` = 304 tests, 94%, pristine; `make lint` clean.
 
 ## Pending work
-- "comrade" content pass over `lesson_packs/*.yaml` (the "you" references in lesson copy).
 - Wire gain/provenance/ppm panels + exam + legal UIs.
 - Remaining lessons M5 (legal), M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
   + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
@@ -133,6 +132,9 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 - Lesson-pack loader hardened (`ca3ba48`): `parse_lesson` now refuses a predict choice key/label
   that YAML coerced to a bool (unquoted yes/no/true/false), so an authoring slip fails loud at load
   instead of becoming a silent "True"/"False" chip. TDD; 304 tests green.
+- Light-touch "comrade" voice pass LANDED (`d2d4ae9`): one address at the frame opening + the
+  "your turn" beat of all 7 packs; teaching copy + predict prompts untouched. MC's call: light, not
+  full persona. Render-verified lesson 2 FRAME on nomad-b. (Fuller lesson copy comes with new lessons.)
 - Real hardware (nomad-b): P0 acceptance passed; spectrum.py + ppm.py honesty verified on real SDR.
 - Phosphor-Terminal restyle LANDED on main (`a8bfef8`): home + FRAME + PREDICT render-verified on
   nomad-b at 800x480; Russo One (Latin + Cyrillic) loads; ☭ renders as a glyph (via system
