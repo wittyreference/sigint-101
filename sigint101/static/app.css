@@ -913,6 +913,53 @@ body {
   white-space: nowrap;
 }
 
+/* ===== PPM panel (M4) ==================================================== */
+/* Measure-on-demand: the measured crystal error leads, the correction state and a hint sit around
+   it, and the button captures the pilot. State by word + glyph, never colour alone. */
+.ppm-panel {
+  flex: 0 0 170px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 3px double var(--border-strong);
+  background: var(--surface);
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  min-height: 0;
+  overflow: hidden;
+}
+.ppm__title {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--fg-dim);
+  text-align: center;
+}
+.ppm__status { font-size: 12px; color: var(--fg-dim); text-align: center; }
+.ppm__status b { color: var(--fg); }
+/* The measurement is the lesson — read large. */
+.ppm__result {
+  font-size: 16px;
+  line-height: 1.05;
+  text-align: center;
+  color: var(--fg);
+  text-shadow: var(--glow);
+}
+.ppm__result--ok { color: var(--accent); }
+.ppm__result--na { color: var(--fg-mute); }
+.ppm__detail {
+  font-size: 10px;
+  line-height: 1.1;
+  color: var(--fg-dim);
+  text-align: center;
+}
+.ppm__measure {
+  margin-top: auto;
+  min-height: 38px;
+  padding: 0 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 /* Frozen predict instrument — dimmed chrome, NO signal drawn (orient, don't reveal). */
 .instrument--frozen {
   flex: 0 0 auto;

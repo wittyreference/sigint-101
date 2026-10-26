@@ -23,6 +23,7 @@ from .events import log_event
 from .exam import ExamStore, load_pool
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
+from .ppm import measure_pilot_ppm
 from .progress import Progress
 from .provenance import (
     compare_to_baseline,
@@ -45,6 +46,11 @@ DEFAULT_TILE_GLYPH = "waterfall"
 # Env var that pins which radio to sweep when the bus holds more than one. A serial, not an index:
 # the index changes with plug order, so "00000001" handed to rtl_power's -d is read as index 1.
 RTLSDR_SERIAL_ENV = "SIGINT101_RTLSDR_SERIAL"
+
+# A ppm measurement captures this many seconds of IQ from one station. Shorter than the module
+# default so the kiosk's "Measure ppm" tap returns promptly; the trade-off is resolution, which the
+# measurement reports so the learner sees how finely it could read.
+PPM_SECONDS = 8.0
 
 
 async def _field(request: Request, name: str) -> str:
@@ -137,7 +143,7 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
-               sweeper_factory=None, pool_path=None) -> FastAPI:
+               sweeper_factory=None, pool_path=None, ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -176,6 +182,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # survives a kiosk power-cut the same way.
         app.state.exam_pool = load_pool(pool_path)
         app.state.exam_store = ExamStore(Path(data_dir) / "exam.db")
+        # Injected so a test drives the ppm route without 8 s of real IQ capture; the default is
+        # the real pilot measurement, which holds the dongle exclusively (the route stands the
+        # sweeper down first, below).
+        app.state.ppm_measure = ppm_measure or measure_pilot_ppm
         try:
             yield
         finally:
@@ -393,6 +403,21 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return JSONResponse(status_code=400, content={"recorded": False, "reason": reason})
         record_baseline_sample(app.state.events_path, snapshot)
         return {"recorded": True, "ref_db": snapshot["ref_db"]}
+
+    @app.post("/api/ppm/measure")
+    def ppm_measure_route(hz: int = 98_100_000):
+        """Measure the receiver's crystal error against a station's 19 kHz stereo pilot.
+
+        rtl_fm needs the dongle to itself, so the sweep stands down first (the next spectrum poll
+        lazily brings it back). ppm is None with a reason whenever no pilot is there to measure
+        against — a mono station carries none, and a weak one reads the same — never a guessed ppm.
+        """
+        app.state.sweeper.stop()
+        result = app.state.ppm_measure(
+            hz=hz, seconds=PPM_SECONDS, device=os.environ.get(RTLSDR_SERIAL_ENV))
+        log_event(app.state.events_path, "ppm_measure",
+                  {"hz": hz, "ppm": result.get("ppm"), "reason": result.get("reason")})
+        return result
 
     @app.get("/api/spectrum")
     def spectrum(limit: int | None = None):

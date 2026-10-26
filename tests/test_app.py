@@ -69,10 +69,11 @@ def _rows():
     ]
 
 
-def _client(tmp_path, *, probe=None, sweeper_factory=None):
+def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
-                     probe=probe or _absent, sweeper_factory=sweeper_factory)
+                     probe=probe or _absent, sweeper_factory=sweeper_factory,
+                     ppm_measure=ppm_measure)
     return TestClient(app)
 
 
@@ -393,3 +394,58 @@ def test_baseline_capture_without_a_reference_is_refused(tmp_path):
         resp = client.post("/api/provenance/baseline")
     assert resp.status_code == 400
     assert resp.json()["recorded"] is False
+
+
+# --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------
+
+
+def test_ppm_measure_reports_the_measurement(tmp_path):
+    # The measure is injected (the real one captures 8s of IQ); the route stops the sweeper first
+    # because only one process may hold the dongle, then hands back what the measurement found.
+    def fake_measure(**kw):
+        return {"hz": kw["hz"], "ppm": 164.3, "reason": "", "pilot_ratio_db": 22.0,
+                "soc_temp_c": 41.0, "resolution_ppm": 0.5}
+    with _client(tmp_path, ppm_measure=fake_measure,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.post("/api/ppm/measure?hz=98100000")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ppm"] == 164.3
+    assert body["pilot_ratio_db"] == 22.0
+
+
+def test_ppm_measure_without_a_pilot_is_honest(tmp_path):
+    # No 19 kHz pilot means no measurement — reported as ppm=None with the reason, never guessed.
+    def fake_measure(**kw):
+        return {"hz": kw["hz"], "ppm": None,
+                "reason": "no 19 kHz pilot here — a mono station carries none"}
+    with _client(tmp_path, ppm_measure=fake_measure,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.post("/api/ppm/measure?hz=98100000")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ppm"] is None
+    assert "pilot" in body["reason"]
+
+
+def test_ppm_measure_releases_the_radio_before_measuring(tmp_path):
+    # rtl_fm cannot open the dongle while the sweep holds it, so the sweeper must stand down first.
+    seen = {}
+
+    def fake_measure(**kw):
+        seen["stopped_before_measure"] = not client_sweeper["running"]
+        return {"hz": kw["hz"], "ppm": 10.0, "reason": ""}
+
+    client_sweeper = {"running": True}
+
+    class _RecordingSweeper(_StubSweeper):
+        def stop(self):
+            client_sweeper["running"] = False
+            super().stop()
+
+    with _client(tmp_path, ppm_measure=fake_measure,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows())) as client:
+        client.get("/api/spectrum")  # start the sweep so there is something to stand down
+        client_sweeper["running"] = True
+        client.post("/api/ppm/measure?hz=98100000")
+    assert seen.get("stopped_before_measure") is True

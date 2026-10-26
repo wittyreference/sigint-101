@@ -150,6 +150,19 @@
                   <button class="btn btn--primary prov__capture" type="button" data-prov-capture>Capture baseline</button>
                 </aside>
                 {% endif %}
+                {% if 'ppm' in lesson.panels %}
+                {# PPM panel (M4): the receiver's crystal error. Measure-on-demand — the button
+                   captures the tuned station's 19 kHz stereo pilot via /api/ppm/measure; a mono or
+                   weak station carries no pilot, and the panel says so rather than guess. #}
+                <aside class="ppm-panel" data-ppm-panel aria-label="Clock error in ppm">
+                  <div class="ppm__title">CLOCK &middot; PPM</div>
+                  <div class="ppm__status">correction <b>RAW</b></div>
+                  <div class="ppm__result" data-ppm-result>measured &mdash;</div>
+                  <div class="ppm__detail" data-ppm-detail>tune strong, then tap</div>
+                  <button class="btn btn--primary ppm__measure" type="button"
+                          data-ppm-measure data-ppm-hz="98100000">Measure ppm</button>
+                </aside>
+                {% endif %}
               </div>
               <div class="tune">
                 <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
@@ -189,6 +202,7 @@
      SAMPLE badge with the live (or clearly-labelled no-radio) state. It never invents a signal. -->
 <script src="/static/waterfall.js"></script>
 <script src="/static/prov.js"></script>
+<script src="/static/ppm.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by

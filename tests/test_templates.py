@@ -340,6 +340,19 @@ def test_a_lesson_without_provenance_has_no_provenance_panel():
     assert "prov-panel" not in html
 
 
+def test_a_ppm_lesson_shows_the_ppm_panel():
+    # The intro fixture declares the ppm panel (M4's), so its instrument stage draws it.
+    html = _console(lesson=_intro_lesson(), current_stage="demo")
+    assert "ppm-panel" in html
+    assert "Measure ppm" in html and "data-ppm-measure" in html
+
+
+def test_a_lesson_without_ppm_has_no_ppm_panel():
+    # The gain fixture declares only the gain panel, so there is no ppm panel on its stages.
+    html = _console(lesson=_gain_intro_lesson(), current_stage="demo")
+    assert "ppm-panel" not in html
+
+
 # --- the home / tile screen ---------------------------------------------------
 
 
