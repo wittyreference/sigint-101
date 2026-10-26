@@ -1,0 +1,78 @@
+# ABOUTME: Lesson pack M7 "Build, Aim & Clean Up" — the build/aim intro; length, orientation, and
+# ABOUTME: notching a too-strong neighbour out of the front end turn "nothing" into a clean signal.
+
+id: 7
+slug: build-and-aim
+title: "Build, Aim & Clean Up"
+type: intro
+concept: >-
+  Matching length and orientation, and keeping a too-strong neighbour out of the front end, turns
+  "nothing" into a clean signal — a missing signal is sometimes too much, not too little antenna.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: []
+
+stages:
+  frame: >-
+    Tonight you turn a dead-looking band into clean aircraft traffic three ways at once — the right
+    length, the right aim, and shoving a too-loud neighbour out of the radio's ear — and you learn
+    that a missing signal sometimes means too much of the wrong thing, not too little antenna.
+  demo: >-
+    Watch this — you don't touch anything yet. Start where last lesson left off: the dipole, each
+    leg set near 6.9 centimetres, the quarter-wave for 1090 MHz, and the radio on the aircraft band.
+    A few faint planes are limping in. First move is aim. Right now the legs are lying flat —
+    horizontal. Keep an eye on the signal-to-noise number as I stand the dipole up so both legs point
+    straight up and down... the returns jump, more planes, cleaner. That's polarization: an aircraft
+    antenna hangs vertically, so it sends its signal standing up, and an antenna held the same way —
+    vertical — drinks it in, while one lying crossways to it barely hears a thing. Same antenna, same
+    length, only the angle changed, and the signal moved. Now the strange one. In a town near strong
+    FM stations the aircraft band can look wrecked — the whole floor smeared and lifted, planes
+    drowning in it — and a beginner's first thought is "my antenna's too small." Watch what actually
+    fixes it. I slide one small barrel inline with the cable: an FM-notch filter, a part whose only
+    job is to throw away the 88-to-108 MHz broadcast band before it ever reaches the radio. The
+    instant it's in, the smear collapses and the planes pop out clean. The antenna never changed. The
+    trouble was never too little signal at 1090 — it was far too much signal down at 100, so loud it
+    was overloading the front end and blinding the radio everywhere at once.
+  try: >-
+    Now you run all three. With the radio on 1090, first set the legs to that 6.9-centimetre
+    quarter-wave and read the SNR; then rotate the dipole from flat to standing vertical and watch
+    the number climb to its best; then slide the FM-notch filter into the cable and watch what
+    happens to the floor. Change one thing at a time and keep the SNR readout in view, so you can say
+    which move bought you what: length got you into the ballpark, aim squeezed out more, and the
+    notch — if FM was overloading you — cleared the smear. Land on the best combination of the three.
+  predict: >-
+    That little notch just rescued the aircraft band, so it's tempting to treat it as a
+    clean-everything button. Here's the call. Picture retuning down to 915 MHz, where small wireless
+    gadgets live, and suppose their signal looks weak. Will inserting that same FM-notch filter help
+    your 915 reception: YES, NO, or IT DEPENDS? Lock in your answer — the rest of the lesson stays
+    hidden until you do.
+  observe: >-
+    Reason from what the notch actually does, and say what you expect before you try it: the filter
+    removes one specific stretch of spectrum — 88 to 108 MHz — and nothing else. Is 915 MHz anywhere
+    inside that stretch? And when your 915 signal is weak, is the likelier culprit the far-off FM band
+    you just removed, or something about the antenna length and aim you set earlier this lesson?
+  explain: >-
+    Here's the straight answer: no — not on its own. The FM-notch filter does exactly one thing,
+    remove the 88-to-108 MHz broadcast band, and 915 is nowhere near it, so the notch doesn't touch
+    your 915 signal at all. It is a targeted tool, not a general cleanup: the only reason it rescued
+    1090 is that strong FM was overloading the radio's front end and smearing the whole picture, and
+    pulling that one loud band out let everything else recover. So the single case where it helps at
+    915 is the very same disease — if that same FM broadcast were overloading you there too — but it
+    can never conjure a 915 signal your antenna is missing, because it adds nothing and it doesn't
+    filter 915. If your 915 reception is weak, the fix is last lesson's: is the dipole the right
+    length for 915 — the legs want to grow to about 8.2 centimetres — and is it aimed right for how
+    that gadget is polarized? That's the real lesson tonight, and it cuts both ways. "Signal is
+    missing" does not always mean "antenna too small." Sometimes it means too much of the wrong
+    thing — a neighbour so loud it blinds the front end — and the cure is to take away, not to add. A
+    good operator asks which disease they have before reaching for a tool: wrong length and wrong aim
+    are fixed at the antenna; an overloading neighbour is fixed with a notch; and more gain, as you
+    learned early on, fixes neither.
+
+# The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
+# predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
+# learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
+# behind the predict commit, so showing the choices never spoils the reveal.
+choices:
+  - {key: "yes", label: "Yes"}
+  - {key: "no", label: "No"}
+  - {key: depends, label: It depends}

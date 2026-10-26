@@ -1,0 +1,80 @@
+# ABOUTME: Lesson pack M6 "Antennas Are Tuning Forks" — the resonance intro; an antenna rings only
+# ABOUTME: near the frequency whose wavelength matches its length, and lambda(m)=300/f(MHz) sets it.
+
+id: 6
+slug: resonance
+title: "Antennas Are Tuning Forks"
+type: intro
+concept: >-
+  An antenna rings only near the frequency whose wavelength matches its length; the wrong length
+  is deaf, and a quarter-wave in metres is 300 / f(MHz), then quartered.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: []
+
+stages:
+  frame: >-
+    Tonight you learn why the right antenna is not the biggest one: an antenna rings like a tuning
+    fork — loud at one length, deaf everywhere else — and you are going to feel it happen under
+    your own thumbs.
+  demo: >-
+    Watch this — you don't touch anything yet. The stock whip screwed onto the radio right now is
+    the same one that caught your very first FM station, and here it is again on the FM band: loud,
+    bright, unmistakable. Now I don't swap the antenna, I don't touch anything on the bench — I
+    only tune the radio up to 1090 MHz, where aircraft overhead report their positions. Watch the
+    screen... almost nothing. Same antenna, same sky, and it has gone nearly deaf. Here is why, and
+    it is the whole idea of tonight: an antenna is a tuning fork for radio. A fork rings at its own
+    note and stays dead silent for any other; a child on a swing climbs only when you push at the
+    swing's own rhythm. An antenna "rings" — hears well — only near the frequency whose wavelength
+    matches its length, and goes deaf for frequencies that don't fit. This whip was cut to ring for
+    FM, so up at 1090 it is the wrong length by a mile. And there is one number that gives you the
+    right length, the only arithmetic you need tonight: a wavelength in metres is 300 divided by the
+    frequency in MHz. Down at FM, around 100 MHz, that's 300 over 100 — three metres. Up at 1090
+    it's 300 over 1090 — about 0.28 metres, twenty-seven centimetres. An antenna likes a quarter of
+    that, so it wants a leg just under seven centimetres. This whip is nowhere near it, and that is
+    exactly why 1090 fell silent.
+  try: >-
+    Now your hands. Unscrew the whip and attach the telescopic dipole from the kit — two sliding
+    metal legs on a little centre block — and leave both legs stretched right out, long, roughly
+    where they'd sit for a low frequency. Keep the radio on 1090 and look: still almost nothing. A
+    longer antenna did not help; "bigger" was not the answer. Now slide each leg inward, shortening
+    both the same amount, and keep your eye on the screen as you go. Use the number: a quarter-wave
+    at 1090 is just under seven centimetres — about 6.9 — so bring each leg down to roughly the
+    length of your thumb. As you close in on that length, faint returns start pricking up out of
+    the noise right where the band was dead. You added no power and turned no knob; you changed the
+    antenna's note until it matched the station's, with your thumbs.
+  predict: >-
+    You just shortened the legs to wake up 1090 MHz, and you've seen the one number that sets the
+    length — 300 divided by the frequency. Here's the call. Leave aircraft behind and picture
+    retuning down to 915 MHz, the band where a crowd of little wireless gadgets chatter. 915 is a
+    lower frequency than 1090. To ring at 915, do the dipole legs need to get LONGER, get SHORTER,
+    or stay the SAME length? Lock in your answer — the rest of the lesson stays hidden until you do.
+  observe: >-
+    Before you touch the legs, reason it straight off the number and say what you expect, not what
+    you hope: work 300 divided by 915 against 300 divided by 1090 — is the wavelength at 915 bigger
+    or smaller than at 1090? — and so, to match it, should the quarter-wave legs grow or shrink from
+    the thumb-length that just worked for aircraft?
+  explain: >-
+    Here's what you were feeling for with your thumbs. Frequency and wavelength sit on a seesaw: the
+    number on top, 300, never moves, so when the frequency goes down the wavelength goes up, and when
+    the frequency goes up the wavelength comes down. 915 is lower than 1090, so its wavelength is
+    longer — 300 over 915 is about 0.33 metres against 0.28 at 1090 — and the quarter-wave legs that
+    match it are longer too: roughly 8.2 centimetres instead of 6.9. So the honest answer is LONGER:
+    to drop to a lower frequency you pull the legs out, not in. That is the whole trap inside "bigger
+    is better." An antenna is not a bucket that catches more the larger it gets; it is a tuning fork
+    that rings at one length and goes deaf off it, so the right antenna is simply the one cut to the
+    frequency you want — too long is every bit as deaf as too short. You proved it both directions
+    tonight: the FM whip was deaf at 1090 because it was far too long, and the dipole only woke up
+    when you brought it to the length the number told you. Carry two things out the door: a
+    quarter-wave in centimetres is 300 over the frequency in MHz, then quartered; and when a band
+    sounds dead, ask whether your antenna is even the right length for it before you blame the sky or
+    blame yourself.
+
+# The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
+# predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
+# learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
+# behind the predict commit, so showing the choices never spoils the reveal.
+choices:
+  - {key: longer, label: Longer}
+  - {key: shorter, label: Shorter}
+  - {key: same, label: Same length}

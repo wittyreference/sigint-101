@@ -19,3 +19,14 @@ conflict a clean textual merge does not catch.
 **How to apply.** When fanning out parallel workers that share a data contract (a field name,
 an enum, a file format), pin the exact names in every brief, and run the FULL suite on the
 integration branch before landing, never only per-branch.
+
+## 2026-10-26: YAML coerces yes/no choice keys into booleans
+**Finding.** Authoring M7's predict `choices` as `{key: yes, label: Yes}` / `{key: no, label: No}`
+silently loaded as `key='True'`/`'False'` with labels `'True'`/`'False'`: PyYAML parses YAML 1.1,
+where `yes|no|Yes|No|on|off|true|false` are booleans, and `lessons.py` then `str()`-coerces them.
+The loader's key+label check still passed (both non-empty), so the test stayed green while the
+learner would have seen "True / False" chips instead of "Yes / No".
+**How to apply.** Quote any lesson-choice key or label that is a YAML 1.1 boolean word
+(`yes/no/on/off/true/false`, any case) — e.g. `{key: "yes", label: "Yes"}`. A key/label
+non-emptiness test will not catch the coercion; eyeball the parsed `choices` (or assert exact
+values) whenever a chip reads True/False.
