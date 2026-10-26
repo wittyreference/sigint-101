@@ -1,0 +1,10 @@
+<!-- ABOUTME: Unit screen — the lessons inside one curriculum unit, as a tile grid that drills
+     ABOUTME: into each lesson; Back returns to the home unit grid. Empty units say so plainly. -->
+{% extends "base.html" %}
+
+{% block title %}{{ unit.title }}{% endblock %}
+
+{% block content %}
+  {% set empty_message = "No lessons here yet — this unit is still being built." %}
+  {% include "_tilegrid.html" %}
+{% endblock %}

@@ -956,6 +956,15 @@ body {
   z-index: 1;
 }
 
+/* Honest empty state for a unit whose lessons are not built yet (no lock, D16). */
+.empty-note {
+  margin: 0;
+  padding: 28px var(--gutter);
+  font-size: 20px;
+  color: var(--fg-dim);
+  text-shadow: var(--glow);
+}
+
 .tile {
   position: relative;
   display: flex;

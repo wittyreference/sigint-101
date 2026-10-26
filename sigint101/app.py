@@ -23,6 +23,7 @@ from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
 from .progress import Progress
 from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
+from .units import UNITS, get_unit
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
@@ -54,19 +55,59 @@ async def _field(request: Request, name: str) -> str:
     return parse_qs(raw).get(name, [""])[0]
 
 
-def _home_tiles(lessons: dict, progress: Progress) -> list:
-    """Build the home grid: one tile per lesson, in id order, carrying its progress.
+def _is_done(progress: Progress, lesson_id: int) -> bool:
+    """Has this lesson been completed? (Opening it is progress, not completion.)"""
+    return bool((progress.get(lesson_id) or {}).get("completed"))
 
-    There are no artificial gates here (D16), so no tile is ever locked — every lesson is
-    reachable. A finished lesson reads as done; the first lesson not yet finished reads as active
-    ("you are here"); the rest are plainly available. The tiles are plain dicts because the
-    home template reads them by attribute/key, and a lesson has no "unit" grouping to model.
+
+def _unit_tiles(lessons: dict, progress: Progress) -> list:
+    """Build the home grid: one tile per curriculum unit, carrying its lesson progress.
+
+    No tile is ever locked (D16). A unit counts only the lessons whose packs have loaded, so a
+    unit with nothing built yet reads 0/0 and drills into an honest empty page rather than
+    pretending to be gated. The first unit that has lessons and is not fully finished reads as
+    active ("you are here"); a fully-finished unit reads done; the rest are plainly available.
     """
     tiles = []
     active_marked = False
-    for lesson_id in sorted(lessons):
+    for unit in UNITS:
+        in_unit = [lessons[i] for i in unit.lesson_ids if i in lessons]
+        total = len(in_unit)
+        done = sum(1 for lesson in in_unit if _is_done(progress, lesson.id))
+        if total and done == total:
+            status = "done"
+        elif total and not active_marked:
+            status = "active"
+            active_marked = True
+        else:
+            status = ""
+        tiles.append({
+            "id": unit.id,
+            "code": f"U{unit.id}",
+            "name": unit.title,
+            "glyph": unit.glyph,
+            "status": status,
+            "href": f"/unit/{unit.id}",
+            "lessons_total": total,
+            "lessons_done": done,
+        })
+    return tiles
+
+
+def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
+    """Build a unit page's grid: one tile per loaded lesson in the unit, in curriculum order.
+
+    Mirrors the unit tiles' status logic one level down: a finished lesson reads done, the first
+    unfinished one reads active, the rest are available. Unbuilt lessons are simply skipped — not
+    shown as locked (D16) — so the page lists only what a learner can actually open today.
+    """
+    tiles = []
+    active_marked = False
+    for lesson_id in unit.lesson_ids:
+        if lesson_id not in lessons:
+            continue
         lesson = lessons[lesson_id]
-        done = bool((progress.get(lesson_id) or {}).get("completed"))
+        done = _is_done(progress, lesson_id)
         if done:
             status = "done"
         elif not active_marked:
@@ -80,6 +121,7 @@ def _home_tiles(lessons: dict, progress: Progress) -> list:
             "name": lesson.title,
             "glyph": DEFAULT_TILE_GLYPH,
             "status": status,
+            "href": f"/lesson/{lesson.id}",
             "lessons_total": 1,
             "lessons_done": 1 if done else 0,
         })
@@ -137,13 +179,31 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
-        """The front page: a tile per lesson, with how far the learner has got."""
-        tiles = _home_tiles(app.state.lessons, app.state.progress)
+        """The front page: a tile per curriculum unit, with how far the learner has got."""
+        tiles = _unit_tiles(app.state.lessons, app.state.progress)
         return templates.TemplateResponse(
             request=request,
             name="home.html",
             context={"title": "SIGINT 101", "back_href": "/", "back_label": "Home",
-                     "units": tiles},
+                     "tiles": tiles},
+        )
+
+    @app.get("/unit/{unit_id}", response_class=HTMLResponse)
+    def unit_view(request: Request, unit_id: int):
+        """One unit's page: the lessons it contains, each drilling into the lesson itself.
+
+        An unknown unit is a 404, the same shape a lesson route uses. A real unit with nothing
+        built yet renders with an empty grid and says so plainly — it is not locked (D16).
+        """
+        unit = get_unit(unit_id)
+        if unit is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} not found")
+        tiles = _lesson_tiles(unit, app.state.lessons, app.state.progress)
+        return templates.TemplateResponse(
+            request=request,
+            name="unit.html",
+            context={"title": unit.title, "back_href": "/", "back_label": "Home",
+                     "unit": unit, "tiles": tiles},
         )
 
     @app.get("/lesson/{lesson_id}", response_class=HTMLResponse)

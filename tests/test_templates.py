@@ -65,19 +65,21 @@ CHOICES = [
     {"key": "c", "label": "The gap shrinks past a point — both max out"},
 ]
 
+# Tile dicts shaped as the home route builds them (no locks, D16): each carries its own
+# link target and aggregate lesson progress.
 UNITS = [
-    {"code": "U1", "name": "Instrument", "glyph": "waterfall",
+    {"code": "U1", "name": "Instrument", "glyph": "waterfall", "href": "/unit/1",
      "lessons_total": 4, "lessons_done": 1, "status": "active"},
-    {"code": "U2", "name": "Rules", "glyph": "rules",
-     "lessons_total": 1, "lessons_done": 0, "status": "available"},
-    {"code": "U3", "name": "Antennas", "glyph": "antenna",
-     "lessons_total": 2, "lessons_done": 0, "status": "locked"},
-    {"code": "U4", "name": "Modulation", "glyph": "wave",
-     "lessons_total": 5, "lessons_done": 0, "status": "locked"},
-    {"code": "U5", "name": "Decode", "glyph": "decode",
-     "lessons_total": 4, "lessons_done": 0, "status": "locked"},
-    {"code": "U6", "name": "Under the Hood", "glyph": "gear",
-     "lessons_total": 2, "lessons_done": 0, "status": "locked"},
+    {"code": "U2", "name": "Rules", "glyph": "rules", "href": "/unit/2",
+     "lessons_total": 1, "lessons_done": 0, "status": ""},
+    {"code": "U3", "name": "Antennas", "glyph": "antenna", "href": "/unit/3",
+     "lessons_total": 2, "lessons_done": 0, "status": ""},
+    {"code": "U4", "name": "Modulation", "glyph": "wave", "href": "/unit/4",
+     "lessons_total": 5, "lessons_done": 0, "status": ""},
+    {"code": "U5", "name": "Decode", "glyph": "decode", "href": "/unit/5",
+     "lessons_total": 4, "lessons_done": 0, "status": ""},
+    {"code": "U6", "name": "Under the Hood", "glyph": "gear", "href": "/unit/6",
+     "lessons_total": 2, "lessons_done": 0, "status": ""},
 ]
 
 
@@ -260,7 +262,7 @@ def test_home_renders_unit_tiles_with_the_status_bar():
     html = _render(
         "home.html",
         **_status(title="SIGINT 101", back_href="/", back_label="Home"),
-        units=UNITS,
+        tiles=UNITS,
     )
     assert "statusbar" in html
     assert "tile" in html
@@ -270,7 +272,7 @@ def test_home_renders_unit_tiles_with_the_status_bar():
 
 
 def test_home_tiles_show_lesson_progress():
-    html = _render("home.html", **_status(), units=UNITS)
+    html = _render("home.html", **_status(), tiles=UNITS)
     # "1/4" style progress for the active unit.
     assert "1/4" in html
 
@@ -279,7 +281,7 @@ def test_every_screen_has_no_horizontal_overflow_affordance():
     # Guard against a stray inline width that would break the 800x480 no-scroll rule;
     # this is a smoke check that the templates render without raising.
     for html in (_render("base.html", **_status()), _console(),
-                 _render("home.html", **_status(), units=UNITS)):
+                 _render("home.html", **_status(), tiles=UNITS)):
         assert "<canvas" in html or "statusbar" in html
 
 

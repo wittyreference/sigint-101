@@ -77,13 +77,66 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None):
 # --- home ---------------------------------------------------------------------
 
 
-def test_home_renders_a_tile_per_lesson(tmp_path):
+def test_home_renders_a_tile_per_unit(tmp_path):
+    """Home is the unit grid now: six unit tiles that drill into a unit's lessons.
+
+    Lessons no longer sit directly on the home grid — they live one level down, under
+    their unit — so a lesson title must not appear on home; a unit title and a /unit link
+    must.
+    """
     with _client(tmp_path) as client:
         resp = client.get("/")
     assert resp.status_code == 200
+    assert "tile" in resp.text
+    # The six curriculum units, by name and by link target.
+    assert "Instrument" in resp.text
+    assert "Modulation" in resp.text
+    assert "Decode" in resp.text
+    assert 'href="/unit/1"' in resp.text
+    assert 'href="/unit/6"' in resp.text
+    # A lesson title lives under its unit, not on the home grid.
+    assert "Fixture Gain and SNR" not in resp.text
+
+
+def test_unit_page_lists_its_lessons(tmp_path):
+    """A unit page shows that unit's loaded lessons, each linking to the lesson."""
+    with _client(tmp_path) as client:
+        resp = client.get("/unit/1")
+    assert resp.status_code == 200
+    assert "Instrument" in resp.text
     assert "Fixture Gain and SNR" in resp.text
     assert "Fixture Second Lesson" in resp.text
-    assert "tile" in resp.text
+    assert 'href="/lesson/1"' in resp.text
+    assert 'href="/lesson/2"' in resp.text
+
+
+def test_unit_page_for_an_unknown_unit_is_404(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/unit/99")
+    assert resp.status_code == 404
+
+
+def test_unit_page_with_no_lessons_yet_is_honest(tmp_path):
+    """A real unit with nothing built yet renders (no lock, D16) and says so plainly."""
+    with _client(tmp_path) as client:
+        resp = client.get("/unit/5")  # Decode — no fixture packs load into it
+    assert resp.status_code == 200
+    assert "Decode" in resp.text
+    assert 'href="/lesson/' not in resp.text
+    assert "No lessons here yet" in resp.text
+
+
+def test_home_unit_tile_shows_aggregate_lesson_progress(tmp_path):
+    """Unit 1 holds two loaded fixture lessons; finishing one reads as 1 of 2 done."""
+    with _client(tmp_path) as client:
+        before = client.get("/").text
+        assert "0/2" in before  # Unit 1: two loaded lessons, none done
+        client.post("/api/predict?lesson_id=1", data={"prediction": "a"},
+                    headers={"content-type": "application/x-www-form-urlencoded"})
+        client.post("/api/complete?lesson_id=1", data={},
+                    headers={"content-type": "application/x-www-form-urlencoded"})
+        after = client.get("/").text
+    assert "1/2" in after
 
 
 # --- commit-before-reveal (the whole point, enforced server-side) -------------
