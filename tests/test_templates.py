@@ -293,6 +293,31 @@ def test_a_hardware_lesson_still_renders_the_radio():
     assert "SIGNAL HIDDEN" in html
 
 
+def _gain_intro_lesson():
+    """An intro lesson that declares the gain panel; its demo stage is an unsealed instrument."""
+    return parse_lesson({
+        "id": 2, "slug": "gain", "title": "Turn It Up", "type": "intro",
+        "concept": "SNR is the gap over the noise floor, not the peak",
+        "panels": ["gain"], "hardware": ["rtlsdr"],
+        "stages": {"frame": "f", "demo": "DEMO watch the gap", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_a_gain_lesson_shows_the_gain_meter_beside_the_waterfall():
+    # A lesson that declares the gain panel draws the SNR level meter on its instrument stages,
+    # with the hooks waterfall.js drives live.
+    html = _console(lesson=_gain_intro_lesson(), current_stage="demo")
+    assert "gain-meter" in html
+    assert "data-gain-gap" in html and "data-gain-floor" in html
+
+
+def test_a_lesson_without_the_gain_panel_has_no_gain_meter():
+    # The intro fixture declares only the ppm panel, so its instrument stage draws no gain meter.
+    html = _console(lesson=_intro_lesson(), current_stage="demo")
+    assert "gain-meter" not in html
+
+
 # --- the home / tile screen ---------------------------------------------------
 
 

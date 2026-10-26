@@ -103,23 +103,48 @@
                fall through to the plain text branch below instead of drawing a waterfall. ---- #}
             <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
             <div class="instrument">
-              <div class="waterfall-wrap">
-                <canvas class="waterfall" width="760" height="200" data-tune data-sample="1"
-                        aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
-                <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
-                <div class="waterfall__axis" aria-hidden="true">
-                  <span>{{ "%.1f"|format(mhz - 1.3) }}</span>
-                  <span>{{ "%.3f"|format(mhz) }} MHz</span>
-                  <span>{{ "%.1f"|format(mhz + 1.3) }}</span>
+              <div class="instrument__row">
+                <div class="waterfall-wrap">
+                  <canvas class="waterfall" width="760" height="200" data-tune data-sample="1"
+                          aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
+                  <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
+                  <div class="waterfall__axis" aria-hidden="true">
+                    <span>{{ "%.1f"|format(mhz - 1.3) }}</span>
+                    <span>{{ "%.3f"|format(mhz) }} MHz</span>
+                    <span>{{ "%.1f"|format(mhz + 1.3) }}</span>
+                  </div>
                 </div>
+                {% if 'gain' in lesson.panels %}
+                {# Gain / SNR level meter (M2): the floor and peak as lines on a vertical dB scale,
+                   the gap between them — the SNR — shaded and labelled. Driven live by waterfall.js
+                   from the same sweep as the waterfall; no radio shows an honest empty meter. #}
+                <aside class="gain-meter" data-gain-meter aria-label="Gain and SNR level meter">
+                  <div class="gain-meter__title">GAIN</div>
+                  <div class="gain-meter__track">
+                    <div class="gain-meter__mark gain-meter__mark--peak" data-gain-peak hidden>
+                      <span class="gain-meter__tag">PEAK</span><b data-gain-peak-v>&mdash;</b>
+                    </div>
+                    <div class="gain-meter__gap" data-gain-gap hidden>
+                      <span class="gain-meter__gap-label">SNR</span><b data-gain-gap-v>&mdash;</b>
+                    </div>
+                    <div class="gain-meter__mark gain-meter__mark--floor" data-gain-floor hidden>
+                      <span class="gain-meter__tag">FLOOR</span><b data-gain-floor-v>&mdash;</b>
+                    </div>
+                    <div class="gain-meter__empty" data-gain-empty>&mdash; no radio &mdash;</div>
+                  </div>
+                </aside>
+                {% endif %}
               </div>
               <div class="tune">
                 <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
                 <div class="tune__dial">
                   <div class="tune__freq" data-freq>{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
-                  <div class="tune__caption">Tap the waterfall to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz steps</div>
+                  <div class="tune__caption">Tap to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz</div>
                 </div>
                 <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+                {# Next-step rides on the tune strip here (not a separate footer) so the fixed 800x480
+                   instrument stage keeps a scrollable band for the narration below. #}
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
@@ -130,7 +155,9 @@
             <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
           {% endif %}
 
-          {% if stage != 'predict' %}
+          {# A real instrument stage carries Next on its tune strip; every other stage (the text
+             stages, and the no-hardware instrument stages that render as text) keeps the footer. #}
+          {% if stage != 'predict' and not (stage in INSTRUMENT and lesson.needs_hardware) %}
             <footer class="stage-foot">
               <button class="btn btn--primary" type="button" data-nav="next">Next step</button>
             </footer>

@@ -740,6 +740,7 @@ body {
   gap: 10px;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
 }
 
 .waterfall-wrap {
@@ -757,6 +758,108 @@ body {
   height: 100%;
   /* CSS fallback so an empty canvas still reads as a spectrogram frame */
   background: var(--wf-bg);
+}
+
+/* The instrument's main row: the waterfall fills it; a declared panel (the gain meter) rides
+   alongside at a fixed width so both share the one 800x480 instrument band. A stage with no
+   panel has a single child here, so the waterfall still spans the full width. */
+.instrument__row {
+  flex: 0 0 auto;
+  height: 120px;
+  display: flex;
+  gap: 10px;
+}
+.instrument__row .waterfall-wrap {
+  flex: 1 1 auto;
+}
+/* On an instrument stage the waterfall band and tune stay fixed, and the "I-do / you-do"
+   narration scrolls beneath them, so a long body never pushes the radio off the fixed 800x480
+   screen (MC's call). Only the instrument body scrolls; the plain text stages are untouched. */
+.instrument > .stage-panel__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ===== Gain / SNR level meter (M2) ======================================= */
+/* Floor and peak as lines on a vertical dB scale; the gap between them — the SNR — is the shaded
+   band, so the whole lesson ("the gap, not the peak") reads at a glance. State by position + a dB
+   number, never colour alone. Driven live by waterfall.js; empty when there is no radio. */
+.gain-meter {
+  flex: 0 0 148px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 3px double var(--border-strong);
+  background: var(--surface);
+  padding: 6px 8px;
+}
+.gain-meter__title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--fg-dim);
+  text-align: center;
+}
+.gain-meter__track {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  border-left: 2px solid var(--border);
+  margin-left: 4px;
+}
+.gain-meter__mark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.gain-meter__mark::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  right: 0;
+  top: 50%;
+  border-top: 2px solid currentColor;
+  opacity: 0.85;
+}
+.gain-meter__mark--peak { color: var(--fg); text-shadow: var(--glow); }
+.gain-meter__mark--floor { color: var(--fg-dim); }
+.gain-meter__tag { font-size: 11px; letter-spacing: 0.1em; }
+.gain-meter__gap {
+  position: absolute;
+  left: 4px;
+  right: 0;
+  background: var(--surface-3);
+  border-top: 1px dashed var(--accent);
+  border-bottom: 1px dashed var(--accent);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  overflow: hidden;
+}
+.gain-meter__gap-label { font-size: 12px; letter-spacing: 0.16em; }
+.gain-meter__gap b { font-size: 17px; text-shadow: var(--glow); }
+.gain-meter__empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-align: center;
 }
 
 /* Frozen predict instrument — dimmed chrome, NO signal drawn (orient, don't reveal). */
@@ -913,7 +1016,7 @@ body {
 
 .tune__freq {
   font-family: var(--font-mono);
-  font-size: 38px;
+  font-size: 30px;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.03em;
@@ -929,12 +1032,22 @@ body {
 }
 
 .tune__caption {
-  font-size: 18px;
+  font-size: 15px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--fg-dim);
   margin-top: 2px;
   text-align: center;
+  white-space: nowrap;
+}
+/* Next-step living on the tune strip (instrument stages): a touch-sized button pinned to the end,
+   so advancing the lesson needs no separate footer and the narration keeps its scroll band. */
+.tune__next {
+  flex: none;
+  margin-left: auto;
+  min-height: var(--touch);
+  padding: 0 18px;
+  white-space: nowrap;
 }
 
 .stage-foot {

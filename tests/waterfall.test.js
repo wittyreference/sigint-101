@@ -52,3 +52,30 @@ test("a dB figure is shown to one decimal", () => {
   assert.equal(panel.formatDb(-46), "-46.0 dB");
   assert.equal(panel.formatDb(0), "0.0 dB");
 });
+
+// The gain meter's geometry: floor and peak dB mapped to positions on a fixed 60 dB track pinned a
+// few dB above the peak. The gap between them (SNR) is the shaded band's height. This is the whole
+// quantitative claim the panel makes, so it is tested rather than read off a laid-out DOM.
+const close = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} != ${b}`);
+
+test("the gain meter places floor and peak and sizes the SNR gap between them", () => {
+  const g = panel.gainMeterGeometry(-70, -42); // hi = -38, span 60
+  close(g.peakTop, 100 * 4 / 60);     // peak sits 4 dB below the top of the window
+  close(g.floorTop, 100 * 32 / 60);   // floor is 32 dB below the top
+  close(g.gapTop, g.peakTop);         // the gap band starts at the peak line
+  close(g.gapHeight, g.floorTop - g.peakTop);
+  close(g.gapDb, 28);                 // -42 - (-70)
+});
+
+test("turning the gain up (a wider gap) grows the shaded band; a closing gap shrinks it", () => {
+  const wide = panel.gainMeterGeometry(-75, -40);
+  const narrow = panel.gainMeterGeometry(-55, -40);
+  assert.ok(wide.gapHeight > narrow.gapHeight);
+  assert.ok(wide.gapDb > narrow.gapDb);
+});
+
+test("a floor below the window clamps to the track instead of overflowing it", () => {
+  const g = panel.gainMeterGeometry(-200, -42); // floor far below the 60 dB window
+  close(g.floorTop, 100);              // clamped to the bottom
+  assert.ok(g.gapHeight <= 100);
+});

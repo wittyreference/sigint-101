@@ -10,7 +10,10 @@
   // formatMHz and formatDb are function declarations, hoisted to the top of this IIFE, so they
   // resolve here even though they are written below beside the drawing code that uses them.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { colour: colour, formatMHz: formatMHz, formatDb: formatDb };
+    module.exports = {
+      colour: colour, formatMHz: formatMHz, formatDb: formatDb,
+      gainMeterGeometry: gainMeterGeometry,
+    };
     return;
   }
 
@@ -31,6 +34,26 @@
 
   function formatDb(db) {
     return db.toFixed(1) + " dB";
+  }
+
+  // Place a floor/peak dB pair on a fixed-span vertical track, as percentages from the top. The
+  // window is pinned a few dB above the peak, so turning the gain up pushes the peak AND the floor
+  // up the track together while the gap between them — the SNR, the whole lesson of M2 — stays
+  // readable as the height of the shaded band. Pure arithmetic, unit-tested like the colour map.
+  function gainMeterGeometry(floorDb, peakDb, span, headroom) {
+    span = span || 60;
+    headroom = headroom === undefined ? 4 : headroom;
+    var hi = peakDb + headroom;
+    var pos = function (db) { return Math.max(0, Math.min(100, (hi - db) / span * 100)); };
+    var peakTop = pos(peakDb);
+    var floorTop = pos(floorDb);
+    return {
+      peakTop: peakTop,
+      floorTop: floorTop,
+      gapTop: peakTop,
+      gapHeight: Math.max(floorTop - peakTop, 0),
+      gapDb: Math.max(peakDb - floorDb, 0),
+    };
   }
 
   // Every instrument stage has its own waterfall; they all show the same live spectrum (there is
@@ -56,10 +79,50 @@
       ctx: canvas.getContext("2d", { willReadFrequently: true }),
       badge: wrap.querySelector(".badge"),
       axis: wrap.querySelector(".waterfall__axis"),
+      meter: buildMeterRefs(wrap),
       floorDbm: null, ceilDbm: null, sized: false
     });
   });
   if (!panels.length) return;
+
+  // A stage that declares the gain panel (M2) carries a vertical level meter beside its waterfall.
+  // It is driven from the same smoothed floor/ceiling the colour scale already tracks, so the one
+  // live sweep feeds both: the floor and the peak lines, and the SNR gap shaded between them.
+  function buildMeterRefs(wrap) {
+    var root = wrap.closest(".instrument");
+    var meter = root && root.querySelector("[data-gain-meter]");
+    if (!meter) return null;
+    return {
+      empty: meter.querySelector("[data-gain-empty]"),
+      peak: meter.querySelector("[data-gain-peak]"),
+      floor: meter.querySelector("[data-gain-floor]"),
+      gap: meter.querySelector("[data-gain-gap]"),
+      peakV: meter.querySelector("[data-gain-peak-v]"),
+      floorV: meter.querySelector("[data-gain-floor-v]"),
+      gapV: meter.querySelector("[data-gain-gap-v]"),
+    };
+  }
+
+  function updateGainMeter(p) {
+    var m = p.meter;
+    if (!m || p.floorDbm === null || p.ceilDbm === null) return;
+    var g = gainMeterGeometry(p.floorDbm, p.ceilDbm);
+    if (m.empty) m.empty.hidden = true;
+    [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = false; });
+    if (m.peak) m.peak.style.top = g.peakTop + "%";
+    if (m.floor) m.floor.style.top = g.floorTop + "%";
+    if (m.gap) { m.gap.style.top = g.gapTop + "%"; m.gap.style.height = g.gapHeight + "%"; }
+    if (m.peakV) m.peakV.textContent = formatDb(p.ceilDbm);
+    if (m.floorV) m.floorV.textContent = formatDb(p.floorDbm);
+    if (m.gapV) m.gapV.textContent = formatDb(g.gapDb);
+  }
+
+  function clearGainMeter(p) {
+    var m = p.meter;
+    if (!m) return;
+    if (m.empty) m.empty.hidden = false;
+    [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = true; });
+  }
 
   var seen = [];          // timestamps already painted, newest last
   var total = 0;          // sweeps painted since the last retune; `seen` is trimmed
@@ -119,6 +182,7 @@
       p.ctx.fillStyle = colour((row.dbm[i] - p.floorDbm) / range);
       p.ctx.fillRect(i, 0, 1, ROW_H);
     }
+    updateGainMeter(p);
   }
 
   // The honest empty state: the band is drawn at its noise colour and the reason is written over
@@ -134,6 +198,7 @@
       p.ctx.fillText(message, p.canvas.width / 2, p.canvas.height / 2);
       p.ctx.textAlign = "left";
     }
+    clearGainMeter(p);
   }
 
   function resetView() {
