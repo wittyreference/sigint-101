@@ -1,13 +1,28 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call — M9 is fully done, including the live blink.** Open items:
-- **M10 (FSK)** — a benign rtl_433 sensor. Needs `rtl_433` installed on nomad-b (not present;
-  new system install → ask MC first). Uses the new tune band (ISM). *Recommended next.*
-- **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their
-  diagram instead of "not shown here yet". Pure asset add; no code.
-Recommended: M10 (ask MC to approve the `rtl_433` install first). TDD; land `--squash`;
-render-verify on nomad-b at 800x480.
+**MC's call — M10 (FSK) is done and landed (`c72a395`), the first rtl_433 decode panel.** Open items:
+- **M11 (LoRa)** — a chirp you cause, decoded below the noise floor (N + a second node). *Recommended
+  next.* Needs a LoRa node to transmit (physical/kit) — scope the source with MC first.
+- **FSK two-tone live capture (deferred)** — M10's decode panel is HIL-verified on real ambient
+  sensors, but they are all ASK; the FSK-specific read (two tones) needs an on-frequency FSK
+  transmitter (a real FSK sensor near nomad-b, or a crafted Flipper 2-FSK `tx_from_file`). Same
+  shape as M9's deferred blink.
+- **Follow-up: M8's predict prompt is ~60 words / 5 lines — 1 px over at a true 800x480.** Trim it to
+  the ~35-40-word guideline. (M9/M10 predict now fit; the shared eyebrow fix helped M8 but its prompt
+  is the remaining 1 px.)
+- **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their diagram.
+Recommended: M11 (scope the LoRa transmit source with MC). TDD; land `--squash`; render-verify on
+nomad-b at a **forced** 800x480 (Emulation.setDeviceMetricsOverride — headless --window-size lies).
+
+**M10 (FSK) DONE and landed (observed, 2026-10-27), main @ `c72a395`.** FSK's two tones sit below the
+waterfall's 125 kHz bins, so M10 reads the band with the rtl_433 decoder instead of the eye (MC's
+call). New `sigint101/decode.py` (a Decoder sibling of Sweeper) owns one `rtl_433 -F json` process;
+`/api/decode` arbitrates the single dongle with the sweeper (release/resume); a `decode` panel
+replaces the waterfall, driven by `static/decode.js`. **HIL-verified on nomad-b at a forced 800x480:**
+the live panel listed a real ambient Acurite-Tower sensor (**18.2 °C, 51 % RH, mod ASK**), and M10 +
+M9 predict both land Commit on-screen. Also fixed a systemic predict overflow (the eyebrow reprinted
+the concept on predict) — see learnings; `rtl_433` is now installed on nomad-b.
 
 **M9 live carrier-blink CAPTURED (observed, 2026-10-27).** The Flipper USB blocker was the
 charge-only cable — MC swapped to a data cable and it enumerates (`0483:5740`, `/dev/ttyACM0`,
@@ -63,6 +78,10 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   does NOT work — it snapshots an empty "WAITING" panel because it races the real async sweeps. Use the
   stdlib-WebSocket `Page.captureScreenshot` + real-`sleep` recipe in `.claude/learnings.md` instead, and
   keep the signal live DURING the chromium session (the page re-tunes and clears the buffer on load).**
+- **For an 800x480 FIT claim, FORCE the viewport** — headless `--window-size=800,480` lays out in a
+  shorter viewport (`innerHeight` ~337), so a fit checked there is a lie. Drive DevTools
+  `Emulation.setDeviceMetricsOverride {width:800,height:480,deviceScaleFactor:1}` first, then assert the
+  Commit/Next button's `getBoundingClientRect().bottom <= 480`. (This is how M9's predict overflow hid.)
 - The **predict** screen is JS-navigated (not a static shot). Best way to render it faithfully:
   write a throwaway `sigint101/static/_predictview.html` that loads `/lesson/1` in a same-origin
   iframe and flips the visible `.stage-panel` to the one with `data-stage="predict"` (the predict
