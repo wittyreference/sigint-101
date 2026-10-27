@@ -4,6 +4,32 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-10-27: M11 reads LoRa off the Nomad's own meshtasticd — node B is the M5 Cardputer
+**Finding.** The Nomad already runs `meshtasticd` on its SPI LoRa radio (a MeshAdv-Mini sx1262,
+US 900 MHz, config `/etc/meshtasticd/config.d/lora-MeshAdv-Mini-900M22S.yaml`), with the standard
+TCP API on `0.0.0.0:4403`. M11 reads that API rather than touching the radio — the `meshtastic`
+python lib's `TCPInterface(hostname, portNumber=4403)` plus a `pub.subscribe(_on_receive,
+"meshtastic.receive")`; each MeshPacket dict carries `rxSnr`/`rxRssi`, and a *negative* rxSnr that
+still decoded is the lesson. The LoRa radio is separate from the RTL-SDR, so there is NO contention
+with the sweeper/decoder (no release/resume). Added `meshtastic` to requirements and installed it
+into both venvs (the droplet's shared one and nomad-b's own). lazy-import it inside the connect so
+the pure parser tests run without the lib. **node B = the M5 Cardputer** (ESP32-S3, USB id
+`303a:1001`, on `/dev/ttyACM0` where the Flipper used to be; `spec5` is in `plugdev`). It is itself a
+Meshtastic node (US region 1, LongFast preset 0, default primary channel) so its packets decode on
+node A. Drive it from the droplet with `meshtastic.serial_interface.SerialInterface(devPath=
+"/dev/ttyACM0")` then `iface.sendText("...")`. **HIL-verified end to end:** node B sent 3 texts,
+node A received and decoded all 3 on `/api/lora` with real SNR.
+**Bench range cannot show a below-floor (negative) SNR.** At ~cm separation and 1 W (tx_power 30),
+RSSI was -12 dBm and SNR +6 dB — a genuinely strong link; lowering tx_power cannot drive SNR
+negative while RSSI stays ~100 dB above the noise floor. A real below-floor capture needs distance:
+carry the (battery, keyboard-equipped) Cardputer far from the Nomad and send from its keys — node A
+still receives over RF, and `/api/lora` surfaces the weak reception. One HIL fix the render caught:
+the panel was listing the node's OWN telemetry (sender present, no `rxSnr`) — a no-rxSnr packet is
+locally originated, not an air reception, so `parse_lora_packet` now skips it.
+**How to apply.** For a meshtasticd feature, read its 4403 API with the `meshtastic` lib; a real air
+reception always carries `rxSnr`, so filter on it. To drive node B, SerialInterface + sendText over
+`/dev/ttyACM0`. A below-floor SNR is a field measurement, not a bench one.
+
 ## 2026-10-27: headless --window-size is NOT a faithful 800x480 — force the viewport or the fit lies
 **Finding.** `chromium --headless=new --window-size=800,480 --screenshot` lays the page out in a
 viewport whose height is NOT 480 (measured `window.innerHeight` = 337 on nomad-b), then scales the

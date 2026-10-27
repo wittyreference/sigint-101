@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 jinja2
 httpx
+meshtastic
 pytest
 pytest-cov
 ruff

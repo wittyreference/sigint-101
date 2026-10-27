@@ -24,6 +24,7 @@ from .events import log_event
 from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
+from .lora import LoRaListener, LoRaUnavailable
 from .ppm import measure_pilot_ppm
 from .progress import Progress
 from .provenance import (
@@ -144,8 +145,8 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
-               sweeper_factory=None, decoder_factory=None, pool_path=None,
-               ppm_measure=None) -> FastAPI:
+               sweeper_factory=None, decoder_factory=None, lora_factory=None,
+               pool_path=None, ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -180,6 +181,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_decoder = decoder_factory
 
+    # The LoRa listener reads the local meshtasticd over its TCP API — a separate radio from the
+    # RTL-SDR, so it needs no arbitration with the sweeper or decoder. The real default connects to
+    # localhost:4403; tests inject their own listener.
+    if lora_factory is None:
+        build_lora = LoRaListener
+    else:
+        build_lora = lora_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -192,6 +201,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.events_path = Path(data_dir) / "events.jsonl"
         app.state.sweeper = build_sweeper()
         app.state.decoder = build_decoder()
+        app.state.lora = build_lora()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -206,6 +216,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         finally:
             app.state.sweeper.stop()
             app.state.decoder.stop()
+            app.state.lora.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -617,6 +628,31 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "available": True,
             "freq_hz": decoder.freq_hz,
             "decodes": [d.as_dict() for d in decoder.recent(limit)],
+        }
+
+    @app.get("/api/lora")
+    def lora(limit: int | None = None):
+        """Recent LoRa packets the Nomad received, each with the SNR it decoded at.
+
+        A packet below the noise floor (negative SNR) is the lesson. meshtasticd not reachable is a
+        503 with the reason, never an empty panel pretending the radio heard nothing. The LoRa radio
+        is separate from the RTL-SDR, so this never disturbs a sweep or a decode.
+        """
+        listener = app.state.lora
+        if not listener.running:
+            try:
+                listener.start()
+            except LoRaUnavailable as exc:
+                log_event(app.state.events_path, "lora_blocked", {"reason": str(exc)})
+                return JSONResponse(status_code=503,
+                                    content={"available": False, "reason": str(exc), "packets": []})
+            log_event(app.state.events_path, "lora_start",
+                      {"host": listener.hostname, "port": listener.port})
+        return {
+            "available": True,
+            "host": listener.hostname,
+            "port": listener.port,
+            "packets": [p.as_dict() for p in listener.recent(limit)],
         }
 
     @app.get("/api/hardware")

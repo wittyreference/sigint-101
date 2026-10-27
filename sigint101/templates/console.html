@@ -72,6 +72,17 @@
                 <div class="decoder__axis" aria-hidden="true">rtl_433 &middot; {{ "%.3f"|format(mhz) }} MHz</div>
               </div>
             </div>
+            {% elif lesson.uses_lora %}
+            {# A LoRa lesson seals its packet list, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; PACKETS HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">meshtastic &middot; US LoRa band</div>
+              </div>
+            </div>
             {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
@@ -136,6 +147,30 @@
                 <div class="tune__dial">
                   <div class="tune__freq">{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
                   <div class="tune__caption">ISM band &middot; rtl_433 listening</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
+            {% elif lesson.uses_lora %}
+            {# ---- LoRa instrument (M11): the Nomad's meshtastic radio decodes packets the SDR could
+               not, because LoRa's chirp spreads the signal below the noise floor. lora.js polls
+               /api/lora and lists each reception with the SNR it decoded at (negative = below the
+               floor); no meshtasticd shows an honest empty state, never a fabricated packet. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder" data-lora-panel
+                   aria-label="Live LoRa packets the Nomad received">
+                <div class="decoder__head">
+                  <span class="decoder__title">meshtastic &middot; LoRa</span>
+                  <span class="decoder__status" data-lora-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-lora-list></ul>
+                <div class="decoder__empty" data-lora-empty>listening for packets&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">915<span>MHz</span></div>
+                  <div class="tune__caption">US LoRa band &middot; meshtastic listening</div>
                 </div>
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
@@ -251,6 +286,9 @@
 <!-- The live decoder (M10): polls /api/decode and lists what rtl_433 read off the ISM band.
      No radio / no rtl_433 shows an honest empty state; it never invents a sensor read. -->
 <script src="/static/decode.js"></script>
+<!-- The live LoRa panel (M11): polls /api/lora and lists packets meshtasticd decoded, with the SNR
+     each landed at. No meshtasticd shows an honest empty state; it never invents a packet. -->
+<script src="/static/lora.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by

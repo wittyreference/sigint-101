@@ -196,6 +196,26 @@ def test_decode_panel_cannot_combine_with_waterfall_overlays():
         parse_lesson(_consolidation(panels=["decode", "gain"]))
 
 
+def test_the_lora_panel_loads_and_selects_the_lora_instrument():
+    lesson = parse_lesson(_consolidation(panels=["lora"]))
+    assert lesson.panels == ["lora"]
+    assert lesson.uses_lora is True
+    assert lesson.uses_decoder is False
+
+
+def test_a_lesson_without_the_lora_panel_does_not_use_lora():
+    assert parse_lesson(_consolidation(panels=["gain"])).uses_lora is False
+    assert parse_lesson(_consolidation()).uses_lora is False
+
+
+def test_an_instrument_panel_cannot_combine_with_another_instrument_or_an_overlay():
+    # One instrument per stage: lora + decode, or lora + an overlay, is a contradiction.
+    with pytest.raises(LessonError, match="lora"):
+        parse_lesson(_consolidation(panels=["lora", "decode"]))
+    with pytest.raises(LessonError, match="lora"):
+        parse_lesson(_consolidation(panels=["lora", "gain"]))
+
+
 def test_hints_must_be_a_list():
     with pytest.raises(LessonError, match="must be a list"):
         parse_lesson(_consolidation(hints="not-a-list"))

@@ -32,12 +32,15 @@ COMMIT_STAGE = "predict"
 # Panels the console can actually render. The waterfall and tune panel are the baseline
 # every lesson gets; a pack turns extras on by name. Anything else refuses to load,
 # because a panel that silently rendered nothing would fail mid-lesson, in front of
-# the learner. "decode" is the odd one out: it is not an overlay on the waterfall but a
-# different instrument (rtl_433), and it REPLACES the waterfall, so it cannot share the
-# screen with the gain/provenance/ppm overlays that decorate the sweep.
+# the learner. "decode" and "lora" are the odd ones out: each is not an overlay on the waterfall
+# but a different instrument (rtl_433, and the LoRa radio), and each REPLACES the waterfall, so an
+# instrument panel cannot share the screen with the gain/provenance/ppm overlays — or with each
+# other (there is one instrument per stage).
 OVERLAY_PANELS = ("gain", "provenance", "ppm")
 DECODE_PANEL = "decode"
-KNOWN_PANELS = (*OVERLAY_PANELS, DECODE_PANEL)
+LORA_PANEL = "lora"
+INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL)
+KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
 # lesson on a narrow signal can ask for a finer step; 100 kHz is the FM-band default.
@@ -94,6 +97,15 @@ class Lesson:
         the decode panel and poll /api/decode rather than the sweep.
         """
         return DECODE_PANEL in self.panels
+
+    @property
+    def uses_lora(self) -> bool:
+        """True when the instrument is the LoRa radio (the lora panel) instead of the waterfall.
+
+        It reads meshtasticd, not the SDR, so the console renders the lora panel and polls
+        /api/lora. The LoRa radio is separate, so there is no contention with a sweep.
+        """
+        return LORA_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:
@@ -233,10 +245,12 @@ def parse_lesson(data: dict) -> Lesson:
     for name in panels:
         if name not in KNOWN_PANELS:
             raise LessonError(f"{ctx}: unknown panel '{name}' — the console has no such panel")
-    if DECODE_PANEL in panels and len(panels) > 1:
+    instruments = [name for name in panels if name in INSTRUMENT_PANELS]
+    if instruments and len(panels) > 1:
         raise LessonError(
-            f"{ctx}: the 'decode' panel replaces the waterfall, so it cannot be combined with "
-            "the overlay panels (gain/provenance/ppm)")
+            f"{ctx}: the '{instruments[0]}' panel is an instrument that replaces the waterfall, so "
+            "it cannot be combined with another instrument or the overlay panels "
+            "(gain/provenance/ppm)")
 
     # Choices are the keyboard-free predict options a pack may carry: one tappable chip per
     # entry, each a {key, label}. The key is what the commit records, the label is what the

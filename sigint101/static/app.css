@@ -849,6 +849,10 @@ body {
 .decoder__model { grid-area: model; color: var(--accent); font-weight: 600; }
 .decoder__mod { grid-area: mod; font-family: var(--font-mono); font-size: 13px; color: var(--fg); }
 .decoder__item--fsk .decoder__mod { color: var(--ok); }
+/* A LoRa packet decoded below the noise floor is the lesson — lead its SNR and label in the
+   accent so the negative-SNR receptions stand out from the ordinary ones. */
+.decoder__item--floor .decoder__mod { color: var(--ok); font-weight: 600; }
+.decoder__item--floor .decoder__tone { color: var(--ok); }
 .decoder__read { grid-area: read; color: var(--fg); }
 .decoder__tone { grid-area: tone; font-family: var(--font-mono); font-size: 13px; color: var(--fg-mute); }
 .decoder__empty {

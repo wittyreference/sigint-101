@@ -402,6 +402,33 @@ def test_a_decode_lessons_predict_frame_seals_the_decoder():
     assert "waterfall-wrap--frozen" not in html
 
 
+def _lora_intro_lesson():
+    """An intro lesson whose instrument is the LoRa radio (M11's), reading meshtasticd."""
+    return parse_lesson({
+        "id": 11, "slug": "lora", "title": "Below the Noise Floor", "type": "intro",
+        "concept": "LoRa's chirp spreads a signal so it decodes below the noise floor",
+        "panels": ["lora"], "hardware": ["lora"],
+        "stages": {"frame": "f", "demo": "DEMO watch a packet land", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_a_lora_lesson_shows_the_lora_panel_not_a_waterfall():
+    html = _console(lesson=_lora_intro_lesson(), current_stage="demo")
+    assert "data-lora-panel" in html
+    assert "data-lora-list" in html
+    assert "meshtastic" in html
+    assert "canvas class=\"waterfall\"" not in html
+    assert "data-decode-panel" not in html
+
+
+def test_a_lora_lessons_predict_frame_seals_the_lora_panel():
+    html = _console(lesson=_lora_intro_lesson(), current_stage="predict",
+                    prediction_committed=False)
+    assert "PACKETS HIDDEN" in html
+    assert "waterfall-wrap--frozen" not in html
+
+
 def _provenance_lesson():
     """An intro lesson that declares the provenance panel (M3's, deaf-vs-empty)."""
     return parse_lesson({

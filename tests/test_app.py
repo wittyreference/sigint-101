@@ -10,6 +10,7 @@ from sigint101 import exam
 from sigint101.app import create_app
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.hardware import RadioProbe
+from sigint101.lora import LoRaListener, parse_lora_packet
 from sigint101.spectrum import Sweeper, SweepRow, validate_span
 
 # The suite owns its lesson content: the real lesson_packs/ are authored in parallel, so a test
@@ -127,12 +128,48 @@ def _reads():
     return [ask, fsk]
 
 
+class _StubLora:
+    """An app-boundary stand-in for the meshtasticd-backed LoRaListener (no real radio)."""
+
+    def __init__(self, packets):
+        self._packets = list(packets)
+        self._started = False
+        self.hostname, self.port = "localhost", 4403
+
+    @property
+    def running(self):
+        return self._started
+
+    def start(self):
+        self._started = True
+
+    def recent(self, limit=None):
+        return self._packets if limit is None else self._packets[-limit:]
+
+    def stop(self):
+        self._started = False
+
+
+def _packets():
+    """A real text packet heard below the noise floor and one above it, from meshtastic shapes."""
+    below = parse_lora_packet({
+        "fromId": "!433d1234", "from": 1128074276, "rxSnr": -11.25, "rxRssi": -119,
+        "hopLimit": 3, "rxTime": 1730000000,
+        "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "ping from node B"}})
+    above = parse_lora_packet({
+        "fromId": "!433d1234", "from": 1128074276, "rxSnr": 6.5, "rxRssi": -92,
+        "rxTime": 1730000005,
+        "decoded": {"portnum": "TELEMETRY_APP", "telemetry": {}}})
+    return [below, above]
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
-            decoder_factory=None):
+            decoder_factory=None, lora_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
-                     ppm_measure=ppm_measure, decoder_factory=decoder_factory)
+                     ppm_measure=ppm_measure, decoder_factory=decoder_factory,
+                     lora_factory=lora_factory)
     return TestClient(app)
 
 
@@ -417,6 +454,43 @@ def test_spectrum_reclaims_the_dongle_from_the_decoder(tmp_path):
         client.get("/api/spectrum")     # waterfall reclaims it
     assert released["value"] is True
     assert resumed["value"] is True
+
+
+# --- lora (meshtasticd; no-mock: absence is an answer, never a fake packet) ---
+
+
+def test_lora_reports_503_and_a_reason_when_meshtasticd_is_unreachable(tmp_path):
+    def refuse(host, port):
+        raise OSError("connection refused")
+    with _client(tmp_path,
+                 lora_factory=lambda: LoRaListener(connect=refuse)) as client:
+        resp = client.get("/api/lora")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["packets"] == []          # never a fabricated reception
+    assert "LoRa" in body["reason"] or "meshtasticd" in body["reason"]
+
+
+def test_lora_default_listener_also_refuses_without_a_daemon(tmp_path):
+    # No lora_factory injected: the real build_lora runs and must still refuse (no meshtasticd).
+    with _client(tmp_path) as client:
+        resp = client.get("/api/lora")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_lora_returns_real_packets_with_their_snr(tmp_path):
+    with _client(tmp_path, lora_factory=lambda: _StubLora(_packets())) as client:
+        resp = client.get("/api/lora")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    # The first packet decoded at a NEGATIVE SNR — below the noise floor, the lesson's point.
+    first = body["packets"][0]
+    assert first["from_id"] == "!433d1234"
+    assert first["snr_db"] < 0 and first["below_floor"] is True
+    assert "ping from node B" in first["summary"]
 
 
 # --- hardware (probe reported as data) ----------------------------------------
