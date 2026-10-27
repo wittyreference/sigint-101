@@ -4,6 +4,46 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-10-27: headless --window-size is NOT a faithful 800x480 — force the viewport or the fit lies
+**Finding.** `chromium --headless=new --window-size=800,480 --screenshot` lays the page out in a
+viewport whose height is NOT 480 (measured `window.innerHeight` = 337 on nomad-b), then scales the
+shot — so a render that "fits" there is checked against a shorter screen than the real kiosk, and a
+render that overflows the true 480 can still look fine. This is why earlier predict-fit checks were
+unreliable: re-measured at a *forced* 800x480, M9's shipped predict put its Commit button at 513 px
+(33 px below the fold) and M10's at 582 — both "verified" before but actually overflowing. The
+honest render drives DevTools `Emulation.setDeviceMetricsOverride {width:800,height:480,
+deviceScaleFactor:1}` over the stdlib-WebSocket client before measuring/screenshotting; then
+`window.innerHeight` reads 480 and `getBoundingClientRect().bottom <= 480` is the real fit test.
+Root cause of the predict overflow itself: the eyebrow reprinted the full lesson `concept` on the
+predict stage (4 lines), on top of the prompt + frozen frame + chips. Dropping the concept on
+predict (it already rode the frame) pulled Commit to 474 for both M9 and M10; M10 also needed a
+2-line prompt, one-phrase chip labels, and a compact 104px frozen decoder.
+**How to apply.** NEVER trust a headless `--window-size` screenshot for an 800x480 fit claim — force
+the viewport with `Emulation.setDeviceMetricsOverride` first, then assert the Commit/Next button's
+`getBoundingClientRect().bottom <= 480`. Predict is the tightest stage: keep prompts ~2 lines, chip
+labels one short phrase, and watch the eyebrow (no repeated concept). **FOLLOW-UP:** M8's predict
+still sits 1 px over (481) — its prompt is ~60 words / 5 lines, over the 35-40 guideline; trim it.
+
+## 2026-10-27: M10 reads FSK with rtl_433 — a decode panel that takes turns on the dongle
+**Finding.** FSK's two tones sit tens of kHz apart but the sweep uses 125 kHz bins, so FSK does not
+resolve on the waterfall — M10's instrument is the rtl_433 decoder instead (`panels: [decode]`,
+MC's call). `sigint101/decode.py` (a Decoder sibling of Sweeper) owns one long-lived `rtl_433 -F
+json` process and parses each line into a Decode (model, mod, freq_hz, **freq2_hz** for the FSK
+mark/space pair, snr, readings). The catch: rtl_433 and rtl_power both need the one RTL-SDR
+exclusively, so `/api/decode` calls `sweeper.release()` (release, not stop — a lazy spectrum poll
+would otherwise reclaim it mid-decode) before starting the decoder, and `/api/spectrum` releases the
+decoder and `resume()`s the sweeper to take the dongle back. The console renders the decode panel
+instead of the waterfall when `lesson.uses_decoder`, driven by `static/decode.js`. **HIL-verified on
+nomad-b:** the live panel listed a real ambient Acurite-Tower sensor (18.2 °C, 51 % RH, mod ASK) —
+the decoder instrument works end to end. **But ambient 433 at nomad-b is all ASK/OOK** (Acurite temp,
+Smoke-GS558 beacon), so the FSK-specific two-tone read is NOT captured — it needs an actual FSK
+transmitter on-frequency (a real FSK sensor, or a crafted Flipper 2-FSK via `tx_from_file`), the same
+way M9's blink needed a live OOK source.
+**How to apply.** rtl_433 FSK reads carry `freq1`/`freq2` (not `freq`); that pair IS the lesson.
+A new SDR-exclusive tool (rtl_433, rtl_fm) must `release()` the sweeper and be released on the way
+back, or the lazy /api/spectrum restart steals the dongle. For M10's FSK payoff capture, stage a
+real FSK source — ambient ISM here won't oblige.
+
 ## 2026-10-27: the Flipper CLI drives sub-GHz TX from the droplet — it WAS the charge-only cable
 **Finding.** Swapping the Flipper's USB cable for a data cable made it enumerate on nomad-b exactly
 as predicted: `0483:5740` in `lsusb`, `/dev/ttyACM0` (root:dialout 660; `spec5` is in `dialout`),

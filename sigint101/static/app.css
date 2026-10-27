@@ -781,6 +781,109 @@ body {
   overflow-y: auto;
 }
 
+/* ===== Decode panel (M10) =============================================== */
+/* The rtl_433 instrument: FSK's two tones don't resolve on a 125 kHz-bin waterfall, so M10 reads
+   the band with a decoder instead of the eye. A bordered list of what each sensor said, filled
+   live by decode.js; an honest empty / no-radio line when nothing decodes. */
+.decoder {
+  flex: 0 0 auto;
+  height: 150px;
+  display: flex;
+  flex-direction: column;
+  border: 3px double var(--border-strong);
+  background: var(--surface);
+  overflow: hidden;
+}
+.decoder__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.decoder__title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+.decoder__status {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  color: var(--warn);
+  border: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 20%, var(--surface));
+}
+.decoder__status--live {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 20%, var(--surface));
+}
+.decoder__status--empty {
+  color: var(--fg-mute);
+  border-color: var(--fg-mute);
+  background: transparent;
+}
+.decoder__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.decoder__item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "model mod" "read tone";
+  gap: 2px 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+}
+.decoder__model { grid-area: model; color: var(--accent); font-weight: 600; }
+.decoder__mod { grid-area: mod; font-family: var(--font-mono); font-size: 13px; color: var(--fg); }
+.decoder__item--fsk .decoder__mod { color: var(--ok); }
+.decoder__read { grid-area: read; color: var(--fg); }
+.decoder__tone { grid-area: tone; font-family: var(--font-mono); font-size: 13px; color: var(--fg-mute); }
+.decoder__empty {
+  flex: none;
+  padding: 10px;
+  text-align: center;
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+/* The frozen predict frame on a decode lesson seals the decoder, mirroring the waterfall's seal.
+   Compact (not the live panel's 150px) so the predict prompt, chips and Commit all stay on the
+   fixed 800x480 screen — predict is the tightest stage. */
+.decoder--frozen {
+  height: auto;
+  min-height: 104px;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.6;
+}
+.decoder__sealed {
+  text-align: center;
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+  color: var(--fg-mute);
+}
+.decoder__sealed span { display: block; font-size: 15px; }
+.decoder__sealed small { display: block; margin-top: 4px; font-size: 11px; }
+.decoder__axis {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
 /* ===== Gain / SNR level meter (M2) ======================================= */
 /* Floor and peak as lines on a vertical dB scale; the gap between them — the SNR — is the shaded
    band, so the whole lesson ("the gap, not the peak") reads at a glance. State by position + a dB

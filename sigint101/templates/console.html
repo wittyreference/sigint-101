@@ -44,10 +44,11 @@
       {% if (not sealed) or prediction_committed %}
         <section class="stage-panel" data-stage="{{ stage }}"{% if stage != cur %} hidden{% endif %}>
           {# The instrument stages (demo/try/observe on a radio lesson) have only a thin scrolling
-             narration band at 800x480, so their eyebrow drops the concept to buy that band back —
-             the concept already rode the frame. Text stages keep it. #}
+             narration band at 800x480, and the predict gate is the tightest screen of all (prompt +
+             frozen frame + chips + Commit), so both drop the concept from the eyebrow to buy that
+             space back — the concept already rode the frame. Frame and explain keep it. #}
           <div class="stage-panel__eyebrow">
-            Step {{ loop.index }} of {{ loop.length }} &middot; {{ stage|upper }}{% if not (stage in INSTRUMENT and lesson.needs_hardware) %} &middot; {{ lesson.concept }}{% endif %}
+            Step {{ loop.index }} of {{ loop.length }} &middot; {{ stage|upper }}{% if not (stage in INSTRUMENT and lesson.needs_hardware) and stage != 'predict' %} &middot; {{ lesson.concept }}{% endif %}
           </div>
 
           {% if stage == 'predict' %}
@@ -59,6 +60,19 @@
                lesson that uses the radio shows it; a no-hardware lesson (the rules) predicts with
                the question and the chips alone. #}
             {% if lesson.needs_hardware %}
+            {% if lesson.uses_decoder %}
+            {# A decode lesson seals its decoder, not a waterfall — same "predict first" frame,
+               the instrument it actually uses. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; READS HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">rtl_433 &middot; {{ "%.3f"|format(mhz) }} MHz</div>
+              </div>
+            </div>
+            {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
                 <div class="waterfall__empty">
@@ -74,6 +88,7 @@
                 </div>
               </div>
             </div>
+            {% endif %}
             {% endif %}
             <form class="predict{% if prediction_committed %} predict--committed{% endif %}"
                   method="post" action="{{ commit_url|default('#') }}">
@@ -101,10 +116,35 @@
             </form>
 
           {% elif stage in INSTRUMENT and lesson.needs_hardware %}
+            <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
+            {% if lesson.uses_decoder %}
+            {# ---- Decode instrument (M10): rtl_433 reads the ISM band and lists what each sensor
+               said. FSK's two tones do not resolve on a 125 kHz-bin waterfall, so the honest
+               instrument here is the decoder, not the eye. decode.js polls /api/decode and fills the
+               list; no radio / no rtl_433 shows an honest empty state, never a fabricated read. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder" data-decode-panel
+                   aria-label="Live rtl_433 sensor decodes on the ISM band">
+                <div class="decoder__head">
+                  <span class="decoder__title">rtl_433 &middot; DECODE</span>
+                  <span class="decoder__status" data-decode-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-decode-list></ul>
+                <div class="decoder__empty" data-decode-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
+                  <div class="tune__caption">ISM band &middot; rtl_433 listening</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
+            {% else %}
             {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson
                with no hardware (e.g. the legal rules) has no radio, so its instrument-named stages
                fall through to the plain text branch below instead of drawing a waterfall. ---- #}
-            <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
             <div class="instrument">
               <div class="instrument__row">
                 <div class="waterfall-wrap">
@@ -181,6 +221,7 @@
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
+            {% endif %}
 
           {% else %}
             {# ---- Text stage (frame, explain). ---- #}
@@ -207,6 +248,9 @@
 <script src="/static/waterfall.js"></script>
 <script src="/static/prov.js"></script>
 <script src="/static/ppm.js"></script>
+<!-- The live decoder (M10): polls /api/decode and lists what rtl_433 read off the ISM band.
+     No radio / no rtl_433 shows an honest empty state; it never invents a sensor read. -->
+<script src="/static/decode.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by

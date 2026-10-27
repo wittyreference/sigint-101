@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from sigint101 import exam
 from sigint101.app import create_app
+from sigint101.decode import Decoder, parse_decode_line
 from sigint101.hardware import RadioProbe
 from sigint101.spectrum import Sweeper, SweepRow, validate_span
 
@@ -55,6 +56,12 @@ class _StubSweeper:
     def retune(self, low, high, bin_size=None):
         self.low, self.high, self.bin_size = validate_span(low, high, bin_size)
 
+    def release(self):
+        self._started = False
+
+    def resume(self):
+        pass
+
     def stop(self):
         self._started = False
 
@@ -69,11 +76,63 @@ def _rows():
     ]
 
 
-def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None):
+class _StubDecoder:
+    """An app-boundary stand-in for the real rtl_433 Decoder.
+
+    Holds real Decode objects and reports them as a running decoder would, so the decode route
+    can be exercised with no dongle attached. A test double at the hardware boundary, never a
+    fake baked into the product.
+    """
+
+    def __init__(self, reads):
+        self._reads = list(reads)
+        self._started = False
+        self._released = False
+        self.freq_hz = 433_920_000
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        if self._released:
+            raise AssertionError("start() after release without resume")
+        self._started = True
+
+    def command(self):
+        return ["rtl_433", "-f", str(self.freq_hz), "-F", "json"]
+
+    def recent(self, limit=None):
+        return self._reads if limit is None else self._reads[-limit:]
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _reads():
+    """A real ASK and a real FSK decode (FSK carries both tones), parsed from rtl_433 shapes."""
+    ask = parse_decode_line(
+        '{"time":"2026-01-01 00:00:00","model":"Acurite-Tower","id":16262,"channel":"A",'
+        '"temperature_C":18.0,"humidity":51,"mod":"ASK","freq":433.95,"snr":36.3}')
+    fsk = parse_decode_line(
+        '{"time":"2026-01-01 00:00:01","model":"LaCrosse-TX141THBv2","id":252,'
+        '"temperature_C":21.3,"humidity":45,"mod":"FSK","freq1":433.882,"freq2":433.958,"snr":22.4}')
+    return [ask, fsk]
+
+
+def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
+            decoder_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
-                     ppm_measure=ppm_measure)
+                     ppm_measure=ppm_measure, decoder_factory=decoder_factory)
     return TestClient(app)
 
 
@@ -270,6 +329,94 @@ def test_spectrum_returns_real_rows_when_the_sweep_is_running(tmp_path):
     assert len(body["rows"]) == 2
     assert body["rows"][0]["dbm"] == [-40.0, -38.0, -12.0, -41.0, -39.0]
     assert "snr_db" in body["rows"][0]
+
+
+# --- decode (rtl_433; no-mock: absence is an answer, never a fake read) -------
+
+
+def test_decode_reports_503_and_a_reason_when_no_radio(tmp_path):
+    # rtl_433 present (injected which) so this pins the no-radio refusal, not the no-binary one.
+    with _client(tmp_path,
+                 decoder_factory=lambda: Decoder(radio_present=lambda: False,
+                                                 which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/decode")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["decodes"] == []         # never a fabricated read
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_decode_reports_503_when_rtl_433_is_missing(tmp_path):
+    with _client(tmp_path,
+                 decoder_factory=lambda: Decoder(radio_present=lambda: True,
+                                                 which=lambda name: None)) as client:
+        resp = client.get("/api/decode")
+    assert resp.status_code == 503
+    assert "rtl_433" in resp.json()["reason"]
+
+
+def test_decode_default_decoder_also_refuses_without_a_radio(tmp_path):
+    # No decoder_factory injected: the real build_decoder runs and must still refuse, not fake.
+    with _client(tmp_path, probe=_absent) as client:
+        resp = client.get("/api/decode")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_decode_returns_real_reads_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 decoder_factory=lambda: _StubDecoder(_reads())) as client:
+        resp = client.get("/api/decode")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["freq_hz"] == 433_920_000
+    assert [d["model"] for d in body["decodes"]] == ["Acurite-Tower", "LaCrosse-TX141THBv2"]
+    # The FSK read carries both tones — the shape M10 is about.
+    fsk = body["decodes"][1]
+    assert fsk["mod"] == "FSK"
+    assert fsk["freq_hz"] == 433_882_000 and fsk["freq2_hz"] == 433_958_000
+
+
+def test_decode_stands_the_sweeper_down(tmp_path):
+    """Starting the decoder releases the dongle from the sweeper — one program at a time."""
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 decoder_factory=lambda: _StubDecoder(_reads())) as client:
+        client.get("/api/decode")
+    assert released["value"] is True
+
+
+def test_spectrum_reclaims_the_dongle_from_the_decoder(tmp_path):
+    """Switching back to the waterfall releases the decoder and resumes the sweep."""
+    resumed = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def resume(self):
+            resumed["value"] = True
+
+    released = {"value": False}
+
+    class _RecordingDecoder(_StubDecoder):
+        def release(self):
+            released["value"] = True
+            super().release()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 decoder_factory=lambda: _RecordingDecoder(_reads())) as client:
+        client.get("/api/decode")       # decoder takes the dongle
+        client.get("/api/spectrum")     # waterfall reclaims it
+    assert released["value"] is True
+    assert resumed["value"] is True
 
 
 # --- hardware (probe reported as data) ----------------------------------------

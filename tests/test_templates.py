@@ -318,6 +318,17 @@ def test_instrument_stage_eyebrow_drops_the_repeated_concept():
     assert lesson.concept in _eyebrow_for(html, "frame")
 
 
+def test_the_predict_eyebrow_drops_the_repeated_concept():
+    # Predict is the tightest screen (prompt + frozen frame + chips + Commit all on 800x480), so its
+    # eyebrow carries only the step + stage label; the concept already rode the frame stage.
+    lesson = _intro_lesson()
+    html = _console(lesson=lesson, current_stage="predict", prediction_committed=False)
+    predict_eyebrow = _eyebrow_for(html, "predict")
+    assert "PREDICT" in predict_eyebrow
+    assert lesson.concept not in predict_eyebrow
+    assert lesson.concept in _eyebrow_for(html, "frame")
+
+
 def test_a_no_hardware_instrument_stage_keeps_the_concept_in_its_eyebrow():
     # A no-radio lesson's demo renders as plain text (no tight waterfall band), so it is not an
     # instrument stage and keeps the concept in its eyebrow like any text stage.
@@ -349,6 +360,46 @@ def test_a_lesson_without_the_gain_panel_has_no_gain_meter():
     # The intro fixture declares only the ppm panel, so its instrument stage draws no gain meter.
     html = _console(lesson=_intro_lesson(), current_stage="demo")
     assert "gain-meter" not in html
+
+
+def _decode_intro_lesson():
+    """An intro lesson whose instrument is the rtl_433 decoder (M10's), tuned to the ISM band."""
+    return parse_lesson({
+        "id": 10, "slug": "fsk", "title": "The Carrier That Shifts", "type": "intro",
+        "concept": "FSK rides two frequencies you read with a decoder, not the eye",
+        "panels": ["decode"], "hardware": ["rtl-sdr"],
+        "tune": {"center_hz": 433_920_000, "span_hz": 600_000},
+        "stages": {"frame": "f", "demo": "DEMO watch the decoder", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_a_decode_lesson_shows_the_decoder_not_a_waterfall():
+    # The decode instrument replaces the waterfall: the panel decode.js fills is there, and no
+    # waterfall canvas is drawn on the instrument stage.
+    html = _console(lesson=_decode_intro_lesson(), current_stage="demo",
+                    tuned_hz=433_920_000, tune_band={"low_hz": 433_620_000,
+                                                      "high_hz": 434_220_000,
+                                                      "center_hz": 433_920_000,
+                                                      "step_hz": 100_000})
+    assert "data-decode-panel" in html
+    assert "data-decode-list" in html
+    assert "rtl_433" in html
+    assert "433.920" in html                 # the ISM band it listens on
+    assert "canvas class=\"waterfall\"" not in html
+
+
+def test_a_waterfall_lesson_has_no_decoder_panel():
+    html = _console(lesson=_intro_lesson(), current_stage="demo")
+    assert "data-decode-panel" not in html
+
+
+def test_a_decode_lessons_predict_frame_seals_the_decoder():
+    # The frozen predict frame on a decode lesson shows the sealed decoder, never a waterfall.
+    html = _console(lesson=_decode_intro_lesson(), current_stage="predict",
+                    prediction_committed=False, tuned_hz=433_920_000)
+    assert "READS HIDDEN" in html
+    assert "waterfall-wrap--frozen" not in html
 
 
 def _provenance_lesson():

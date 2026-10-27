@@ -1,0 +1,72 @@
+# ABOUTME: Lesson pack M10 "The Carrier That Shifts" — frequency-shift keying, the carrier that never
+# ABOUTME: goes off but hops between two tones, read with a decoder because the tones are too close to see.
+
+id: 10
+slug: frequency-shift-keying
+title: "The Carrier That Shifts"
+type: intro
+concept: >-
+  Frequency-shift keying keeps the carrier lit the whole time and moves it between two tones — a
+  mark and a space — so the pattern of pitches carries the message, not the height or an on-off
+  blink. The two tones sit too close to split on the waterfall, so you read FSK with a decoder,
+  not the eye; it is the robust code the weather-sensor zoo out on 433 MHz speaks.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [decode]
+tune:
+  center_hz: 433920000
+  span_hz: 600000
+  step_hz: 20000
+
+stages:
+  frame: >-
+    Tonight, comrade, the carrier refuses to vanish. Last lesson it blinked flat off to send a bit;
+    this one keeps the carrier lit the whole time and shifts it between two frequencies instead —
+    two pitches, bit by bit. But those two tones sit a hair apart, too close to tell by eye on this
+    screen, so tonight you meet a new instrument: a decoder that reads them for you.
+  demo: >-
+    Watch — hands off for now. No waterfall tonight; rtl_433 is listening on 433.92, the same crowded
+    ISM band, and it does the hard part — it demodulates each transmission and prints what it found.
+    When a sensor speaks, a line appears: the make of the device, a reading it sent — a temperature,
+    a humidity — and the modulation. Look at that last column. A cheap remote or doorbell reads ASK,
+    amplitude-shift: one frequency switched on and off, the on-off keying from last lesson. But a
+    weather sensor often reads FSK, frequency-shift, and it prints two frequencies, not one. That
+    pair is the whole trick: the carrier never went off, it hopped between a low tone and a high
+    tone, and rtl_433 read the hops as ones and zeros. You are reading a signal you cannot see.
+  try: >-
+    Now it's your turn, comrade — eyes on the list, and be patient; a sensor only chirps every minute
+    or two, so let it fill. As reads arrive, sort them by that last column: which are ASK, the
+    one-frequency on-off code, and which are FSK, carrying two frequencies? Find one FSK read and note
+    its two tones — how far apart are they? A few tens of kHz, far too fine for the waterfall's fat
+    bins. That is exactly why we let the decoder do the looking tonight.
+  predict: >-
+    An FSK sensor sends a bit, but unlike last lesson's OOK its carrier never switches off. So how
+    does it carry that bit? Lock it in.
+  observe: >-
+    Go back to the list and find an FSK read, eye on its two frequencies. Are they the same number or
+    two different ones, and how far apart? Then ask yourself why we trusted the decoder over the
+    waterfall: if those two tones are only tens of kHz apart, could a screen whose every bin is
+    125 kHz wide ever have shown them as two?
+  explain: >-
+    Here's the straight answer: it shifts to a second frequency. Frequency-shift keying keeps the
+    carrier on the whole time and moves it between two tones — a mark and a space, a high pitch and a
+    low — and the pattern of which tone is sounding carries the bits. Nothing ever switches off, which
+    is exactly why FSK beats OOK out in the noise: a burst of interference can fake a carrier blinking
+    off, but it is much harder to fake a clean jump between two set frequencies. That robustness is
+    why the weather sensor in someone's garden speaks FSK while the dollar-store doorbell speaks OOK.
+    And here is the catch you felt tonight: those two tones sit only tens of kHz apart, while this
+    waterfall's bins are 125 kHz wide — so FSK's two frequencies land in the same fat bin and the
+    screen can never split them. You did not fail to see it; it is simply below the screen's
+    resolution. So you changed instruments: rtl_433 demodulates the shift at full resolution, recovers
+    the bits, and even prints the sensor's message — the temperature it was reporting all along. That
+    is the lesson under the lesson: some signals you read with your eyes on the waterfall, and some you
+    read with a decoder, and knowing which is which is half the craft. One honest footnote, the one
+    rule from Unit 2 still standing over all of it: reading that a sensor said "eighteen degrees" is
+    fine; a device that is not yours is still not yours to act on.
+
+# Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
+# (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
+choices:
+  - {key: blink, label: "Blinks off"}
+  - {key: height, label: "Changes height"}
+  - {key: shift, label: "Shifts frequency"}

@@ -178,6 +178,24 @@ def test_panels_must_be_a_list():
         parse_lesson(_consolidation(panels="gain"))
 
 
+def test_the_decode_panel_loads_and_selects_the_decoder():
+    lesson = parse_lesson(_consolidation(panels=["decode"]))
+    assert lesson.panels == ["decode"]
+    assert lesson.uses_decoder is True
+
+
+def test_a_lesson_without_the_decode_panel_uses_the_waterfall():
+    assert parse_lesson(_consolidation(panels=["gain"])).uses_decoder is False
+    assert parse_lesson(_consolidation()).uses_decoder is False
+
+
+def test_decode_panel_cannot_combine_with_waterfall_overlays():
+    # decode replaces the waterfall; gain/provenance/ppm overlay the waterfall, so mixing them
+    # is a contradiction that would render a decoder with orphaned overlay chrome.
+    with pytest.raises(LessonError, match="decode"):
+        parse_lesson(_consolidation(panels=["decode", "gain"]))
+
+
 def test_hints_must_be_a_list():
     with pytest.raises(LessonError, match="must be a list"):
         parse_lesson(_consolidation(hints="not-a-list"))

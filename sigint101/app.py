@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .decode import Decoder, DecodeUnavailable
 from .events import log_event
 from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
@@ -143,7 +144,8 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
-               sweeper_factory=None, pool_path=None, ppm_measure=None) -> FastAPI:
+               sweeper_factory=None, decoder_factory=None, pool_path=None,
+               ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -166,6 +168,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_sweeper = sweeper_factory
 
+    # The decoder shares the sweeper's radio and its enumerator, so the two agree on which dongle
+    # they are taking turns on. Wired here and nowhere else, same as the sweeper.
+    if decoder_factory is None:
+        def build_decoder():
+            return Decoder(
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_decoder = decoder_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -177,6 +191,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.progress = Progress(Path(data_dir) / "progress.db")
         app.state.events_path = Path(data_dir) / "events.jsonl"
         app.state.sweeper = build_sweeper()
+        app.state.decoder = build_decoder()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -190,6 +205,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             yield
         finally:
             app.state.sweeper.stop()
+            app.state.decoder.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -551,6 +567,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # settles after a power cut, and a boot-time start would wrongly conclude "no radio" and
         # stay dark until a restart.
         if not sweeper.running:
+            # The decoder and the waterfall share one dongle. Taking it back from the decoder
+            # (release) and clearing any prior release on the sweeper is what lets the sweep start
+            # after an M10 lesson handed the radio to rtl_433.
+            app.state.decoder.release()
+            sweeper.resume()
             try:
                 sweeper.start()
             except SpectrumUnavailable as exc:
@@ -570,6 +591,32 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "bin_size": sweeper.bin_size,
             "gain": sweeper.gain,
             "rows": [row.as_dict() for row in sweeper.rows(limit)],
+        }
+
+    @app.get("/api/decode")
+    def decode(limit: int | None = None):
+        """Recent rtl_433 decodes on the ISM band. No radio or no rtl_433 is a 503 with the reason.
+
+        The decoder holds the dongle rtl_power otherwise sweeps, so the sweep is released first and
+        stays released until a /api/spectrum poll takes it back. resume() clears any release left on
+        the decoder by that reclaim, so flipping between the two keeps working.
+        """
+        decoder = app.state.decoder
+        if not decoder.running:
+            app.state.sweeper.release()
+            decoder.resume()
+            try:
+                decoder.start()
+            except DecodeUnavailable as exc:
+                log_event(app.state.events_path, "decode_blocked", {"reason": str(exc)})
+                return JSONResponse(status_code=503,
+                                    content={"available": False, "reason": str(exc), "decodes": []})
+            log_event(app.state.events_path, "decode_start",
+                      {"command": " ".join(decoder.command())})
+        return {
+            "available": True,
+            "freq_hz": decoder.freq_hz,
+            "decodes": [d.as_dict() for d in decoder.recent(limit)],
         }
 
     @app.get("/api/hardware")

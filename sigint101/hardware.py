@@ -16,6 +16,10 @@ RTLSDR_USB_IDS = ("0bda:2838", "0bda:2832")
 # numbers the bus, so the index SIGINT 101 picks is the index rtl_power will honour.
 RTL_POWER = "rtl_power"
 
+# The decoder's binary. rtl_433 holds the same dongle rtl_power does, one program at a time,
+# so the decode panel and the waterfall take turns on the radio (Sweeper.release/resume).
+RTL_433 = "rtl_433"
+
 # A selector that cannot match any real serial. Given one, rtl_power prints the whole device
 # list and exits without claiming a radio — which is how the bus gets surveyed without taking
 # the dongle away from a lesson in progress.
