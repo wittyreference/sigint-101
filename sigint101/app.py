@@ -247,22 +247,27 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         prediction = app.state.progress.get_prediction(lesson_id)
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
-        return templates.TemplateResponse(
-            request=request,
-            name="console.html",
-            context={
-                "title": lesson.title,
-                "back_href": "/",
-                "back_label": "Home",
-                "lesson": lesson,
-                "current_stage": lesson.sealed_stages[0] if committed else lesson.stage_order[0],
-                "prediction_committed": committed,
-                "committed_choice": prediction,
-                "predict_choices": lesson.choices,
-                "commit_url": f"/api/predict?lesson_id={lesson.id}",
-                "revealed": revealed,
-            },
-        )
+        context = {
+            "title": lesson.title,
+            "back_href": "/",
+            "back_label": "Home",
+            "lesson": lesson,
+            "current_stage": lesson.sealed_stages[0] if committed else lesson.stage_order[0],
+            "prediction_committed": committed,
+            "committed_choice": prediction,
+            "predict_choices": lesson.choices,
+            "commit_url": f"/api/predict?lesson_id={lesson.id}",
+            "revealed": revealed,
+        }
+        # A lesson that names its own band starts the instrument there instead of the default FM
+        # sweep: the dial reads its centre and step, and the live waterfall carries the band edges
+        # the console retunes the sweep to. A lesson with no band leaves these unset, so the
+        # template's FM defaults stand and no retune edges are emitted.
+        if lesson.tune:
+            context["tuned_hz"] = lesson.tune["center_hz"]
+            context["step_hz"] = lesson.tune["step_hz"]
+            context["tune_band"] = lesson.tune
+        return templates.TemplateResponse(request=request, name="console.html", context=context)
 
     @app.post("/api/predict")
     async def predict(lesson_id: int, request: Request):

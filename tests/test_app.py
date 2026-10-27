@@ -291,6 +291,33 @@ def test_hardware_reports_an_absent_radio(tmp_path):
     assert resp.json()["present"] is False
 
 
+# --- per-lesson tune band (the instrument starts on the lesson's band) --------
+
+
+def test_a_tuned_lesson_renders_its_own_band(tmp_path):
+    """Fixture lesson 2 declares a 433.92 MHz band, so its console points there, not at FM.
+
+    The dial reads the band centre, the step is the pack's, and the live waterfall carries the
+    band edges the console retunes the sweep to.
+    """
+    with _client(tmp_path) as client:
+        client.post("/api/predict?lesson_id=2", data={"prediction": "a"},
+                    headers={"content-type": "application/x-www-form-urlencoded"})
+        resp = client.get("/lesson/2")
+    assert resp.status_code == 200
+    assert "433.920" in resp.text
+    assert 'data-tune-low="432920000"' in resp.text
+    assert 'data-tune-high="434920000"' in resp.text
+
+
+def test_an_untuned_lesson_keeps_the_default_fm_band(tmp_path):
+    """Lesson 1 declares no band, so its console keeps the FM default and emits no retune edges."""
+    with _client(tmp_path) as client:
+        resp = client.get("/lesson/1")
+    assert resp.status_code == 200
+    assert "data-tune-low" not in resp.text
+
+
 # --- tune (fail-closed with the reason) ---------------------------------------
 
 

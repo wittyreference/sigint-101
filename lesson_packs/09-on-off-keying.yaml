@@ -1,0 +1,70 @@
+# ABOUTME: Lesson pack M9 "The Carrier That Vanishes" — on-off keying, the simplest modulation:
+# ABOUTME: a carrier switched flat off and on, the message carried by the pattern of bursts and gaps.
+
+id: 9
+slug: on-off-keying
+title: "The Carrier That Vanishes"
+type: intro
+concept: >-
+  On-off keying is the simplest modulation there is — the carrier is switched all the way off and
+  on, like a flashlight blinked in the dark, and the message is the pattern of the bursts and the
+  gaps, not the height or the pitch. It is what the cheapest radios speak: remotes, doorbells,
+  weather sensors, all crowding the 433 MHz band.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: []
+tune:
+  center_hz: 433920000
+  span_hz: 2000000
+  step_hz: 20000
+
+stages:
+  frame: >-
+    Tonight, comrade, you meet the simplest code on the air. Last lesson both carriers stayed lit
+    through the quiet; this one does the opposite — it blinks all the way out and back, a flashlight
+    signalling in the dark. Garage remotes, doorbells, cheap sensors: half the 433 MHz band speaks it.
+  demo: >-
+    Watch — hands off for now. We are parked at 433.92 MHz, the little ISM band where keyfobs and
+    sensors chatter. When something keys up, a bright column stabs straight up out of the noise —
+    then it is gone, flat to the floor — then back, then gone. Look closely: it is not dimming the
+    way an AM voice did, it is switching clean off between pulses, no carrier left behind at all. The
+    rhythm of those on-flashes and off-gaps is the whole message, exactly like Morse. One more view:
+    on your Flipper, Sub-GHz then Read RAW catches the same event as a pulse train in time — bars and
+    spaces marching left to right. The waterfall draws it in frequency, the Flipper draws it in time;
+    one code, two windows.
+  try: >-
+    Now it's your turn, comrade — eyes on 433.92. Key a 433 MHz remote near the radio, or let the
+    Flipper replay a capture, and watch the column blink. Each press: does the line drop all the way
+    to the noise floor in the gaps, or does a ghost of it hang on? Then glance at the Flipper's Read
+    RAW and match the blinks to its bars and spaces — the same on and off, drawn two ways. Count a
+    few; get a feel for the rhythm before you call it.
+  predict: >-
+    The call is about the quiet between presses. When nothing is keyed at 433.92, what sits where the
+    column was — a carrier still lit like AM's, the signal dropped to the noise floor, or a dim
+    half-carrier? Lock it in.
+  observe: >-
+    Go back to 433.92 and watch one full press and release, eye on the column through the release. In
+    the gap, is anything holding that spot, or is it just bare noise floor again? And ask yourself why
+    that has to be so: if the carrier itself comes and goes, what is left to carry the message?
+  explain: >-
+    Here's the straight answer: it drops all the way to the floor. On-off keying does exactly what the
+    name says — it switches the carrier fully off, so in the gaps there is no carrier at all, just the
+    noise floor you started with. That is the vanishing the last lesson promised you. And notice what
+    that means: the message cannot be written on the carrier's height or its pitch, because half the
+    time there is no carrier to write on. The message *is* the pattern — the lengths of the bursts and
+    the gaps — Morse with a flashlight. That is why the cheapest hardware on earth uses it: a remote
+    only has to flick a transmitter on and off on cue, no fine modulation to get right. You saw it two
+    ways tonight and they are the same event: the waterfall shows the blink in frequency, a column that
+    comes and goes; the Flipper's Read RAW shows it in time, a pulse train of bars and spaces. Learn to
+    read one against the other and you can spot OOK anywhere on the dial. One honest footnote: seeing
+    the blinks is not the same as reading them. Turning a particular on-off pattern into "unlock" or
+    "ring the bell" is decoding, and that is the next climb — with the one rule from Unit 2 still
+    standing over whose remote you may lawfully decode. Tonight you learned to watch a carrier vanish;
+    next you learn to read what its blinking says.
+
+# Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
+# (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
+choices:
+  - {key: lit, label: "A lit carrier"}
+  - {key: floor, label: "Down to the noise floor"}
+  - {key: dim, label: "A dim half-carrier"}

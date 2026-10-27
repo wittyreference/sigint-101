@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from .spectrum import MAX_SPAN_HZ, MIN_SPAN_HZ, TUNER_MAX_HZ, TUNER_MIN_HZ
+
 # A pack declares its shape with `type`. An intro lesson teaches a concept from a blank
 # slate, so it opens with frame/demo/try before the learner predicts; a consolidation
 # lesson drills a concept the learner has already met, so it goes straight to predict.
@@ -32,6 +34,10 @@ COMMIT_STAGE = "predict"
 # because a panel that silently rendered nothing would fail mid-lesson, in front of
 # the learner.
 KNOWN_PANELS = ("gain", "provenance", "ppm")
+
+# The tune buttons step by this much when a pack declares a band but not its own step. A
+# lesson on a narrow signal can ask for a finer step; 100 kHz is the FM-band default.
+DEFAULT_TUNE_STEP_HZ = 100_000
 
 
 class LessonError(ValueError):
@@ -69,6 +75,7 @@ class Lesson:
     artifact: str
     panels: list
     choices: list
+    tune: dict | None
 
     @property
     def needs_hardware(self) -> bool:
@@ -124,6 +131,52 @@ def _require(data: dict, key: str, ctx: str):
     if key not in data or data[key] in (None, "", []):
         raise LessonError(f"{ctx}: missing required field '{key}'")
     return data[key]
+
+
+def _parse_tune(data: dict, ctx: str) -> dict | None:
+    """Validate an optional `tune` band and normalise it to centre/span/step + edges.
+
+    A pack names where its instrument should start — `tune: {center_hz, span_hz, step_hz?}` —
+    because the eight FM-band lessons predate any need to leave 88-108 MHz, and a lesson on a
+    signal elsewhere (OOK at 433.92 MHz) cannot be hand-tuned there a hundred kHz at a time. The
+    band is checked against what the radio can actually reach and what the sweeper can sweep, at
+    load, so an unreachable pack fails here rather than mid-lesson in front of a learner. A pack
+    with no `tune` returns None and keeps the default FM sweep.
+    """
+    raw = data.get("tune")
+    if raw in (None, {}):
+        return None
+    if not isinstance(raw, dict):
+        raise LessonError(f"{ctx}: 'tune' must be a mapping of center_hz/span_hz/step_hz")
+
+    def _positive_int(key: str, *, required: bool, default: int | None = None) -> int:
+        if key not in raw or raw[key] is None:
+            if required:
+                raise LessonError(f"{ctx}: 'tune' needs an integer '{key}'")
+            return default
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise LessonError(f"{ctx}: 'tune.{key}' must be a positive integer in Hz")
+        return value
+
+    center = _positive_int("center_hz", required=True)
+    span = _positive_int("span_hz", required=True)
+    step = _positive_int("step_hz", required=False, default=DEFAULT_TUNE_STEP_HZ)
+
+    if span < MIN_SPAN_HZ or span > MAX_SPAN_HZ:
+        raise LessonError(
+            f"{ctx}: 'tune.span_hz' is {span / 1e6:.3f} MHz — the sweep spans "
+            f"{MIN_SPAN_HZ // 1000} kHz to {MAX_SPAN_HZ // 1_000_000} MHz"
+        )
+    low = center - span // 2
+    high = center + span // 2
+    if low < TUNER_MIN_HZ or high > TUNER_MAX_HZ:
+        raise LessonError(
+            f"{ctx}: 'tune' band {low / 1e6:.3f}-{high / 1e6:.3f} MHz is outside the radio's "
+            f"{TUNER_MIN_HZ // 1_000_000}-{TUNER_MAX_HZ // 1_000_000} MHz range"
+        )
+    return {"center_hz": center, "span_hz": span, "step_hz": step,
+            "low_hz": low, "high_hz": high}
 
 
 def parse_lesson(data: dict) -> Lesson:
@@ -212,6 +265,7 @@ def parse_lesson(data: dict) -> Lesson:
         artifact=str(data.get("artifact", "")),
         panels=list(panels),
         choices=choices,
+        tune=_parse_tune(data, ctx),
     )
 
 

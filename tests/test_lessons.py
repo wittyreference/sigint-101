@@ -277,3 +277,49 @@ def test_quoted_yes_no_choices_still_load():
         {"key": "no", "label": "No"},
     ]))
     assert lesson.choices == [{"key": "yes", "label": "Yes"}, {"key": "no", "label": "No"}]
+
+
+# --- per-lesson tune band (the instrument's starting frequency) ---------------
+# Every instrument lesson before M9 lived on the default FM sweep; a lesson that teaches a
+# signal elsewhere on the dial (OOK at 433.92 MHz) must be able to point the sweep at its
+# own band. A pack declares it with `tune: {center_hz, span_hz, step_hz?}`; the band must be
+# one the radio can actually reach, checked at load so an unreachable pack fails here, not
+# in front of a learner.
+
+
+def test_a_lesson_without_a_tune_band_keeps_the_default_band():
+    # The eight existing packs declare no band; they must stay on the FM default (tune is None).
+    assert parse_lesson(_consolidation()).tune is None
+
+
+def test_a_tune_band_parses_to_its_centre_span_step_and_edges():
+    lesson = parse_lesson(_consolidation(tune={
+        "center_hz": 433_920_000, "span_hz": 2_000_000, "step_hz": 100_000}))
+    assert lesson.tune["center_hz"] == 433_920_000
+    assert lesson.tune["span_hz"] == 2_000_000
+    assert lesson.tune["step_hz"] == 100_000
+    # The sweep needs edges; they are derived from the centre and span.
+    assert lesson.tune["low_hz"] == 432_920_000
+    assert lesson.tune["high_hz"] == 434_920_000
+
+
+def test_a_tune_band_defaults_its_step_when_omitted():
+    lesson = parse_lesson(_consolidation(tune={"center_hz": 433_920_000, "span_hz": 2_000_000}))
+    assert lesson.tune["step_hz"] == 100_000
+
+
+def test_a_tune_band_the_radio_cannot_reach_is_refused():
+    # 10 MHz is below the R82xx tuner floor (24 MHz); unreachable, so the pack must not load.
+    with pytest.raises(LessonError, match="tune"):
+        parse_lesson(_consolidation(tune={"center_hz": 10_000_000, "span_hz": 2_000_000}))
+
+
+def test_a_tune_span_outside_the_sweep_limits_is_refused():
+    # A span narrower than the sweeper's minimum (100 kHz) cannot be swept; fail at load.
+    with pytest.raises(LessonError, match="span"):
+        parse_lesson(_consolidation(tune={"center_hz": 433_920_000, "span_hz": 1_000}))
+
+
+def test_a_tune_band_missing_its_centre_is_refused():
+    with pytest.raises(LessonError, match="tune"):
+        parse_lesson(_consolidation(tune={"span_hz": 2_000_000}))

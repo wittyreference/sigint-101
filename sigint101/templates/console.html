@@ -109,6 +109,7 @@
               <div class="instrument__row">
                 <div class="waterfall-wrap">
                   <canvas class="waterfall" width="760" height="200" data-tune data-sample="1"
+                          {% if tune_band %}data-tune-low="{{ tune_band.low_hz }}" data-tune-high="{{ tune_band.high_hz }}"{% endif %}
                           aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
                   <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
                   <div class="waterfall__axis" aria-hidden="true">

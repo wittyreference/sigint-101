@@ -12,9 +12,20 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       colour: colour, formatMHz: formatMHz, formatDb: formatDb,
-      gainMeterGeometry: gainMeterGeometry,
+      gainMeterGeometry: gainMeterGeometry, parseTuneBand: parseTuneBand,
     };
     return;
+  }
+
+  // Turn a canvas's data-tune-low/high attribute pair into an /api/tune request, or null when the
+  // pair is absent or not two sane integer edges. Pure, so it is tested without a DOM; the attribute
+  // read and the POST are the browser-only wiring around it. A null means no tune is sent and the
+  // sweep keeps its default band rather than being pointed at a malformed span.
+  function parseTuneBand(lowAttr, highAttr) {
+    var low = parseInt(lowAttr, 10);
+    var high = parseInt(highAttr, 10);
+    if (!isFinite(low) || !isFinite(high) || low <= 0 || high <= 0 || high <= low) return null;
+    return { low: low, high: high };
   }
 
   // Blue -> cyan -> green -> yellow -> red. Conventional for RF, and legible on dark.
@@ -280,6 +291,25 @@
       });
   }
 
+  // A lesson that names its own band (data-tune-low/high on the canvas) points the shared sweep at
+  // it once on load, so the waterfall shows that band instead of the default FM sweep. The retune
+  // is detected on the next poll like any other span change. Polling starts whatever the outcome —
+  // on no radio the tune 503s and the panel still shows the honest no-radio state.
+  function autoTuneToBand() {
+    for (var i = 0; i < panels.length; i++) {
+      var c = panels[i].canvas;
+      var band = parseTuneBand(c.getAttribute("data-tune-low"), c.getAttribute("data-tune-high"));
+      if (band) {
+        return fetch("/api/tune", {
+          method: "POST", cache: "no-store",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(band),
+        }).catch(function () { /* next poll still draws the current band honestly */ });
+      }
+    }
+    return Promise.resolve();
+  }
+
   say("connecting", "sample", "starting the sweep");
-  tick();
+  autoTuneToBand().then(tick);
 })();

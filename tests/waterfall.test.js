@@ -79,3 +79,19 @@ test("a floor below the window clamps to the track instead of overflowing it", (
   close(g.floorTop, 100);              // clamped to the bottom
   assert.ok(g.gapHeight <= 100);
 });
+
+// A lesson can name its own band (data-tune-low/high on the canvas). Before polling, the panel
+// turns that attribute pair into a /api/tune request; this is the one pure decision in that path
+// — a complete pair becomes integer edges, anything partial or malformed yields null so no tune
+// is POSTed (the sweep then stays on its default band rather than being pointed at a bad span).
+test("a complete band attribute pair becomes integer tune edges", () => {
+  assert.deepEqual(panel.parseTuneBand("432920000", "434920000"),
+                   { low: 432920000, high: 434920000 });
+});
+
+test("a missing or partial band pair yields null (no tune is sent)", () => {
+  assert.equal(panel.parseTuneBand(null, null), null);
+  assert.equal(panel.parseTuneBand("432920000", null), null);
+  assert.equal(panel.parseTuneBand("", ""), null);
+  assert.equal(panel.parseTuneBand("notanumber", "434920000"), null);
+});

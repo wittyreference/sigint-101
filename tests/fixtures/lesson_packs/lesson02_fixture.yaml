@@ -1,11 +1,17 @@
 # Second fixture pack, so the home grid is tested with more than one tile and the "first
-# unfinished lesson is active" rule has something to choose between.
+# unfinished lesson is active" rule has something to choose between. It is also the suite's
+# instrument lesson that declares its own tune band, so the route wiring that points the
+# sweep at a lesson's band (not the default FM sweep) has something to exercise.
 id: 2
 slug: fixture-second
 title: Fixture Second Lesson
 concept: a second drill the learner meets after the first
 type: consolidation
-hardware: []
+hardware: [rtl-sdr]
+tune:
+  center_hz: 433920000
+  span_hz: 2000000
+  step_hz: 20000
 stages:
   predict: "Second lesson: what do you expect?"
   operate: "SECOND_OPERATE operate the second radio step"

@@ -386,6 +386,44 @@ def test_a_lesson_without_ppm_has_no_ppm_panel():
     assert "ppm-panel" not in html
 
 
+# --- per-lesson tune band -----------------------------------------------------
+
+
+def _tuned_lesson():
+    """A hardware consolidation lesson that declares its own band (OOK at 433.92 MHz)."""
+    return parse_lesson({
+        "id": 9, "slug": "ook", "title": "On-Off Keying",
+        "concept": "a carrier switched fully on and off is the simplest code of all",
+        "hardware": ["rtlsdr"],
+        "tune": {"center_hz": 433_920_000, "span_hz": 2_000_000, "step_hz": 20_000},
+        "stages": {
+            "predict": "Does the carrier vanish between pulses, or just dim?",
+            "operate": "OP tune to the band and key the remote",
+            "observe": "OB the line blinks fully out between pulses",
+            "explain": "EX that full on/off is on-off keying",
+        },
+    })
+
+
+def test_a_tuned_lesson_points_the_instrument_dial_at_its_band():
+    lesson = _tuned_lesson()
+    html = _console(lesson=lesson, current_stage="operate", prediction_committed=True,
+                    tuned_hz=lesson.tune["center_hz"], step_hz=lesson.tune["step_hz"],
+                    tune_band=lesson.tune)
+    assert "433.920" in html                       # the dial reads the band centre
+    assert "20 kHz" in html                         # the pack's finer tune step
+    # The live waterfall carries the band edges so the console can retune the sweep to it.
+    assert 'data-tune-low="432920000"' in html
+    assert 'data-tune-high="434920000"' in html
+
+
+def test_an_untuned_lesson_carries_no_band_to_retune_to():
+    # The FM-band lessons declare no band; the console must emit no retune edges for them.
+    html = _console(lesson=_consolidation_lesson(), current_stage="operate",
+                    prediction_committed=True)
+    assert "data-tune-low" not in html
+
+
 # --- the home / tile screen ---------------------------------------------------
 
 
