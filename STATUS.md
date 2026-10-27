@@ -1,20 +1,31 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call — M11 (LoRa) is done and landed (`7a8015d`), the meshtasticd decode panel.** Open items:
-- **M12 (PSK via RDS)** — the data you cannot see on the waterfall (N, the last Modulation lesson).
-  *Recommended next.* RDS rides FM (88-108), so it reuses the SDR + waterfall; the decode is the new
-  part. Scope the decode source with MC (rtl_fm/redsea, or a decode panel).
-- ~~LoRa below-floor capture~~ **DONE (observed, 2026-10-27)** — MC carried the Cardputer around a
-  corner, removed its antenna, and held it in a fist (body absorption); node A decoded four packets
-  at **−4.75 to −5.25 dB SNR** (RSSI −98), genuinely below the noise floor, rendered on the observe
-  panel highlighted. The headline capture for "Below the Noise Floor."
-- **FSK two-tone live capture (deferred)** — M10 is HIL-verified on ambient ASK; the FSK two-tone read
-  needs an on-frequency FSK transmitter (a real FSK sensor, or a crafted Flipper 2-FSK).
+**MC's call — M12 (RDS/PSK) is done and landed (`e390c5c`). Unit 4 Modulation (M8-M12) is COMPLETE.**
+Open items:
+- **M13 (ADS-B + map)** — the start of Unit 5 Decode: aircraft transponders at 1090 MHz on a map
+  (N+S). *Recommended next.* Needs `dump1090` (or similar) on nomad-b — a system install, ask MC. A
+  new tune band (1090 MHz, already supported) + a decode/map instrument.
+- **RDS below-the-waterfall capture (deferred, physical)** — M12's pipeline is HIL-proven end to end
+  (redsea built + decoding real test RDS; /api/rds runs live, honest-empty), but **nomad-b's FM
+  antenna can't recover the 57 kHz subcarrier** (no station decodes RDS off-air — same block as M4's
+  pilot). Drop a tuned FM dipole / good telescopic on the SDR and we capture the live station text.
+- **LoRa below-floor capture — DONE** (−4.75 to −5.25 dB SNR, 2026-10-27).
+- **FSK two-tone live capture (deferred)** — needs an on-frequency FSK transmitter.
+- **M4 real-ppm (deferred)** — same FM-antenna block as M12's RDS; a good FM antenna unblocks both.
 - **Follow-up: M8's predict prompt is ~60 words / 5 lines — 1 px over at a true 800x480.** Trim it.
 - **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their diagram.
-Recommended: M12 (scope the RDS decode with MC). TDD; land `--squash`; render-verify on nomad-b at a
-**forced** 800x480 (Emulation.setDeviceMetricsOverride — headless --window-size lies).
+Recommended: M13 (ask MC to approve the `dump1090` install first). TDD; land `--squash`; render-verify
+on nomad-b at a **forced** 800x480 (Emulation.setDeviceMetricsOverride — headless --window-size lies).
+
+**M12 (RDS/PSK) DONE and landed (observed, 2026-10-27), main @ `e390c5c`.** PSK hides data in phase,
+which the waterfall (amplitude × frequency) can never show; M12 reads it through RDS — the station
+name/RadioText on an FM 57 kHz subcarrier — with the redsea decode panel (a third SDR-exclusive tool
+sharing the dongle via release/resume). `redsea` built from source on nomad-b (installed to
+/usr/local/bin) and proven on real RDS (its own test MPX); `sigint101/rds.py` TDD'd against that real
+redsea JSON. **HIL on nomad-b:** the live `/api/rds` pipeline runs end to end (honest-empty), observe
++ predict render at a true 800x480. **Deferred (physical):** the live RDS *decode* needs a proper FM
+antenna — nomad-b's reception can't recover the subcarrier (no station decodes; same as M4).
 
 **M11 (LoRa) DONE and landed (observed, 2026-10-27), main @ `7a8015d`.** LoRa decodes below the noise
 floor by chirp processing gain; M11's instrument is the Nomad's own meshtastic radio (MC's call: a
