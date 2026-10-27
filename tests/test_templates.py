@@ -408,6 +408,19 @@ def test_home_tiles_show_lesson_progress():
     assert "1/4" in html
 
 
+def test_home_offers_the_licence_exam_trainer_apart_from_the_units():
+    """A full-width call-to-action under the grid lands on /exam — its own affordance,
+
+    visually set apart from the six curriculum unit tiles (it is a cross-cutting track).
+    """
+    html = _render("home.html", **_status(), tiles=UNITS)
+    assert 'class="exam-cta"' in html
+    assert 'href="/exam"' in html
+    assert "Licence" in html
+    # It is not dressed as a unit tile.
+    assert 'class="tile exam-cta"' not in html
+
+
 def test_every_screen_has_no_horizontal_overflow_affordance():
     # Guard against a stray inline width that would break the 800x480 no-scroll rule;
     # this is a smoke check that the templates render without raising.

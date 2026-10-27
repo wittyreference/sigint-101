@@ -1405,6 +1405,58 @@ body {
 
 /* ===== Scored practice exam (sim) ======================================== */
 /* Entry link from the study card to the 35-question exam. */
+/* Home's licence-exam call-to-action: a full-width bar under the unit grid. It is a
+   cross-cutting track, not a unit, so it reads apart from the tiles — an accent double
+   border and no U-code/progress bar — rather than sitting in the grid as a seventh tile. */
+.exam-cta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: var(--touch);
+  margin: 0 var(--gutter) 14px;
+  padding: 10px 16px;
+  background: var(--surface-2);
+  border: 3px double var(--accent);
+  color: var(--fg);
+  text-decoration: none;
+  position: relative;
+  z-index: 1;
+}
+.exam-cta__glyph {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  stroke: var(--accent);
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+.exam-cta__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-right: auto;
+}
+.exam-cta__title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.03em;
+  text-shadow: var(--glow);
+}
+.exam-cta__sub {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--fg-dim);
+  letter-spacing: 0.04em;
+}
+.exam-cta__arrow {
+  flex: none;
+  font-size: 26px;
+  color: var(--accent);
+  text-shadow: var(--glow);
+}
+
 .exam__sim-link {
   font-size: 15px;
   color: var(--accent);

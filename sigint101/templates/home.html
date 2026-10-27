@@ -6,4 +6,14 @@
 
 {% block content %}
   {% include "_tilegrid.html" %}
+  {# The licence exam trainer is a cross-cutting track, not one of the six curriculum
+     units, so it sits in its own full-width affordance under the grid, not in it. #}
+  <a class="exam-cta" href="/exam">
+    <svg class="exam-cta__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 9-9 9-9-9z"/></svg>
+    <span class="exam-cta__text">
+      <span class="exam-cta__title">Licence exam</span>
+      <span class="exam-cta__sub">Practice for your Technician ticket</span>
+    </span>
+    <span class="exam-cta__arrow" aria-hidden="true">&rarr;</span>
+  </a>
 {% endblock %}

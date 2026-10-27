@@ -142,6 +142,20 @@ def test_home_unit_tile_shows_aggregate_lesson_progress(tmp_path):
     assert "1/2" in after
 
 
+def test_home_links_to_the_exam_trainer(tmp_path):
+    """The licence exam trainer is reachable from home, not only by typing the URL.
+
+    It is a cross-cutting track, not one of the six curriculum units, so it sits in its
+    own affordance (not a unit tile) that lands on /exam.
+    """
+    with _client(tmp_path) as client:
+        resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'href="/exam"' in resp.text
+    assert "exam-cta" in resp.text          # its own affordance, not a unit tile
+    assert "Licence" in resp.text
+
+
 # --- commit-before-reveal (the whole point, enforced server-side) -------------
 
 
