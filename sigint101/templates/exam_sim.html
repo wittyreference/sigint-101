@@ -1,0 +1,60 @@
+<!-- ABOUTME: Scored practice-exam card — one of 35 questions at a time with a running score,
+     ABOUTME: answer-then-advance, commit-before-reveal (the right option is marked only on review). -->
+{% extends "base.html" %}
+
+{% block title %}{{ title|default('Practice Exam') }}{% endblock %}
+
+{% block content %}
+<section class="exam exam-sim">
+  <div class="stage-panel__eyebrow">&#9773; PRACTICE EXAM &middot; Question {{ position }} of {{ total }}</div>
+
+  <div class="exam-sim__score">
+    Score so far: {{ score }} right of {{ answered }} answered &middot; pass at {{ pass_mark }}/{{ total }}
+  </div>
+
+  <h1 class="exam__question">{{ question.question }}</h1>
+
+  {% if question.figure %}
+    <p class="exam__figure-note">Refers to diagram {{ question.figure }} &mdash; not shown here yet.</p>
+  {% endif %}
+
+  {% if not reviewed %}
+    {# ---- Answer: tap a choice, then commit. No typing (keyboard-free gate). ---- #}
+    <form class="predict" method="post" action="/api/exam/sim/answer?question_id={{ question.id }}">
+      <fieldset class="predict-chips exam-chips">
+        <legend class="sr-only">Tap your answer, then commit &mdash; no typing</legend>
+        {% for letter, text in question.options.items()|sort %}
+          <label class="predict-chip exam-chip">
+            <input type="radio" name="choice" value="{{ letter }}" {% if loop.first %}required{% endif %}>
+            <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
+            <span class="predict-chip__label">{{ text }}</span>
+          </label>
+        {% endfor %}
+      </fieldset>
+      <div class="predict__actions">
+        <span class="predict__hint">Tap your answer, comrade &mdash; then commit.</span>
+        <button class="btn btn--primary btn-commit" type="submit">Commit answer</button>
+      </div>
+    </form>
+  {% else %}
+    {# ---- Review: the right option is marked; a wrong pick is flagged too. ---- #}
+    <div class="exam-chips exam-chips--reviewed">
+      {% for letter, text in question.options.items()|sort %}
+        <div class="predict-chip exam-chip
+                    {%- if letter == question.answer %} exam-chip--correct{% endif %}
+                    {%- if letter == chosen and letter != question.answer %} exam-chip--chosen{% endif %}">
+          <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
+          <span class="predict-chip__label">{{ text }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    <div class="exam-reveal">
+      <p class="exam-result">
+        {% if correct %}Correct, comrade.{% else %}Not quite — the answer is {{ question.answer }}.{% endif %}
+        {% if question.fcc_refs %}<span class="exam-refs">[{{ question.fcc_refs|join(', ') }}]</span>{% endif %}
+      </p>
+      <a class="btn btn--primary" href="{{ next_href }}">{% if last %}See results{% else %}Next question{% endif %}</a>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

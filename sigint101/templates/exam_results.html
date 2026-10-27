@@ -1,0 +1,32 @@
+<!-- ABOUTME: Practice-exam results — pass/fail at 26/35 (74%), the score, and a per-subelement
+     ABOUTME: breakdown so a learner sees which syllabus areas to study next. -->
+{% extends "base.html" %}
+
+{% block title %}{{ title|default('Practice Exam') }}{% endblock %}
+
+{% block content %}
+<section class="exam-results exam-results--{{ 'pass' if result.passed else 'fail' }}">
+  <div class="stage-panel__eyebrow">&#9773; PRACTICE EXAM &middot; RESULTS</div>
+
+  <div class="exam-results__verdict">{% if result.passed %}PASS{% else %}NOT YET{% endif %}</div>
+  <div class="exam-results__score">{{ result.correct }} of {{ result.total }} correct &middot; {{ pct }}%</div>
+  <div class="exam-results__passline">Pass mark: {{ pass_mark }} of {{ total }} ({{ pass_pct }}%)</div>
+
+  <div class="exam-results__breakdown-title">By subelement</div>
+  <ul class="exam-results__breakdown">
+    {% for row in breakdown %}
+      <li class="exam-results__row{% if row.correct < row.total %} exam-results__row--weak{% endif %}">
+        <span class="exam-results__sub">{{ row.subelement }}</span>
+        <span class="exam-results__cell">{{ row.correct }}/{{ row.total }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+
+  <div class="exam-results__actions">
+    <form method="post" action="/api/exam/sim/restart">
+      <button class="btn btn--primary" type="submit">Retake</button>
+    </form>
+    <a class="btn" href="/">Back to units</a>
+  </div>
+</section>
+{% endblock %}

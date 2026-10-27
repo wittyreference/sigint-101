@@ -362,6 +362,107 @@ def test_exam_answer_for_an_unknown_question_is_404(tmp_path):
     assert resp.status_code == 404
 
 
+# --- exam trainer: scored 35-question practice sim (answer-then-advance) -----------------
+
+def _pool_answer(qid):
+    return exam.load_pool().get(qid).answer
+
+
+def _drive_sim(client, *, correct_count=35):
+    """Answer the whole sim via the real flow: the first correct_count right, the rest wrong.
+
+    Returns the location /exam/sim redirects to once every question is answered.
+    """
+    pool = exam.load_pool()
+    answered = 0
+    for _ in range(80):
+        page = client.get("/exam/sim", follow_redirects=False)
+        if page.status_code in (302, 303, 307):
+            return page.headers["location"]
+        qid = re.search(r"question_id=(T\w+)", page.text).group(1)
+        q = pool.get(qid)
+        choice = q.answer if answered < correct_count else next(c for c in "ABCD" if c != q.answer)
+        answered += 1
+        client.post(f"/api/exam/sim/answer?question_id={qid}",
+                    data={"choice": choice},
+                    headers={"content-type": "application/x-www-form-urlencoded"},
+                    follow_redirects=False)
+    raise AssertionError("sim did not finish in 80 steps")
+
+
+def test_exam_sim_starts_and_serves_the_first_question(tmp_path):
+    with _client(tmp_path) as client:
+        page = client.get("/exam/sim")
+    assert page.status_code == 200
+    assert "Question 1 of 35" in page.text
+    # A real pool question with four tap choices, posting to the sim endpoint, no reveal yet.
+    assert page.text.count('name="choice"') == 4
+    assert "/api/exam/sim/answer" in page.text
+    assert "exam-reveal" not in page.text
+
+
+def test_exam_sim_answer_records_and_redirects_to_its_review(tmp_path):
+    with _client(tmp_path) as client:
+        page = client.get("/exam/sim")
+        qid = re.search(r"question_id=(T\w+)", page.text).group(1)
+        posted = client.post(f"/api/exam/sim/answer?question_id={qid}",
+                             data={"choice": _pool_answer(qid)},
+                             headers={"content-type": "application/x-www-form-urlencoded"},
+                             follow_redirects=False)
+        assert posted.status_code == 303
+        assert f"/exam/sim/review/{qid}" in posted.headers["location"]
+        review = client.get(posted.headers["location"])
+    assert review.status_code == 200
+    assert "exam-chip--correct" in review.text        # the answer is revealed
+    assert "Question 1 of 35" in review.text           # progress stays visible
+
+
+def test_exam_sim_runs_to_a_passing_results_screen(tmp_path):
+    with _client(tmp_path) as client:
+        where = _drive_sim(client, correct_count=35)
+        assert "/exam/sim/results" in where
+        results = client.get("/exam/sim/results")
+    assert results.status_code == 200
+    assert "35 of 35" in results.text
+    assert "exam-results--pass" in results.text
+    assert "26" in results.text                         # the 74% pass line is shown
+
+
+def test_exam_sim_below_the_pass_mark_reads_as_not_passed(tmp_path):
+    with _client(tmp_path) as client:
+        _drive_sim(client, correct_count=25)            # one below 26/35
+        results = client.get("/exam/sim/results")
+    assert results.status_code == 200
+    assert "25 of 35" in results.text
+    assert "exam-results--fail" in results.text
+
+
+def test_exam_sim_results_before_finishing_resumes_the_sim(tmp_path):
+    with _client(tmp_path) as client:
+        client.get("/exam/sim")                          # starts a sim, nothing answered
+        resp = client.get("/exam/sim/results", follow_redirects=False)
+    assert resp.status_code in (302, 303, 307)
+    assert resp.headers["location"].endswith("/exam/sim")
+
+
+def test_exam_sim_restart_clears_and_starts_fresh(tmp_path):
+    with _client(tmp_path) as client:
+        _drive_sim(client, correct_count=35)
+        restarted = client.post("/api/exam/sim/restart", follow_redirects=False)
+        assert restarted.status_code == 303
+        page = client.get(restarted.headers["location"])
+    assert "Question 1 of 35" in page.text              # a brand-new sim, back at the start
+
+
+def test_exam_sim_answer_for_an_unknown_question_is_404(tmp_path):
+    with _client(tmp_path) as client:
+        client.get("/exam/sim")
+        resp = client.post("/api/exam/sim/answer?question_id=NOPE99",
+                           data={"choice": "A"},
+                           headers={"content-type": "application/x-www-form-urlencoded"})
+    assert resp.status_code == 404
+
+
 # --- provenance panel (M3): the radio's account of itself + baseline (deaf vs. empty) ---------
 
 

@@ -317,3 +317,59 @@ def test_scoring_detail_marks_each_question():
 def _seeded():
     import random
     return random.Random(1234)
+
+
+# ------------------------------------------------------- practice-exam session (sim)
+
+def test_sim_starts_empty_and_round_trips(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    assert store.sim() is None
+    store.start_sim(["T1A01", "T2B02", "T3C03"])
+    s = store.sim()
+    assert s["question_ids"] == ["T1A01", "T2B02", "T3C03"]
+    assert s["answers"] == {}
+
+
+def test_sim_records_answers_in_order(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.start_sim(["T1A01", "T2B02"])
+    store.record_sim_answer("T1A01", "B")
+    assert store.sim()["answers"] == {"T1A01": "B"}
+    store.record_sim_answer("T2B02", "C")
+    assert store.sim()["answers"] == {"T1A01": "B", "T2B02": "C"}
+
+
+def test_sim_refuses_an_answer_for_a_question_not_on_the_sheet(tmp_path):
+    # A stray id must not be stored — the sim only scores the 35 it drew.
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.start_sim(["T1A01"])
+    store.record_sim_answer("T9Z99", "A")
+    assert store.sim()["answers"] == {}
+
+
+def test_starting_a_sim_replaces_the_previous_one(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.start_sim(["T1A01"])
+    store.record_sim_answer("T1A01", "A")
+    store.start_sim(["T2B02", "T3C03"])
+    s = store.sim()
+    assert s["question_ids"] == ["T2B02", "T3C03"]
+    assert s["answers"] == {}
+
+
+def test_clear_sim_removes_the_session(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.start_sim(["T1A01"])
+    store.clear_sim()
+    assert store.sim() is None
+
+
+def test_sim_survives_a_reopen(tmp_path):
+    # Power-loss durability: a sim in progress is still there after the store reopens.
+    db = tmp_path / "exam.db"
+    first = exam.ExamStore(db)
+    first.start_sim(["T1A01", "T2B02"])
+    first.record_sim_answer("T1A01", "D")
+    first.close()
+    second = exam.ExamStore(db)
+    assert second.sim()["answers"] == {"T1A01": "D"}

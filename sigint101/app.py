@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .events import log_event
-from .exam import ExamStore, load_pool
+from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
 from .ppm import measure_pilot_ppm
@@ -352,6 +352,125 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "question": question, "reviewed": True,
                      "chosen": chosen, "correct": chosen == question.answer},
         )
+
+    # --- scored 35-question practice exam (answer-then-advance) ---------------------------
+
+    def _sim_progress(sim):
+        """From a sim dict: (first-unanswered id or None, that question's 1-based position,
+        correct-so-far). The current question is always the first the learner has not answered."""
+        pool = app.state.exam_pool
+        ids, answers = sim["question_ids"], sim["answers"]
+        correct = sum(1 for qid, c in answers.items()
+                      if pool.get(qid) is not None and c == pool.get(qid).answer)
+        current = next((qid for qid in ids if qid not in answers), None)
+        pos = (ids.index(current) + 1) if current is not None else len(ids)
+        return current, pos, correct
+
+    def _sim_breakdown(questions, answers):
+        """Per-subelement correct/total for the results screen, in exam order (T1..T9, T0 last)."""
+        rows: dict = {}
+        for q in questions:
+            cell = rows.setdefault(q.subelement, {"subelement": q.subelement, "correct": 0,
+                                                  "total": 0})
+            cell["total"] += 1
+            if answers.get(q.id) == q.answer:
+                cell["correct"] += 1
+        order = sorted(rows, key=lambda s: (10 if s[1] == "0" else int(s[1]), s))
+        return [rows[k] for k in order]
+
+    @app.get("/exam/sim", response_class=HTMLResponse)
+    def exam_sim(request: Request):
+        """Serve the current question of a scored practice exam, starting one if none is active.
+
+        The current question is the first unanswered on the drawn sheet; once all 35 are in, this
+        hands off to the results screen. The correct answer is never in the question HTML —
+        commit-before-reveal, exactly like the study card and the lesson predict gate.
+        """
+        store = app.state.exam_store
+        sim = store.sim()
+        if sim is None:
+            store.start_sim([q.id for q in build_exam(app.state.exam_pool)])
+            sim = store.sim()
+        current, pos, correct = _sim_progress(sim)
+        if current is None:
+            return RedirectResponse("/exam/sim/results", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="exam_sim.html",
+            context={"title": "Practice Exam", "back_href": "/exam", "back_label": "Exam",
+                     "question": app.state.exam_pool.get(current), "reviewed": False,
+                     "position": pos, "total": len(sim["question_ids"]),
+                     "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK},
+        )
+
+    @app.post("/api/exam/sim/answer")
+    async def exam_sim_answer(question_id: str, request: Request):
+        """Record one sim answer and redirect to its review — no JS, like the study card."""
+        question = app.state.exam_pool.get(question_id)
+        if question is None:
+            raise HTTPException(status_code=404, detail=f"question {question_id} not found")
+        choice = (await _field(request, "choice")).strip().upper()
+        correct = choice == question.answer
+        app.state.exam_store.record_sim_answer(question_id, choice)
+        # Also credit the Leitner history so the sim feeds the study card's weak-first order.
+        app.state.exam_store.record(question_id, correct)
+        log_event(app.state.events_path, "exam_sim_answer",
+                  {"question": question_id, "choice": choice, "correct": correct})
+        return RedirectResponse(f"/exam/sim/review/{question_id}?choice={choice}", status_code=303)
+
+    @app.get("/exam/sim/review/{question_id}", response_class=HTMLResponse)
+    def exam_sim_review(request: Request, question_id: str, choice: str = ""):
+        """Show the answered sim question revealed, with Next pointing at the next question or,
+        once the sheet is done, the results screen."""
+        question = app.state.exam_pool.get(question_id)
+        if question is None:
+            raise HTTPException(status_code=404, detail=f"question {question_id} not found")
+        sim = app.state.exam_store.sim()
+        if sim is None or question_id not in sim["question_ids"]:
+            return RedirectResponse("/exam/sim", status_code=303)
+        ids = sim["question_ids"]
+        _, _, correct = _sim_progress(sim)
+        nxt = next((qid for qid in ids if qid not in sim["answers"]), None)
+        chosen = choice.strip().upper()
+        return templates.TemplateResponse(
+            request=request,
+            name="exam_sim.html",
+            context={"title": "Practice Exam", "back_href": "/exam", "back_label": "Exam",
+                     "question": question, "reviewed": True,
+                     "chosen": chosen, "correct": chosen == question.answer,
+                     "position": ids.index(question_id) + 1, "total": len(ids),
+                     "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK,
+                     "next_href": "/exam/sim" if nxt is not None else "/exam/sim/results",
+                     "last": nxt is None},
+        )
+
+    @app.get("/exam/sim/results", response_class=HTMLResponse)
+    def exam_sim_results(request: Request):
+        """Score the finished practice exam: total, pass/fail at 26/35, and a per-subelement
+        breakdown. An unfinished or absent sim is sent back to answer the rest."""
+        sim = app.state.exam_store.sim()
+        if sim is None:
+            return RedirectResponse("/exam/sim", status_code=303)
+        current, _, _ = _sim_progress(sim)
+        if current is not None:
+            return RedirectResponse("/exam/sim", status_code=303)
+        questions = [app.state.exam_pool.get(qid) for qid in sim["question_ids"]]
+        result = score_exam(questions, sim["answers"])
+        return templates.TemplateResponse(
+            request=request,
+            name="exam_results.html",
+            context={"title": "Practice Exam", "back_href": "/", "back_label": "Home",
+                     "result": result, "pass_mark": PASS_MARK, "total": EXAM_SIZE,
+                     "pct": round(100 * result.correct / result.total),
+                     "pass_pct": round(100 * PASS_MARK / EXAM_SIZE),
+                     "breakdown": _sim_breakdown(questions, sim["answers"])},
+        )
+
+    @app.post("/api/exam/sim/restart")
+    def exam_sim_restart():
+        """Discard the finished (or abandoned) sim and start a fresh one."""
+        app.state.exam_store.clear_sim()
+        return RedirectResponse("/exam/sim", status_code=303)
 
     def _current_row():
         """The latest real sweep row, lazily starting the sweeper, or None when there is no radio.

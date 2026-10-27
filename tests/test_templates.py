@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from sigint101 import exam
 from sigint101.lessons import parse_lesson
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "sigint101" / "templates"
@@ -413,6 +414,63 @@ def test_every_screen_has_no_horizontal_overflow_affordance():
     for html in (_render("base.html", **_status()), _console(),
                  _render("home.html", **_status(), tiles=UNITS)):
         assert "<canvas" in html or "statusbar" in html
+
+
+# --- scored practice exam (sim card + results) --------------------------------
+
+
+def _exam_ctx(**over):
+    ctx = _status()
+    ctx.update(over)
+    return ctx
+
+
+def test_exam_sim_card_shows_progress_and_running_score():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam_sim.html", **_exam_ctx(
+        title="Practice Exam", back_href="/exam", back_label="Exam",
+        question=q, reviewed=False, position=3, total=35, score=2, answered=2, pass_mark=26))
+    assert "Question 3 of 35" in html
+    assert "2 right of 2 answered" in html
+    assert html.count('name="choice"') == 4
+    assert "/api/exam/sim/answer" in html
+    assert "exam-reveal" not in html          # commit-before-reveal on the sim too
+
+
+def test_exam_sim_review_reveals_the_answer_and_points_to_results_on_the_last():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam_sim.html", **_exam_ctx(
+        title="Practice Exam", back_href="/exam", back_label="Exam",
+        question=q, reviewed=True, chosen=q.answer, correct=True,
+        position=35, total=35, score=34, answered=35, pass_mark=26,
+        next_href="/exam/sim/results", last=True))
+    assert "exam-chip--correct" in html
+    assert 'href="/exam/sim/results"' in html
+    assert "See results" in html
+
+
+def test_exam_results_shows_verdict_passline_and_subelement_breakdown():
+    result = exam.ExamResult(total=35, correct=30, passed=True, detail=())
+    breakdown = [{"subelement": "T1", "correct": 6, "total": 6},
+                 {"subelement": "T5", "correct": 2, "total": 4}]
+    html = _render("exam_results.html", **_exam_ctx(
+        title="Practice Exam", back_href="/", back_label="Home",
+        result=result, pass_mark=26, total=35, pct=86, pass_pct=74, breakdown=breakdown))
+    assert "exam-results--pass" in html and "PASS" in html
+    assert "30 of 35 correct" in html
+    assert "Pass mark: 26 of 35 (74%)" in html
+    assert "By subelement" in html
+    assert "T1" in html and "6/6" in html
+    assert "exam-results__row--weak" in html      # T5 was 2/4, flagged for study
+
+
+def test_exam_results_not_passed_reads_not_yet():
+    result = exam.ExamResult(total=35, correct=20, passed=False, detail=())
+    html = _render("exam_results.html", **_exam_ctx(
+        title="Practice Exam", back_href="/", back_label="Home",
+        result=result, pass_mark=26, total=35, pct=57, pass_pct=74, breakdown=[]))
+    assert "exam-results--fail" in html
+    assert "NOT YET" in html
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -206,6 +206,15 @@ class ExamStore:
         seen        INTEGER NOT NULL DEFAULT 0,
         correct     INTEGER NOT NULL DEFAULT 0
     );
+    -- The single in-progress practice exam (a kiosk has one learner at a time). Its drawn
+    -- question ids and the answers given so far, so a sim survives a power loss mid-exam like
+    -- the Leitner history does. The CHECK pins it to one row.
+    CREATE TABLE IF NOT EXISTS sim (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        question_ids TEXT NOT NULL,
+        answers      TEXT NOT NULL DEFAULT '{}',
+        created      REAL
+    );
     """
 
     def __init__(self, db_path=None):
@@ -285,6 +294,61 @@ class ExamStore:
                     ranked.append((box, qid))
         ranked.sort(key=lambda item: (item[0], item[1]))
         return [qid for _, qid in ranked]
+
+    # --- practice-exam session (one active sim at a time) ---------------------------------
+
+    def start_sim(self, question_ids, *, clock=time.time) -> None:
+        """Begin a fresh practice exam over these drawn question ids, discarding any in progress.
+
+        The answer map starts empty; one row (id=1) holds the only active sim, so starting a new
+        one replaces the last.
+        """
+        ids = list(question_ids)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO sim(id, question_ids, answers, created) VALUES(1, ?, '{}', ?) "
+                "ON CONFLICT(id) DO UPDATE SET question_ids=excluded.question_ids, "
+                "answers='{}', created=excluded.created",
+                (json.dumps(ids), clock()),
+            )
+            self._conn.commit()
+
+    def sim(self):
+        """The active sim as {question_ids, answers}, or None when none is in progress."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT question_ids, answers FROM sim WHERE id=1"
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "question_ids": json.loads(row["question_ids"]),
+            "answers": json.loads(row["answers"]),
+        }
+
+    def record_sim_answer(self, question_id: str, choice: str) -> None:
+        """Store one answer in the active sim. A question not on the drawn sheet is ignored,
+        so only the 35 the sim drew are ever scored."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT question_ids, answers FROM sim WHERE id=1"
+            ).fetchone()
+            if row is None:
+                return
+            if question_id not in json.loads(row["question_ids"]):
+                return
+            answers = json.loads(row["answers"])
+            answers[question_id] = choice
+            self._conn.execute(
+                "UPDATE sim SET answers=? WHERE id=1", (json.dumps(answers),)
+            )
+            self._conn.commit()
+
+    def clear_sim(self) -> None:
+        """Discard the active sim (e.g. on a retake or when the learner walks away)."""
+        with self._lock:
+            self._conn.execute("DELETE FROM sim WHERE id=1")
+            self._conn.commit()
 
     def close(self) -> None:
         """Close the database so the file is left clean on shutdown."""

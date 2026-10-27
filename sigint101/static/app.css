@@ -1402,3 +1402,87 @@ body {
   color: var(--fg-dim);
   font-size: 15px;
 }
+
+/* ===== Scored practice exam (sim) ======================================== */
+/* Entry link from the study card to the 35-question exam. */
+.exam__sim-link {
+  font-size: 15px;
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--accent);
+  align-self: flex-start;
+}
+/* The running score above the question — state by number, dim so the question leads. */
+.exam-sim__score {
+  font-size: 15px;
+  color: var(--fg-dim);
+  letter-spacing: 0.02em;
+}
+
+/* Results screen: verdict led large, then score, pass line, and a per-subelement grid. */
+.exam-results {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px var(--gutter);
+  overflow-y: auto;
+}
+/* PASS / NOT YET reads by the word and its size, never colour alone (the border echoes it). */
+.exam-results__verdict {
+  font-family: var(--font-mono);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-shadow: var(--glow);
+  padding: 4px 0;
+  border-bottom: 3px double var(--border-strong);
+}
+.exam-results--pass .exam-results__verdict { color: var(--ok); }
+.exam-results--fail .exam-results__verdict { color: var(--warn); }
+.exam-results__score {
+  font-size: 22px;
+  color: var(--fg);
+}
+.exam-results__passline {
+  font-size: 15px;
+  color: var(--fg-dim);
+}
+.exam-results__breakdown-title {
+  font-size: 14px;
+  color: var(--fg-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+/* Ten subelement cells wrap to a couple of rows so the whole report fits 800x480. */
+.exam-results__breakdown {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 8px;
+}
+.exam-results__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  font-size: 16px;
+}
+/* A subelement the learner did not ace is outlined to stand out as a study target. */
+.exam-results__row--weak {
+  border-style: dashed;
+  border-color: var(--warn);
+}
+.exam-results__sub { color: var(--fg-dim); }
+.exam-results__cell { color: var(--fg); font-weight: 700; }
+.exam-results__actions {
+  margin-top: auto;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
