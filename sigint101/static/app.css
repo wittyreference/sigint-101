@@ -853,6 +853,40 @@ body {
    accent so the negative-SNR receptions stand out from the ordinary ones. */
 .decoder__item--floor .decoder__mod { color: var(--ok); font-weight: 600; }
 .decoder__item--floor .decoder__tone { color: var(--ok); }
+/* RDS station card (M12): the hidden data assembled from the subcarrier. The station name (PS)
+   leads large — it is the reveal — with PI/programme-type/group-count beneath and the RadioText
+   scrolling below. */
+.rds {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* A flex display would otherwise beat the UA [hidden] rule, so the sealed/empty card leaks through
+   before any RDS decodes — keep [hidden] authoritative. */
+.rds[hidden] { display: none; }
+.rds__ps {
+  font-family: var(--font-display, var(--font-mono));
+  font-size: 30px;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+.rds__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+.rds__meta b { color: var(--fg); }
+.rds__rt {
+  font-size: 15px;
+  color: var(--fg);
+}
 .decoder__read { grid-area: read; color: var(--fg); }
 .decoder__tone { grid-area: tone; font-family: var(--font-mono); font-size: 13px; color: var(--fg-mute); }
 .decoder__empty {

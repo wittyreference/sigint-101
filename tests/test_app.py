@@ -11,6 +11,7 @@ from sigint101.app import create_app
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.hardware import RadioProbe
 from sigint101.lora import LoRaListener, parse_lora_packet
+from sigint101.rds import RDSDecoder, RDSStation, parse_rds_group
 from sigint101.spectrum import Sweeper, SweepRow, validate_span
 
 # The suite owns its lesson content: the real lesson_packs/ are authored in parallel, so a test
@@ -163,13 +164,52 @@ def _packets():
     return [below, above]
 
 
+class _StubRDS:
+    """An app-boundary stand-in for the rtl_fm|redsea RDSDecoder (no real radio)."""
+
+    def __init__(self, station):
+        self._station = station
+        self._started = False
+        self._released = False
+        self.freq_hz = 96_000_000
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def station(self):
+        return self._station
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _station():
+    """A real RDSStation assembled from real redsea group shapes."""
+    s = RDSStation()
+    s.absorb(parse_rds_group('{"pi":"0x6201","group":"0A","prog_type":"Serious classical"}'))
+    s.absorb(parse_rds_group('{"pi":"0x6201","group":"0A","ps":"YLEKLAS1"}'))
+    s.absorb(parse_rds_group('{"pi":"0x6201","group":"2A","radiotext":"Now playing: Finlandia"}'))
+    return s
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
-            decoder_factory=None, lora_factory=None):
+            decoder_factory=None, lora_factory=None, rds_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
                      ppm_measure=ppm_measure, decoder_factory=decoder_factory,
-                     lora_factory=lora_factory)
+                     lora_factory=lora_factory, rds_factory=rds_factory)
     return TestClient(app)
 
 
@@ -491,6 +531,59 @@ def test_lora_returns_real_packets_with_their_snr(tmp_path):
     assert first["from_id"] == "!433d1234"
     assert first["snr_db"] < 0 and first["below_floor"] is True
     assert "ping from node B" in first["summary"]
+
+
+# --- rds (rtl_fm|redsea; no-mock: absence is an answer, never a fake station) -
+
+
+def test_rds_reports_503_and_a_reason_when_no_radio(tmp_path):
+    # redsea+rtl_fm present (injected which) so this pins the no-radio refusal.
+    with _client(tmp_path,
+                 rds_factory=lambda: RDSDecoder(radio_present=lambda: False,
+                                                which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/rds")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["station"] is None        # never a fabricated station
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_rds_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/rds")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_rds_returns_the_assembled_station_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 rds_factory=lambda: _StubRDS(_station())) as client:
+        resp = client.get("/api/rds")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["freq_hz"] == 96_000_000
+    st = body["station"]
+    assert st["pi"] == "0x6201"
+    assert st["ps"] == "YLEKLAS1"                       # the hidden station name
+    assert "Finlandia" in st["radiotext"]
+    assert st["group_count"] == 3
+
+
+def test_rds_stands_the_sweeper_down(tmp_path):
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 rds_factory=lambda: _StubRDS(_station())) as client:
+        client.get("/api/rds")
+    assert released["value"] is True
 
 
 # --- hardware (probe reported as data) ----------------------------------------

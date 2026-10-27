@@ -20,6 +20,11 @@ RTL_POWER = "rtl_power"
 # so the decode panel and the waterfall take turns on the radio (Sweeper.release/resume).
 RTL_433 = "rtl_433"
 
+# The RDS decode pipeline (M12): rtl_fm demodulates the FM multiplex, redsea pulls the RDS data from
+# the 57 kHz subcarrier. Both hold the one dongle, so the RDS panel takes turns with the sweep too.
+RTL_FM = "rtl_fm"
+REDSEA = "redsea"
+
 # A selector that cannot match any real serial. Given one, rtl_power prints the whole device
 # list and exits without claiming a radio — which is how the bus gets surveyed without taking
 # the dongle away from a lesson in progress.

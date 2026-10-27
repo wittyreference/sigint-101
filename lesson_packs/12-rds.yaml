@@ -1,0 +1,73 @@
+# ABOUTME: Lesson pack M12 "The Hidden Text" — PSK seen through RDS, data carried in the phase of an
+# ABOUTME: FM subcarrier, invisible on the waterfall and read only with a decoder (rtl_fm|redsea).
+
+id: 12
+slug: rds
+title: "The Hidden Text"
+type: intro
+concept: >-
+  Phase-shift keying hides data in the timing of the wave — the phase — leaving the height and the
+  frequency untouched, so a waterfall built from amplitude and frequency can never show it. RDS is
+  the everyday example: every FM broadcaster flips the phase of a quiet 57 kHz subcarrier to carry
+  its station name and scrolling text, there on every station you have tuned, and you read it only
+  by decoding the phase. It closes the modulation unit: the shape your eyes can never see.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [rds]
+tune:
+  center_hz: 96000000
+  span_hz: 400000
+  step_hz: 100000
+
+stages:
+  frame: >-
+    Tonight, comrade, the one trick your eyes can never catch. You have read a carrier by its height,
+    its on and off, its pitch, its chirp. The last is invisible: phase-shift keying moves the timing
+    of the wave itself — the phase — and a waterfall, which only ever shows height and frequency,
+    is blind to it. And it hides in plain sight: every FM station you have tuned carries a stream of
+    text in the phase of a quiet subcarrier. Tonight you read the words that were there all along.
+  demo: >-
+    Watch — hands off for now. No waterfall tonight; it would show you nothing new, because this data
+    does not live in height or frequency. redsea is listening to 96.0 MHz, the strong local station,
+    and pulling the hidden stream out of it. Watch the card fill in: the station's call sign — the PS
+    name — a couple of characters at a time, its programme type, and the RadioText scrolling beneath,
+    the song titles and messages the broadcaster sends. This is PSK at work: a 57 kHz subcarrier whose
+    phase flips back and forth, eleven hundred times a second, to spell out those letters — locked to
+    the station's 19 kHz pilot so the receiver knows where each bit starts. You saw this station's
+    power on the waterfall back in Lesson 1. You never saw this. It was always there.
+  try: >-
+    Now it's your turn, comrade — watch the card assemble. RDS is slow, a trickle of bits, so the call
+    sign builds letter by letter; give it a few seconds to settle. Read the programme type, and watch
+    the RadioText when it arrives. Sit with what you are doing: reading data that rides every FM
+    station on the dial, invisible on any waterfall, until you decode the phase it hides in.
+  predict: >-
+    RDS hides its data in the carrier's phase — not its height or frequency. So does it turn up on
+    the waterfall at all? Lock it in.
+  observe: >-
+    Look at the card against what a waterfall would have shown. On the waterfall this station is just a
+    plain FM block — did any of this text ever appear there, in any lesson? And ask yourself the real
+    question: if shifting phase changes neither height nor frequency, what instrument could ever have
+    shown it to you?
+  explain: >-
+    Here's the straight answer: not at all — it is invisible there. A waterfall is built from one
+    thing: how much energy sits at each frequency, moment to moment — amplitude across frequency.
+    Phase-shift keying leaves both of those alone. It holds the frequency steady and the height steady
+    and shifts only the phase, the exact timing of the wave's crossings. Two signals identical in
+    height and frequency but half a cycle apart in phase look exactly the same on any waterfall, yet
+    they carry opposite bits. That is why RDS hides so well: its 57 kHz subcarrier flips phase 1187.5
+    times a second to spell the station name and text, locked to the 19 kHz pilot so the receiver
+    knows where each bit begins — and not one bit of it moves a single pixel on the waterfall. To read
+    phase you need a decoder that recovers the carrier's own reference and measures the shift against
+    it, which is exactly what redsea did. And that is the quiet lesson of the whole unit: your eyes on
+    the waterfall are a powerful instrument, but they see amplitude and frequency, never phase — and a
+    whole class of signals, from this RDS to the Wi-Fi and satellite links waiting ahead, hides there
+    on purpose. One honest footnote: reading a broadcaster's RDS is as ordinary as reading the station
+    name off a car radio — it is public, meant to be seen. Next, you stop naming modulations and start
+    turning signals into meaning: decoding, in earnest.
+
+# Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
+# (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
+choices:
+  - {key: shows, label: "A bright mark"}
+  - {key: hidden, label: "Nothing at all"}
+  - {key: faint, label: "A faint smear"}

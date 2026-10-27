@@ -216,6 +216,20 @@ def test_an_instrument_panel_cannot_combine_with_another_instrument_or_an_overla
         parse_lesson(_consolidation(panels=["lora", "gain"]))
 
 
+def test_the_rds_panel_loads_and_selects_the_rds_instrument():
+    lesson = parse_lesson(_consolidation(panels=["rds"]))
+    assert lesson.panels == ["rds"]
+    assert lesson.uses_rds is True
+    assert lesson.uses_decoder is False and lesson.uses_lora is False
+
+
+def test_the_rds_panel_is_an_instrument_and_cannot_combine():
+    with pytest.raises(LessonError, match="rds"):
+        parse_lesson(_consolidation(panels=["rds", "decode"]))
+    with pytest.raises(LessonError, match="rds"):
+        parse_lesson(_consolidation(panels=["rds", "ppm"]))
+
+
 def test_hints_must_be_a_list():
     with pytest.raises(LessonError, match="must be a list"):
         parse_lesson(_consolidation(hints="not-a-list"))

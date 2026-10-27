@@ -83,6 +83,17 @@
                 <div class="decoder__axis" aria-hidden="true">meshtastic &middot; US LoRa band</div>
               </div>
             </div>
+            {% elif lesson.uses_rds %}
+            {# An RDS lesson seals the station data, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; STATION DATA HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">redsea &middot; RDS on {{ "%.1f"|format(mhz) }} MHz</div>
+              </div>
+            </div>
             {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
@@ -171,6 +182,37 @@
                 <div class="tune__dial">
                   <div class="tune__freq">915<span>MHz</span></div>
                   <div class="tune__caption">US LoRa band &middot; meshtastic listening</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
+            {% elif lesson.uses_rds %}
+            {# ---- RDS instrument (M12): the data riding the FM station's 57 kHz subcarrier, which the
+               waterfall never showed. rtl_fm|redsea decodes it; rds.js polls /api/rds and fills the
+               station card as the groups assemble. No radio / no redsea shows an honest empty state,
+               never a fabricated station. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder" data-rds-panel aria-label="Live RDS station data">
+                <div class="decoder__head">
+                  <span class="decoder__title">redsea &middot; RDS</span>
+                  <span class="decoder__status" data-rds-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <div class="rds" hidden data-rds-card>
+                  <div class="rds__ps" data-rds-ps>&mdash;</div>
+                  <div class="rds__meta">
+                    <span>PI <b data-rds-pi>&mdash;</b></span>
+                    <span data-rds-pty>&mdash;</span>
+                    <span>groups <b data-rds-count>0</b></span>
+                  </div>
+                  <div class="rds__rt" data-rds-rt></div>
+                </div>
+                <div class="decoder__empty" data-rds-empty>listening for RDS&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">{{ "%.1f"|format(mhz) }}<span>MHz</span></div>
+                  <div class="tune__caption">FM station &middot; redsea decoding RDS</div>
                 </div>
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
@@ -289,6 +331,9 @@
 <!-- The live LoRa panel (M11): polls /api/lora and lists packets meshtasticd decoded, with the SNR
      each landed at. No meshtasticd shows an honest empty state; it never invents a packet. -->
 <script src="/static/lora.js"></script>
+<!-- The live RDS panel (M12): polls /api/rds and fills the station card redsea assembles from the
+     57 kHz subcarrier. No radio / no redsea shows an honest empty state; it never invents a station. -->
+<script src="/static/rds.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by

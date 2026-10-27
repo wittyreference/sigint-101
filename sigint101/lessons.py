@@ -39,7 +39,8 @@ COMMIT_STAGE = "predict"
 OVERLAY_PANELS = ("gain", "provenance", "ppm")
 DECODE_PANEL = "decode"
 LORA_PANEL = "lora"
-INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL)
+RDS_PANEL = "rds"
+INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -106,6 +107,15 @@ class Lesson:
         /api/lora. The LoRa radio is separate, so there is no contention with a sweep.
         """
         return LORA_PANEL in self.panels
+
+    @property
+    def uses_rds(self) -> bool:
+        """True when the instrument is the RDS decoder (the rds panel) instead of the waterfall.
+
+        It runs rtl_fm|redsea on the SDR, so the console renders the rds panel and polls /api/rds;
+        like the rtl_433 decoder it takes turns with the sweep on the one dongle.
+        """
+        return RDS_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:

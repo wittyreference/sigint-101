@@ -4,6 +4,29 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-10-27: M12 decodes RDS (PSK) with rtl_fm|redsea — but nomad-b's FM antenna can't hear it
+**Finding.** RDS is the data on an FM station's 57 kHz subcarrier (PSK — phase, which the waterfall
+can never show). M12 decodes it with `rtl_fm -M fm -l 0 -A std -s 171k -F 9 -f <hz> | redsea -r
+171000` (171 kHz MPX keeps the 57 kHz subcarrier). `redsea` is NOT in apt — built from source on
+nomad-b (meson/ninja + libsndfile1-dev + libliquid-dev), installed to `/usr/local/bin`. redsea 1.3.1
+works: it decoded real RDS from its own test MPX recording (`pi:0x6201`, `prog_type`, groups 0A/1A).
+`sigint101/rds.py` mirrors the rtl_433 Decoder: `parse_rds_group` (one redsea JSON line → a group),
+`RDSStation` assembles pi/ps/radiotext/prog_type across groups, `RDSDecoder` runs the pipeline (two
+Popens wrapped as `_Pipeline`) with release/resume — a THIRD SDR-exclusive tool now shares the dongle
+with the sweeper and rtl_433 decoder, so every exclusive start releases the other two and
+/api/spectrum resumes the sweep. **BLOCKER (same as M4's ppm): nomad-b's FM reception can't recover
+the subcarrier.** Strongest station 96.0 MHz at ~29 dB over the sweep floor, but a full-band scan
+decoded RDS on NONE of the 4 audible stations, and /api/rds runs the live pipeline to an honest-empty
+station (group_count 0). M4 saw the same (no 19 kHz stereo pilot there). It is the FM antenna — the
+RTL-SDR has no proper tuned FM antenna. The live RDS *decode* is deferred until a dipole/good
+telescopic is on the SDR; the lesson, backend and pipeline are built and the plumbing is HIL-proven.
+**CSS gotcha caught by the render:** `.rds { display:flex }` beat the UA `[hidden]` rule, so the empty
+station card leaked over the "listening..." state — needed `.rds[hidden] { display:none }`. Watch any
+flex/grid element that also toggles the `hidden` attribute.
+**How to apply.** redsea JSON keys: pi, group (0A/2A/...), ps (8-char name), radiotext, prog_type.
+Decode redsea's LFS test files via the GitHub media URL (a shallow clone gets LFS pointers, not audio).
+A below-`[hidden]` leak means a `display` rule is overriding it — add `<sel>[hidden]{display:none}`.
+
 ## 2026-10-27: M11 reads LoRa off the Nomad's own meshtasticd — node B is the M5 Cardputer
 **Finding.** The Nomad already runs `meshtasticd` on its SPI LoRa radio (a MeshAdv-Mini sx1262,
 US 900 MHz, config `/etc/meshtasticd/config.d/lora-MeshAdv-Mini-900M22S.yaml`), with the standard

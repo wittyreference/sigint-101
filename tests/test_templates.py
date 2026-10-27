@@ -429,6 +429,34 @@ def test_a_lora_lessons_predict_frame_seals_the_lora_panel():
     assert "waterfall-wrap--frozen" not in html
 
 
+def _rds_intro_lesson():
+    """An intro lesson whose instrument is the RDS decoder (M12's), tuned to an FM station."""
+    return parse_lesson({
+        "id": 12, "slug": "rds", "title": "The Hidden Text", "type": "intro",
+        "concept": "RDS rides data on a subcarrier the waterfall never shows",
+        "panels": ["rds"], "hardware": ["rtl-sdr"],
+        "tune": {"center_hz": 96_000_000, "span_hz": 400_000},
+        "stages": {"frame": "f", "demo": "DEMO watch the text appear", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_an_rds_lesson_shows_the_station_card_not_a_waterfall():
+    html = _console(lesson=_rds_intro_lesson(), current_stage="demo", tuned_hz=96_000_000)
+    assert "data-rds-panel" in html
+    assert "data-rds-ps" in html
+    assert "redsea" in html
+    assert "96.0" in html                    # the FM station it decodes
+    assert "canvas class=\"waterfall\"" not in html
+
+
+def test_an_rds_lessons_predict_frame_seals_the_station():
+    html = _console(lesson=_rds_intro_lesson(), current_stage="predict",
+                    prediction_committed=False, tuned_hz=96_000_000)
+    assert "STATION DATA HIDDEN" in html
+    assert "waterfall-wrap--frozen" not in html
+
+
 def _provenance_lesson():
     """An intro lesson that declares the provenance panel (M3's, deaf-vs-empty)."""
     return parse_lesson({

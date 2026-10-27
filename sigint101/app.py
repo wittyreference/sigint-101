@@ -33,6 +33,7 @@ from .provenance import (
     read_baseline,
     record_baseline_sample,
 )
+from .rds import RDSDecoder, RDSUnavailable
 from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
 from .units import UNITS, get_unit
 
@@ -146,7 +147,7 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
-               pool_path=None, ppm_measure=None) -> FastAPI:
+               rds_factory=None, pool_path=None, ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -189,6 +190,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_lora = lora_factory
 
+    # The RDS decoder runs rtl_fm|redsea, so it holds the one dongle the sweeper and rtl_433 decoder
+    # also want — it joins their release/resume turn-taking. Wired to the same probe and enumerator.
+    if rds_factory is None:
+        def build_rds():
+            return RDSDecoder(
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_rds = rds_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -202,6 +215,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.sweeper = build_sweeper()
         app.state.decoder = build_decoder()
         app.state.lora = build_lora()
+        app.state.rds = build_rds()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -217,6 +231,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.sweeper.stop()
             app.state.decoder.stop()
             app.state.lora.stop()
+            app.state.rds.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -578,10 +593,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # settles after a power cut, and a boot-time start would wrongly conclude "no radio" and
         # stay dark until a restart.
         if not sweeper.running:
-            # The decoder and the waterfall share one dongle. Taking it back from the decoder
-            # (release) and clearing any prior release on the sweeper is what lets the sweep start
-            # after an M10 lesson handed the radio to rtl_433.
+            # The decoder, the RDS pipeline and the waterfall share one dongle. Taking it back from
+            # the SDR-exclusive tools (release) and clearing any prior release on the sweeper lets
+            # the sweep start after an M10/M12 lesson handed the radio to rtl_433 or rtl_fm.
             app.state.decoder.release()
+            app.state.rds.release()
             sweeper.resume()
             try:
                 sweeper.start()
@@ -615,6 +631,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         decoder = app.state.decoder
         if not decoder.running:
             app.state.sweeper.release()
+            app.state.rds.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -653,6 +670,32 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "host": listener.hostname,
             "port": listener.port,
             "packets": [p.as_dict() for p in listener.recent(limit)],
+        }
+
+    @app.get("/api/rds")
+    def rds():
+        """The RDS station assembled off the tuned FM frequency. No radio / no redsea is a 503.
+
+        rtl_fm|redsea holds the dongle the waterfall otherwise sweeps, so the sweep and the rtl_433
+        decoder are released first and stay released until a /api/spectrum poll takes the radio.
+        """
+        decoder = app.state.rds
+        if not decoder.running:
+            app.state.sweeper.release()
+            app.state.decoder.release()
+            decoder.resume()
+            try:
+                decoder.start()
+            except RDSUnavailable as exc:
+                log_event(app.state.events_path, "rds_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "station": None})
+            log_event(app.state.events_path, "rds_start", {"freq_hz": decoder.freq_hz})
+        return {
+            "available": True,
+            "freq_hz": decoder.freq_hz,
+            "station": decoder.station().as_dict(),
         }
 
     @app.get("/api/hardware")
