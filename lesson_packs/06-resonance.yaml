@@ -18,42 +18,31 @@ stages:
     fork — loud at one length, deaf everywhere else — and you are going to feel it happen under
     your own thumbs.
   demo: >-
-    Watch this — you don't touch anything yet. The stock whip screwed onto the radio right now is
-    the same one that caught your very first FM station, and here it is again on the FM band: loud,
-    bright, unmistakable. Now I don't swap the antenna, I don't touch anything on the bench — I
-    only tune the radio up to 1090 MHz, where aircraft overhead report their positions. Watch the
-    screen... almost nothing. Same antenna, same sky, and it has gone nearly deaf. Here is why, and
-    it is the whole idea of tonight: an antenna is a tuning fork for radio. A fork rings at its own
-    note and stays dead silent for any other; a child on a swing climbs only when you push at the
-    swing's own rhythm. An antenna "rings" — hears well — only near the frequency whose wavelength
-    matches its length, and goes deaf for frequencies that don't fit. This whip was cut to ring for
-    FM, so up at 1090 it is the wrong length by a mile. And there is one number that gives you the
-    right length, the only arithmetic you need tonight: a wavelength in metres is 300 divided by the
-    frequency in MHz. Down at FM, around 100 MHz, that's 300 over 100 — three metres. Up at 1090
-    it's 300 over 1090 — about 0.28 metres, twenty-seven centimetres. An antenna likes a quarter of
-    that, so it wants a leg just under seven centimetres. This whip is nowhere near it, and that is
-    exactly why 1090 fell silent.
+    Watch — hands off for now. The stock whip is the same one that caught your first FM station —
+    loud and bright on FM. Now I swap nothing and just tune up to 1090 MHz, where aircraft report
+    their positions. Watch... almost nothing: same antenna, same sky, gone nearly deaf. Here's
+    the whole idea — an antenna is a tuning fork: it rings, hears well, only near the frequency
+    whose wavelength matches its length, and goes deaf off it. This whip was cut for FM, so at
+    1090 it's the wrong length by a mile. One number gives the right length: a wavelength in metres
+    is 300 over the frequency in MHz. At 100 MHz that's three metres; at 1090, about 0.28 —
+    twenty-seven centimetres. An antenna likes a quarter of that: a leg just under seven
+    centimetres, nowhere near this whip. That's why 1090 fell silent.
   try: >-
-    Now your hands, comrade. Unscrew the whip and attach the telescopic dipole from the kit — two sliding
-    metal legs on a little centre block — and leave both legs stretched right out, long, roughly
-    where they'd sit for a low frequency. Keep the radio on 1090 and look: still almost nothing. A
-    longer antenna did not help; "bigger" was not the answer. Now slide each leg inward, shortening
-    both the same amount, and keep your eye on the screen as you go. Use the number: a quarter-wave
-    at 1090 is just under seven centimetres — about 6.9 — so bring each leg down to roughly the
-    length of your thumb. As you close in on that length, faint returns start pricking up out of
-    the noise right where the band was dead. You added no power and turned no knob; you changed the
-    antenna's note until it matched the station's, with your thumbs.
+    Now your hands, comrade. Unscrew the whip and attach the kit's telescopic dipole, both legs
+    stretched right out, long. Keep the radio on 1090: still almost nothing. Longer didn't help;
+    "bigger" wasn't the answer. Now slide each leg inward, eye on the screen. Use the number — a
+    quarter-wave at 1090 is just under seven centimetres, a thumb's length — and bring each leg to
+    there. As you close in, faint returns prick up where the band was dead. No power, no knob: you
+    tuned the antenna's note to the station's, with your thumbs.
   predict: >-
-    You just shortened the legs to wake up 1090 MHz, and you've seen the one number that sets the
-    length — 300 divided by the frequency. Here's the call. Leave aircraft behind and picture
-    retuning down to 915 MHz, the band where a crowd of little wireless gadgets chatter. 915 is a
-    lower frequency than 1090. To ring at 915, do the dipole legs need to get LONGER, get SHORTER,
-    or stay the SAME length? Lock in your answer — the rest of the lesson stays hidden until you do.
+    You just shortened the legs to wake up 1090 MHz, and you've seen the number that sets length —
+    300 over the frequency. The call: retune down to 915 MHz, where little wireless gadgets
+    chatter. 915 is lower than 1090. To ring there, do the dipole legs need to get LONGER, get
+    SHORTER, or stay the SAME? Lock it in — the rest stays hidden until you do.
   observe: >-
-    Before you touch the legs, reason it straight off the number and say what you expect, not what
-    you hope: work 300 divided by 915 against 300 divided by 1090 — is the wavelength at 915 bigger
-    or smaller than at 1090? — and so, to match it, should the quarter-wave legs grow or shrink from
-    the thumb-length that just worked for aircraft?
+    Before you touch the legs, reason off the number and say what you expect: 300 divided by 915
+    against 300 divided by 1090 — is the wavelength at 915 bigger or smaller? And so, to match it,
+    should the legs grow or shrink from the thumb-length that just worked for aircraft?
   explain: >-
     Here's what you were feeling for with your thumbs. Frequency and wavelength sit on a seesaw: the
     number on top, 300, never moves, so when the frequency goes down the wavelength goes up, and when

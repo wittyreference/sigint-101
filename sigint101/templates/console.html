@@ -43,8 +43,11 @@
       {% set sealed = stage in lesson.sealed_stages %}
       {% if (not sealed) or prediction_committed %}
         <section class="stage-panel" data-stage="{{ stage }}"{% if stage != cur %} hidden{% endif %}>
+          {# The instrument stages (demo/try/observe on a radio lesson) have only a thin scrolling
+             narration band at 800x480, so their eyebrow drops the concept to buy that band back —
+             the concept already rode the frame. Text stages keep it. #}
           <div class="stage-panel__eyebrow">
-            Step {{ loop.index }} of {{ loop.length }} &middot; {{ stage|upper }} &middot; {{ lesson.concept }}
+            Step {{ loop.index }} of {{ loop.length }} &middot; {{ stage|upper }}{% if not (stage in INSTRUMENT and lesson.needs_hardware) %} &middot; {{ lesson.concept }}{% endif %}
           </div>
 
           {% if stage == 'predict' %}

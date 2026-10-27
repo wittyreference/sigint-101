@@ -19,43 +19,34 @@ stages:
     off its shape on the waterfall, so you can call AM from FM on sight, before you ever turn up the
     sound.
   demo: >-
-    Watch this — you don't touch anything yet. I'm putting two signals in front of you, one after the
-    other. First the airband — the aircraft voice band, 118 to 137 MHz — and I'll park on a
-    controller's channel. See that: a single hard, bright line sitting dead still at the center. That's
-    the carrier, a pure steady tone with no message written on it yet. Now a pilot keys up and talks —
-    watch the brightness bloom and flicker right around that line, in time with the words, then fall
-    back to the bare line the moment they stop. The line itself never moves; only the brightness riding
-    on it comes and goes, and the whole thing is skinny, under ten kHz wide. That's AM — amplitude
-    modulation — the message written in height: louder voice, brighter paint, the carrier holding
-    still underneath. Now I jump down to broadcast FM, the music band from Lesson 1, and it's a
-    completely different animal. A fat block of light about 200 kHz wide — more than twenty times wider
-    than that airband channel — and instead of sitting still it writhes, the bright part darting side
-    to side across the channel as the music rises and falls. The height barely changes; it's the
-    sideways wiggle that carries the song. That's FM — frequency modulation — the message written in
-    pitch. Two shapes: AM, a still line that flickers bright; FM, a wide band that wiggles. You can
-    tell them apart with the sound all the way off.
+    Watch — hands off for now. Two signals, one after the other. First the airband — aircraft
+    voice, 118 to 137 MHz — on a controller's channel: a single hard, bright line, dead still at
+    center. That's the carrier, a pure steady tone, no message yet. A pilot keys up and talks —
+    the brightness blooms and flickers around the line with the words, then falls back when they
+    stop. The line never moves, only the brightness on it, and it's skinny, under ten kHz. That's
+    AM — amplitude modulation — the message written in height. Now broadcast FM, the music band
+    from Lesson 1: a different animal — a fat block about 200 kHz wide, twenty times wider, and
+    instead of sitting still it writhes, the bright part darting side to side with the music. The
+    height barely changes; the sideways wiggle carries the song. That's FM — frequency modulation
+    — the message in pitch. Two shapes: AM, a still line that flickers; FM, a wide band that
+    wiggles — tell them apart with the sound off.
   try: >-
-    Now it's your turn, comrade — and the whole job is your eyes — leave the volume down. Tap between the two
-    presets I've set: the airband controller channel and the FM music station. Flip back and forth a
-    few times and just watch the shapes. On the airband, find the thin bright carrier line and wait for
-    it to flicker when someone talks; on FM, find the wide block and watch it wiggle side to side. Then
-    say which is which out loud before you move on: point at the narrow one that flickers in place and
-    name it AM, point at the wide one that wiggles and name it FM. Don't listen yet — the point tonight
-    is that the shape already told you, and you want to learn to trust the shape.
+    Now it's your turn, comrade — the job is your eyes, so leave the volume down. Tap between the
+    two presets, the airband controller channel and the FM music station, and watch the shapes. On
+    the airband, find the thin bright carrier line and wait for it to flicker when someone talks;
+    on FM, find the wide block and watch it wiggle. Then call them out loud — the narrow flickering
+    one is AM, the wide wiggling one is FM. Don't listen yet; the shape already told you, so learn
+    to trust it.
   predict: >-
-    You just watched the airband carrier flare bright every time the controller spoke. Here's the call,
-    about what happens in the gaps — between words, when nobody is talking. Does a carrier go quiet and
-    vanish from the screen in that silence, leaving empty band until the next word, or does it stay
-    lit? Pick the one whose carrier you think disappears between words: the AM airband voice, the FM
-    music station, or neither of them. Lock in your answer — the rest of the lesson stays hidden until
-    you do.
+    You watched the airband carrier flare bright whenever the controller spoke. The call is about
+    the gaps between words: does a carrier vanish from the screen in that silence, or stay lit? Pick
+    the one whose carrier you think disappears between words — the AM airband voice, the FM music
+    station, or neither. Lock it in — the rest stays hidden until you do.
   observe: >-
-    Go back to the airband and really watch the carrier through a whole exchange, not just while
-    someone is talking. Wait for a gap — the moment after the controller finishes and before the next
-    transmission — and keep your eye fixed on that center line. Tell me what the line itself does in
-    the silence: does it blink out and leave empty screen until the next word, or does it stay lit and
-    steady, with only the brightness around it dropping away? And ask yourself why they'd call it a
-    carrier in the first place — what would it have to do, in the quiet, to earn that name?
+    Go back to the airband and watch the carrier through a whole exchange, not just while someone
+    talks. In a gap between transmissions, eye on the center line: does it blink out, or stay lit
+    while only the brightness around it drops? And why call it a carrier — what must it do in the
+    quiet to earn the name?
   explain: >-
     Here's the straight answer: neither — the carrier does not vanish. Watch an AM carrier through the
     quiet and you'll see the center line stay lit and rock-steady between words; what comes and goes is

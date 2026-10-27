@@ -18,33 +18,28 @@ stages:
     receiver and an empty sky look exactly alike on the screen — and the one plain habit that
     catches it.
   demo: >-
-    Watch this — you don't touch anything yet. Before we hunt for a single signal, I'm going to
-    do the thing that looks boring and is actually the whole job: write down the state of the
-    instrument itself. Open the provenance panel. It isn't showing you a signal — it's showing
-    you the radio: which radio this is, the gain it's set to, the temperature of its chip, whether
-    its power is clean, and the one reading that matters most tonight — the level of a known
-    reference, the strong local FM station you found in Lesson 1. That station is always on and
-    always in the same place, so its level is something you can hold the radio against. I capture
-    all of it right now as tonight's baseline: a dated snapshot of a healthy radio looking at a
-    signal it should always hear. That dull little snapshot is the thing that will one day tell
-    you the truth.
+    Watch — hands off for now. The boring move here is actually the whole job: write down the
+    state of the instrument itself. Open the provenance panel — it isn't showing a signal, it's
+    showing the radio: which radio this is, its gain, its chip temperature, whether its power is
+    clean, and the reading that matters most, the level of a known reference — the strong local
+    FM station from Lesson 1. It's always on, always in the same place, so you can hold the radio
+    against its level. I capture it all now as tonight's baseline: a dated snapshot of a healthy
+    radio hearing what it should. That snapshot is what will one day tell you the truth.
   try: >-
-    Now you capture yours, comrade. Point the radio at that same reference station and tap capture on the
-    provenance panel — that stamps tonight's baseline with today's date: the radio, its settings,
-    its temperature, and the reference level, all in one record. Here is the part that is itself
-    the lesson: do this again tomorrow night, and the night after. You're not waiting for anything
-    to happen yet — you're building the record that lets you notice when something does.
+    Now you capture yours, comrade. Aim at that same reference station and tap capture — that
+    stamps tonight's baseline with today's date: the radio, its settings, its temperature, the
+    reference level, one record. The lesson is in the repeat: do it again tomorrow, and the night
+    after. You're not waiting for something to happen — you're building the record that lets you
+    notice when it does.
   predict: >-
-    You've now saved a baseline against a known reference. Here's the call. Imagine weeks from now
-    this receiver slowly goes deaf — a corroded connector, a dying front end — and you aim it at a
-    stretch of band with nothing on it. Next to a band that is simply quiet tonight, how would that
-    broken-radio picture look: IDENTICAL, a LITTLE different, or OBVIOUSLY different? Lock in your
-    answer — the rest of the lesson stays hidden until you do.
+    You've saved a baseline against a known reference. The call: weeks from now this receiver
+    slowly goes deaf — corroded connector, dying front end — and you aim it at empty band. Next
+    to a band merely quiet tonight, would the broken-radio picture look IDENTICAL, a LITTLE
+    different, or OBVIOUSLY different? Lock it in — the rest stays hidden until you do.
   observe: >-
-    Put your own empty-band waterfall next to your captured baseline and look hard. Tell me
-    honestly: from the empty waterfall alone — the grass, the dark, the flat floor — can you
-    actually tell whether the radio is working or stone deaf? If the band itself can't answer that,
-    what is the one thing on your screen that can?
+    Put your empty-band waterfall beside your captured baseline and look hard. From the empty
+    waterfall alone — grass, dark, flat floor — can you tell whether the radio is working or
+    stone deaf? If the band can't answer that, what one thing on your screen can?
   explain: >-
     Here's the hard truth you just reasoned your way toward. A dead front end and an empty sky draw
     the same waterfall — flat floor, no stripes, nothing at all. "Quiet band" and "deaf radio" are

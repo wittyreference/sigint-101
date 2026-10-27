@@ -18,39 +18,32 @@ stages:
     length, the right aim, and shoving a too-loud neighbour out of the radio's ear — and you learn
     that a missing signal sometimes means too much of the wrong thing, not too little antenna.
   demo: >-
-    Watch this — you don't touch anything yet. Start where last lesson left off: the dipole, each
-    leg set near 6.9 centimetres, the quarter-wave for 1090 MHz, and the radio on the aircraft band.
-    A few faint planes are limping in. First move is aim. Right now the legs are lying flat —
-    horizontal. Keep an eye on the signal-to-noise number as I stand the dipole up so both legs point
-    straight up and down... the returns jump, more planes, cleaner. That's polarization: an aircraft
-    antenna hangs vertically, so it sends its signal standing up, and an antenna held the same way —
-    vertical — drinks it in, while one lying crossways to it barely hears a thing. Same antenna, same
-    length, only the angle changed, and the signal moved. Now the strange one. In a town near strong
-    FM stations the aircraft band can look wrecked — the whole floor smeared and lifted, planes
-    drowning in it — and a beginner's first thought is "my antenna's too small." Watch what actually
-    fixes it. I slide one small barrel inline with the cable: an FM-notch filter, a part whose only
-    job is to throw away the 88-to-108 MHz broadcast band before it ever reaches the radio. The
-    instant it's in, the smear collapses and the planes pop out clean. The antenna never changed. The
-    trouble was never too little signal at 1090 — it was far too much signal down at 100, so loud it
-    was overloading the front end and blinding the radio everywhere at once.
+    Watch — hands off for now. Start where last lesson left off: dipole legs near 6.9 cm for 1090
+    MHz, radio on the aircraft band, a few faint planes. First move is aim. The legs lie flat;
+    watch the SNR as I stand the dipole up, both legs vertical — the returns jump, more planes,
+    cleaner. That's polarization: an aircraft antenna hangs vertically, so a vertical antenna
+    drinks its signal in while a crosswise one barely hears. Same antenna, same length — only the
+    angle changed. Now the strange one: near strong FM the aircraft band can look wrecked, the
+    floor smeared and planes drowning, and the beginner thinks "antenna too small." Watch the real
+    fix: I slide an FM-notch filter inline — its only job is to throw away the 88-to-108 MHz band
+    before it reaches the radio. The smear collapses and the planes pop out clean. The antenna
+    never changed: the trouble was never too little signal at 1090, it was far too much at 100 —
+    so loud it overloaded the front end and blinded the radio everywhere.
   try: >-
-    Now you run all three, comrade. With the radio on 1090, first set the legs to that 6.9-centimetre
-    quarter-wave and read the SNR; then rotate the dipole from flat to standing vertical and watch
-    the number climb to its best; then slide the FM-notch filter into the cable and watch what
-    happens to the floor. Change one thing at a time and keep the SNR readout in view, so you can say
-    which move bought you what: length got you into the ballpark, aim squeezed out more, and the
-    notch — if FM was overloading you — cleared the smear. Land on the best combination of the three.
+    Now you run all three, comrade. On 1090, set the legs to the 6.9-centimetre quarter-wave and
+    read the SNR; rotate the dipole from flat to vertical and watch it climb; then slide the
+    FM-notch filter into the cable and watch the floor. Change one thing at a time, SNR in view,
+    and say what each move bought: length got you to the ballpark, aim squeezed out more, the notch
+    cleared the smear if FM was overloading you.
   predict: >-
-    That little notch just rescued the aircraft band, so it's tempting to treat it as a
-    clean-everything button. Here's the call. Picture retuning down to 915 MHz, where small wireless
-    gadgets live, and suppose their signal looks weak. Will inserting that same FM-notch filter help
-    your 915 reception: YES, NO, or IT DEPENDS? Lock in your answer — the rest of the lesson stays
-    hidden until you do.
+    The notch just rescued the aircraft band, so it's tempting to treat it as a clean-everything
+    button. The call: retune down to 915 MHz, where small wireless gadgets live, and suppose their
+    signal looks weak. Will inserting that same FM-notch filter help 915 — YES, NO, or IT DEPENDS?
+    Lock it in — the rest stays hidden until you do.
   observe: >-
-    Reason from what the notch actually does, and say what you expect before you try it: the filter
-    removes one specific stretch of spectrum — 88 to 108 MHz — and nothing else. Is 915 MHz anywhere
-    inside that stretch? And when your 915 signal is weak, is the likelier culprit the far-off FM band
-    you just removed, or something about the antenna length and aim you set earlier this lesson?
+    Reason from what the notch actually does, and say what you expect first: the filter removes one
+    stretch, 88 to 108 MHz, and nothing else. Is 915 MHz anywhere inside it? And when 915 is weak,
+    is the likelier culprit the far-off FM you removed, or the antenna length and aim from earlier?
   explain: >-
     Here's the straight answer: no — not on its own. The FM-notch filter does exactly one thing,
     remove the 88-to-108 MHz broadcast band, and 915 is nowhere near it, so the notch doesn't touch

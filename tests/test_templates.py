@@ -1,6 +1,7 @@
 # ABOUTME: Renders the touch-console Jinja templates (base/console/home) with sample
 # ABOUTME: contexts and asserts the shell, the keyboard-free predict gate, and the seal.
 
+import re
 from pathlib import Path
 
 import pytest
@@ -126,6 +127,16 @@ def _console(lesson=None, **ctx):
     )
     base.update(ctx)
     return _render("console.html", **base)
+
+
+def _eyebrow_for(html, stage):
+    """The eyebrow text of one stage's panel (the first eyebrow after its section opens)."""
+    m = re.search(
+        r'data-stage="' + re.escape(stage) + r'".*?stage-panel__eyebrow">(.*?)</div>',
+        html,
+        re.S,
+    )
+    return m.group(1) if m else ""
 
 
 # --- the shell (base.html) ----------------------------------------------------
@@ -291,6 +302,27 @@ def test_a_hardware_lesson_still_renders_the_radio():
     html = _console(lesson=_intro_lesson(), current_stage="demo")
     assert "<canvas" in html
     assert "SIGNAL HIDDEN" in html
+
+
+def test_instrument_stage_eyebrow_drops_the_repeated_concept():
+    # The instrument stages (demo/try/observe) have a tight scrolling narration band at 800x480,
+    # so their eyebrow carries only the step + stage label; the concept already rode the frame
+    # stage and must not eat that band again here.
+    lesson = _intro_lesson()
+    html = _console(lesson=lesson, current_stage="demo", prediction_committed=False)
+    demo_eyebrow = _eyebrow_for(html, "demo")
+    assert "DEMO" in demo_eyebrow
+    assert lesson.concept not in demo_eyebrow
+    # The frame still carries the lesson's thesis.
+    assert lesson.concept in _eyebrow_for(html, "frame")
+
+
+def test_a_no_hardware_instrument_stage_keeps_the_concept_in_its_eyebrow():
+    # A no-radio lesson's demo renders as plain text (no tight waterfall band), so it is not an
+    # instrument stage and keeps the concept in its eyebrow like any text stage.
+    lesson = _rules_lesson()
+    html = _console(lesson=lesson, current_stage="demo")
+    assert lesson.concept in _eyebrow_for(html, "demo")
 
 
 def _gain_intro_lesson():

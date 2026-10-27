@@ -18,30 +18,25 @@ stages:
     is seeing a real signal as a shape on the screen, and every lesson after this one is just
     learning to read more shapes.
   demo: >-
-    Watch this — you don't touch anything yet. I'm going to sweep the FM broadcast band, 88
-    to 108 MHz, and tune the strongest station near you. Give it a second... there. That
-    bright vertical stripe, about 200 kHz wide, that just bloomed on the screen is a radio
-    station arriving right now — you are seeing radio. This picture is called a waterfall, and
-    it has exactly three directions worth knowing. Left-to-right is frequency: where on the
-    dial a signal lives. Top-to-bottom is time: the newest sliver paints at the top and
-    scrolls down, so the screen is the last few seconds of the air. Brightness is power: the
-    brighter the paint, the stronger the signal. That's the whole alphabet — frequency across,
+    Watch — hands off for now. I sweep the FM band, 88 to 108 MHz, and tune the strongest
+    station near you. There — that bright vertical stripe, about 200 kHz wide, is a radio
+    station arriving right now. You are seeing radio. This picture is a waterfall, and it has
+    three directions: left-to-right is frequency; top-to-bottom is time, the newest sliver at
+    the top, scrolling down; brightness is power. That's the whole alphabet — frequency across,
     time down, brightness is power.
   try: >-
-    Now it's your turn, comrade. From the stations I just scanned, tap a different strong one — any
-    other bright stripe on the list. Watch the screen jump to that frequency and a fresh
-    ~200 kHz stripe bloom where that station lives. That's it: you just tuned a radio.
-    Don't over-think the details yet — the only goal is to make a station appear and put your
-    finger on its stripe.
+    Now it's your turn, comrade. From the stations I just scanned, tap a different strong one —
+    any other bright stripe on the list. Watch the screen jump to it and a fresh stripe bloom
+    where that station lives. That's it — you just tuned a radio. The only goal: make a station
+    appear and put your finger on its stripe.
   predict: >-
     Next you'll tune two notches up the dial, to the station above the one you're on. First,
     commit to a guess: will that station's bright stripe be WIDER, NARROWER, or the SAME
     width as this one? Lock it in — the rest of the lesson stays hidden until you do.
   observe: >-
-    Go ahead and tune that station two notches up, and hold the two in your mind side by side.
-    Tell me what you actually see, not what you expected: between this station and the one
-    before it, which stripe is BRIGHTER — that's the stronger signal — and which stripe is
-    WIDER, or do the two look the same?
+    Now tune two notches up the dial and hold the two stations side by side. Tell me what you
+    actually see, not what you expected: which stripe is BRIGHTER — the stronger signal — and
+    which is WIDER, or do the two look the same?
   explain: >-
     Here's what you were looking at. Every broadcast FM station is handed the same slice of
     the dial — about 200 kHz wide — so from one station to the next the stripe is the same
