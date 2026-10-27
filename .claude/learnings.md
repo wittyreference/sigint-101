@@ -4,6 +4,26 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-10-27: the instrument narration is a ~27-65px scroll band — the eyebrow concept was eating it
+**Finding.** At 800x480 the instrument stage's narration (`.instrument > .stage-panel__body`) is a
+tiny scrolling band: the fixed chrome (status bar, stage rail, eyebrow, title, the 120px waterfall
+row, the tune strip) consumes almost the whole 480px. Measured with a throwaway same-origin iframe
+fit-view that flips a hidden `.stage-panel[data-stage=...]` visible and prints
+`scrollHeight - clientHeight`: the shipped M2 demo (78 words) left a 46px band and scrolled 157px;
+M7's demo left only **27px** (one line) because its eyebrow reprinted the full lesson `concept` and
+wrapped to 3 lines. The eyebrow `Step N of M · STAGE · <concept>` repeats on EVERY stage, so the
+concept (already shown on the frame) was the single biggest band-eater on the tight instrument
+stages. Dropping it there (keeping it on frame/predict/explain + no-hardware stages) grew the band
+27px -> 65px (~one line -> two) uniformly, zero content lost (`85d126d`). Copy-trimming the narration
+helps proportionally but cannot make a dense demo "fit" — a 150-180-word demo still scrolls ~450px in
+a 65px band. The narration is a scroll band BY DESIGN (592bf84); trimming reduces the scroll, it does
+not eliminate it.
+**How to apply.** Treat any instrument-stage prose as scrolling (~1-2 lines show at once), and spend
+the fixed vertical budget carefully — don't repeat chrome (like the concept) on stages that already
+showed it. To measure a stage's real scroll, render a throwaway same-origin fit-view (iframe to
+`/lesson/N`, flip the target `data-stage` panel visible, print `body.scrollHeight - body.clientHeight`)
+and screenshot it on nomad-b. **Delete the fit-view before committing.**
+
 ## 2026-10-26: Harness installed
 
 - **Feature-factory harness seeded (TDD + self-learning + self-documenting, solo footprint).**

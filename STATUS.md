@@ -1,15 +1,12 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's plan: (1) trim the remaining instrument lessons' copy, then (2) build exam-sim mode.**
-1. **Instrument-lesson copy trim** (no hardware, content only): trim the demo/try/observe narration
-   on **M1, M3, M4, M6, M7, M8** the way M2 was trimmed (`592bf84`), so each fits the fixed 800x480
-   instrument stage cleanly (they work now but their long copy scrolls in a small band until trimmed).
-   Edit `lesson_packs/*.yaml`; keep predict prompts short (~35-40 words); render-check each stage at
-   800x480 (POST a predict to reveal observe; see render recipe). Land through a worktree, --squash.
-2. **Exam-sim mode**: a scored 35-question practice exam (NCVEC blueprint) alongside the study card,
-   wiring `build_exam` + `score_exam` (both already in `exam.py`) with a results/score screen. No
-   hardware; reuse the exam-chip pattern from `/exam`. Ask MC ONE question on session/results shape first.
+**Exam-sim mode** (the copy trim landed `85d126d` — see Done). A scored 35-question practice exam
+(NCVEC blueprint) alongside the `/exam` study card, wiring `build_exam` + `score_exam` (both already
+in `exam.py`) with a results/score screen. No hardware; reuse the exam-chip pattern from `/exam`.
+**Ask MC ONE question on session/results shape first** (e.g. one-question-at-a-time vs all-35-then-
+score; whether to show the 74% pass line). TDD the scoring/session logic; land through a worktree
+(`--squash`); render-verify the results screen on nomad-b at 800x480.
 
 **This session landed (11 features, all squash-merged; HIL where live):** Phosphor restyle + predict
 fit (`a8bfef8`), units→lessons nav (`0e2fc54`), parser bool guard (`ca3ba48`), comrade voice
@@ -111,15 +108,13 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   call (kit antenna / a known strong *stereo* station). The real-ppm measurement awaits a pilot.
 
 ## Where the build stands
-- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `0e2fc54`. Stack: FastAPI +
+- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `85d126d`. Stack: FastAPI +
   Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
 - 13 modules (added `units.py`); console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
   honest 503). 8 lesson packs (M1-M8). Exam trainer backend on the verified NCVEC
-  2026-2030 pool (409 + errata). `make selftest` = 325 tests + 15 node (JS) tests, 94%, pristine; `make lint` clean.
+  2026-2030 pool (409 + errata). `make selftest` = 327 tests + 15 node (JS) tests, 94%, pristine; `make lint` clean.
 
 ## Pending work
-- Trim the demo/try/observe copy on the OTHER instrument lessons (M1, M3, M4, M6, M7, M8) the way M2
-  was trimmed — they fit the new instrument layout but their long copy scrolls until trimmed.
 - Exam-sim mode (scored practice exam) + results screen; legal/other UIs.
 - Remaining lessons M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
   + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
@@ -148,7 +143,17 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   lessons' predict copy should be written to fit; the content pass should check each one renders.
 
 ## Done / verified
-- Logic (droplet): 325 tests green (+ 15 node JS tests), 94%, pristine.
+- Logic (droplet): 327 tests green (+ 15 node JS tests), 94%, pristine.
+- Instrument-lesson copy trim + eyebrow fit LANDED (`85d126d`, MC-reviewed): trimmed the demo/try/
+  observe narration (and over-long predict prompts) on M1/M3/M4/M6/M7/M8 the way M2 was, 20-43% off
+  each demo, every teaching beat kept. Render-verify on nomad-b exposed the real constraint — the
+  instrument narration is a thin scroll band (waterfall 120px + tune + title eat ~480px), and the
+  eyebrow reprinted the full lesson `concept` on EVERY stage, leaving only ~27px on a radio lesson.
+  MC's call: drop the concept from the eyebrow on the hardware instrument stages (demo/try/operate/
+  observe) — it already rode the frame; text/no-hardware stages keep it. HIL-verified: the M7
+  narration band grew 27px -> 65px (one line -> ~two) across every instrument stage. MC chose NOT to
+  gut the dense demos, so M6/M7/M8 still scroll by design (content-faithful, like the shipped M2).
+  TDD for the template change (2 eyebrow tests). 327 tests green.
 - Units→lessons nav LANDED on main (`0e2fc54`): home shows 6 unit tiles, `/unit/{id}` lists a unit's
   lessons, unbuilt units render an honest empty page (no lock). Render-verified on nomad-b at 800x480
   (home, /unit/1 Instrument, /unit/5 Decode empty); 304 tests green, lint clean. TDD throughout.
