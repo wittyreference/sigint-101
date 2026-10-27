@@ -4,6 +4,36 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-10-27: before M9 every instrument lesson ran the FM default sweep, whatever its copy said
+**Finding.** The Sweeper defaults to 88-108 MHz (`DEFAULT_LOW/HIGH`) and nothing was per-lesson:
+`lesson_view` passed no `tuned_hz`/`step_hz`, so `console.html`'s `|default(100300000)` stood for
+every lesson, and the live `/api/spectrum` sweep stayed on the global FM band. So M6's copy ("tune
+up to 1090 MHz") rode an FM waterfall — a latent copy-vs-instrument mismatch no test caught. The
+manual tune buttons step 100 kHz, so a learner cannot hand-walk from FM to 433 MHz either. Fixed by
+a per-lesson `tune: {center_hz, span_hz, step_hz?}` (`8ed4c3e`): `lessons.py` validates the band at
+load against `TUNER_MIN/MAX_HZ` + `MIN/MAX_SPAN_HZ` (imported from spectrum.py — no cycle), the
+route passes centre/step/edges, the live waterfall canvas carries `data-tune-low/high`, and
+`waterfall.js` POSTs `/api/tune` once on load (reusing the existing retune-clears-the-canvas path).
+**How to apply.** Any lesson off the FM band MUST declare `tune:` or it silently shows FM. The pure
+bit (`parseTuneBand`) is node-tested; the DOM read + POST is browser-only (verified by HIL render).
+To HIL-verify the retune: run the server ON nomad-b (live SDR), commit a prediction to unseal
+observe, render `/lesson/N` — the axis + dial read the band. The *empty* band is the honest state
+when nothing is keying; a signal needs a real transmitter on that frequency.
+
+## 2026-10-27: the Flipper does not enumerate as USB CDC on nomad-b (charge-only cable suspected)
+**Finding.** With the Flipper "plugged in" to nomad-b there was no `/dev/ttyACM*` and `lsusb` showed
+only the RTL-SDR (`0bda:2838`) and the MeshAdv HAT (`0484:5750`) — not the Flipper's `0483:5740`
+(STM32 virtual COM) — and `dmesg` logged no recent CDC attach. Almost always a charge-only USB
+cable (very common with the Flipper) or USB not "connected" on its screen. M9's live OOK demo does
+NOT need the CDC: the Flipper transmits at 433.92 over the air and the RTL-SDR hears it over the air,
+so hand-operating it works; the USB link only matters to drive its TX from the droplet (the plan's
+host-driven FAP / an automated blink capture). **433 ISM at nomad-b:** ambient OOK is intermittent —
+a 15s `rtl_power` sweep caught one +40 dB burst above floor, otherwise quiet; `rtl_433` is NOT
+installed there (M10's dependency, a system install).
+**How to apply.** For a Flipper-over-USB feature, first confirm `0483:5740` in `lsusb` and a
+`/dev/ttyACM*` on nomad-b — if absent, it is the cable, not the code. For an OOK blink capture you
+need a real transmitter on-frequency during the render window; don't expect ambient 433 to oblige.
+
 ## 2026-10-27: the instrument narration is a ~27-65px scroll band — the eyebrow concept was eating it
 **Finding.** At 800x480 the instrument stage's narration (`.instrument > .stage-panel__body`) is a
 tiny scrolling band: the fixed chrome (status bar, stage rail, eyebrow, title, the 120px waterfall

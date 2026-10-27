@@ -1,13 +1,19 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call — pick the next arc.** The exam trainer is now reachable from home (a full-width
-licence-exam CTA under the unit grid), so the remaining open items are:
+**MC's call.** M9 (OOK) + the per-lesson tune band landed and are HIL-verified. Open items:
+- **Capture M9's live carrier-blink** (needs a 433.92 MHz OOK source transmitting while the sweep
+  renders — MC keys a 433 remote near nomad-b, or the Flipper replays a capture). The lesson + the
+  live retune are verified; only the visual blink is uncaptured (band showed honest-empty with
+  nothing keying). Quick once a source transmits. **Flipper USB blocker:** not enumerating on
+  nomad-b (no /dev/ttyACM*, lsusb lacks 0483:5740) — likely a charge-only cable; fix it and the
+  droplet could drive its TX over the CLI for an automated blink capture.
+- **M10 (FSK)** — a benign rtl_433 sensor. Needs `rtl_433` installed on nomad-b (not present;
+  new system install → ask MC first). Uses the new tune band (ISM).
 - **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their
   diagram instead of "not shown here yet". Pure asset add; no code.
-- **Larger arc: the next lesson batch (M9+)** + decode backends — needs HIL on nomad-b (live sweeps).
-Recommended: the next lesson batch (M9) — the exam on-ramp and its discoverability are both done.
-TDD; land `--squash`; render-verify on nomad-b at 800x480.
+Recommended: capture M9's blink (one short HIL with MC keying a 433 source), then M10. TDD; land
+`--squash`; render-verify on nomad-b at 800x480.
 
 **This session landed (11 features, all squash-merged; HIL where live):** Phosphor restyle + predict
 fit (`a8bfef8`), units→lessons nav (`0e2fc54`), parser bool guard (`ca3ba48`), comrade voice
@@ -109,18 +115,22 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   call (kit antenna / a known strong *stereo* station). The real-ppm measurement awaits a pilot.
 
 ## Where the build stands
-- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `84bd0b1`. Stack: FastAPI +
+- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `8ed4c3e`. Stack: FastAPI +
   Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
 - 13 modules (added `units.py`); console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
-  honest 503). 8 lesson packs (M1-M8). Exam trainer backend on the verified NCVEC
-  2026-2030 pool (409 + errata), reachable from home. `make selftest` = 346 tests + 15 node (JS) tests, 94%, pristine; `make lint` clean.
+  honest 503). 9 lesson packs (M1-M9); a pack can declare its own tune band (`tune:`) so the
+  instrument starts off the FM default. Exam trainer backend on the verified NCVEC
+  2026-2030 pool (409 + errata), reachable from home. `make selftest` = 361 tests + 17 node (JS) tests, 94%, pristine; `make lint` clean.
 
 ## Pending work
 - Commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3) so figure questions in the exam show their diagram
   (today they read "not shown here yet").
-- Remaining lessons M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
-  + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
-- Commit 3 NCVEC diagram JPGs for the exam UI.
+- Capture M9's live carrier-blink (needs a 433.92 MHz OOK source transmitting). Flipper not
+  enumerating over USB on nomad-b (no /dev/ttyACM*, lsusb lacks 0483:5740 — likely a charge-only
+  cable); fix it to drive its TX over the CLI for an automated blink capture.
+- Remaining lessons M10-M18 + decode backends (M10 FSK needs `rtl_433` on nomad-b — not installed,
+  a new system install); counter-surveillance (Flock ESP32 on pi5 + Rayhunter ingest);
+  kiosk/provisioning/updater; Flipper Lesson Companion FAP (Pulse Scope, own worker track).
 
 ## Gotchas (learned this session)
 - All `sigint101/` edits go through a worktree (worktree-gate). Docs (STATUS/CLAUDE.md) are outside
@@ -145,7 +155,19 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   lessons' predict copy should be written to fit; the content pass should check each one renders.
 
 ## Done / verified
-- Logic (droplet): 346 tests green (+ 15 node JS tests), 94%, pristine.
+- Logic (droplet): 361 tests green (+ 17 node JS tests), 94%, pristine.
+- M9 "The Carrier That Vanishes" (OOK) + per-lesson tune band LANDED (`8ed4c3e`): a pack can
+  declare `tune: {center_hz, span_hz, step_hz?}`; lessons.py validates it against the tuner reach +
+  sweep limits at load, the lesson route points the dial/step at it, and waterfall.js POSTs the band
+  to /api/tune once on load (packs with no band keep the FM default — the 8 existing lessons are
+  untouched). M9 is a six-stage intro tuned to 433.92: a keyed OOK source blinks the carrier fully
+  to the noise floor; message = pattern of bursts/gaps; two-view idea (waterfall=frequency, Flipper
+  Read RAW=time). TDD throughout (band 6, route 2, render 2, parseTuneBand 2 node, M9 content 5).
+  **HIL-verified on nomad-b at 800x480**: the live sweep retunes to 432.92-434.92 MHz on the real
+  SDR (dial 433.920, 20 kHz step); frame, predict (41-word prompt fits, 3 chips + Commit on screen),
+  observe all render clean; the band shows honest-empty with nothing keying. **Not yet captured:**
+  the live carrier-blink (needs a 433 OOK source transmitting — see NEXT ACTION), like M4's deferred
+  happy-path. Also unblocks later non-FM lessons (ADS-B 1090, GPS).
 - Exam-nav LANDED (`84bd0b1`, MC-reviewed): the licence exam trainer now has a home affordance —
   a full-width CTA under the unit grid ("Licence exam / Practice for your Technician ticket →")
   that lands on `/exam` (which links on to the 35-Q practice exam). MC's call: a full-width bar
