@@ -1,12 +1,14 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**Exam-sim mode** (the copy trim landed `85d126d` — see Done). A scored 35-question practice exam
-(NCVEC blueprint) alongside the `/exam` study card, wiring `build_exam` + `score_exam` (both already
-in `exam.py`) with a results/score screen. No hardware; reuse the exam-chip pattern from `/exam`.
-**Ask MC ONE question on session/results shape first** (e.g. one-question-at-a-time vs all-35-then-
-score; whether to show the 74% pass line). TDD the scoring/session logic; land through a worktree
-(`--squash`); render-verify the results screen on nomad-b at 800x480.
+**MC's call — pick the next arc.** The exam trainer (study card + scored sim) and the instrument
+lessons are complete and landed. Two sensible directions:
+- **Quick win: surface the exam trainer + practice exam from home/nav.** Both `/exam` and
+  `/exam/sim` are only reachable by typing the URL — no home tile or nav links to them yet. A small
+  discoverability pass (a home affordance / a 7th "Licence" track tile, MC's taste on placement).
+- **Larger arc: the next lesson batch (M9+)** + decode backends — needs HIL on nomad-b (live sweeps).
+Recommended: the exam-nav quick win first (one short worktree), then start M9. No hardware for the
+nav work; TDD; land `--squash`; render-verify on nomad-b at 800x480.
 
 **This session landed (11 features, all squash-merged; HIL where live):** Phosphor restyle + predict
 fit (`a8bfef8`), units→lessons nav (`0e2fc54`), parser bool guard (`ca3ba48`), comrade voice
@@ -108,14 +110,17 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   call (kit antenna / a known strong *stereo* station). The real-ppm measurement awaits a pilot.
 
 ## Where the build stands
-- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `85d126d`. Stack: FastAPI +
+- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `32ec4a0`. Stack: FastAPI +
   Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
 - 13 modules (added `units.py`); console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
   honest 503). 8 lesson packs (M1-M8). Exam trainer backend on the verified NCVEC
-  2026-2030 pool (409 + errata). `make selftest` = 327 tests + 15 node (JS) tests, 94%, pristine; `make lint` clean.
+  2026-2030 pool (409 + errata). `make selftest` = 344 tests + 15 node (JS) tests, 94%, pristine; `make lint` clean.
 
 ## Pending work
-- Exam-sim mode (scored practice exam) + results screen; legal/other UIs.
+- Surface the exam trainer from home/nav: `/exam` (study card) and `/exam/sim` (scored practice
+  exam) work but are only reachable by typing the URL — no home tile or nav link yet.
+- Commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3) so figure questions in the exam show their diagram
+  (today they read "not shown here yet").
 - Remaining lessons M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
   + Rayhunter ingest); kiosk/provisioning/updater; Flipper FAP.
 - Commit 3 NCVEC diagram JPGs for the exam UI.
@@ -143,7 +148,17 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   lessons' predict copy should be written to fit; the content pass should check each one renders.
 
 ## Done / verified
-- Logic (droplet): 327 tests green (+ 15 node JS tests), 94%, pristine.
+- Logic (droplet): 344 tests green (+ 15 node JS tests), 94%, pristine.
+- Exam-sim (scored 35-question practice exam) LANDED (`32ec4a0`, MC-reviewed): `/exam/sim` draws a
+  35-Q sheet (one per NCVEC group) and serves the current question with a running score; answering
+  reveals the right option + the learner's miss (commit-before-reveal) and advances; `/exam/sim/
+  results` scores it — PASS/NOT YET at 26/35 (74%), the percentage, and a per-subelement breakdown
+  that flags the areas not aced; Retake starts fresh. The in-progress sim persists in a one-row
+  `sim` table in exam.db (survives power loss); each answer also feeds the Leitner store, so a sim
+  sharpens the study card. MC's call: answer-then-advance, not all-35-then-score. TDD (sim store +
+  routes + templates). **HIL-verified on nomad-b at 800x480**: the question card, the review (correct
+  marked, miss flagged), and the results screen (13/35 NOT YET, pass line, 10-cell subelement grid)
+  all render clean, Back always visible. Study card links to the sim; neither is on home yet (pending).
 - Instrument-lesson copy trim + eyebrow fit LANDED (`85d126d`, MC-reviewed): trimmed the demo/try/
   observe narration (and over-long predict prompts) on M1/M3/M4/M6/M7/M8 the way M2 was, 20-43% off
   each demo, every teaching beat kept. Render-verify on nomad-b exposed the real constraint — the
