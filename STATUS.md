@@ -1,14 +1,13 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call — pick the next arc.** The exam trainer (study card + scored sim) and the instrument
-lessons are complete and landed. Two sensible directions:
-- **Quick win: surface the exam trainer + practice exam from home/nav.** Both `/exam` and
-  `/exam/sim` are only reachable by typing the URL — no home tile or nav links to them yet. A small
-  discoverability pass (a home affordance / a 7th "Licence" track tile, MC's taste on placement).
+**MC's call — pick the next arc.** The exam trainer is now reachable from home (a full-width
+licence-exam CTA under the unit grid), so the remaining open items are:
+- **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their
+  diagram instead of "not shown here yet". Pure asset add; no code.
 - **Larger arc: the next lesson batch (M9+)** + decode backends — needs HIL on nomad-b (live sweeps).
-Recommended: the exam-nav quick win first (one short worktree), then start M9. No hardware for the
-nav work; TDD; land `--squash`; render-verify on nomad-b at 800x480.
+Recommended: the next lesson batch (M9) — the exam on-ramp and its discoverability are both done.
+TDD; land `--squash`; render-verify on nomad-b at 800x480.
 
 **This session landed (11 features, all squash-merged; HIL where live):** Phosphor restyle + predict
 fit (`a8bfef8`), units→lessons nav (`0e2fc54`), parser bool guard (`ca3ba48`), comrade voice
@@ -110,15 +109,13 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   call (kit antenna / a known strong *stereo* station). The real-ppm measurement awaits a pilot.
 
 ## Where the build stands
-- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `32ec4a0`. Stack: FastAPI +
+- Repo: github.com/wittyreference/sigint-101 (public, MIT), main @ `84bd0b1`. Stack: FastAPI +
   Jinja2 + polling JS + offline CSS + SQLite + JSONL events, Pi 4 / Bookworm / aarch64, Chromium kiosk.
 - 13 modules (added `units.py`); console serves the shell end-to-end (commit-before-reveal server-side; /api/spectrum
   honest 503). 8 lesson packs (M1-M8). Exam trainer backend on the verified NCVEC
-  2026-2030 pool (409 + errata). `make selftest` = 344 tests + 15 node (JS) tests, 94%, pristine; `make lint` clean.
+  2026-2030 pool (409 + errata), reachable from home. `make selftest` = 346 tests + 15 node (JS) tests, 94%, pristine; `make lint` clean.
 
 ## Pending work
-- Surface the exam trainer from home/nav: `/exam` (study card) and `/exam/sim` (scored practice
-  exam) work but are only reachable by typing the URL — no home tile or nav link yet.
 - Commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3) so figure questions in the exam show their diagram
   (today they read "not shown here yet").
 - Remaining lessons M9-M18 + decode backends; counter-surveillance (Flock ESP32 on pi5
@@ -148,7 +145,15 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
   lessons' predict copy should be written to fit; the content pass should check each one renders.
 
 ## Done / verified
-- Logic (droplet): 344 tests green (+ 15 node JS tests), 94%, pristine.
+- Logic (droplet): 346 tests green (+ 15 node JS tests), 94%, pristine.
+- Exam-nav LANDED (`84bd0b1`, MC-reviewed): the licence exam trainer now has a home affordance —
+  a full-width CTA under the unit grid ("Licence exam / Practice for your Technician ticket →")
+  that lands on `/exam` (which links on to the 35-Q practice exam). MC's call: a full-width bar
+  below the grid, not a 7th tile — the trainer is a cross-cutting licence track, not a curriculum
+  unit, so it reads apart (accent double border, inline-SVG diamond glyph, no U-code/progress bar).
+  TDD (1 route test + 1 template test). **HIL-verified on nomad-b at 800x480** (dark theme): grid +
+  CTA fit with no overflow, both tile rows intact, glyph + arrow render. red-night/sunlight inferred
+  (shared theme tokens, no state-by-colour). `/exam` returns 200.
 - Exam-sim (scored 35-question practice exam) LANDED (`32ec4a0`, MC-reviewed): `/exam/sim` draws a
   35-Q sheet (one per NCVEC group) and serves the current question with a running score; answering
   reveals the right option + the learner's miss (commit-before-reveal) and advances; `/exam/sim/
