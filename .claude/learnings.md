@@ -19,11 +19,15 @@ Meshtastic node (US region 1, LongFast preset 0, default primary channel) so its
 node A. Drive it from the droplet with `meshtastic.serial_interface.SerialInterface(devPath=
 "/dev/ttyACM0")` then `iface.sendText("...")`. **HIL-verified end to end:** node B sent 3 texts,
 node A received and decoded all 3 on `/api/lora` with real SNR.
-**Bench range cannot show a below-floor (negative) SNR.** At ~cm separation and 1 W (tx_power 30),
-RSSI was -12 dBm and SNR +6 dB — a genuinely strong link; lowering tx_power cannot drive SNR
-negative while RSSI stays ~100 dB above the noise floor. A real below-floor capture needs distance:
-carry the (battery, keyboard-equipped) Cardputer far from the Nomad and send from its keys — node A
-still receives over RF, and `/api/lora` surfaces the weak reception. One HIL fix the render caught:
+**A below-floor (negative) SNR takes real path loss, and we got it.** The SX126x *floors its LoRa
+SNR metric at ~+6 dB for any strong signal* — it only reports the true, lower SNR once RSSI nears
+the noise floor (~-114 dBm). So RSSI is the live link indicator, SNR is not, until the link is weak.
+Progression captured on 2026-10-27: bench 1 W → RSSI -12, SNR +6; down the hall → RSSI -53, SNR
+still +6 (floored); antenna removed + end of hall → RSSI -91, SNR +1.25 (SNR finally came off the
+floor); **antenna off + around a corner + held in a fist (body absorption at 900 MHz is ~10-20 dB)
+→ RSSI -98, SNR -4.75 to -5.25 dB — four packets decoded cleanly BELOW the noise floor.** The fist
+was the last ~10-15 dB that tipped it. Lowering tx_power alone could not (max ~39 dB, not enough and
+awkward on the Cardputer UI); removing the antenna + losing line-of-sight + body absorption did. One HIL fix the render caught:
 the panel was listing the node's OWN telemetry (sender present, no `rxSnr`) — a no-rxSnr packet is
 locally originated, not an air reception, so `parse_lora_packet` now skips it.
 **How to apply.** For a meshtasticd feature, read its 4403 API with the `meshtastic` lib; a real air

@@ -5,11 +5,10 @@
 - **M12 (PSK via RDS)** — the data you cannot see on the waterfall (N, the last Modulation lesson).
   *Recommended next.* RDS rides FM (88-108), so it reuses the SDR + waterfall; the decode is the new
   part. Scope the decode source with MC (rtl_fm/redsea, or a decode panel).
-- **LoRa below-floor capture (deferred, physical)** — M11 is HIL-verified end to end (node B = the M5
-  Cardputer transmitted, the Nomad decoded real texts at +6 dB SNR), but a genuine *below-floor*
-  (negative-SNR) reception can't happen at bench range. Carry the battery/keyboard Cardputer well
-  away from the Nomad and send from its keys; node A still receives, and `/api/lora` surfaces the
-  weak, below-floor packet. Same shape as M9's deferred blink / M10's FSK two-tone.
+- ~~LoRa below-floor capture~~ **DONE (observed, 2026-10-27)** — MC carried the Cardputer around a
+  corner, removed its antenna, and held it in a fist (body absorption); node A decoded four packets
+  at **−4.75 to −5.25 dB SNR** (RSSI −98), genuinely below the noise floor, rendered on the observe
+  panel highlighted. The headline capture for "Below the Noise Floor."
 - **FSK two-tone live capture (deferred)** — M10 is HIL-verified on ambient ASK; the FSK two-tone read
   needs an on-frequency FSK transmitter (a real FSK sensor, or a crafted Flipper 2-FSK).
 - **Follow-up: M8's predict prompt is ~60 words / 5 lines — 1 px over at a true 800x480.** Trim it.
@@ -24,10 +23,10 @@ contention. New `sigint101/lora.py` (parse + LoRaListener), `/api/lora`, a `lora
 `static/lora.js`; only genuine air receptions (carrying rxSnr) are shown. `meshtastic` added to
 requirements and installed on both venvs. **HIL-verified end to end on nomad-b:** node B (an M5
 Cardputer Meshtastic node on `/dev/ttyACM0`, driven via SerialInterface.sendText) transmitted three
-texts, the Nomad decoded all three on `/api/lora` with real SNR (+6 dB, bench range), and the observe
-stage renders at a true 800x480. Below-floor negative SNR is a field measurement (see learnings).
-**NOTE: a server is still running on nomad-b (branch `worktree-m11-lora`) for an optional field
-capture — tear it down (`pkill uvicorn`, `git checkout main`, delete the branch) when done.**
+texts, the Nomad decoded all three on `/api/lora` with real SNR, and the observe stage renders at a
+true 800x480. **The below-floor payoff is captured too:** with the antenna off, around a corner, and
+fist-held, node A decoded packets at **−4.75 to −5.25 dB SNR** — genuinely below the noise floor,
+highlighted on the panel. nomad-b is cleaned up and back on main.
 
 **M10 (FSK) DONE and landed (observed, 2026-10-27), main @ `c72a395`.** FSK's two tones sit below the
 waterfall's 125 kHz bins, so M10 reads the band with the rtl_433 decoder instead of the eye (MC's
