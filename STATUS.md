@@ -1,19 +1,25 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call.** M9 (OOK) + the per-lesson tune band landed and are HIL-verified. Open items:
-- **Capture M9's live carrier-blink** (needs a 433.92 MHz OOK source transmitting while the sweep
-  renders — MC keys a 433 remote near nomad-b, or the Flipper replays a capture). The lesson + the
-  live retune are verified; only the visual blink is uncaptured (band showed honest-empty with
-  nothing keying). Quick once a source transmits. **Flipper USB blocker:** not enumerating on
-  nomad-b (no /dev/ttyACM*, lsusb lacks 0483:5740) — likely a charge-only cable; fix it and the
-  droplet could drive its TX over the CLI for an automated blink capture.
+**MC's call — M9 is fully done, including the live blink.** Open items:
 - **M10 (FSK)** — a benign rtl_433 sensor. Needs `rtl_433` installed on nomad-b (not present;
-  new system install → ask MC first). Uses the new tune band (ISM).
+  new system install → ask MC first). Uses the new tune band (ISM). *Recommended next.*
 - **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their
   diagram instead of "not shown here yet". Pure asset add; no code.
-Recommended: capture M9's blink (one short HIL with MC keying a 433 source), then M10. TDD; land
-`--squash`; render-verify on nomad-b at 800x480.
+Recommended: M10 (ask MC to approve the `rtl_433` install first). TDD; land `--squash`;
+render-verify on nomad-b at 800x480.
+
+**M9 live carrier-blink CAPTURED (observed, 2026-10-27).** The Flipper USB blocker was the
+charge-only cable — MC swapped to a data cable and it enumerates (`0483:5740`, `/dev/ttyACM0`,
+fw 1.4.3, region US). The droplet drove `subghz tx 0x00F7F7F7 433920000 350 60 0` on the Flipper
+while nomad-b's SDR swept the 433.92 band: carrier reached **+22 dB above the noise floor** at the
+433.92 bin (API), and the live `/lesson/9` observe waterfall rendered the carrier present ("LIVE·14")
+and then, after keying stopped mid-capture, the quiet rows pushing in over it ("LIVE·24") — the
+carrier that vanishes, on real hardware. Caveat: the near-field Flipper overloads the RTL front end,
+so the lit rows smear broadband instead of a clean 433.92 column (honest overload + OOK splatter, not
+invented signal); a crisp column needs the Flipper moved ~1 m off the whip (physical). Screenshots
+delivered to MC. Full render recipe for a LIVE dynamic panel (stdlib-WebSocket DevTools capture with
+a real-time wait — `--virtual-time-budget` snapshots an empty waterfall) in `.claude/learnings.md`.
 
 **This session landed (11 features, all squash-merged; HIL where live):** Phosphor restyle + predict
 fit (`a8bfef8`), units→lessons nav (`0e2fc54`), parser bool guard (`ca3ba48`), comrade voice
@@ -53,6 +59,10 @@ scp spec5@100.108.20.20:/tmp/s.png <scratch>/   # then Read it
 - **A LIVE panel (gain/provenance/ppm, the waterfall) needs real data → run the server ON nomad-b**,
   not the droplet (no SDR there). Full HIL recipe (checkout the branch at `/home/spec5/sigint-101`,
   hold the ssh open running uvicorn, warm the sweep, render localhost, restore) is in `.claude/learnings.md`.
+  **For a LIVE DYNAMIC panel that must show accumulated real data (a lit waterfall), `--virtual-time-budget`
+  does NOT work — it snapshots an empty "WAITING" panel because it races the real async sweeps. Use the
+  stdlib-WebSocket `Page.captureScreenshot` + real-`sleep` recipe in `.claude/learnings.md` instead, and
+  keep the signal live DURING the chromium session (the page re-tunes and clears the buffer on load).**
 - The **predict** screen is JS-navigated (not a static shot). Best way to render it faithfully:
   write a throwaway `sigint101/static/_predictview.html` that loads `/lesson/1` in a same-origin
   iframe and flips the visible `.stage-panel` to the one with `data-stage="predict"` (the predict

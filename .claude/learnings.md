@@ -4,6 +4,46 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-10-27: the Flipper CLI drives sub-GHz TX from the droplet — it WAS the charge-only cable
+**Finding.** Swapping the Flipper's USB cable for a data cable made it enumerate on nomad-b exactly
+as predicted: `0483:5740` in `lsusb`, `/dev/ttyACM0` (root:dialout 660; `spec5` is in `dialout`),
+a clean `cdc_acm` attach in `dmesg`, product "Flipper Lle0zik". System `python3` has `pyserial`
+3.5 (the `.venv` does NOT — use system python for serial). Full CLI works over 115200: `device_info`
+(Flipper Zero, official fw 1.4.3, region US, `radio_alive: true`) and, crucially, `subghz tx <3-byte
+key hex> <freq Hz> <te us> <repeat> <device: 0=CC1101_INT>` — e.g. `subghz tx 0x00F7F7F7 433920000
+350 60 0`. So the droplet can key a 433.92 OOK transmitter on demand. **A `subghz tx` left running
+when the serial port is closed can leave a command pending; send `\x03` (Ctrl-C) + CR to abort and
+confirm the `>: ` prompt returns before trusting the device is idle (it was not stuck keying — the
+PA stops at burst end — but the CLI read was mid-command).**
+**How to apply.** Flipper-over-USB features are now unblocked on nomad-b. Open `/dev/ttyACM0` with
+system `python3`+`pyserial`; drive the CLI by writing `<cmd>\r\n` and reading after a short settle.
+Only one process can hold the port — stop any background TX task before a script that needs it.
+
+## 2026-10-27: a LIVE dynamic panel render needs a REAL-time wait, not --virtual-time-budget
+**Finding.** Capturing the M9 waterfall with a *lit* carrier exposed that `chromium --headless
+--virtual-time-budget=N --screenshot` snapshots an EMPTY waterfall ("WAITING"): virtual time races
+the page's `setTimeout` polls but does NOT wait for the real `rtl_power` sweeps (~1 row/sec) to land
+over the network, so 0 rows are painted at snapshot. (The prior empty-band captures looked fine only
+because empty is empty regardless of row count.) Pre-warming the buffer doesn't help either —
+`waterfall.js` auto-POSTs `/api/tune` on load and `retune()` ALWAYS clears the buffer (no same-band
+short-circuit), wiping the warm rows. The fix that worked: drive DevTools directly. nomad-b has no
+node/wscat/websocket libs, so a ~60-line **pure-stdlib WebSocket client** (raw socket, manual
+`Sec-WebSocket-Key` handshake, masked client frames, 126/127 length + continuation reassembly) sends
+`Page.captureScreenshot` after a genuine `time.sleep`. One foreground ssh runs: launch chromium with
+`--remote-debugging-port=9222 --remote-allow-origins=*` (newer Chrome rejects the ws upgrade without
+the allow-origins flag), poll `/json` for the page target, real-sleep while rows accumulate, capture,
+kill chromium — all in one call so the process lives the whole time. Newest sweep paints at the TOP,
+scrolling down (`drawRow`), and colour is normalised per-row (min/max eased), so a no-carrier row is
+greenish noise, not black. To capture "the carrier that vanishes" in one frame: key ON ~14s (lit rows
+fill), stop keying, wait ~9s (quiet rows push in at top over the red carrier band below).
+**Near-field overload:** the Flipper sitting on the SDR whip is so strong it overloads the RTL front
+end and smears energy broadband-red across the whole 2 MHz span instead of a clean 433.92 column
+(real overload + OOK keying splatter — honest, not invented). A crisp single column needs the Flipper
+moved ~1 m off the antenna (physical).
+**How to apply.** For any live-data panel with real async backing, do NOT trust `--virtual-time-budget`
+to wait — use the stdlib-WS + `Page.captureScreenshot` + real-sleep recipe. Reuse the band-clear fact:
+the page re-tunes (and clears) on load, so the carrier must be live DURING the chromium session.
+
 ## 2026-10-27: before M9 every instrument lesson ran the FM default sweep, whatever its copy said
 **Finding.** The Sweeper defaults to 88-108 MHz (`DEFAULT_LOW/HIGH`) and nothing was per-lesson:
 `lesson_view` passed no `tuned_hz`/`step_hz`, so `console.html`'s `|default(100300000)` stood for
