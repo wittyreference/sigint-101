@@ -342,3 +342,22 @@ capture defers; pipeline HIL-proven honest-empty. The dongle arbitration is now 
 **How to apply.** A second lesson on the same decoder tool is mostly a new parser + panel + pack; reuse
 the pipeline and the list panel. Choose roster-vs-log by the signal's nature. Keep applying predict-fit
 up front so the render is a confirmation, not a debug loop.
+
+## 2026-10-28: M16 ACARS — real data via the factory, and Unit 5 complete
+**Finding.** acarsdec differs from the multimon-ng lessons: it opens the RTL-SDR **directly** (like
+dump1090), so there is no rtl_fm front end — the decoder owns a single acarsdec process whose stdout
+is line-delimited JSON (`-o 4`, printed unformatted per `cJSON_PrintPreallocated(...,0)`). The JSON
+field names come from acarsdec's own source (netout.c/output.c cJSON_Add*ToObject calls), and —
+crucially — acarsdec ships a `test.wav` that decodes to real ACARS, so fixtures are genuinely real
+output captured with `acarsdec -o 4 -f test.wav`, not documented-format reconstructions. **Best HIL
+trick of the session:** because the decoder is injected via `create_app(acars_factory=...)`, a tiny
+demo app (`m16_demo.py`) wired an AcarsDecoder whose spawn runs `acarsdec -o 4 -f test.wav` instead of
+the live radio — the REAL decoder + REAL recording, a simulator running real code. Pointed the same
+chromium render at it and got the ACARS panel populated with 12 genuinely-decoded aircraft messages,
+proving the whole decode→parse→/api→js→render chain with real data — something the antenna-limited
+lessons (ADS-B/APRS/POCSAG, all deaf) could only prove empty. For any future decode lesson that has a
+sample recording and a file-input decode mode, use this factory-injection demo to get a populated
+render. **Unit 5 Decode (M13-M16) is complete; 7 SDR-exclusive consumers now share the dongle — the
+`claim()` helper refactor (flagged M14) is overdue, still gated on MC.**
+**How to apply.** Prefer a decoder's own test asset + its file-input mode for real fixtures and a real
+populated render; inject it through the existing `*_factory` seam rather than changing production code.

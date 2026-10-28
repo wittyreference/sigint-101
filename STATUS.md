@@ -1,12 +1,24 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call (do all three) — M14 APRS + M15 POCSAG done + landed. Building M16 (ACARS) to finish
-Unit 5 Decode (M13 ADS-B, M14 APRS, M15 POCSAG, M16 ACARS).**
+**UNIT 5 DECODE COMPLETE — M13 ADS-B, M14 APRS, M15 POCSAG, M16 ACARS all done + landed (MC's "do
+all three" after M13).** Awaiting MC's direction for what's next. The recommended next is **Unit 6
+"Under the Hood" (M17-M18)** — ask MC what those two cover (the plan reserves them but does not name
+topics; options worth floating: the RF chain / how an SDR actually works, DSP/sampling, or a build/
+provisioning capstone). The counter-surveillance track (Rayhunter/Flock) remains a separate 7th
+track, only if MC asks.
 Open items:
-- **M16 (ACARS aircraft text)** — *last one / in progress.* The typed ops messages aircraft send on
-  VHF (~131 MHz AM). Needs `acarsdec` built from source on nomad-b (like dump1090/redsea — a build,
-  not an apt install). A text-list panel like POCSAG/APRS. TDD; land `--squash`; render-verify 800x480.
+- **Follow-up (ask MC): collapse the dongle-arbitration release lists into a `claim(target)` helper.**
+  There are now **7 SDR-exclusive consumers** (sweeper, rtl_433, rds, adsb, aprs, pocsag, acars) and
+  each route open-codes "release the other six, resume me". A `claim()` helper on app.state would make
+  it one line per route and one-line registration per consumer — but it edits the existing working
+  routes, so it needs MC's OK (don't-reimplement gate). See learnings 2026-10-28 (M14).
+- **ACARS live capture (deferred, physical)** — M16's pipeline is HIL-proven BOTH ways: live
+  `/api/acars` runs honest-empty on the real radio (nomad-b hears no aircraft on 131.55), AND the
+  full chain was proven with REAL data by feeding acarsdec's own `test.wav` through the real decoder
+  (12 genuine ACARS messages decoded + rendered — see the populated screenshot). `acarsdec` built
+  from source (cmake, `-Drtl=ON`) + installed to `/usr/local/bin`. Live-off-air needs VHF ACARS
+  traffic + antenna.
 - **POCSAG live capture (deferred, physical)** — M15's pipeline is HIL-proven honest-empty; needs a
   pager-band antenna + live POCSAG traffic in range (nomad-b heard none). `multimon-ng` installed.
 - **APRS live capture (deferred, physical)** — M14's pipeline is HIL-proven honest-empty, but
@@ -24,6 +36,20 @@ Open items:
 - **M4 real-ppm (deferred)** — same FM-antenna block as M12's RDS; a good FM antenna unblocks both.
 - **Follow-up: M8's predict prompt is ~60 words / 5 lines — 1 px over at a true 800x480.** Trim it.
 - **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their diagram.
+
+**M16 (ACARS) DONE and landed (observed, 2026-10-28), squash-merged to main — COMPLETES UNIT 5.**
+ACARS is the airlines' VHF text link (~131.550 MHz): typed messages (position/weather/engine reports,
+free text), mostly in the clear. New `sigint101/acars.py`: `parse_acars_message` (acarsdec `-o 4`
+JSON → tail/flight/label/mode/block_id/msgno/ack/text/freq/level; label always present, text
+optional), `AcarsLog` (bounded newest-first), `AcarsDecoder` (owns the `acarsdec` process, which
+opens the dongle **directly** like dump1090 — no rtl_fm front end; reader thread, release/resume) —
+the **7th SDR-exclusive consumer**. `/api/acars` + an `acars` panel reusing the decoder list
+(`static/acars.js`) + `lesson_packs/16-acars.yaml`. `acarsdec` built from source on nomad-b (cmake,
+`-Drtl=ON`) → `/usr/local/bin`. **HIL on nomad-b — the strongest yet:** live `/api/acars` honest-empty
+on the real radio, 7-way arbitration both directions, observe + predict fit at a forced 800x480
+(Next=423, Commit=474), AND the full decode→parse→API→JS→render chain **proven with REAL data** by
+feeding acarsdec's own `test.wav` through the real decoder (12 genuine ACARS messages decoded and
+rendered). **The decode unit (M13-M16) is complete.**
 
 **M15 (POCSAG) DONE and landed (observed, 2026-10-28), squash-merged to main.** Continues Unit 5
 (Decode): POCSAG pager traffic on 929.6 MHz is a half-second FSK burst on the waterfall but a
