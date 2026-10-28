@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sigint101 import exam
+from sigint101.acars import AcarsDecoder
 from sigint101.adsb import AdsbDecoder
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
@@ -322,16 +323,55 @@ def _pocsag_pages():
     }]
 
 
+class _StubAcars:
+    """An app-boundary stand-in for the acarsdec AcarsDecoder (no real radio)."""
+
+    def __init__(self, messages):
+        self._messages = messages
+        self._started = False
+        self._released = False
+        self.freq_hz = 131_550_000
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def messages(self, limit=None):
+        return self._messages
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _acars_messages():
+    """One decoded ACARS message, in the dict shape AcarsDecoder.messages() hands the route."""
+    return [{
+        "tail": "F-GTAE", "flight": "AF7728", "label": "H1", "mode": "G",
+        "block_id": "3", "msgno": "D65C", "ack": False, "text": "#DFB00000/V206",
+        "freq_mhz": 131.55, "level": -8.5,
+    }]
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
-            aprs_factory=None, pocsag_factory=None):
+            aprs_factory=None, pocsag_factory=None, acars_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
                      ppm_measure=ppm_measure, decoder_factory=decoder_factory,
                      lora_factory=lora_factory, rds_factory=rds_factory,
                      adsb_factory=adsb_factory, aprs_factory=aprs_factory,
-                     pocsag_factory=pocsag_factory)
+                     pocsag_factory=pocsag_factory, acars_factory=acars_factory)
     return TestClient(app)
 
 
@@ -872,6 +912,75 @@ def test_pocsag_stands_the_sweeper_down(tmp_path):
                  sweeper_factory=lambda: _RecordingSweeper(_rows()),
                  pocsag_factory=lambda: _StubPocsag(_pocsag_pages())) as client:
         client.get("/api/pocsag")
+    assert released["value"] is True
+
+
+# --- acars (ACARS message log, M16) -------------------------------------------
+
+
+def test_acars_reports_503_and_a_reason_when_no_radio(tmp_path):
+    with _client(tmp_path,
+                 acars_factory=lambda: AcarsDecoder(
+                     radio_present=lambda: False,
+                     which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/acars")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["messages"] == []          # never a fabricated message
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_acars_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/acars")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_acars_returns_the_messages_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 acars_factory=lambda: _StubAcars(_acars_messages())) as client:
+        resp = client.get("/api/acars")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["freq_hz"] == 131_550_000
+    m = body["messages"][0]
+    assert m["tail"] == "F-GTAE"
+    assert m["flight"] == "AF7728"
+    assert m["label"] == "H1"
+
+
+def test_acars_stands_the_sweeper_down(tmp_path):
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 acars_factory=lambda: _StubAcars(_acars_messages())) as client:
+        client.get("/api/acars")
+    assert released["value"] is True
+
+
+def test_spectrum_releases_the_acars_decoder(tmp_path):
+    """Switching back to the waterfall releases the ACARS decoder — one program per dongle."""
+    released = {"value": False}
+
+    class _RecordingAcars(_StubAcars):
+        def release(self):
+            released["value"] = True
+            super().release()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows()),
+                 acars_factory=lambda: _RecordingAcars(_acars_messages())) as client:
+        client.get("/api/acars")         # acarsdec takes the dongle
+        client.get("/api/spectrum")      # sweep reclaims it
     assert released["value"] is True
 
 

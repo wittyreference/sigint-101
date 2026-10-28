@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .acars import AcarsDecoder, AcarsUnavailable
 from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .decode import Decoder, DecodeUnavailable
@@ -168,7 +169,7 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
-               pool_path=None, ppm_measure=None) -> FastAPI:
+               acars_factory=None, pool_path=None, ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -262,6 +263,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_pocsag = pocsag_factory
 
+    # The ACARS decoder runs acarsdec, which opens the dongle directly on the VHF ACARS channel — it
+    # joins the sweeper / rtl_433 / rds / adsb / aprs / pocsag release/resume turn-taking.
+    if acars_factory is None:
+        def build_acars():
+            return AcarsDecoder(
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_acars = acars_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -279,6 +292,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.adsb = build_adsb()
         app.state.aprs = build_aprs()
         app.state.pocsag = build_pocsag()
+        app.state.acars = build_acars()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -298,6 +312,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.adsb.stop()
             app.state.aprs.stop()
             app.state.pocsag.stop()
+            app.state.acars.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -667,6 +682,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.adsb.release()
             app.state.aprs.release()
             app.state.pocsag.release()
+            app.state.acars.release()
             sweeper.resume()
             try:
                 sweeper.start()
@@ -704,6 +720,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.adsb.release()
             app.state.aprs.release()
             app.state.pocsag.release()
+            app.state.acars.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -758,6 +775,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.adsb.release()
             app.state.aprs.release()
             app.state.pocsag.release()
+            app.state.acars.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -789,6 +807,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.rds.release()
             app.state.aprs.release()
             app.state.pocsag.release()
+            app.state.acars.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -821,6 +840,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.rds.release()
             app.state.adsb.release()
             app.state.pocsag.release()
+            app.state.acars.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -852,6 +872,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.rds.release()
             app.state.adsb.release()
             app.state.aprs.release()
+            app.state.acars.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -865,6 +886,38 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "available": True,
             "freq_hz": decoder.freq_hz,
             "pages": decoder.pages(limit),
+        }
+
+    @app.get("/api/acars")
+    def acars(limit: int | None = None):
+        """The ACARS messages acarsdec is decoding on the VHF channel, newest first.
+
+        acarsdec opens the dongle the waterfall otherwise sweeps, so the sweep and the other SDR
+        tools are released first and stay released until a /api/spectrum poll takes the radio. No
+        radio, no acarsdec, or a quiet channel is an honest empty log — a 503 with the reason when
+        the process cannot be read, never a fabricated message.
+        """
+        decoder = app.state.acars
+        if not decoder.running:
+            app.state.sweeper.release()
+            app.state.decoder.release()
+            app.state.rds.release()
+            app.state.adsb.release()
+            app.state.aprs.release()
+            app.state.pocsag.release()
+            decoder.resume()
+            try:
+                decoder.start()
+            except AcarsUnavailable as exc:
+                log_event(app.state.events_path, "acars_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "messages": []})
+            log_event(app.state.events_path, "acars_start", {"freq_hz": decoder.freq_hz})
+        return {
+            "available": True,
+            "freq_hz": decoder.freq_hz,
+            "messages": decoder.messages(limit),
         }
 
     @app.get("/api/hardware")

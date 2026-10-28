@@ -33,6 +33,10 @@ DUMP1090 = "dump1090-fa"
 # AFSK1200 AX.25 frames; both hold the one dongle, so the APRS panel takes its turn on the sweep.
 MULTIMON = "multimon-ng"
 
+# The ACARS decoder (M16). acarsdec opens the RTL-SDR directly on the VHF ACARS channels and prints
+# decoded aircraft messages as JSON; it holds the one dongle, so the ACARS panel takes its turn too.
+ACARSDEC = "acarsdec"
+
 # A selector that cannot match any real serial. Given one, rtl_power prints the whole device
 # list and exits without claiming a radio — which is how the bus gets surveyed without taking
 # the dongle away from a lesson in progress.

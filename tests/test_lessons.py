@@ -288,6 +288,25 @@ def test_the_pocsag_panel_is_an_instrument_and_cannot_combine():
         parse_lesson(_consolidation(panels=["pocsag", "gain"]))
 
 
+def test_the_acars_panel_loads_and_selects_the_acars_instrument():
+    lesson = parse_lesson(_consolidation(panels=["acars"]))
+    assert lesson.panels == ["acars"]
+    assert lesson.uses_acars is True
+    assert lesson.uses_pocsag is False and lesson.uses_adsb is False
+
+
+def test_a_lesson_without_the_acars_panel_does_not_use_acars():
+    assert parse_lesson(_consolidation(panels=["gain"])).uses_acars is False
+    assert parse_lesson(_consolidation()).uses_acars is False
+
+
+def test_the_acars_panel_is_an_instrument_and_cannot_combine():
+    with pytest.raises(LessonError, match="acars"):
+        parse_lesson(_consolidation(panels=["acars", "pocsag"]))
+    with pytest.raises(LessonError, match="acars"):
+        parse_lesson(_consolidation(panels=["acars", "gain"]))
+
+
 def test_hints_must_be_a_list():
     with pytest.raises(LessonError, match="must be a list"):
         parse_lesson(_consolidation(hints="not-a-list"))

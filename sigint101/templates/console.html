@@ -127,6 +127,17 @@
                 <div class="decoder__axis" aria-hidden="true">multimon-ng &middot; POCSAG on 929.6 MHz</div>
               </div>
             </div>
+            {% elif lesson.uses_acars %}
+            {# An ACARS lesson seals the message log, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; MESSAGES HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">acarsdec &middot; ACARS on 131.55 MHz</div>
+              </div>
+            </div>
             {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
@@ -339,6 +350,29 @@
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
+            {% elif lesson.uses_acars %}
+            {# ---- ACARS log (M16): the typed messages aircraft send on VHF, which a waterfall shows
+               only as a brief AM burst. acarsdec decodes them; acars.js polls /api/acars and lists
+               each message with its aircraft and text. No radio / no acarsdec / a quiet channel shows
+               an honest empty log, never a fabricated message. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder" data-acars-panel aria-label="Live ACARS message log">
+                <div class="decoder__head">
+                  <span class="decoder__title">acarsdec &middot; ACARS</span>
+                  <span class="decoder__status" data-acars-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-acars-list></ul>
+                <div class="decoder__empty" data-acars-empty>listening on 131.550 MHz&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">131.550<span>MHz</span></div>
+                  <div class="tune__caption">VHF ACARS &middot; acarsdec decoding messages</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
             {% else %}
             {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson
                with no hardware (e.g. the legal rules) has no radio, so its instrument-named stages
@@ -464,6 +498,9 @@
 <!-- The live POCSAG log (M15): polls /api/pocsag and lists each pager message multimon-ng decoded,
      with its address. No radio / no multimon-ng / silent channel shows honestly; never a fake page. -->
 <script src="/static/pocsag.js"></script>
+<!-- The live ACARS log (M16): polls /api/acars and lists each aircraft message acarsdec decoded.
+     No radio / no acarsdec / quiet channel shows honestly; never a fake message. -->
+<script src="/static/acars.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by

@@ -1,0 +1,75 @@
+# ABOUTME: Lesson pack M16 "What the Aircraft Says" — ACARS, the typed messages aircraft send over
+# ABOUTME: VHF, decoded with acarsdec into a registration, a flight number and the message text.
+
+id: 16
+slug: acars
+title: "What the Aircraft Says"
+type: intro
+concept: >-
+  In Lesson 13 you watched aircraft broadcast where they are. ACARS is how they broadcast what they
+  are saying: a VHF data link, around 131 MHz, carrying typed messages between the plane and its
+  airline — position and weather reports, fuel and engine data, gate and delay notices, even free
+  text to the crew. Most of it is sent in the clear. acarsdec demodulates the burst and reads the
+  fields, and the console lists each message by the aircraft that sent it. This closes the decode
+  unit: from a signal's shape, to its position, to its words.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [acars]
+tune:
+  center_hz: 131550000
+  span_hz: 200000
+  step_hz: 100000
+
+stages:
+  frame: >-
+    One last signal, comrade, and it finishes the story. Back in Lesson 13 the aircraft told you where
+    they were. Tonight they tell you what they are saying. ACARS is the airlines' own text-message
+    system, sent over VHF around 131 megahertz: short typed bursts between an aircraft and its company
+    — a position report, a weather readback, an engine reading, a note to the crew about a gate change.
+    On the waterfall it is a quarter-second buzz. Decoded, it is the aeroplane talking, in words.
+  demo: >-
+    Watch — hands off. acarsdec is listening on 131.550, the main ACARS channel, opening the radio
+    itself and reading the bursts. Each row is one message: the aircraft's registration — its tail
+    number, painted on the fuselage — and its flight number, then the message label (a short code for
+    what kind it is) and the text it carried, when it carried any. Some are just handshakes with no
+    words; others are a line of operational data or plain English. There is no sender you had to look
+    up and, for most messages, nothing you had to break — the aeroplane simply said it, and you read
+    it. That is the whole arc of this unit in one panel.
+  try: >-
+    Your log now, comrade. ACARS comes in bursts as aircraft pass overhead and check in, so give it
+    time and watch the tail numbers arrive. Read a message: which aircraft, and what it said. Some
+    rows will be terse codes, some readable text. Sit with the whole unit behind you — you began by
+    naming a signal's shape on a waterfall, and you end by reading, in plain words, what an aircraft
+    told its airline.
+  predict: >-
+    An ACARS burst is a quarter-second buzz on the waterfall. Decoded, what is inside — readable
+    airline text, or encrypted ops data? Lock it in.
+  observe: >-
+    Look at a message against everything this unit taught you. Lesson 13's scope said "this aircraft
+    is here"; this one says "this aircraft said this." Ask yourself how far you have come: the same
+    waterfall that once only told you a signal existed now feeds decoders that read positions, station
+    names, packets, pages and now typed aircraft messages. What was the thing that changed — the
+    radio, or what you knew to do with what it heard?
+  explain: >-
+    Here's the straight answer, and the close of the unit: mostly readable airline text and data, sent
+    in the clear. ACARS — Aircraft Communications Addressing and Reporting System — is a VHF data link
+    dating to the 1970s, and its common form is not encrypted. Each message carries an aircraft
+    registration, a label identifying the message type, a block and sequence number, and often a text
+    body — a position or weather report, an engine or fuel reading, an operational notice, sometimes
+    plain English to the crew. acarsdec recovers the burst, checks it, and hands up those fields;
+    they appear because, for most traffic, nothing hid them. A few airlines do compress or encrypt
+    some messages, and some carry data that is simply terse rather than secret — so not every row will
+    read as a sentence. Now step back and see the whole unit. You started it able to say only "there
+    is a signal, and here is its shape." You end it able to say who is flying overhead and where, what
+    an FM station is quietly broadcasting, what a ham's packet carries, what a pager was told, and what
+    an aircraft just reported to its airline — all from the same dongle, each unlocked by a decoder
+    that knew the format. That is the real lesson: a receiver hears energy; decoding turns energy into
+    meaning. And the discipline that goes with it — the can-versus-may you met with the pager — rides
+    along with all of it. That is decoding. Unit complete.
+
+# Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
+# (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
+choices:
+  - {key: text, label: "Readable airline text"}
+  - {key: encrypted, label: "Encrypted ops data"}
+  - {key: telemetry, label: "Only raw numbers"}

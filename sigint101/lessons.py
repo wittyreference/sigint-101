@@ -43,7 +43,9 @@ RDS_PANEL = "rds"
 ADSB_PANEL = "adsb"
 APRS_PANEL = "aprs"
 POCSAG_PANEL = "pocsag"
-INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL, POCSAG_PANEL)
+ACARS_PANEL = "acars"
+INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL,
+                     POCSAG_PANEL, ACARS_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -146,6 +148,15 @@ class Lesson:
         /api/pocsag; like the other SDR instruments it takes turns with the sweep on the one dongle.
         """
         return POCSAG_PANEL in self.panels
+
+    @property
+    def uses_acars(self) -> bool:
+        """True when the instrument is the ACARS decoder (the acars panel), not the waterfall.
+
+        It runs acarsdec on the VHF ACARS channel, so the console renders the message log and polls
+        /api/acars; like the other SDR instruments it takes turns with the sweep on the one dongle.
+        """
+        return ACARS_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:

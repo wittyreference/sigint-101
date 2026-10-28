@@ -544,6 +544,35 @@ def test_a_pocsag_lessons_predict_frame_seals_the_log():
     assert "waterfall-wrap--frozen" not in html
 
 
+def _acars_intro_lesson():
+    """An intro lesson whose instrument is the ACARS decoder (M16's), on the VHF ACARS channel."""
+    return parse_lesson({
+        "id": 16, "slug": "acars", "title": "What the Aircraft Says", "type": "intro",
+        "concept": "ACARS is the airlines' VHF text link: typed messages, mostly in the clear",
+        "panels": ["acars"], "hardware": ["rtl-sdr"],
+        "tune": {"center_hz": 131_550_000, "span_hz": 200_000},
+        "stages": {"frame": "f", "demo": "DEMO watch the messages arrive", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_an_acars_lesson_shows_the_message_log_not_a_waterfall():
+    html = _console(lesson=_acars_intro_lesson(), current_stage="demo", tuned_hz=131_550_000)
+    assert "data-acars-panel" in html
+    assert "data-acars-list" in html
+    assert "acarsdec" in html
+    assert "131.550" in html
+    assert "canvas class=\"waterfall\"" not in html
+    assert "data-pocsag-panel" not in html
+
+
+def test_an_acars_lessons_predict_frame_seals_the_log():
+    html = _console(lesson=_acars_intro_lesson(), current_stage="predict",
+                    prediction_committed=False, tuned_hz=131_550_000)
+    assert "MESSAGES HIDDEN" in html
+    assert "waterfall-wrap--frozen" not in html
+
+
 def _provenance_lesson():
     """An intro lesson that declares the provenance panel (M3's, deaf-vs-empty)."""
     return parse_lesson({
