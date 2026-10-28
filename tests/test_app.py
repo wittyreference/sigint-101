@@ -13,6 +13,7 @@ from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.hardware import RadioProbe
 from sigint101.lora import LoRaListener, parse_lora_packet
+from sigint101.pocsag import PocsagDecoder
 from sigint101.rds import RDSDecoder, RDSStation, parse_rds_group
 from sigint101.spectrum import Sweeper, SweepRow, validate_span
 
@@ -283,15 +284,54 @@ def _aprs_stations():
     }]
 
 
+class _StubPocsag:
+    """An app-boundary stand-in for the rtl_fm|multimon-ng PocsagDecoder (no real radio)."""
+
+    def __init__(self, pages):
+        self._pages = pages
+        self._started = False
+        self._released = False
+        self.freq_hz = 929_600_000
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def pages(self, limit=None):
+        return self._pages
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _pocsag_pages():
+    """One decoded pager page, in the dict shape PocsagDecoder.pages() hands the route."""
+    return [{
+        "baud": 1200, "address": 1234567, "function": 3,
+        "kind": "alpha", "text": "CALL EXT 2210 URGENT",
+    }]
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
-            aprs_factory=None):
+            aprs_factory=None, pocsag_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
                      ppm_measure=ppm_measure, decoder_factory=decoder_factory,
                      lora_factory=lora_factory, rds_factory=rds_factory,
-                     adsb_factory=adsb_factory, aprs_factory=aprs_factory)
+                     adsb_factory=adsb_factory, aprs_factory=aprs_factory,
+                     pocsag_factory=pocsag_factory)
     return TestClient(app)
 
 
@@ -780,6 +820,75 @@ def test_aprs_stands_the_sweeper_down(tmp_path):
                  sweeper_factory=lambda: _RecordingSweeper(_rows()),
                  aprs_factory=lambda: _StubAprs(_aprs_stations())) as client:
         client.get("/api/aprs")
+    assert released["value"] is True
+
+
+# --- pocsag (POCSAG page log, M15) --------------------------------------------
+
+
+def test_pocsag_reports_503_and_a_reason_when_no_radio(tmp_path):
+    with _client(tmp_path,
+                 pocsag_factory=lambda: PocsagDecoder(
+                     radio_present=lambda: False,
+                     which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/pocsag")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["pages"] == []             # never a fabricated page
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_pocsag_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/pocsag")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_pocsag_returns_the_pages_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 pocsag_factory=lambda: _StubPocsag(_pocsag_pages())) as client:
+        resp = client.get("/api/pocsag")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["freq_hz"] == 929_600_000
+    page = body["pages"][0]
+    assert page["address"] == 1234567
+    assert page["kind"] == "alpha"
+    assert page["text"] == "CALL EXT 2210 URGENT"
+
+
+def test_pocsag_stands_the_sweeper_down(tmp_path):
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 pocsag_factory=lambda: _StubPocsag(_pocsag_pages())) as client:
+        client.get("/api/pocsag")
+    assert released["value"] is True
+
+
+def test_spectrum_releases_the_pocsag_decoder(tmp_path):
+    """Switching back to the waterfall releases the POCSAG decoder — one program per dongle."""
+    released = {"value": False}
+
+    class _RecordingPocsag(_StubPocsag):
+        def release(self):
+            released["value"] = True
+            super().release()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows()),
+                 pocsag_factory=lambda: _RecordingPocsag(_pocsag_pages())) as client:
+        client.get("/api/pocsag")        # multimon-ng takes the dongle
+        client.get("/api/spectrum")      # sweep reclaims it
     assert released["value"] is True
 
 

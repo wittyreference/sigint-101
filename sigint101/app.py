@@ -27,6 +27,7 @@ from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
 from .lora import LoRaListener, LoRaUnavailable
+from .pocsag import PocsagDecoder, PocsagUnavailable
 from .ppm import measure_pilot_ppm
 from .progress import Progress
 from .provenance import (
@@ -166,7 +167,7 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
-               rds_factory=None, adsb_factory=None, aprs_factory=None,
+               rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                pool_path=None, ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
@@ -249,6 +250,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_aprs = aprs_factory
 
+    # The POCSAG decoder runs rtl_fm|multimon-ng on the pager band, so it holds the one dongle too —
+    # it joins the sweeper / rtl_433 / rds / adsb / aprs release/resume turn-taking.
+    if pocsag_factory is None:
+        def build_pocsag():
+            return PocsagDecoder(
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_pocsag = pocsag_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -265,6 +278,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.rds = build_rds()
         app.state.adsb = build_adsb()
         app.state.aprs = build_aprs()
+        app.state.pocsag = build_pocsag()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -283,6 +297,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.rds.stop()
             app.state.adsb.stop()
             app.state.aprs.stop()
+            app.state.pocsag.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -651,6 +666,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.rds.release()
             app.state.adsb.release()
             app.state.aprs.release()
+            app.state.pocsag.release()
             sweeper.resume()
             try:
                 sweeper.start()
@@ -687,6 +703,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.rds.release()
             app.state.adsb.release()
             app.state.aprs.release()
+            app.state.pocsag.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -740,6 +757,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.decoder.release()
             app.state.adsb.release()
             app.state.aprs.release()
+            app.state.pocsag.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -770,6 +788,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.decoder.release()
             app.state.rds.release()
             app.state.aprs.release()
+            app.state.pocsag.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -801,6 +820,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.decoder.release()
             app.state.rds.release()
             app.state.adsb.release()
+            app.state.pocsag.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -814,6 +834,37 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "available": True,
             "freq_hz": decoder.freq_hz,
             "stations": decoder.stations(),
+        }
+
+    @app.get("/api/pocsag")
+    def pocsag(limit: int | None = None):
+        """The pager messages multimon-ng is decoding on the POCSAG channel, newest first.
+
+        rtl_fm|multimon-ng holds the dongle the waterfall otherwise sweeps, so the sweep and the
+        other SDR tools are released first and stay released until a /api/spectrum poll takes the
+        radio. No radio, no multimon-ng, or a silent channel is an honest empty log — a 503 with the
+        reason when the pipeline cannot be read, never a fabricated page.
+        """
+        decoder = app.state.pocsag
+        if not decoder.running:
+            app.state.sweeper.release()
+            app.state.decoder.release()
+            app.state.rds.release()
+            app.state.adsb.release()
+            app.state.aprs.release()
+            decoder.resume()
+            try:
+                decoder.start()
+            except PocsagUnavailable as exc:
+                log_event(app.state.events_path, "pocsag_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "pages": []})
+            log_event(app.state.events_path, "pocsag_start", {"freq_hz": decoder.freq_hz})
+        return {
+            "available": True,
+            "freq_hz": decoder.freq_hz,
+            "pages": decoder.pages(limit),
         }
 
     @app.get("/api/hardware")

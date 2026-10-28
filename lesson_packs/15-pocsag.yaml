@@ -1,0 +1,70 @@
+# ABOUTME: Lesson pack M15 "Not Meant for You" — POCSAG paging, unencrypted messages addressed to
+# ABOUTME: someone else, decoded from the pager band into a cap code and the text it carried.
+
+id: 15
+slug: pocsag
+title: "Not Meant for You"
+type: intro
+concept: >-
+  Pagers are not gone — hospitals, plant operators and emergency crews still run them, and POCSAG,
+  the protocol most of them use, sends every message in the clear. On the waterfall a page is a brief
+  FSK burst; decoded, it is a cap code (the address of one specific pager) and a line of text or
+  digits meant for whoever carries it. multimon-ng turns the burst into that message. This is the
+  sharp edge of the decode unit: a signal you can read perfectly, addressed to someone who is not you.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [pocsag]
+tune:
+  center_hz: 929600000
+  span_hz: 200000
+  step_hz: 100000
+
+stages:
+  frame: >-
+    A different kind of message tonight, comrade — one you were never meant to see. Pagers still run
+    the world's quiet corners: a hospital calling a doctor, a plant telling an engineer a pump has
+    tripped. Most use POCSAG, and POCSAG has no encryption at all. Each message carries a cap code —
+    the address of one particular pager — and a short line of text or numbers. On the waterfall it is
+    a half-second buzz. Decoded, it is somebody's private message, in plain words, over the air.
+  demo: >-
+    Watch — hands off. rtl_fm is listening on the pager band and multimon-ng is turning the POCSAG
+    bursts back into pages. Each row is one message: the cap code first — the numeric address of the
+    pager it was sent to — then what it said, an alphanumeric line or a string of digits, or just a
+    tone if it was only a nudge to call in. The pagers run at 512, 1200 or 2400 bits a second, so the
+    decoder listens for all three. Notice there is no sender name, no key, nothing to crack: the
+    message is readable the instant it is demodulated. That is exactly the point to sit with.
+  try: >-
+    Your log now, comrade. Pages come in bursts, not a steady stream, so give it time and watch the
+    rows arrive. Read one: the cap code it was addressed to, and the message it carried. Then feel the
+    weight of it — this is a real message, sent to a real pager, that you are reading without being
+    the person it was for. The skill is trivial; the ethics are not. We will come back to that.
+  predict: >-
+    A POCSAG page is a half-second buzz on the waterfall. Decoded, what is inside — a readable message
+    for someone, or just a beep? Lock it in.
+  observe: >-
+    Look at a page against what the waterfall showed. The waterfall said "a burst at 929.6"; the
+    decoder says "pager number such-and-such was told this." Ask yourself: what, if anything, stood
+    between you and that message — any encryption, any key, any barrier at all? And if so little did,
+    what does that say about every unencrypted signal you have learned to decode in this unit?
+  explain: >-
+    Here's the straight answer: a complete, readable message, addressed to someone who is not you, with
+    nothing in the way. POCSAG is a 1980s paging standard built for simplicity, not secrecy: a frame
+    carries a cap code — the address identifying one pager — a function bits or two, and a payload that
+    is either numeric (a callback number) or alphanumeric (a line of text). There is no encryption in
+    the protocol. multimon-ng recovers the FSK, syncs to the POCSAG frame, and reads the fields; the
+    message appears because nothing was ever done to hide it. Now the part that matters more than the
+    code. Receiving radio is passive and legal almost everywhere; acting on, recording, or repeating a
+    message that was not meant for you very often is not, and in many places even divulging the
+    contents of a private message you happened to receive is an offence. This lesson shows you the
+    capability precisely so you understand the responsibility: a signal being easy to decode says
+    nothing about whether you are allowed to use what it carried. That line — can versus may — is the
+    real lesson of decoding in the open. Next, back to the sky, and a message the aircraft themselves
+    send in words: ACARS.
+# The closing line sets up M16 (ACARS aircraft text).
+
+# Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
+# (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
+choices:
+  - {key: readable, label: "A readable message"}
+  - {key: scrambled, label: "Scrambled text"}
+  - {key: beep, label: "Just a beep"}

@@ -116,6 +116,17 @@
                 <div class="decoder__axis" aria-hidden="true">multimon-ng &middot; APRS on 144.39 MHz</div>
               </div>
             </div>
+            {% elif lesson.uses_pocsag %}
+            {# A POCSAG lesson seals the page log, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; PAGES HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">multimon-ng &middot; POCSAG on 929.6 MHz</div>
+              </div>
+            </div>
             {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
@@ -305,6 +316,29 @@
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
+            {% elif lesson.uses_pocsag %}
+            {# ---- POCSAG page log (M15): pager messages on the paging band, which a waterfall shows
+               only as a burst of FSK. rtl_fm|multimon-ng decodes the pages; pocsag.js polls
+               /api/pocsag and lists each page with its address and text. No radio / no multimon-ng /
+               a silent channel shows an honest empty log, never a fabricated page. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder" data-pocsag-panel aria-label="Live POCSAG page log">
+                <div class="decoder__head">
+                  <span class="decoder__title">multimon-ng &middot; POCSAG</span>
+                  <span class="decoder__status" data-pocsag-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-pocsag-list></ul>
+                <div class="decoder__empty" data-pocsag-empty>listening on 929.6 MHz&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">929.6<span>MHz</span></div>
+                  <div class="tune__caption">pager band &middot; multimon-ng decoding POCSAG</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
             {% else %}
             {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson
                with no hardware (e.g. the legal rules) has no radio, so its instrument-named stages
@@ -427,6 +461,9 @@
 <!-- The live APRS roster (M14): polls /api/aprs and lists each station multimon-ng decoded on 2m,
      with its latest packet. No radio / no multimon-ng / quiet channel shows honestly; never a fake station. -->
 <script src="/static/aprs.js"></script>
+<!-- The live POCSAG log (M15): polls /api/pocsag and lists each pager message multimon-ng decoded,
+     with its address. No radio / no multimon-ng / silent channel shows honestly; never a fake page. -->
+<script src="/static/pocsag.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by
