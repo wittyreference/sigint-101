@@ -277,3 +277,31 @@ its placeholder "—". The waterfall already avoids this with `querySelectorAll`
 canvases, so a hidden stage is already correct when you step to it).
 **How to apply.** Any live panel driven by a poll must `querySelectorAll` and update every instance,
 exactly like waterfall.js — a lesson shows the same panel on each of its instrument stages.
+
+## 2026-10-28: M13 ADS-B — a 4th SDR-exclusive instrument, and the 1090 MHz antenna wall
+**Finding.** dump1090-fa builds cleanly from source on nomad-b (Bookworm/aarch64) with just
+`librtlsdr-dev` + `libncurses-dev` and `make BLADERF=no`; it is not in Debian's repos. It serves a
+line-oriented BaseStation (SBS-1) feed on TCP 30003 — one CSV message per decoded Mode S frame — so
+the backend reuses the exact parse→accumulate→reader-thread pattern of the RDS/rtl_433 decoders, with
+a per-ICAO `AircraftTracker` assembling identity (MSG,1) + position (MSG,3) + velocity (MSG,4) into
+one aircraft. The authoritative field layout (incl. the trailing `H` on a geometric altitude and the
+-1/0 flags) is in dump1090-fa's `net_io.c:modesSendSBSOutput`; TDD against those exact shapes beats a
+rate-mismatched IQ sample (the classic antirez `modes1.bin` is 2 MHz; dump1090-fa demods at a fixed
+2.4 MSPS, so it decodes 0 frames). dump1090 becomes a **4th** SDR-exclusive consumer — every
+exclusive start releases the other three (sweeper, rtl_433, rtl_fm), and /api/spectrum releases it.
+**The antenna wall:** nomad-b hears **411k Mode-S preambles but 0 pass CRC** at 1090 MHz, peak signal
+power blank — i.e. noise triggering the preamble detector, no real aircraft. This is a UHF antenna
+problem (1090 MHz), **independent of the FM antenna** that blocks M4/M12. Gain is not the lever (0 of
+2M candidate frames is not a gain miss). So M13's live capture defers like M9/M10/M12; the pipeline
+is HIL-proven honest-empty.
+**Render gotcha (again):** the radar scope at 212px pushed the observe Next button to y=485 — 5px
+below the 480 fold — and the **screenshot did not show it** (the button's top was visible). Only the
+DevTools `getBoundingClientRect().bottom` measure at a FORCED 800x480 caught it; trimmed the panel to
+200px (Next→473). Also `/json/new` is **PUT-only** on current Chromium (GET → 405) — grab the existing
+`about:blank` page target from `/json` instead and reuse one WS connection for both render passes;
+and never `rm` the running server's `progress.db` (unlinking it under the open sqlite handle 500s the
+next write) — start the render on a fresh data dir instead.
+**How to apply.** For a decode lesson over a line/stream source, reuse the parse_X/accumulator/reader
+pattern and read the tool's own output-format source for fixtures. For a reception-limited lesson,
+prove the pipeline honest-empty and defer the live capture on the right antenna — and always confirm
+the 800x480 fit with the numeric bottom-measure, not the screenshot.

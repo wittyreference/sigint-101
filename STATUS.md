@@ -1,22 +1,39 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call — M12 (RDS/PSK) is done and landed (`e390c5c`). Unit 4 Modulation (M8-M12) is COMPLETE.**
+**MC's call — M13 (ADS-B) is done and landed. Unit 5 Decode is underway (M13 of M13-16).**
 Open items:
-- **M13 (ADS-B + map)** — the start of Unit 5 Decode: aircraft transponders at 1090 MHz on a map
-  (N+S). *Recommended next.* Needs `dump1090` (or similar) on nomad-b — a system install, ask MC. A
-  new tune band (1090 MHz, already supported) + a decode/map instrument.
-- **RDS below-the-waterfall capture (deferred, physical)** — M12's pipeline is HIL-proven end to end
-  (redsea built + decoding real test RDS; /api/rds runs live, honest-empty), but **nomad-b's FM
-  antenna can't recover the 57 kHz subcarrier** (no station decodes RDS off-air — same block as M4's
-  pilot). Drop a tuned FM dipole / good telescopic on the SDR and we capture the live station text.
+- **M14 (next Decode lesson)** — *recommended next.* Confirm the topic with MC / the plan (U5 =
+  M13-16; APRS/AX.25 packet, POCSAG pager, or ACARS are the usual decode-unit candidates, all
+  readable with the SDR already on nomad-b). TDD; land `--squash`; render-verify at a forced 800x480.
+- **ADS-B live radar capture (deferred, physical)** — M13's pipeline is HIL-proven end to end
+  (dump1090 built + serving, /api/adsb runs live honest-empty), but **nomad-b's antenna is deaf at
+  1090 MHz** (411k Mode-S preambles, 0 CRC-valid, blank signal power — no planes decode). This is a
+  **UHF** antenna, independent of the FM one. Drop a 1090 MHz ADS-B antenna (or a tuned ~6.9 cm whip)
+  on the SDR and the scope lights up; set `SIGINT101_RX_LAT`/`RX_LON` to place contacts on the rings.
+- **RDS below-the-waterfall capture (deferred, physical)** — needs a tuned FM dipole/telescopic on
+  the SDR (same block as M4's pilot; an FM antenna unblocks both M12 RDS and M4 ppm).
 - **LoRa below-floor capture — DONE** (−4.75 to −5.25 dB SNR, 2026-10-27).
 - **FSK two-tone live capture (deferred)** — needs an on-frequency FSK transmitter.
 - **M4 real-ppm (deferred)** — same FM-antenna block as M12's RDS; a good FM antenna unblocks both.
 - **Follow-up: M8's predict prompt is ~60 words / 5 lines — 1 px over at a true 800x480.** Trim it.
 - **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their diagram.
-Recommended: M13 (ask MC to approve the `dump1090` install first). TDD; land `--squash`; render-verify
-on nomad-b at a **forced** 800x480 (Emulation.setDeviceMetricsOverride — headless --window-size lies).
+
+**M13 (ADS-B) DONE and landed (observed, 2026-10-28), squash-merged to main.** Opens Unit 5 (Decode):
+aircraft broadcast identity + position in the clear on 1090 MHz, and the console decodes the Mode S /
+ADS-B into contacts placed on a **radar scope** (MC's call over a tile map — fully offline, no map
+assets) by range (ring) and bearing (angle) from the receiver. New `sigint101/adsb.py`:
+`parse_sbs_message` (dump1090 BaseStation lines — field layout + 'H' geometric-altitude suffix + -1/0
+flags taken from dump1090-fa's `net_io.c`), `AircraftTracker` (per-ICAO accumulator, prunes stale),
+`great_circle` (haversine range + bearing), `AdsbDecoder` (owns the dump1090 process + SBS socket on
+port 30003, reader thread, release/resume) — a **4th SDR-exclusive consumer** joining the sweeper /
+rtl_433 / rtl_fm turn-taking. `/api/adsb` + an `adsb` instrument panel (inline-SVG radar in
+`static/adsb.js`) + `lesson_packs/13-adsb.yaml`. `dump1090-fa` built from source on nomad-b (needs
+`librtlsdr-dev` + `libncurses-dev`; `make BLADERF=no`) and installed to `/usr/local/bin`. **HIL on
+nomad-b:** live `/api/adsb` runs end to end honest-empty, the 4-way dongle arbitration works both
+directions (dump1090 ⇄ sweeper), observe scope (LIVE, honest-empty) + predict gate render at a forced
+800x480 (Next=473, Commit=474). **Deferred (physical):** live aircraft capture needs a 1090 MHz
+antenna — nomad-b's is deaf there (0 CRC-valid of 411k preambles).
 
 **M12 (RDS/PSK) DONE and landed (observed, 2026-10-27), main @ `e390c5c`.** PSK hides data in phase,
 which the waterfall (amplitude × frequency) can never show; M12 reads it through RDS — the station
