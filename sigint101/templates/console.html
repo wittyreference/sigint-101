@@ -94,6 +94,17 @@
                 <div class="decoder__axis" aria-hidden="true">redsea &middot; RDS on {{ "%.1f"|format(mhz) }} MHz</div>
               </div>
             </div>
+            {% elif lesson.uses_adsb %}
+            {# An ADS-B lesson seals the radar scope, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; SKY HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">dump1090 &middot; ADS-B on 1090 MHz</div>
+              </div>
+            </div>
             {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
@@ -218,6 +229,48 @@
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
+            {% elif lesson.uses_adsb %}
+            {# ---- ADS-B radar (M13): aircraft transponders at 1090 MHz, which never appear on an FM
+               waterfall. dump1090 decodes them; adsb.js polls /api/adsb and places each contact on
+               the scope by its range (ring) and bearing (angle) from the receiver. No radio / no
+               dump1090 / no planes overhead shows an honest empty sky, never a fabricated contact.
+               The scope skeleton (rings, crosshair, compass) is static; adsb.js draws the dots. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder radar" data-adsb-panel aria-label="Live ADS-B radar scope">
+                <div class="decoder__head">
+                  <span class="decoder__title">dump1090 &middot; ADS-B</span>
+                  <span class="decoder__status" data-adsb-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <div class="radar__scope">
+                  <svg class="radar__svg" viewBox="0 0 200 200" aria-hidden="true">
+                    <g class="radar__grid">
+                      <circle cx="100" cy="100" r="90"/>
+                      <circle cx="100" cy="100" r="60"/>
+                      <circle cx="100" cy="100" r="30"/>
+                      <line x1="100" y1="10" x2="100" y2="190"/>
+                      <line x1="10" y1="100" x2="190" y2="100"/>
+                    </g>
+                    <circle class="radar__me" cx="100" cy="100" r="2.5"/>
+                    <g class="radar__dots" data-adsb-dots></g>
+                    <text class="radar__compass" x="100" y="8">N</text>
+                    <text class="radar__compass" x="196" y="103">E</text>
+                    <text class="radar__compass" x="100" y="199">S</text>
+                    <text class="radar__compass" x="4" y="103">W</text>
+                  </svg>
+                  <div class="radar__ring-label" data-adsb-ring>&mdash;</div>
+                </div>
+                <div class="radar__count"><b data-adsb-count>0</b> contacts</div>
+                <div class="decoder__empty" data-adsb-empty>listening on 1090 MHz&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">1090<span>MHz</span></div>
+                  <div class="tune__caption">Mode S &middot; dump1090 decoding ADS-B</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
             {% else %}
             {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson
                with no hardware (e.g. the legal rules) has no radio, so its instrument-named stages
@@ -334,6 +387,9 @@
 <!-- The live RDS panel (M12): polls /api/rds and fills the station card redsea assembles from the
      57 kHz subcarrier. No radio / no redsea shows an honest empty state; it never invents a station. -->
 <script src="/static/rds.js"></script>
+<!-- The live ADS-B radar (M13): polls /api/adsb and places each aircraft dump1090 decodes on the
+     scope by range and bearing. No radio / no dump1090 / empty sky shows honestly; never a fake plane. -->
+<script src="/static/adsb.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by

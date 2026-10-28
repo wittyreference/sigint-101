@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sigint101 import exam
+from sigint101.adsb import AdsbDecoder
 from sigint101.app import create_app
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.hardware import RadioProbe
@@ -203,13 +204,53 @@ def _station():
     return s
 
 
+class _StubAdsb:
+    """An app-boundary stand-in for the dump1090 AdsbDecoder (no real radio)."""
+
+    def __init__(self, aircraft, *, located=True):
+        self._aircraft = aircraft
+        self.receiver = type("_R", (), {"known": located})()
+        self._started = False
+        self._released = False
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def aircraft(self):
+        return self._aircraft
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _aircraft():
+    """One located aircraft, in the dict shape AdsbDecoder.aircraft() hands the route."""
+    return [{
+        "hex_ident": "A1B2C3", "callsign": "UAL123", "altitude_ft": 37000,
+        "ground_speed_kt": 450.0, "track_deg": 118.0, "lat": 37.6195, "lon": -122.3868,
+        "squawk": "2200", "message_count": 7, "range_nm": 12.4, "bearing_deg": 41.0,
+    }]
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
-            decoder_factory=None, lora_factory=None, rds_factory=None):
+            decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
                      ppm_measure=ppm_measure, decoder_factory=decoder_factory,
-                     lora_factory=lora_factory, rds_factory=rds_factory)
+                     lora_factory=lora_factory, rds_factory=rds_factory,
+                     adsb_factory=adsb_factory)
     return TestClient(app)
 
 
@@ -583,6 +624,87 @@ def test_rds_stands_the_sweeper_down(tmp_path):
                  sweeper_factory=lambda: _RecordingSweeper(_rows()),
                  rds_factory=lambda: _StubRDS(_station())) as client:
         client.get("/api/rds")
+    assert released["value"] is True
+
+
+# --- adsb (ADS-B radar, M13) --------------------------------------------------
+
+
+def test_adsb_reports_503_and_a_reason_when_no_radio(tmp_path):
+    # dump1090 present (injected which) so this pins the no-radio refusal, not a missing tool.
+    with _client(tmp_path,
+                 adsb_factory=lambda: AdsbDecoder(radio_present=lambda: False,
+                                                  which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/adsb")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["aircraft"] == []          # never a fabricated contact
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_adsb_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/adsb")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_adsb_returns_the_located_aircraft_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 adsb_factory=lambda: _StubAdsb(_aircraft())) as client:
+        resp = client.get("/api/adsb")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["freq_hz"] == 1_090_000_000
+    assert body["receiver_located"] is True
+    plane = body["aircraft"][0]
+    assert plane["callsign"] == "UAL123"
+    assert plane["altitude_ft"] == 37000
+    assert plane["range_nm"] == 12.4
+    assert plane["bearing_deg"] == 41.0
+
+
+def test_adsb_empty_sky_is_honest_not_a_fabricated_plane(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 adsb_factory=lambda: _StubAdsb([])) as client:
+        resp = client.get("/api/adsb")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["aircraft"] == []
+
+
+def test_adsb_stands_the_sweeper_down(tmp_path):
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 adsb_factory=lambda: _StubAdsb(_aircraft())) as client:
+        client.get("/api/adsb")
+    assert released["value"] is True
+
+
+def test_spectrum_releases_the_adsb_decoder(tmp_path):
+    """Switching back to the waterfall releases the ADS-B decoder — one program per dongle."""
+    released = {"value": False}
+
+    class _RecordingAdsb(_StubAdsb):
+        def release(self):
+            released["value"] = True
+            super().release()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows()),
+                 adsb_factory=lambda: _RecordingAdsb(_aircraft())) as client:
+        client.get("/api/adsb")          # dump1090 takes the dongle
+        client.get("/api/spectrum")      # sweep reclaims it
     assert released["value"] is True
 
 

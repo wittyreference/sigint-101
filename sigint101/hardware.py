@@ -25,6 +25,10 @@ RTL_433 = "rtl_433"
 RTL_FM = "rtl_fm"
 REDSEA = "redsea"
 
+# The ADS-B decoder (M13). dump1090 demodulates Mode S at 1090 MHz and serves decoded aircraft as
+# BaseStation (SBS-1) text; it holds the same one dongle, so the radar panel takes its turn too.
+DUMP1090 = "dump1090-fa"
+
 # A selector that cannot match any real serial. Given one, rtl_power prints the whole device
 # list and exits without claiming a radio — which is how the bus gets surveyed without taking
 # the dongle away from a lesson in progress.

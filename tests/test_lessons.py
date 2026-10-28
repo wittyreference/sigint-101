@@ -230,6 +230,26 @@ def test_the_rds_panel_is_an_instrument_and_cannot_combine():
         parse_lesson(_consolidation(panels=["rds", "ppm"]))
 
 
+def test_the_adsb_panel_loads_and_selects_the_adsb_instrument():
+    lesson = parse_lesson(_consolidation(panels=["adsb"]))
+    assert lesson.panels == ["adsb"]
+    assert lesson.uses_adsb is True
+    assert lesson.uses_decoder is False and lesson.uses_lora is False
+    assert lesson.uses_rds is False
+
+
+def test_a_lesson_without_the_adsb_panel_does_not_use_adsb():
+    assert parse_lesson(_consolidation(panels=["gain"])).uses_adsb is False
+    assert parse_lesson(_consolidation()).uses_adsb is False
+
+
+def test_the_adsb_panel_is_an_instrument_and_cannot_combine():
+    with pytest.raises(LessonError, match="adsb"):
+        parse_lesson(_consolidation(panels=["adsb", "rds"]))
+    with pytest.raises(LessonError, match="adsb"):
+        parse_lesson(_consolidation(panels=["adsb", "gain"]))
+
+
 def test_hints_must_be_a_list():
     with pytest.raises(LessonError, match="must be a list"):
         parse_lesson(_consolidation(hints="not-a-list"))

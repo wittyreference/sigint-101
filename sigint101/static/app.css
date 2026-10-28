@@ -887,6 +887,59 @@ body {
   font-size: 15px;
   color: var(--fg);
 }
+/* ADS-B radar scope (M13): the receiver at the centre, aircraft placed by range (ring) and bearing
+   (angle). Taller than the list panels because the scope is the whole instrument, with no overlay
+   beside it; it stays within the fixed 800x480 budget (scope + count + tune + body). */
+.radar { height: 200px; }
+.radar__scope {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+}
+.radar__svg {
+  height: 100%;
+  width: auto;
+  aspect-ratio: 1 / 1;
+}
+.radar__grid circle, .radar__grid line {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 0.6;
+}
+.radar__me { fill: var(--accent); }
+.radar__plane { fill: var(--ok); }
+.radar__plane-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  fill: var(--fg);
+}
+.radar__compass {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  fill: var(--fg-mute);
+  text-anchor: middle;
+}
+.radar__ring-label {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+.radar__count {
+  flex: none;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+.radar__count b { color: var(--accent); font-size: 15px; }
 .decoder__read { grid-area: read; color: var(--fg); }
 .decoder__tone { grid-area: tone; font-family: var(--font-mono); font-size: 13px; color: var(--fg-mute); }
 .decoder__empty {

@@ -1,0 +1,73 @@
+# ABOUTME: Lesson pack M13 "The Sky Talks" — ADS-B at 1090 MHz, aircraft broadcasting their identity
+# ABOUTME: and position in the clear, decoded from Mode S into contacts placed on a radar scope.
+
+id: 13
+slug: adsb
+title: "The Sky Talks"
+type: intro
+concept: >-
+  Every airliner overhead broadcasts who it is, how high it flies and exactly where it sits — in the
+  clear, on 1090 MHz, to anyone with a receiver. This opens the decode unit: you stop naming a
+  signal's shape and start turning it into meaning. dump1090 reads the Mode S transmissions and hands
+  you callsign, altitude and position; the console places each aircraft on a radar scope by its range
+  and bearing. Nothing is cracked — it is an open published standard you simply decode.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [adsb]
+tune:
+  center_hz: 1090000000
+  span_hz: 2000000
+  step_hz: 1000000
+
+stages:
+  frame: >-
+    A new unit, comrade, and a new kind of listening. All of Unit 4 you spent naming shapes — on,
+    off, a pitch, a chirp, a phase. Tonight you stop naming and start reading. Above you, right now,
+    airliners are shouting their names into the sky: an open broadcast on 1090 MHz, several times a
+    second, carrying a plane's identity, its altitude, its exact position over the ground. No permit,
+    no key, no secret — the standard is published, meant to be received. Tonight you build a radar.
+  demo: >-
+    Watch — hands off. No waterfall tonight; a waterfall would show you a faint smudge at 1090 MHz
+    and nothing more, because the meaning is in the data, not the picture. dump1090 is listening, and
+    the scope in front of you is a radar: you sit at the centre, the rings mark distance, the angle
+    marks the compass bearing. When a plane's transmission is decoded, a contact appears on its ring
+    with the callsign the crew filed. Each aircraft sends its identity in one message, its altitude
+    and position in another, its speed in a third — and dump1090 assembles them into one track. Busy
+    sky, the rings fill; quiet sky, the scope stays honestly empty. It never paints a plane that isn't
+    there.
+  try: >-
+    Your scope now, comrade. Give it a minute — ADS-B is a broadcast, not a request, so you wait for
+    each aircraft to transmit before it can appear. Read a contact: its callsign, the ring it sits on
+    for distance, the angle for bearing. If the sky above this receiver is quiet, or its antenna is
+    deaf to 1090 MHz, the scope will tell you plainly rather than invent traffic. Either way, sit with
+    what just changed: you are not identifying a modulation any more — you are reading a message.
+  predict: >-
+    An airliner overhead is transmitting on 1090 MHz. To put it on your scope — callsign, altitude,
+    position — must you break a code, or just decode an open standard? Lock it in.
+  observe: >-
+    Look at what the scope gives you. Not "there is a signal at 1090 MHz" — that is all a waterfall
+    could ever say — but a name, a height, a place. Ask yourself: how much of this did you have to
+    unlock, and how much simply arrived, formatted and readable, the moment you decoded it? And if the
+    scope is empty, is that the decoder failing, or the honest answer that nothing up there is talking?
+  explain: >-
+    Here's the straight answer: nothing is broken into. ADS-B — Automatic Dependent Surveillance,
+    Broadcast — is exactly that: every equipped aircraft automatically broadcasts its own position and
+    identity, in the clear, on 1090 MHz, because the air-traffic system is built on everyone hearing
+    everyone. There is no encryption and no key; the message format is a published international
+    standard. So "decoding" it is just that — demodulating the pulses into bits and reading the fields
+    the standard defines: a 24-bit address that names the aircraft, a callsign, a barometric altitude,
+    a latitude and longitude. dump1090 does the demodulation and the bit-unpacking; the console does
+    the geometry, turning each plane's latitude and longitude into a range and a bearing from where
+    you sit, which is what places it on the ring. That is the whole shift this unit makes. In Unit 4 a
+    signal's value was its shape — what kind of modulation it was. Here a signal's value is its
+    content — what it says. A waterfall was the right instrument for shape; a decoder and a scope are
+    the right instruments for meaning. One honest footnote: receiving ADS-B is as ordinary as a flight
+    tracker on your phone — it is a public broadcast, and listening is passive. Next, you keep
+    decoding: more signals that carry words, not just waveforms.
+
+# Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
+# (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
+choices:
+  - {key: open, label: "Open data, just decode"}
+  - {key: locked, label: "Encrypted, needs a key"}
+  - {key: garbled, label: "Only broken fragments"}

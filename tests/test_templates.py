@@ -457,6 +457,35 @@ def test_an_rds_lessons_predict_frame_seals_the_station():
     assert "waterfall-wrap--frozen" not in html
 
 
+def _adsb_intro_lesson():
+    """An intro lesson whose instrument is the ADS-B radar (M13's), on 1090 MHz."""
+    return parse_lesson({
+        "id": 13, "slug": "adsb", "title": "The Sky Talks", "type": "intro",
+        "concept": "aircraft broadcast their identity and position in the clear on 1090 MHz",
+        "panels": ["adsb"], "hardware": ["rtl-sdr"],
+        "tune": {"center_hz": 1_090_000_000, "span_hz": 2_000_000},
+        "stages": {"frame": "f", "demo": "DEMO watch a contact appear", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_an_adsb_lesson_shows_the_radar_scope_not_a_waterfall():
+    html = _console(lesson=_adsb_intro_lesson(), current_stage="demo", tuned_hz=1_090_000_000)
+    assert "data-adsb-panel" in html
+    assert "data-adsb-dots" in html
+    assert "dump1090" in html
+    assert "1090" in html
+    assert "canvas class=\"waterfall\"" not in html
+    assert "data-rds-panel" not in html
+
+
+def test_an_adsb_lessons_predict_frame_seals_the_scope():
+    html = _console(lesson=_adsb_intro_lesson(), current_stage="predict",
+                    prediction_committed=False, tuned_hz=1_090_000_000)
+    assert "SKY HIDDEN" in html
+    assert "waterfall-wrap--frozen" not in html
+
+
 def _provenance_lesson():
     """An intro lesson that declares the provenance panel (M3's, deaf-vs-empty)."""
     return parse_lesson({

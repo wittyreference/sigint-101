@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .decode import Decoder, DecodeUnavailable
 from .events import log_event
 from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
@@ -49,6 +50,23 @@ DEFAULT_TILE_GLYPH = "waterfall"
 # Env var that pins which radio to sweep when the bus holds more than one. A serial, not an index:
 # the index changes with plug order, so "00000001" handed to rtl_power's -d is read as index 1.
 RTLSDR_SERIAL_ENV = "SIGINT101_RTLSDR_SERIAL"
+
+# Where the ADS-B radar is standing. Set to the receiver's own latitude/longitude, the scope turns
+# each aircraft's position into a range and bearing; left unset, the scope lists contacts without
+# placing them, because a range drawn from a guessed location would be a real-looking lie.
+RX_LAT_ENV = "SIGINT101_RX_LAT"
+RX_LON_ENV = "SIGINT101_RX_LON"
+
+
+def _env_float(name: str):
+    """Read an environment value as a float, or None if unset or not a number."""
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 # A ppm measurement captures this many seconds of IQ from one station. Shorter than the module
 # default so the kiosk's "Measure ppm" tap returns promptly; the trade-off is resolution, which the
@@ -147,7 +165,7 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
-               rds_factory=None, pool_path=None, ppm_measure=None) -> FastAPI:
+               rds_factory=None, adsb_factory=None, pool_path=None, ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -202,6 +220,21 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_rds = rds_factory
 
+    # The ADS-B decoder runs dump1090, which holds the same one dongle; it joins the sweeper /
+    # rtl_433 / rtl_fm release/resume turn-taking. Its receiver location comes from the environment
+    # so the scope can place aircraft; wired to the same probe and enumerator as the rest.
+    if adsb_factory is None:
+        def build_adsb():
+            return AdsbDecoder(
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+                receiver_lat=_env_float(RX_LAT_ENV),
+                receiver_lon=_env_float(RX_LON_ENV),
+            )
+    else:
+        build_adsb = adsb_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -216,6 +249,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.decoder = build_decoder()
         app.state.lora = build_lora()
         app.state.rds = build_rds()
+        app.state.adsb = build_adsb()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -232,6 +266,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.decoder.stop()
             app.state.lora.stop()
             app.state.rds.stop()
+            app.state.adsb.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -598,6 +633,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             # the sweep start after an M10/M12 lesson handed the radio to rtl_433 or rtl_fm.
             app.state.decoder.release()
             app.state.rds.release()
+            app.state.adsb.release()
             sweeper.resume()
             try:
                 sweeper.start()
@@ -632,6 +668,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if not decoder.running:
             app.state.sweeper.release()
             app.state.rds.release()
+            app.state.adsb.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -683,6 +720,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if not decoder.running:
             app.state.sweeper.release()
             app.state.decoder.release()
+            app.state.adsb.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -696,6 +734,36 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "available": True,
             "freq_hz": decoder.freq_hz,
             "station": decoder.station().as_dict(),
+        }
+
+    @app.get("/api/adsb")
+    def adsb():
+        """The aircraft dump1090 is decoding at 1090 MHz, each with range/bearing when located.
+
+        dump1090 holds the dongle the waterfall otherwise sweeps, so the sweep, the rtl_433 decoder
+        and the RDS pipeline are released first and stay released until a /api/spectrum poll takes
+        the radio. No radio, no dump1090, or no planes overhead is an honest empty sky — a 503 with
+        the reason when the feed cannot be read, never a fabricated contact.
+        """
+        decoder = app.state.adsb
+        if not decoder.running:
+            app.state.sweeper.release()
+            app.state.decoder.release()
+            app.state.rds.release()
+            decoder.resume()
+            try:
+                decoder.start()
+            except AdsbUnavailable as exc:
+                log_event(app.state.events_path, "adsb_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "aircraft": []})
+            log_event(app.state.events_path, "adsb_start", {"freq_hz": DEFAULT_ADSB_HZ})
+        return {
+            "available": True,
+            "freq_hz": DEFAULT_ADSB_HZ,
+            "receiver_located": decoder.receiver.known,
+            "aircraft": decoder.aircraft(),
         }
 
     @app.get("/api/hardware")

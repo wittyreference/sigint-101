@@ -40,7 +40,8 @@ OVERLAY_PANELS = ("gain", "provenance", "ppm")
 DECODE_PANEL = "decode"
 LORA_PANEL = "lora"
 RDS_PANEL = "rds"
-INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL)
+ADSB_PANEL = "adsb"
+INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -116,6 +117,15 @@ class Lesson:
         like the rtl_433 decoder it takes turns with the sweep on the one dongle.
         """
         return RDS_PANEL in self.panels
+
+    @property
+    def uses_adsb(self) -> bool:
+        """True when the instrument is the ADS-B radar (the adsb panel) instead of the waterfall.
+
+        It runs dump1090 at 1090 MHz on the SDR, so the console renders the radar scope and polls
+        /api/adsb; like the other SDR instruments it takes turns with the sweep on the one dongle.
+        """
+        return ADSB_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:
