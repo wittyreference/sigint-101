@@ -1,11 +1,16 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call — M13 (ADS-B) is done and landed. Unit 5 Decode is underway (M13 of M13-16).**
+**MC's call (do all three) — M14 (APRS) done + landed. Building M15 (POCSAG) then M16 (ACARS) to
+finish Unit 5 Decode (M13 ADS-B, M14 APRS, M15 POCSAG, M16 ACARS).**
 Open items:
-- **M14 (next Decode lesson)** — *recommended next.* Confirm the topic with MC / the plan (U5 =
-  M13-16; APRS/AX.25 packet, POCSAG pager, or ACARS are the usual decode-unit candidates, all
-  readable with the SDR already on nomad-b). TDD; land `--squash`; render-verify at a forced 800x480.
+- **M15 (POCSAG pager)** — *in progress / next.* Unencrypted pager messages anyone can read (the
+  privacy angle). Decoder: `multimon-ng` (already installed, `-a POCSAG512/1200/2400`). A text-list
+  panel like APRS/decode. TDD; land `--squash`; render-verify at a forced 800x480.
+- **M16 (ACARS aircraft text)** — after M15. Needs `acarsdec` built from source (like dump1090/redsea).
+- **APRS live capture (deferred, physical)** — M14's pipeline is HIL-proven honest-empty, but
+  **nomad-b is deaf at 2m** (0 packets decoded on 144.390 in 50s). Needs a 2m/VHF antenna + local
+  APRS traffic. `multimon-ng` installed on nomad-b (apt).
 - **ADS-B live radar capture (deferred, physical)** — M13's pipeline is HIL-proven end to end
   (dump1090 built + serving, /api/adsb runs live honest-empty), but **nomad-b's antenna is deaf at
   1090 MHz** (411k Mode-S preambles, 0 CRC-valid, blank signal power — no planes decode). This is a
@@ -18,6 +23,20 @@ Open items:
 - **M4 real-ppm (deferred)** — same FM-antenna block as M12's RDS; a good FM antenna unblocks both.
 - **Follow-up: M8's predict prompt is ~60 words / 5 lines — 1 px over at a true 800x480.** Trim it.
 - **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their diagram.
+
+**M14 (APRS) DONE and landed (observed, 2026-10-28), squash-merged to main.** Continues Unit 5
+(Decode): amateur APRS packet on 2m (144.390) is a half-second blip on the waterfall but a fully
+framed AX.25 packet decoded — callsign, digipeater path, and a payload (position / message / status).
+New `sigint101/aprs.py`: `parse_aprs_line` (strips multimon-ng's `APRS: ` prefix), `parse_aprs_frame`
+(TNC2 → source/dest/path/info + classifies the info field: uncompressed position → decimal lat/lon,
+message → addressee+text, status), `StationRoster` (latest packet per callsign), `AprsDecoder` (owns
+the rtl_fm|multimon-ng pipeline, reader thread, release/resume) — a **5th SDR-exclusive consumer** in
+the turn-taking. The TNC2 format + prefix taken from multimon-ng's `hdlc.c`. `/api/aprs` + an `aprs`
+panel reusing the decoder list (`static/aprs.js`) + `lesson_packs/14-aprs.yaml`. `multimon-ng`
+installed via apt (covers M15 POCSAG too). **HIL on nomad-b:** live `/api/aprs` runs honest-empty, the
+5-way dongle arbitration works both directions (multimon-ng ⇄ sweeper), observe roster + predict gate
+render at a forced 800x480 (Next=423, Commit=474). **Deferred (physical):** live capture needs a 2m
+antenna — nomad-b decoded 0 packets on 144.390 in 50s.
 
 **M13 (ADS-B) DONE and landed (observed, 2026-10-28), squash-merged to main.** Opens Unit 5 (Decode):
 aircraft broadcast identity + position in the clear on 1090 MHz, and the console decodes the Mode S /

@@ -305,3 +305,24 @@ next write) — start the render on a fresh data dir instead.
 pattern and read the tool's own output-format source for fixtures. For a reception-limited lesson,
 prove the pipeline honest-empty and defer the live capture on the right antenna — and always confirm
 the 800x480 fit with the numeric bottom-measure, not the screenshot.
+
+## 2026-10-28: M14 APRS — a 5th SDR consumer, and the release-list is growing
+**Finding.** APRS reuses the RDS two-Popen pipeline pattern exactly (rtl_fm | multimon-ng), parsing
+multimon-ng's TNC2 monitor output. The exact output format — the "APRS: " prefix, the
+SRC>DST,DIGI,...:info shape, SSID shown only when nonzero, a repeated digi's trailing '*', and the
+UI/CRC gating — is in multimon-ng's hdlc.c (aprs_disp_packet); reading that nailed the fixtures
+without needing a decodable WAV. One `multimon-ng` apt package covers BOTH APRS (AFSK1200) and the
+upcoming M15 POCSAG. nomad-b is deaf at 2m too (0 packets on 144.390 in 50s), so APRS live capture
+defers like ADS-B/RDS; the pipeline is HIL-proven honest-empty. The APRS roster reuses the existing
+`.decoder__list` panel + `.decoder__item` grid, so M14 needed no new CSS. Predict-fit bit again: a
+3-line prompt + a chip that wrapped to 3 lines pushed Commit to y=488 (8px over); trimmed to a 2-line
+prompt + one-phrase chips (Commit → 474).
+**Follow-up (ask MC before doing).** The per-route dongle-arbitration release list is now 5 consumers
+(sweeper, rtl_433, rds, adsb, aprs) and M15/M16 add two more. Each SDR route open-codes "release the
+others, resume me". A small `claim(target)` helper on app.state that releases all SDR-exclusive
+consumers except `target` and resumes it would collapse ~7 release calls per route into one and make
+adding a consumer a one-line registration — but it edits the 4 existing working routes, so it needs
+MC's OK (don't-reimplement gate). Until then, stay additive (one release line per new consumer).
+**How to apply.** For a multimon-ng-based decode lesson, read hdlc.c / the demod source for the exact
+output format, reuse the RDS pipeline + the decoder-list panel, and always re-check the predict fit
+with the numeric bottom-measure after writing the pack.
