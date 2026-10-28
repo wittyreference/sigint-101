@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sigint101 import exam
 from sigint101.adsb import AdsbDecoder
 from sigint101.app import create_app
+from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.hardware import RadioProbe
 from sigint101.lora import LoRaListener, parse_lora_packet
@@ -243,14 +244,54 @@ def _aircraft():
     }]
 
 
+class _StubAprs:
+    """An app-boundary stand-in for the rtl_fm|multimon-ng AprsDecoder (no real radio)."""
+
+    def __init__(self, stations):
+        self._stations = stations
+        self._started = False
+        self._released = False
+        self.freq_hz = 144_390_000
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def stations(self):
+        return self._stations
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _aprs_stations():
+    """One decoded APRS station, in the dict shape AprsDecoder.stations() hands the route."""
+    return [{
+        "source": "KD2ABC-9", "dest": "APU25N", "path": ["WIDE1-1", "WIDE2-1"],
+        "kind": "position", "lat": 40.70, "lon": -74.00, "text": "Test de KD2ABC",
+        "addressee": None, "packet_count": 3,
+    }]
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
-            decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None):
+            decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
+            aprs_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
                      ppm_measure=ppm_measure, decoder_factory=decoder_factory,
                      lora_factory=lora_factory, rds_factory=rds_factory,
-                     adsb_factory=adsb_factory)
+                     adsb_factory=adsb_factory, aprs_factory=aprs_factory)
     return TestClient(app)
 
 
@@ -688,6 +729,74 @@ def test_adsb_stands_the_sweeper_down(tmp_path):
                  sweeper_factory=lambda: _RecordingSweeper(_rows()),
                  adsb_factory=lambda: _StubAdsb(_aircraft())) as client:
         client.get("/api/adsb")
+    assert released["value"] is True
+
+
+# --- aprs (APRS roster, M14) --------------------------------------------------
+
+
+def test_aprs_reports_503_and_a_reason_when_no_radio(tmp_path):
+    with _client(tmp_path,
+                 aprs_factory=lambda: AprsDecoder(radio_present=lambda: False,
+                                                  which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/aprs")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["stations"] == []          # never a fabricated station
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_aprs_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/aprs")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_aprs_returns_the_roster_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 aprs_factory=lambda: _StubAprs(_aprs_stations())) as client:
+        resp = client.get("/api/aprs")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["freq_hz"] == 144_390_000
+    s = body["stations"][0]
+    assert s["source"] == "KD2ABC-9"
+    assert s["kind"] == "position"
+    assert s["lat"] == 40.70
+
+
+def test_aprs_stands_the_sweeper_down(tmp_path):
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 aprs_factory=lambda: _StubAprs(_aprs_stations())) as client:
+        client.get("/api/aprs")
+    assert released["value"] is True
+
+
+def test_spectrum_releases_the_aprs_decoder(tmp_path):
+    """Switching back to the waterfall releases the APRS decoder — one program per dongle."""
+    released = {"value": False}
+
+    class _RecordingAprs(_StubAprs):
+        def release(self):
+            released["value"] = True
+            super().release()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows()),
+                 aprs_factory=lambda: _RecordingAprs(_aprs_stations())) as client:
+        client.get("/api/aprs")          # multimon-ng takes the dongle
+        client.get("/api/spectrum")      # sweep reclaims it
     assert released["value"] is True
 
 

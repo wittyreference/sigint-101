@@ -29,6 +29,10 @@ REDSEA = "redsea"
 # BaseStation (SBS-1) text; it holds the same one dongle, so the radar panel takes its turn too.
 DUMP1090 = "dump1090-fa"
 
+# The APRS decoder (M14). rtl_fm demodulates the 2m FM packet channel, multimon-ng decodes the
+# AFSK1200 AX.25 frames; both hold the one dongle, so the APRS panel takes its turn on the sweep.
+MULTIMON = "multimon-ng"
+
 # A selector that cannot match any real serial. Given one, rtl_power prints the whole device
 # list and exits without claiming a radio — which is how the bus gets surveyed without taking
 # the dongle away from a lesson in progress.

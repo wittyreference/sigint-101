@@ -105,6 +105,17 @@
                 <div class="decoder__axis" aria-hidden="true">dump1090 &middot; ADS-B on 1090 MHz</div>
               </div>
             </div>
+            {% elif lesson.uses_aprs %}
+            {# An APRS lesson seals the station roster, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; ROSTER HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">multimon-ng &middot; APRS on 144.39 MHz</div>
+              </div>
+            </div>
             {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
@@ -271,6 +282,29 @@
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
+            {% elif lesson.uses_aprs %}
+            {# ---- APRS roster (M14): amateur packet on the 2m channel, which a waterfall only shows
+               as a brief FM blip. rtl_fm|multimon-ng decodes the AX.25 frames; aprs.js polls
+               /api/aprs and lists each station with its latest packet (position, message or status).
+               No radio / no multimon-ng / a quiet channel shows an honest empty roster. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder" data-aprs-panel aria-label="Live APRS station roster">
+                <div class="decoder__head">
+                  <span class="decoder__title">multimon-ng &middot; APRS</span>
+                  <span class="decoder__status" data-aprs-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-aprs-list></ul>
+                <div class="decoder__empty" data-aprs-empty>listening on 144.390 MHz&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">144.390<span>MHz</span></div>
+                  <div class="tune__caption">2m packet &middot; multimon-ng decoding APRS</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
             {% else %}
             {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson
                with no hardware (e.g. the legal rules) has no radio, so its instrument-named stages
@@ -390,6 +424,9 @@
 <!-- The live ADS-B radar (M13): polls /api/adsb and places each aircraft dump1090 decodes on the
      scope by range and bearing. No radio / no dump1090 / empty sky shows honestly; never a fake plane. -->
 <script src="/static/adsb.js"></script>
+<!-- The live APRS roster (M14): polls /api/aprs and lists each station multimon-ng decoded on 2m,
+     with its latest packet. No radio / no multimon-ng / quiet channel shows honestly; never a fake station. -->
+<script src="/static/aprs.js"></script>
 <script>
   // Shell behaviour that is NOT the waterfall: the tune readout (display only) and stepping
   // between the lesson's rendered stage panels. The waterfall itself is drawn by

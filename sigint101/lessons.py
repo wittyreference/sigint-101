@@ -41,7 +41,8 @@ DECODE_PANEL = "decode"
 LORA_PANEL = "lora"
 RDS_PANEL = "rds"
 ADSB_PANEL = "adsb"
-INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL)
+APRS_PANEL = "aprs"
+INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -126,6 +127,15 @@ class Lesson:
         /api/adsb; like the other SDR instruments it takes turns with the sweep on the one dongle.
         """
         return ADSB_PANEL in self.panels
+
+    @property
+    def uses_aprs(self) -> bool:
+        """True when the instrument is the APRS decoder (the aprs panel) instead of the waterfall.
+
+        It runs rtl_fm|multimon-ng on the 2m packet channel, so the console renders the station
+        roster and polls /api/aprs; like the other SDR instruments it takes turns with the sweep.
+        """
+        return APRS_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:

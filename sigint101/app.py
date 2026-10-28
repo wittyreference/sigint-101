@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
+from .aprs import AprsDecoder, AprsUnavailable
 from .decode import Decoder, DecodeUnavailable
 from .events import log_event
 from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
@@ -165,7 +166,8 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
-               rds_factory=None, adsb_factory=None, pool_path=None, ppm_measure=None) -> FastAPI:
+               rds_factory=None, adsb_factory=None, aprs_factory=None,
+               pool_path=None, ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -235,6 +237,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_adsb = adsb_factory
 
+    # The APRS decoder runs rtl_fm|multimon-ng, so it holds the one dongle the sweeper and the other
+    # SDR tools also want — it joins their release/resume turn-taking, wired to the same enumerator.
+    if aprs_factory is None:
+        def build_aprs():
+            return AprsDecoder(
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_aprs = aprs_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -250,6 +264,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.lora = build_lora()
         app.state.rds = build_rds()
         app.state.adsb = build_adsb()
+        app.state.aprs = build_aprs()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -267,6 +282,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.lora.stop()
             app.state.rds.stop()
             app.state.adsb.stop()
+            app.state.aprs.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -634,6 +650,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.decoder.release()
             app.state.rds.release()
             app.state.adsb.release()
+            app.state.aprs.release()
             sweeper.resume()
             try:
                 sweeper.start()
@@ -669,6 +686,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.sweeper.release()
             app.state.rds.release()
             app.state.adsb.release()
+            app.state.aprs.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -721,6 +739,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.sweeper.release()
             app.state.decoder.release()
             app.state.adsb.release()
+            app.state.aprs.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -750,6 +769,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.sweeper.release()
             app.state.decoder.release()
             app.state.rds.release()
+            app.state.aprs.release()
             decoder.resume()
             try:
                 decoder.start()
@@ -764,6 +784,36 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": DEFAULT_ADSB_HZ,
             "receiver_located": decoder.receiver.known,
             "aircraft": decoder.aircraft(),
+        }
+
+    @app.get("/api/aprs")
+    def aprs():
+        """The APRS stations multimon-ng is decoding on the 2m packet channel, latest packet each.
+
+        rtl_fm|multimon-ng holds the dongle the waterfall otherwise sweeps, so the sweep and the
+        other SDR tools are released first and stay released until a /api/spectrum poll takes the
+        radio. No radio, no multimon-ng, or a quiet channel is an honest empty roster — a 503 with
+        the reason when the pipeline cannot be read, never a fabricated station.
+        """
+        decoder = app.state.aprs
+        if not decoder.running:
+            app.state.sweeper.release()
+            app.state.decoder.release()
+            app.state.rds.release()
+            app.state.adsb.release()
+            decoder.resume()
+            try:
+                decoder.start()
+            except AprsUnavailable as exc:
+                log_event(app.state.events_path, "aprs_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "stations": []})
+            log_event(app.state.events_path, "aprs_start", {"freq_hz": decoder.freq_hz})
+        return {
+            "available": True,
+            "freq_hz": decoder.freq_hz,
+            "stations": decoder.stations(),
         }
 
     @app.get("/api/hardware")

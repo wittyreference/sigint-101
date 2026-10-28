@@ -486,6 +486,35 @@ def test_an_adsb_lessons_predict_frame_seals_the_scope():
     assert "waterfall-wrap--frozen" not in html
 
 
+def _aprs_intro_lesson():
+    """An intro lesson whose instrument is the APRS decoder (M14's), on the 2m packet channel."""
+    return parse_lesson({
+        "id": 14, "slug": "aprs", "title": "The Return Address", "type": "intro",
+        "concept": "APRS rides AX.25: a framed packet with a callsign, path and position",
+        "panels": ["aprs"], "hardware": ["rtl-sdr"],
+        "tune": {"center_hz": 144_390_000, "span_hz": 200_000},
+        "stages": {"frame": "f", "demo": "DEMO watch the roster fill", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_an_aprs_lesson_shows_the_roster_not_a_waterfall():
+    html = _console(lesson=_aprs_intro_lesson(), current_stage="demo", tuned_hz=144_390_000)
+    assert "data-aprs-panel" in html
+    assert "data-aprs-list" in html
+    assert "multimon-ng" in html
+    assert "144.390" in html
+    assert "canvas class=\"waterfall\"" not in html
+    assert "data-adsb-panel" not in html
+
+
+def test_an_aprs_lessons_predict_frame_seals_the_roster():
+    html = _console(lesson=_aprs_intro_lesson(), current_stage="predict",
+                    prediction_committed=False, tuned_hz=144_390_000)
+    assert "ROSTER HIDDEN" in html
+    assert "waterfall-wrap--frozen" not in html
+
+
 def _provenance_lesson():
     """An intro lesson that declares the provenance panel (M3's, deaf-vs-empty)."""
     return parse_lesson({

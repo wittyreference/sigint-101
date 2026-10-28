@@ -1,0 +1,75 @@
+# ABOUTME: Lesson pack M14 "The Packet Has a Return Address" — APRS/AX.25 amateur packet on 2m,
+# ABOUTME: decoded from AFSK1200 into a station's callsign, digipeater path, position and messages.
+
+id: 14
+slug: aprs
+title: "The Return Address"
+type: intro
+concept: >-
+  On the waterfall a 2m APRS burst is a half-second blip — but inside it is a fully framed packet.
+  APRS rides AX.25, the amateur packet protocol: every transmission carries the sender's callsign,
+  the list of digipeaters that relayed it, and a payload that is often a position, a short message or
+  a status, all in the clear. multimon-ng demodulates the AFSK1200 tones and unpacks the frame, and
+  the console lists each station with what it last said. This is decode in earnest: a signal with a
+  return address.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [aprs]
+tune:
+  center_hz: 144390000
+  span_hz: 200000
+  step_hz: 100000
+
+stages:
+  frame: >-
+    Another signal to read, comrade, and this one announces itself. Up on 2 metres, 144.390, radio
+    amateurs run a packet network called APRS: little bursts of data a half-second long, each one
+    carrying a station's callsign, the path it took to reach you, and usually where that station is
+    standing — latitude and longitude — or a short message to someone. On the waterfall it is a blip
+    you would never look twice at. Decoded, it is a postcard with a return address. Tonight you read
+    the mail.
+  demo: >-
+    Watch — hands off. No waterfall; a 2m packet burst shows there as a flick of colour and nothing
+    more, because the meaning is in the tones, not the picture. rtl_fm is listening on 144.390 and
+    multimon-ng is turning the two AFSK tones — 1200 and 2200 Hz, Bell 202, twelve hundred bits a
+    second — back into AX.25 frames. Watch the roster fill: each row is a station, its callsign first
+    (with its SSID, the -9 that says "mobile"), then what it last sent — a decoded position, a status,
+    a message to another ham. The callsign is real and licensed; the path shows which digipeaters
+    relayed the packet across the county. None of it is hidden. It is amateur radio, public by law.
+  try: >-
+    Your roster now, comrade. APRS is bursty — a station beacons every minute or few, not every
+    second — so give it time and watch new callsigns arrive. Read a row: who sent it, and what the
+    packet carried. A position becomes a latitude and longitude; a message shows who it was for.
+    Sit with it: you are not naming a modulation any more, you are reading a framed message off the
+    air, return address and all.
+  predict: >-
+    A 2m APRS burst is a half-second blip on the waterfall. Decoded, what is inside it — a framed
+    packet, or just a tone? Lock it in.
+  observe: >-
+    Look at a row against what the waterfall showed. The waterfall said "a brief signal at 144.39";
+    the decoder says "this licensed station, relayed by these digipeaters, is standing here and said
+    this." Ask yourself: how much of that structure — the callsign, the path, the position — was in
+    the air all along, waiting only for something that knew the frame? And if the channel is quiet,
+    is the empty roster the decoder failing, or simply no one beaconing in range right now?
+  explain: >-
+    Here's the straight answer: a complete, structured packet. APRS is built on AX.25, the amateur
+    packet-radio link protocol, and every frame has the same skeleton: a source address (the sender's
+    callsign and SSID), a destination, a digipeater path (the chain of relays that forwarded it), and
+    an information field. That information field is where the postcard is written — a data-type
+    character says what follows, and the console reads the common ones: a position (latitude and
+    longitude, often with a comment), a message addressed to another station, or a status. multimon-ng
+    does the demodulation — recovering the 1200-baud Bell 202 tones and the HDLC framing, checking the
+    frame's CRC so a corrupted burst is dropped rather than shown wrong — and hands up the clean TNC2
+    line the roster is built from. Two things worth keeping. First, this is open by design: amateur
+    radio may not be encrypted, so every callsign and position here is meant to be received — that is
+    the point of APRS. Second, notice what the decode unit keeps teaching you: the waterfall sees that
+    a signal exists; a decoder that knows the frame sees what it says. Next, another kind of message in
+    the air — one not meant for you at all, yet just as readable.
+# The closing line sets up M15 (POCSAG pagers): readable, but not addressed to you.
+
+# Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
+# (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
+choices:
+  - {key: framed, label: "A framed packet"}
+  - {key: blip, label: "Just a tone"}
+  - {key: scrambled, label: "Scrambled data"}

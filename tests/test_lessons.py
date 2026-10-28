@@ -250,6 +250,25 @@ def test_the_adsb_panel_is_an_instrument_and_cannot_combine():
         parse_lesson(_consolidation(panels=["adsb", "gain"]))
 
 
+def test_the_aprs_panel_loads_and_selects_the_aprs_instrument():
+    lesson = parse_lesson(_consolidation(panels=["aprs"]))
+    assert lesson.panels == ["aprs"]
+    assert lesson.uses_aprs is True
+    assert lesson.uses_adsb is False and lesson.uses_rds is False
+
+
+def test_a_lesson_without_the_aprs_panel_does_not_use_aprs():
+    assert parse_lesson(_consolidation(panels=["gain"])).uses_aprs is False
+    assert parse_lesson(_consolidation()).uses_aprs is False
+
+
+def test_the_aprs_panel_is_an_instrument_and_cannot_combine():
+    with pytest.raises(LessonError, match="aprs"):
+        parse_lesson(_consolidation(panels=["aprs", "adsb"]))
+    with pytest.raises(LessonError, match="aprs"):
+        parse_lesson(_consolidation(panels=["aprs", "ppm"]))
+
+
 def test_hints_must_be_a_list():
     with pytest.raises(LessonError, match="must be a list"):
         parse_lesson(_consolidation(hints="not-a-list"))
