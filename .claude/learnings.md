@@ -326,3 +326,19 @@ MC's OK (don't-reimplement gate). Until then, stay additive (one release line pe
 **How to apply.** For a multimon-ng-based decode lesson, read hdlc.c / the demod source for the exact
 output format, reuse the RDS pipeline + the decoder-list panel, and always re-check the predict fit
 with the numeric bottom-measure after writing the pack.
+
+## 2026-10-28: M15 POCSAG — same tool, different shape (a log, not a roster)
+**Finding.** POCSAG reuses the exact multimon-ng pipeline as APRS — same binary, just different
+demods (`-a POCSAG512 -a POCSAG1200 -a POCSAG2400`) — and the same rtl_fm front end. The output
+format ("POCSAG<baud>: Address: <n>  Function: <f>  Alpha:/Numeric: <text>", dash address + a
+label-less tone-only page) is in multimon-ng's pocsag.c. The one design difference from APRS: pager
+traffic is a stream of one-off events, not stations that beacon, so the accumulator is a bounded
+newest-first `PageLog` (deque) rather than a per-key roster — pick the data structure from whether the
+signal is "who is on the air" (roster) or "what just came through" (log). Applying the predict-fit
+rule preemptively (2-line prompt + one-phrase chips) meant both gates fit at 800x480 on the first
+render (Commit=474, Next=423) — no second iteration. nomad-b heard no pages (silent/deaf), so live
+capture defers; pipeline HIL-proven honest-empty. The dongle arbitration is now **6 consumers** — the
+`claim()` helper refactor flagged under M14 is increasingly worth doing (still gated on MC's OK).
+**How to apply.** A second lesson on the same decoder tool is mostly a new parser + panel + pack; reuse
+the pipeline and the list panel. Choose roster-vs-log by the signal's nature. Keep applying predict-fit
+up front so the render is a confirmation, not a debug loop.

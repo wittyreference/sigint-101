@@ -1,13 +1,14 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**MC's call (do all three) — M14 (APRS) done + landed. Building M15 (POCSAG) then M16 (ACARS) to
-finish Unit 5 Decode (M13 ADS-B, M14 APRS, M15 POCSAG, M16 ACARS).**
+**MC's call (do all three) — M14 APRS + M15 POCSAG done + landed. Building M16 (ACARS) to finish
+Unit 5 Decode (M13 ADS-B, M14 APRS, M15 POCSAG, M16 ACARS).**
 Open items:
-- **M15 (POCSAG pager)** — *in progress / next.* Unencrypted pager messages anyone can read (the
-  privacy angle). Decoder: `multimon-ng` (already installed, `-a POCSAG512/1200/2400`). A text-list
-  panel like APRS/decode. TDD; land `--squash`; render-verify at a forced 800x480.
-- **M16 (ACARS aircraft text)** — after M15. Needs `acarsdec` built from source (like dump1090/redsea).
+- **M16 (ACARS aircraft text)** — *last one / in progress.* The typed ops messages aircraft send on
+  VHF (~131 MHz AM). Needs `acarsdec` built from source on nomad-b (like dump1090/redsea — a build,
+  not an apt install). A text-list panel like POCSAG/APRS. TDD; land `--squash`; render-verify 800x480.
+- **POCSAG live capture (deferred, physical)** — M15's pipeline is HIL-proven honest-empty; needs a
+  pager-band antenna + live POCSAG traffic in range (nomad-b heard none). `multimon-ng` installed.
 - **APRS live capture (deferred, physical)** — M14's pipeline is HIL-proven honest-empty, but
   **nomad-b is deaf at 2m** (0 packets decoded on 144.390 in 50s). Needs a 2m/VHF antenna + local
   APRS traffic. `multimon-ng` installed on nomad-b (apt).
@@ -23,6 +24,20 @@ Open items:
 - **M4 real-ppm (deferred)** — same FM-antenna block as M12's RDS; a good FM antenna unblocks both.
 - **Follow-up: M8's predict prompt is ~60 words / 5 lines — 1 px over at a true 800x480.** Trim it.
 - **Small: commit the 3 NCVEC diagram JPGs (T-1/T-2/T-3)** so exam figure questions show their diagram.
+
+**M15 (POCSAG) DONE and landed (observed, 2026-10-28), squash-merged to main.** Continues Unit 5
+(Decode): POCSAG pager traffic on 929.6 MHz is a half-second FSK burst on the waterfall but a
+complete unencrypted message decoded — a cap code (one pager's address) and a line of text/digits.
+The lesson pairs the capability with the ethics (can vs. may — receiving is passive, but acting on or
+divulging a private message often is not). New `sigint101/pocsag.py`: `parse_pocsag_line` (the
+`POCSAG<baud>: Address: <n>  Function: <f>  Alpha:/Numeric:` format from multimon-ng's `pocsag.c`;
+dash-address + tone-only pages handled), `PageLog` (bounded newest-first history — pages are one-off
+events, not beacons), `PocsagDecoder` (rtl_fm|multimon-ng pipeline, reader thread, release/resume) —
+a **6th SDR-exclusive consumer**. `/api/pocsag` + a `pocsag` panel reusing the decoder list
+(`static/pocsag.js`) + `lesson_packs/15-pocsag.yaml`. Reuses the already-installed `multimon-ng`.
+**HIL on nomad-b:** live `/api/pocsag` runs honest-empty, the 6-way arbitration works both directions,
+observe log + predict gate render at a forced 800x480 (Next=423, Commit=474; predict trimmed from the
+start). **Deferred (physical):** live capture needs a pager-band antenna + traffic in range.
 
 **M14 (APRS) DONE and landed (observed, 2026-10-28), squash-merged to main.** Continues Unit 5
 (Decode): amateur APRS packet on 2m (144.390) is a half-second blip on the waterfall but a fully
