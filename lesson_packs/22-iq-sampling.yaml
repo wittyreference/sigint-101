@@ -1,0 +1,78 @@
+# ABOUTME: Lesson M22 "Two Streams" — I/Q (quadrature) sampling (no RF): the dongle hands up two
+# ABOUTME: streams a quarter-cycle apart, carrying phase as well as amplitude; 2.4 MSPS is a 2.4 MHz slice.
+
+id: 22
+slug: iq-sampling
+title: "Two Streams"
+type: intro
+concept: >-
+  The dongle does not hand you one stream of numbers but two — in-phase (I) and quadrature (Q), a
+  quarter-cycle apart — and together they carry a signal's amplitude and its phase. That pair is a
+  complex sample, and the phase is what lets you tell a signal above the tuned frequency from one
+  below it. The sample rate, 2.4 MSPS, is how wide a slice you capture at once: 2.4 MHz, which is
+  the width of the waterfall itself.
+requires_tx: false
+hardware: []
+panels: []
+
+stages:
+  frame: >-
+    This whole unit, comrade, we have been lifting the radio's lid. Tonight we look at the numbers
+    themselves. All course long the waterfall has painted signals as colour across a band — but what
+    is the dongle actually handing up, millions of times a second, to draw that picture? Not one
+    stream of numbers. Two. The radio takes the air in pairs, and once you see why there must be two
+    of them, the waterfall stops being magic and becomes arithmetic you could almost do by hand.
+  demo: >-
+    Here is the whole of it, comrade. When the radio tunes to a frequency, it does not measure the
+    wave once per sample — it measures it twice, against two reference waves a quarter-cycle apart.
+    The first measurement is the in-phase value, I; the second, taken ninety degrees along, is the
+    quadrature value, Q. One I and one Q together are a single complex sample, written I plus jQ —
+    one number with two parts. Why bother with two? Because one value alone can only tell you how
+    strong the wave is at that instant — its amplitude. The pair tells you amplitude and phase: not
+    just how far the wave has swung, but where in its cycle it is. Picture a clock hand sweeping
+    round. I is its shadow on the floor, Q its shadow on the wall. Watch one shadow alone and you
+    cannot tell which way the hand is turning — it slides back and forth the same either way. Watch
+    both, ninety degrees apart, and the direction is obvious. That direction is the payoff: it is how
+    the radio tells a signal sitting just above the frequency you tuned from one sitting just below.
+    With a single stream the two would be mirror images, indistinguishable; with I and Q, above and
+    below are simply the two directions the hand can spin.
+  try: >-
+    Your turn to reason it out, comrade, before the next screen. Hold two facts side by side. One:
+    because each sample is a complex pair, the radio can separate frequencies above and below where
+    you tuned — the band splits cleanly around the centre. Two: the dongle takes these pairs at a set
+    rate, 2.4 million every second — 2.4 MSPS. Now ask what that rate buys you. Every pair you take is
+    one more slice of spectrum you can account for, above the centre and below it. So if the pairs
+    arrive at 2.4 million a second, how much spectrum can the radio watch in one gulp — and how does
+    that compare to the waterfall you have stared at all course?
+  predict: >-
+    Your dongle samples at 2.4 MSPS of I/Q. Tuned to 100 MHz, how wide a slice can you watch at
+    once? Lock it in.
+  observe: >-
+    Hold your guess against what the complex pair bought you. A real-only stream wastes half its
+    width on a mirror image it cannot read; I and Q together keep both halves. So ask yourself: does
+    the slice reach only above the centre, or the same distance below it too?
+  explain: >-
+    Here is the straight answer, comrade: 2.4 MHz — the full sample rate, not half of it. This is the
+    one place the usual rule trips people. A plain, real-valued stream of samples can only cover half
+    its own rate cleanly; the other half folds back as a mirror it cannot tell apart, so 2.4 MSPS of
+    plain samples would buy you just 1.2 MHz. But your samples are not plain — they are complex, I and
+    Q together, and that pair is exactly what resolves the mirror. So the slice runs the full 2.4 MHz:
+    1.2 MHz above the frequency you tuned and 1.2 MHz below it, centred where you pointed the radio.
+    That span — sample rate equals bandwidth — is the width of the waterfall you have read all course.
+    When a lesson watched a narrow sliver only a couple hundred kilohertz wide, it was looking inside
+    a single bite; when the waterfall swept the whole FM band, far wider than one bite, the radio
+    could not swallow it in a single gulp, so it retuned and stitched many 2.4 MHz bites side by side
+    — but each bite was this same complex slice. One detail worth keeping: the dongle hands up each I
+    and each Q as a single byte, so one complex sample is two bytes, and 2.4 MSPS is a touch under
+    five megabytes a second pouring off the stick. That is what is under the lid, comrade: two streams
+    a quarter-cycle apart, carrying amplitude and phase; a complex sample that knows above from below;
+    and a sample rate that is simply how wide a window you hold open. The waterfall was never magic —
+    it was arithmetic on these pairs all along.
+
+# The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
+# predict gate). Each is a {key, label}; keys are quoted so a YAML-boolean word stays text, and so
+# the 1.2-vs-2.4 trap is settled by a tap, never a typed number.
+choices:
+  - {key: "half", label: "1.2 MHz — half the rate"}
+  - {key: "full", label: "2.4 MHz — the full rate"}
+  - {key: "point", label: "Only 100 MHz itself"}
