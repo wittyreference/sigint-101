@@ -573,6 +573,33 @@ def test_an_acars_lessons_predict_frame_seals_the_log():
     assert "waterfall-wrap--frozen" not in html
 
 
+def _flock_intro_lesson():
+    """An intro lesson whose instrument is the Flock detector (M18's), on wlan1 monitor mode."""
+    return parse_lesson({
+        "id": 18, "slug": "flock-detector", "title": "The Camera's Fingerprint", "type": "intro",
+        "concept": "A Flock ALPR camera leaks a WiFi fingerprint; a monitor radio recognises it",
+        "panels": ["flock"], "hardware": ["wifi-monitor"],
+        "stages": {"frame": "f", "demo": "DEMO watch the detections arrive", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_a_flock_lesson_shows_the_detections_list_not_a_waterfall():
+    html = _console(lesson=_flock_intro_lesson(), current_stage="demo")
+    assert "data-flock-panel" in html
+    assert "data-flock-list" in html
+    assert "Flock detector" in html
+    assert "canvas class=\"waterfall\"" not in html
+    assert "data-acars-panel" not in html
+
+
+def test_a_flock_lessons_predict_frame_seals_the_list():
+    html = _console(lesson=_flock_intro_lesson(), current_stage="predict",
+                    prediction_committed=False)
+    assert "DEVICES HIDDEN" in html
+    assert "waterfall-wrap--frozen" not in html
+
+
 def _provenance_lesson():
     """An intro lesson that declares the provenance panel (M3's, deaf-vs-empty)."""
     return parse_lesson({

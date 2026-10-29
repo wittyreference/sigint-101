@@ -12,6 +12,7 @@ from sigint101.adsb import AdsbDecoder
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder, parse_decode_line
+from sigint101.flock import FlockDetector
 from sigint101.hardware import RadioProbe
 from sigint101.lora import LoRaListener, parse_lora_packet
 from sigint101.pocsag import PocsagDecoder
@@ -362,16 +363,47 @@ def _acars_messages():
     }]
 
 
+class _StubFlock:
+    """An app-boundary stand-in for the FlockDetector (no real wlan1 monitor radio)."""
+
+    def __init__(self, detections):
+        self._detections = detections
+        self._started = False
+        self.interface = "wlan1"
+
+    @property
+    def running(self):
+        return self._started
+
+    def start(self):
+        self._started = True
+
+    def detections(self, limit=None):
+        return self._detections
+
+    def stop(self):
+        self._started = False
+
+
+def _flock_detections():
+    """One detected Flock device, in the dict shape FlockDetector.detections() hands the route."""
+    return [{
+        "mac": "b4:1e:52:00:00:01", "oui": "b4:1e:52", "tier": 4,
+        "rule": "probe-request IE fingerprint", "ssid": None, "count": 3, "last_seen": 2.0,
+    }]
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
-            aprs_factory=None, pocsag_factory=None, acars_factory=None):
+            aprs_factory=None, pocsag_factory=None, acars_factory=None, flock_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
                      ppm_measure=ppm_measure, decoder_factory=decoder_factory,
                      lora_factory=lora_factory, rds_factory=rds_factory,
                      adsb_factory=adsb_factory, aprs_factory=aprs_factory,
-                     pocsag_factory=pocsag_factory, acars_factory=acars_factory)
+                     pocsag_factory=pocsag_factory, acars_factory=acars_factory,
+                     flock_factory=flock_factory)
     return TestClient(app)
 
 
@@ -982,6 +1014,54 @@ def test_spectrum_releases_the_acars_decoder(tmp_path):
         client.get("/api/acars")         # acarsdec takes the dongle
         client.get("/api/spectrum")      # sweep reclaims it
     assert released["value"] is True
+
+
+def test_flock_reports_503_and_a_reason_when_no_monitor_radio(tmp_path):
+    with _client(tmp_path,
+                 flock_factory=lambda: FlockDetector(
+                     radio_present=lambda: False,
+                     which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/flock")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["detections"] == []          # never a fabricated detection
+    assert "monitor interface" in body["reason"]
+
+
+def test_flock_default_detector_also_refuses_without_the_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/flock")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_flock_returns_detections_when_running(tmp_path):
+    with _client(tmp_path, flock_factory=lambda: _StubFlock(_flock_detections())) as client:
+        resp = client.get("/api/flock")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["interface"] == "wlan1"
+    d = body["detections"][0]
+    assert d["mac"] == "b4:1e:52:00:00:01"
+    assert d["tier"] == 4
+
+
+def test_flock_is_a_separate_radio_and_leaves_the_sweeper_alone(tmp_path):
+    """The Flock detector reads wlan1, not the SDR, so /api/flock never stands the sweeper down."""
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 flock_factory=lambda: _StubFlock(_flock_detections())) as client:
+        client.get("/api/flock")
+    assert released["value"] is False
 
 
 def test_spectrum_releases_the_pocsag_decoder(tmp_path):

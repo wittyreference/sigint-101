@@ -44,8 +44,9 @@ ADSB_PANEL = "adsb"
 APRS_PANEL = "aprs"
 POCSAG_PANEL = "pocsag"
 ACARS_PANEL = "acars"
+FLOCK_PANEL = "flock"
 INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL,
-                     POCSAG_PANEL, ACARS_PANEL)
+                     POCSAG_PANEL, ACARS_PANEL, FLOCK_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -157,6 +158,15 @@ class Lesson:
         /api/acars; like the other SDR instruments it takes turns with the sweep on the one dongle.
         """
         return ACARS_PANEL in self.panels
+
+    @property
+    def uses_flock(self) -> bool:
+        """True when the instrument is the Flock detector (the flock panel), not the waterfall.
+
+        It runs tcpdump on wlan1 in monitor mode, a separate radio from the SDR dongle, so the
+        console renders the detections list and polls /api/flock with no contention with the sweep.
+        """
+        return FLOCK_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:

@@ -1,0 +1,72 @@
+# ABOUTME: Lesson M18 "The Camera's Fingerprint" — build the Flock ALPR detector on nomad-b's own
+# ABOUTME: WiFi radio in monitor mode: recognise the camera by its MAC OUI + probe-request IE order.
+
+id: 18
+slug: flock-detector
+title: "The Camera's Fingerprint"
+type: intro
+concept: >-
+  Last lesson named the counter-surveillance track's first law; this one builds the detector that
+  obeys it. A Flock ALPR camera phones its plates home over a radio, and that radio leaks a
+  fingerprint — its MAC OUI plus the order of Information Elements in the 802.11 probe requests it
+  sends in the clear. A USB WiFi adapter in monitor mode overhears those management frames and
+  matches the shape, strictly receive-only. Recognition is tiered: a bare OUI is a weak hint, OUI
+  plus the exact IE fingerprint a strong hit. And the first law still holds — no alert never means
+  no camera.
+requires_tx: false
+hardware: [wifi-monitor]
+panels: [flock]
+
+stages:
+  frame: >-
+    Last lesson, comrade, you learned the first law: a quiet detector never proves absence. Tonight
+    you earn the other half of that bargain — you build the detector itself, and learn exactly what
+    it can and cannot see. The Flock camera on the pole needs a radio to ship its plates home, and
+    that radio, like every radio, must announce itself before it joins any network. You will not
+    touch the camera. You will not transmit a thing. You will only listen to what it is already
+    saying to the air.
+  demo: >-
+    Watch — hands off. Your own radio is awake now, not the SDR but a plain USB WiFi adapter,
+    switched into monitor mode. In that mode it stops pretending to be one device on one network and
+    simply overhears every 802.11 management frame in the air — the probe requests and beacons that
+    phones, laptops and cameras all shout in the clear before they ever join anything. The panel
+    fills with what it hears. Each row is a device the air gave up: the first half of its MAC, the
+    OUI, which names the maker; the order its radio lists its Information Elements, the capabilities
+    it rattles off in a probe; sometimes a network name it is hunting for. A Flock camera's radio has
+    a shape to all of this, and the panel is matching every row against it.
+  try: >-
+    Your watch now, comrade. Let it sit and listen a while; management frames come in bursts, as
+    devices wake and probe and fall quiet again. Read a flagged row when one lands: what maker does
+    the OUI name, and did the whole fingerprint match or only the prefix? Notice what you are doing
+    and what you are not. You are reading the metadata — who is speaking, and how — never the
+    payload, never the pictures. You never answer, never associate, never key the transmitter. The
+    camera does not know you exist, and that is the whole point.
+  predict: >-
+    A device trips your detector: a known Flock MAC prefix, but the IE fingerprint doesn't match.
+    How sure are you it's a camera? Lock it in.
+  observe: >-
+    Weigh what actually fired against what did not. The maker prefix is shared across a whole product
+    line, and more than one kind of gadget can wear a radio from the same batch; the fingerprint is
+    the finer thing. Ask yourself which half of the match carries the weight, and what a half-match
+    honestly earns.
+  explain: >-
+    Here's the straight answer, comrade: a weak hint, not a camera. Recognition comes in tiers, and
+    the tier is the confidence. A bare OUI match says only that the radio was built by a maker Flock
+    also buys from — worth noticing, nothing you would stand behind. The strong hit is the OUI
+    together with the exact order of Information Elements in a probe request, and better still an
+    SSID keyword — a "flock" or a "penguin" — sitting on top. That combination is a fingerprint; the
+    prefix alone is a family name. So when the prefix matches but the fingerprint does not, you have
+    a lead to watch, not a verdict to call. And carry the first law straight through this one,
+    because the detector you just built is exactly the thing it warns about. No alert never means no
+    camera. Your radio sees only the signatures it was taught, only on the 2.4-gigahertz band it is
+    watching, only in the moments a device chooses to probe. A camera powered down, sitting on a
+    channel you are not on, or wearing a firmware that reorders its elements into a fingerprint
+    nobody has catalogued yet, is simply invisible to you — and your silence is not its absence. What
+    you built buys awareness, real but narrow: when a shape you know is in the air, you get to know
+    it is there. A reading, never a guarantee.
+
+# Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
+choices:
+  - {key: "weak-hint", label: "Weak hint only"}
+  - {key: "strong-hit", label: "Strong, likely a camera"}
+  - {key: "certain", label: "Certain it's a camera"}

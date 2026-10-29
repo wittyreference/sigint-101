@@ -307,6 +307,25 @@ def test_the_acars_panel_is_an_instrument_and_cannot_combine():
         parse_lesson(_consolidation(panels=["acars", "gain"]))
 
 
+def test_the_flock_panel_loads_and_selects_the_flock_instrument():
+    lesson = parse_lesson(_consolidation(panels=["flock"]))
+    assert lesson.panels == ["flock"]
+    assert lesson.uses_flock is True
+    assert lesson.uses_acars is False and lesson.uses_adsb is False
+
+
+def test_a_lesson_without_the_flock_panel_does_not_use_flock():
+    assert parse_lesson(_consolidation(panels=["gain"])).uses_flock is False
+    assert parse_lesson(_consolidation()).uses_flock is False
+
+
+def test_the_flock_panel_is_an_instrument_and_cannot_combine():
+    with pytest.raises(LessonError, match="flock"):
+        parse_lesson(_consolidation(panels=["flock", "acars"]))
+    with pytest.raises(LessonError, match="flock"):
+        parse_lesson(_consolidation(panels=["flock", "gain"]))
+
+
 def test_hints_must_be_a_list():
     with pytest.raises(LessonError, match="must be a list"):
         parse_lesson(_consolidation(hints="not-a-list"))

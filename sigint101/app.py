@@ -25,6 +25,7 @@ from .aprs import AprsDecoder, AprsUnavailable
 from .decode import Decoder, DecodeUnavailable
 from .events import log_event
 from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
+from .flock import FlockDetector, FlockUnavailable
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
 from .lora import LoRaListener, LoRaUnavailable
@@ -169,7 +170,8 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
-               acars_factory=None, pool_path=None, ppm_measure=None) -> FastAPI:
+               acars_factory=None, flock_factory=None, pool_path=None,
+               ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -275,6 +277,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_acars = acars_factory
 
+    # The Flock detector runs tcpdump on wlan1 in monitor mode — a separate radio from the RTL-SDR,
+    # like the LoRa listener, so it needs no arbitration with the sweeper or the SDR decoders.
+    if flock_factory is None:
+        build_flock = FlockDetector
+    else:
+        build_flock = flock_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -293,6 +302,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.aprs = build_aprs()
         app.state.pocsag = build_pocsag()
         app.state.acars = build_acars()
+        app.state.flock = build_flock()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -313,6 +323,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.aprs.stop()
             app.state.pocsag.stop()
             app.state.acars.stop()
+            app.state.flock.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -759,6 +770,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "host": listener.hostname,
             "port": listener.port,
             "packets": [p.as_dict() for p in listener.recent(limit)],
+        }
+
+    @app.get("/api/flock")
+    def flock(limit: int | None = None):
+        """Flock ALPR cameras heard on wlan1 in monitor mode, strongest-evidence devices first.
+
+        The detector reads 802.11 management frames off a separate WiFi radio, so this never
+        disturbs a sweep or a decode. No monitor interface / no tcpdump is a 503 with the reason,
+        never an empty panel pretending to clear the area — no alert never means no camera.
+        """
+        detector = app.state.flock
+        if not detector.running:
+            try:
+                detector.start()
+            except FlockUnavailable as exc:
+                log_event(app.state.events_path, "flock_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "detections": []})
+            log_event(app.state.events_path, "flock_start", {"interface": detector.interface})
+        return {
+            "available": True,
+            "interface": detector.interface,
+            "detections": detector.detections(limit),
         }
 
     @app.get("/api/rds")
