@@ -4,8 +4,10 @@
 **CURRICULUM PINNED (MC, 2026-10-29).** Unit 5 Decode is complete (M13-M16 landed). MC scoped the
 rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
 AskUserQuestion pass. Full map in **CURRICULUM ROADMAP** below. **Build order (MC's call): Counter-
-surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **Next build = CS1 (framing
-lesson)** of the counter-surveillance track. No lesson started yet — this entry records the plan only.
+surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **CS1 (M17 "Who's Watching",
+framing) is built + HIL-verified; next build = CS2 (Flock detector on nomad-b).** U7 counter-
+surveillance track is live in `units.py` (ids 17-19; U6 shifted to 20-23). CS2 is the detector-logic
++ capture work (see the CS2 bullet for the corrected capture path and the signature set).
 
 ## CURRICULUM ROADMAP (pinned 2026-10-29)
 Lesson ids assigned by build order from M17 up; unit/track placement finalized per lesson at build
@@ -13,13 +15,22 @@ time. All lessons keep the six-stage intro-pack shape, TDD backends, and HIL-on-
 
 **Track A — Counter-surveillance (7th track, "detect & recognize", BUILD FIRST).** 3 lessons:
 - **CS1 framing** — how mass surveillance works (ALPR networks, cell-site simulators) + the law/ethics.
-- **CS2 Flock cameras** — the FlockYou Pro. MC's unit = **M5Stack Atom Echo** (ESP32-PICO-D4, serial
-  `A9522E5CF6`, by-id `usb-Hades2001_M5stack_A9522E5CF6-if00-port0`). Firmware "FlockYou v2 WiFi
-  detector": **strictly receive-only** (WiFi promiscuous + BLE coexist; OUI + Information-Element
-  fingerprints), **emits JSON detection lines on serial** + CRC'd SPIFFS sessions. Ingest = read JSON
-  lines off the serial port — same listener/parser pattern as the decode lessons. Corpus:
-  `pi5:~/elmer/.claude/references/hardware/flockyou-detector.md` + the 2026-10-09 handover. OPEN
-  question from the corpus: **does the BLE scan transmit?** (must confirm before claiming RX-only).
+- **CS2 Flock cameras** — **reproduce the FlockYou detection capability natively on nomad-b** (MC's
+  correction 2026-10-29: do NOT ingest the M5 device; rebuild the algorithm on our own radio). The M5
+  Atom Echo / Elmer corpus is the *algorithm reference only*. Detector logic = pure
+  `parse_management_frame → match_signatures` TDD'd against real 802.11 captures (same pattern as the
+  decode lessons). Capture layer = **a monitor-mode USB WiFi adapter MC will add** (Alfa AWUS036ACM /
+  mt7612u or an rtl8812au); nomad-b's built-in BCM43455/brcmfmac has **no monitor mode** and the
+  RTL-SDR can't reach 2.4 GHz, so live capture defers until the adapter lands (honest-empty until
+  then). Passive/RX-only. **Signature set (authoritative: upstream `colonelpanichacks/flock-you`
+  @6704f01, `main.cpp`):** 34 OUIs (32 community + 2 firmware-extracted incl. Flock's own `b4:1e:52`),
+  3 SSID keywords (`flock`/`penguin`/`fs ext battery`), exact probe-request IE fingerprint
+  `2,12,127,221:506f9a16030103,45,191,221:0050f208000000`, matched in tiers on addr2/addr1/addr3.
+  **OPEN BLE-TX question: answered for upstream — passive (`setActiveScan(false)`, no SCAN_REQ); MC's
+  specific vendor binary still needs the corpus's RF-observation test to be 100% sure, but we're
+  reproducing upstream, so our build is passive by construction.** Corpus:
+  `pi5:~/elmer/.claude/references/hardware/flockyou-detector.md`. Repo clone in this session's
+  scratchpad (`flockyou-repo`).
 - **CS3 Rayhunter** — EFF IMSI-catcher / cell-site-simulator detector on an Orbic hotspot. Web UI/JSON
   at `http://192.168.1.1:8080`. Orbic is NOT on the tailnet; **MC's call: the course box (nomad-b)
   joins the Orbic's WiFi AP and polls it** (box is off the main net during that capture). Onboarding

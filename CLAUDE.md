@@ -102,5 +102,9 @@ capable instrument, not a locked toy.
 - **Be autonomous: don't hand back checks or wait.** Finish the phase, move to the next thing, and
   only pause for what genuinely NEEDS MC's input (taste, a physical/hardware step, an irreversible
   action). This reinforces the global "do it without asking" rule. (Session 2026-10-26.)
+  - **Sharpened 2026-10-29:** never gate a reversible build step by asking "should I start / build /
+    go?" — just do it and report. Default to **subagent-heavy** execution: fan research and
+    independent chunks out to subagents. Ending a turn with "Want me to go?" is the exact ping-pong
+    MC called out. One unavoidable tap remains (EnterWorktree); flag it, then stay heads-down.
 - **nomad-b (user `spec5` @ 100.108.20.20, host `spec5b`) is the WORKING HIL target**; spec5
   (100.90.68.20) is the deaf one (busted RX antenna). Don't conflate them. (Session 2026-10-26.)

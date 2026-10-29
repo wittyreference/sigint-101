@@ -9,26 +9,32 @@ from sigint101.units import UNITS, get_unit, unit_for_lesson
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_there_are_six_units_in_curriculum_order():
-    assert [u.id for u in UNITS] == [1, 2, 3, 4, 5, 6]
+def test_there_are_seven_units_spine_plus_counter_surveillance():
+    # Six numbered spine units (U1-U6) plus the counter-surveillance track (U7),
+    # activated 2026-10-29 when MC scoped the rest of the course.
+    assert [u.id for u in UNITS] == [1, 2, 3, 4, 5, 6, 7]
     # Names come from the plan's curriculum spine.
     assert get_unit(1).title == "Instrument"
     assert get_unit(6).slug == "under-the-hood"
+    assert get_unit(7).slug == "counter-surveillance"
+    assert get_unit(7).title == "Counter-Surveillance"
 
 
 def test_units_partition_the_planned_lessons_without_overlap_or_gap():
-    """Every planned lesson id 1..18 lives in exactly one unit."""
+    """Every planned lesson id 1..23 lives in exactly one unit."""
     seen = []
     for u in UNITS:
         seen.extend(u.lesson_ids)
-    assert sorted(seen) == list(range(1, 19))
+    assert sorted(seen) == list(range(1, 24))
     assert len(seen) == len(set(seen)), "a lesson id appears in two units"
 
 
 def test_unit_for_lesson_maps_ids_to_their_unit():
     assert unit_for_lesson(1).id == 1    # M1 -> U1 Instrument
     assert unit_for_lesson(8).id == 4    # M8 -> U4 Modulation
-    assert unit_for_lesson(18).id == 6   # M18 -> U6
+    assert unit_for_lesson(17).id == 7   # M17 -> U7 counter-surveillance (built first)
+    assert unit_for_lesson(18).id == 7   # M18 -> U7 counter-surveillance
+    assert unit_for_lesson(20).id == 6   # M20 -> U6 Under the Hood
     assert unit_for_lesson(999) is None
 
 

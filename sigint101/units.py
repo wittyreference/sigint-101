@@ -1,5 +1,5 @@
-# ABOUTME: The six-unit curriculum map (U1-U6) that groups lessons for the home nav.
-# ABOUTME: Unit membership is fixed curriculum (the plan's module spine), looked up by id.
+# ABOUTME: The curriculum map: the six-unit numbered spine (U1-U6) plus the U7 counter-
+# ABOUTME: surveillance track, grouping lessons for the home nav; membership looked up by id.
 
 from __future__ import annotations
 
@@ -25,13 +25,16 @@ class Unit:
 
 
 # The curriculum spine from the plan. Glyphs map 1:1 onto the home template's icon set.
+# U7 is the counter-surveillance track (activated 2026-10-29); it is built first, so its
+# lesson ids (17-19) are the lowest of the as-yet-unbuilt range even though it displays last.
 UNITS: tuple = (
     Unit(1, "instrument", "Instrument", "waterfall", (1, 2, 3, 4)),
     Unit(2, "rules", "Rules", "rules", (5,)),
     Unit(3, "antennas", "Antennas", "antenna", (6, 7)),
     Unit(4, "modulation", "Modulation", "wave", (8, 9, 10, 11, 12)),
     Unit(5, "decode", "Decode", "decode", (13, 14, 15, 16)),
-    Unit(6, "under-the-hood", "Under the Hood", "gear", (17, 18)),
+    Unit(6, "under-the-hood", "Under the Hood", "gear", (20, 21, 22, 23)),
+    Unit(7, "counter-surveillance", "Counter-Surveillance", "counter-surv", (17, 18, 19)),
 )
 
 

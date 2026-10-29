@@ -1,0 +1,60 @@
+# ABOUTME: Lesson M17 "Who's Watching" — opens the counter-surveillance track (no RF): how ALPR
+# ABOUTME: networks and cell-site simulators work, and the first law — no alert never means no camera.
+
+id: 17
+slug: watch-the-watchers
+title: "Who's Watching"
+type: intro
+concept: >-
+  Surveillance tech announces itself in the clear — ALPR cameras and fake cell towers both leak
+  signatures you can detect passively — but a quiet detector never proves you are not being watched.
+requires_tx: false
+hardware: []
+panels: []
+
+stages:
+  frame: >-
+    Every lesson so far, comrade, you turned the radio outward to hear what the world broadcasts.
+    Tonight you turn it around and ask the harder question: who is listening to you? Two machines
+    work your street. One reads every licence plate that rolls past and files where your car has
+    been. The other pretends to be a phone tower so your phone will step up and say its name. You
+    can learn to feel both of them in the air.
+  demo: >-
+    Start with the camera. An automated licence-plate reader — Flock is the common brand —
+    photographs every plate, stamps it with time and place, and ships it to a searchable map of who
+    went where. Wire dozens together and the map covers everyone, not just the wanted. To phone home
+    it needs a radio, and that radio chatters in the clear: a WiFi fingerprint you can recognise
+    without ever touching the camera. The second machine is the cell-site simulator — a Stingray, an
+    IMSI-catcher. It stands up a fake tower stronger than the real ones; your phone trusts it, hands
+    over its permanent ID, and can be shoved down to flimsy old 2G where it is easy to track. You
+    never agreed; it just happened. The counter-move for both is the move you already know: listen.
+    Recognise the signature, do not transmit, do not interfere. But hold one hard truth close —
+    detection is a guess, never a guarantee.
+  try: >-
+    Think it through before the next screen, comrade. Both machines leak something you can catch by
+    listening alone — the camera's WiFi chatter, the fake tower's too-strong, too-pushy signal.
+    Neither needs you to transmit a thing to find it. So here is the question the whole track turns
+    on: if you listen for an hour and your detector stays dark, what exactly have you learned?
+  predict: >-
+    You drive an hour with your camera-detector running. It never once alerts. Does that prove the
+    road you drove has no licence-plate readers on it? Lock it in.
+  observe: >-
+    Hold your guess against what a detector actually does. It watches certain signatures, on certain
+    frequencies, only while it is switched on and listening. Ask yourself what a silent hour leaves
+    out.
+  explain: >-
+    The honest answer, comrade, is no — and this is the first law of the whole track. A quiet
+    detector never proves absence. It only sees the signatures it was taught, on the bands it happens
+    to watch, in the moments it is listening. A camera that was powered down, or sat on a frequency
+    you were not watching, or wears a fingerprint nobody has catalogued yet, is simply invisible to
+    you — and your silence is not its absence. So no alert never means no camera. What detection buys
+    you is real but narrow: when a signature you DO know is in the air, you get to know it is there.
+    Awareness, not safety; a reading, not a verdict. Carry that and the rest of the track pays off —
+    next you will rebuild a real Flock-camera detector on your own radio, then one for the fake
+    towers. Both receive-only. You watch the watchers; you never touch them.
+
+# Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
+choices:
+  - {key: "proves-none", label: "Yes — a clean hour means none"}
+  - {key: "proves-nothing", label: "No — silence proves nothing"}
+  - {key: "good-evidence", label: "Mostly — it's strong evidence"}
