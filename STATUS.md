@@ -1,12 +1,47 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**UNIT 5 DECODE COMPLETE — M13 ADS-B, M14 APRS, M15 POCSAG, M16 ACARS all done + landed (MC's "do
-all three" after M13).** Awaiting MC's direction for what's next. The recommended next is **Unit 6
-"Under the Hood" (M17-M18)** — ask MC what those two cover (the plan reserves them but does not name
-topics; options worth floating: the RF chain / how an SDR actually works, DSP/sampling, or a build/
-provisioning capstone). The counter-surveillance track (Rayhunter/Flock) remains a separate 7th
-track, only if MC asks.
+**CURRICULUM PINNED (MC, 2026-10-29).** Unit 5 Decode is complete (M13-M16 landed). MC scoped the
+rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
+AskUserQuestion pass. Full map in **CURRICULUM ROADMAP** below. **Build order (MC's call): Counter-
+surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **Next build = CS1 (framing
+lesson)** of the counter-surveillance track. No lesson started yet — this entry records the plan only.
+
+## CURRICULUM ROADMAP (pinned 2026-10-29)
+Lesson ids assigned by build order from M17 up; unit/track placement finalized per lesson at build
+time. All lessons keep the six-stage intro-pack shape, TDD backends, and HIL-on-nomad-b discipline.
+
+**Track A — Counter-surveillance (7th track, "detect & recognize", BUILD FIRST).** 3 lessons:
+- **CS1 framing** — how mass surveillance works (ALPR networks, cell-site simulators) + the law/ethics.
+- **CS2 Flock cameras** — the FlockYou Pro. MC's unit = **M5Stack Atom Echo** (ESP32-PICO-D4, serial
+  `A9522E5CF6`, by-id `usb-Hades2001_M5stack_A9522E5CF6-if00-port0`). Firmware "FlockYou v2 WiFi
+  detector": **strictly receive-only** (WiFi promiscuous + BLE coexist; OUI + Information-Element
+  fingerprints), **emits JSON detection lines on serial** + CRC'd SPIFFS sessions. Ingest = read JSON
+  lines off the serial port — same listener/parser pattern as the decode lessons. Corpus:
+  `pi5:~/elmer/.claude/references/hardware/flockyou-detector.md` + the 2026-10-09 handover. OPEN
+  question from the corpus: **does the BLE scan transmit?** (must confirm before claiming RX-only).
+- **CS3 Rayhunter** — EFF IMSI-catcher / cell-site-simulator detector on an Orbic hotspot. Web UI/JSON
+  at `http://192.168.1.1:8080`. Orbic is NOT on the tailnet; **MC's call: the course box (nomad-b)
+  joins the Orbic's WiFi AP and polls it** (box is off the main net during that capture). Onboarding
+  corpus: `pi5:~/elmer/analysis/sessions/2026-09-29-device-onboarding-blackhat-pager-orbic.md`.
+
+**Track B — Unit 6 "Under the Hood" (4 lessons, in-spine).** How the instrument actually works:
+front-end (antenna+LNA) → mixing/downconversion → I/Q sampling → FFT/decimation (DSP). No build/
+provisioning capstone (MC excluded it).
+
+**Track C — Decode+ (split by type, 4 lessons).**
+- *Images* (new unit): **NOAA APT** weather-sat (137 MHz, decode to a cloud image) + **SSTV**.
+- *Data/voice* (near Unit 5): **AIS** ship tracking + **DMR/P25** digital voice (full decode, no
+  special ethics framing — MC's call).
+
+**Track D — Meshtastic (own mini-track, 1 lesson).** The mesh/app layer above the M11 LoRa PHY —
+nodes, channels, messages. Needs a second mesh node (MC acquiring; maybe a Flipper LoRa hat).
+
+**Track E — Flipper Companion FAP (on-device app, own build track, LAST).** Pulse Scope + lesson sync
+(show current lesson on the Flipper, push a capture back to the console).
+
+**Installs:** MC pre-approved everything these tracks need, incl. daemons/services for Flock ingest
+and Rayhunter.
 Open items:
 - **Follow-up (ask MC): collapse the dongle-arbitration release lists into a `claim(target)` helper.**
   There are now **7 SDR-exclusive consumers** (sweeper, rtl_433, rds, adsb, aprs, pocsag, acars) and
