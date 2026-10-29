@@ -4,10 +4,23 @@
 **CURRICULUM PINNED (MC, 2026-10-29).** Unit 5 Decode is complete (M13-M16 landed). MC scoped the
 rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
 AskUserQuestion pass. Full map in **CURRICULUM ROADMAP** below. **Build order (MC's call): Counter-
-surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **CS1 (M17 "Who's Watching",
-framing) is built + HIL-verified; next build = CS2 (Flock detector on nomad-b).** U7 counter-
-surveillance track is live in `units.py` (ids 17-19; U6 shifted to 20-23). CS2 is the detector-logic
-+ capture work (see the CS2 bullet for the corrected capture path and the signature set).
+surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **CS1 (M17) and CS2 (M18
+"The Camera's Fingerprint") are both built + HIL-verified + landed; next build = CS3 (Rayhunter).**
+U7 counter-surveillance track is live in `units.py` (ids 17-19; U6 shifted to 20-23).
+
+**CS2 HIL (observed on nomad-b 2026-10-29):** the RTL8821CU dongle is on nomad-b as `wlan1`
+(`rtw_8821cu`) in monitor mode; `tcpdump` given `CAP_NET_RAW` so the non-root app captures; `/api/flock`
+returns `available:true` + honest-empty (no Flock camera in MC's airspace, real frames flowing — the
+parser is proven on a real 207-frame off-air capture in the unit tests); both gates render at a forced
+800x480 (predict Commit 474, demo panel LIVE). The detector reads wlan1, a separate radio, so no SDR
+arbitration. **DEPLOYMENT FOLLOW-UP (not automated yet):** the kiosk must (a) `setcap
+cap_net_raw,cap_net_admin+eip` on tcpdump and (b) put wlan1 into monitor mode before the detector runs
+— today those are manual HIL steps, not a boot service. Log as a CS-track provisioning item.
+
+**Parallel build in flight:** a `sigint-curriculum-fanout` Workflow (run `wkdcewsyr`) is drafting +
+verifying the other 10 lessons (CS3 · Unit 6 ×4 · Decode+ ×4 · Meshtastic). Integrate each as it
+clears verify (a stray `25-sstv.yaml` a workflow agent wrote into the cs2-flock worktree was NOT
+committed — discard it; use the workflow's structured output instead).
 
 ## CURRICULUM ROADMAP (pinned 2026-10-29)
 Lesson ids assigned by build order from M17 up; unit/track placement finalized per lesson at build
