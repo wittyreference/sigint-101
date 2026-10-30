@@ -4,9 +4,18 @@
 **CURRICULUM PINNED (MC, 2026-10-29).** Unit 5 Decode is complete (M13-M16 landed). MC scoped the
 rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
 AskUserQuestion pass. Full map in **CURRICULUM ROADMAP** below. **Build order (MC's call): Counter-
-surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **CS1 (M17) and CS2 (M18
-"The Camera's Fingerprint") are both built + HIL-verified + landed; next build = CS3 (Rayhunter).**
-U7 counter-surveillance track is live in `units.py` (ids 17-19; U6 shifted to 20-23).
+surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **LANDED: CS1 (M17), CS2
+(M18), and all of Unit 6 (M20-M23) — HIL-verified at 800x480.** U7 counter-surveillance track is
+live in `units.py` (ids 17-19; U6 = 20-23). **Next: the 6 remaining lessons' backends** — CS3
+Rayhunter (M19, needs Orbic on WiFi), Decode+ (M24 NOAA APT, M25 SSTV, M26 AIS, M27 DMR/P25 — each an
+SDR-exclusive decoder), M28 Meshtastic (meshtasticd). All 10 were drafted + verified by the
+`sigint-curriculum-fanout` workflow; the verified packs are staged in this session's scratchpad
+(`lessons/`), and the per-lesson build specs (tool, band, backend shape) are in the workflow result.
+
+**Unit 6 fit note (durable, now in CLAUDE.md Corrections):** the reading-stage layout has ~250-300px
+of fixed overhead (concept banner on every stage + title + footer), so a reading body must be **≤~50
+words** to fit 800x480 — measured: 85-word bodies render to 543-590px, 50-word bodies to 437px
+(ceiling 480). Shrink lesson copy to fit, always; never scroll, never ask.
 
 **CS2 HIL (observed on nomad-b 2026-10-29):** the RTL8821CU dongle is on nomad-b as `wlan1`
 (`rtw_8821cu`) in monitor mode; `tcpdump` given `CAP_NET_RAW` so the non-root app captures; `/api/flock`
