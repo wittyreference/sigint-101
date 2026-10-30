@@ -677,6 +677,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                   {"hz": hz, "ppm": result.get("ppm"), "reason": result.get("reason")})
         return result
 
+    # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time;
+    # each opens the dongle exclusively and would fight the others for it. A route takes the radio
+    # by naming only itself to _claim_sdr, which stands every other consumer down (release) and
+    # clears any prior stand-down on the caller (resume). LoRa (meshtasticd) and Flock (wlan1
+    # monitor) ride their own radios and are deliberately absent from this set.
+    sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars")
+
+    def _claim_sdr(target: str) -> None:
+        """Hand the one RTL-SDR to `target`, standing every other SDR-exclusive consumer down."""
+        for name in sdr_consumers:
+            consumer = getattr(app.state, name)
+            if name == target:
+                consumer.resume()
+            else:
+                consumer.release()
+
     @app.get("/api/spectrum")
     def spectrum(limit: int | None = None):
         """Recent real sweeps. No radio is an answer (503 with the reason), never a fake row."""
@@ -688,13 +704,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             # The decoder, the RDS pipeline and the waterfall share one dongle. Taking it back from
             # the SDR-exclusive tools (release) and clearing any prior release on the sweeper lets
             # the sweep start after an M10/M12 lesson handed the radio to rtl_433 or rtl_fm.
-            app.state.decoder.release()
-            app.state.rds.release()
-            app.state.adsb.release()
-            app.state.aprs.release()
-            app.state.pocsag.release()
-            app.state.acars.release()
-            sweeper.resume()
+            _claim_sdr("sweeper")
             try:
                 sweeper.start()
             except SpectrumUnavailable as exc:
@@ -726,13 +736,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.decoder
         if not decoder.running:
-            app.state.sweeper.release()
-            app.state.rds.release()
-            app.state.adsb.release()
-            app.state.aprs.release()
-            app.state.pocsag.release()
-            app.state.acars.release()
-            decoder.resume()
+            _claim_sdr("decoder")
             try:
                 decoder.start()
             except DecodeUnavailable as exc:
@@ -805,13 +809,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.rds
         if not decoder.running:
-            app.state.sweeper.release()
-            app.state.decoder.release()
-            app.state.adsb.release()
-            app.state.aprs.release()
-            app.state.pocsag.release()
-            app.state.acars.release()
-            decoder.resume()
+            _claim_sdr("rds")
             try:
                 decoder.start()
             except RDSUnavailable as exc:
@@ -837,13 +835,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.adsb
         if not decoder.running:
-            app.state.sweeper.release()
-            app.state.decoder.release()
-            app.state.rds.release()
-            app.state.aprs.release()
-            app.state.pocsag.release()
-            app.state.acars.release()
-            decoder.resume()
+            _claim_sdr("adsb")
             try:
                 decoder.start()
             except AdsbUnavailable as exc:
@@ -870,13 +862,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.aprs
         if not decoder.running:
-            app.state.sweeper.release()
-            app.state.decoder.release()
-            app.state.rds.release()
-            app.state.adsb.release()
-            app.state.pocsag.release()
-            app.state.acars.release()
-            decoder.resume()
+            _claim_sdr("aprs")
             try:
                 decoder.start()
             except AprsUnavailable as exc:
@@ -902,13 +888,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.pocsag
         if not decoder.running:
-            app.state.sweeper.release()
-            app.state.decoder.release()
-            app.state.rds.release()
-            app.state.adsb.release()
-            app.state.aprs.release()
-            app.state.acars.release()
-            decoder.resume()
+            _claim_sdr("pocsag")
             try:
                 decoder.start()
             except PocsagUnavailable as exc:
@@ -934,13 +914,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.acars
         if not decoder.running:
-            app.state.sweeper.release()
-            app.state.decoder.release()
-            app.state.rds.release()
-            app.state.adsb.release()
-            app.state.aprs.release()
-            app.state.pocsag.release()
-            decoder.resume()
+            _claim_sdr("acars")
             try:
                 decoder.start()
             except AcarsUnavailable as exc:

@@ -4,6 +4,7 @@
 import re
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sigint101 import exam
@@ -688,6 +689,72 @@ def test_spectrum_reclaims_the_dongle_from_the_decoder(tmp_path):
         client.get("/api/spectrum")     # waterfall reclaims it
     assert released["value"] is True
     assert resumed["value"] is True
+
+
+# The seven consumers that share the one RTL-SDR; the arbitration contract names them all.
+_SDR_CONSUMERS = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars")
+
+
+def _recording_sdr_client(tmp_path):
+    """A client whose seven SDR consumers record every release/resume, plus untouched LoRa/Flock.
+
+    The RTL-SDR is single-tenant: claiming it for one route must resume that consumer and release
+    the other six, while the separate-radio LoRa (meshtasticd) and Flock (wlan1 monitor) consumers
+    are never disturbed. Returns the client and a {"release", "resume"} ledger of consumer names.
+    """
+    calls = {"release": [], "resume": []}
+
+    def recorder(cls, name, *data):
+        class _Rec(cls):
+            def release(self):
+                calls["release"].append(name)
+                super().release()
+
+            def resume(self):
+                calls["resume"].append(name)
+                super().resume()
+
+        return _Rec(*data)
+
+    client = _client(
+        tmp_path, probe=_present,
+        sweeper_factory=lambda: recorder(_StubSweeper, "sweeper", _rows()),
+        decoder_factory=lambda: recorder(_StubDecoder, "decoder", _reads()),
+        rds_factory=lambda: recorder(_StubRDS, "rds", _station()),
+        adsb_factory=lambda: recorder(_StubAdsb, "adsb", _aircraft()),
+        aprs_factory=lambda: recorder(_StubAprs, "aprs", _aprs_stations()),
+        pocsag_factory=lambda: recorder(_StubPocsag, "pocsag", _pocsag_pages()),
+        acars_factory=lambda: recorder(_StubAcars, "acars", _acars_messages()),
+        lora_factory=lambda: _StubLora(_packets()),
+        flock_factory=lambda: _StubFlock(_flock_detections()),
+    )
+    return client, calls
+
+
+@pytest.mark.parametrize("route,target", [
+    ("/api/spectrum", "sweeper"),
+    ("/api/decode", "decoder"),
+    ("/api/rds", "rds"),
+    ("/api/adsb", "adsb"),
+    ("/api/aprs", "aprs"),
+    ("/api/pocsag", "pocsag"),
+    ("/api/acars", "acars"),
+])
+def test_claiming_an_sdr_route_stands_down_every_other_sdr_consumer(tmp_path, route, target):
+    """One RTL-SDR, one tenant: a route resumes its own consumer and releases the other six.
+
+    The separate-radio consumers (LoRa, Flock) are never touched. This pins the claim()
+    arbitration so a Decode+ consumer can be added to the set without hand-editing every rival's
+    release list — the exact per-route edit this contract replaces.
+    """
+    client, calls = _recording_sdr_client(tmp_path)
+    with client:
+        resp = client.get(route)
+    assert resp.status_code == 200
+    others = set(_SDR_CONSUMERS) - {target}
+    assert target in calls["resume"]
+    assert set(calls["release"]) == others
+    assert target not in calls["release"]
 
 
 # --- lora (meshtasticd; no-mock: absence is an answer, never a fake packet) ---
