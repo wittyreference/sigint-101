@@ -5,14 +5,15 @@
 rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
 AskUserQuestion pass. Full map in **CURRICULUM ROADMAP** below. **Build order (MC's call): Counter-
 surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **LANDED: CS1 (M17), CS2
-(M18), all of Unit 6 (M20-M23), the `claim()` arbitration refactor, and Decode+ data/voice (M26 AIS,
-M27 DMR/P25) — all HIL-verified at 800x480.** U7 counter-surveillance is live in `units.py` (ids
-17-19; U6 = 20-23); M26/M27 join Unit 5 Decode (13-16, 26, 27). **Next: Decode+ Images — M24 NOAA
-APT + M25 SSTV** (image decoders, a NEW console panel pattern — the backends are built + TDD'd by the
-`decode-plus-backends` workflow and staged in this session's scratchpad `decode-plus/`; they produce
-a PNG under data/, not a record list, so the panel is a new design). Then CS3 Rayhunter (M19, needs
-Orbic on WiFi) and M28 Meshtastic (meshtasticd, needs a 2nd node). All lesson packs were drafted +
-verified by the `sigint-curriculum-fanout` workflow and staged in scratchpad `lessons/`.
+(M18), all of Unit 6 (M20-M23), the `claim()` arbitration refactor, Decode+ data/voice (M26 AIS,
+M27 DMR/P25), and Decode+ Images (M24 APT, M25 SSTV) — all HIL-verified at 800x480.** U7
+counter-surveillance is live in `units.py` (ids 17-19; U6 = 20-23); M26/M27 join Unit 5 Decode
+(13-16, 26, 27); M24/M25 are the new Unit 8 Images. Decode+ Images (M24 NOAA APT + M25
+SSTV) is now **LANDED** too — new Unit 8 Images, with the first image panel. **Next: CS3 Rayhunter
+(M19, needs the Orbic on WiFi) and M28 Meshtastic (meshtasticd, needs a 2nd mesh node), then the
+Flipper Companion FAP (LAST).** All lesson packs were drafted + verified by the
+`sigint-curriculum-fanout` workflow and staged in scratchpad `lessons/` (19-catch-the-catcher.yaml,
+28-meshtastic.yaml remain).
 
 **Unit 6 fit note (durable, now in CLAUDE.md Corrections):** the reading-stage layout has ~250-300px
 of fixed overhead (concept banner on every stage + title + footer), so a reading body must be **≤~50
@@ -49,6 +50,23 @@ Commit=474 — same as the shipped instrument lessons); `rtl_ais` built from sou
 `/api/ais` runs honest-empty on the real radio (available:true, vessels:[] — no ships inland) with
 rtl_ais genuinely running, and the `claim()` arbitration released it when `/api/spectrum` reclaimed
 the dongle. **Deferred:** dsd-fme build for live `/api/dmr` + a real DMR capture (see open items).
+
+**M24 (NOAA APT) + M25 (SSTV) DONE and landed (observed, 2026-10-30) — Decode+ Images, new Unit 8.**
+The first instrument whose product is an IMAGE, not a record list. `sigint101/apt.py`: satdump runs
+the NOAA APT pipeline on a ~137 MHz pass and writes PNGs; the decoder orchestrates it and scans the
+output dir (release stops the capture but KEEPS the images — real receptions on disk).
+`sigint101/sstv.py`: rtl_fm|sox|sstv decodes a bounded WAV to a PNG, a reader thread captures the
+mode into a sidecar. Both are the **10th and 11th SDR-exclusive consumers**. New image panel: a
+`.gallery` frame that shows the decoded `<img>` (served by a guarded `/media/{path}` route that
+exposes ONLY .png under data/apt + data/sstv — never the progress/exam/events stores), honest
+"waiting" until a real decode, no placeholder. `/api/apt` + `/api/sstv`, apt.js/sstv.js, packs
+`24-noaa-apt.yaml` / `25-sstv.yaml`, Unit 8 "Images" (images glyph). **HIL on nomad-b:** both render
+at a forced 800x480 (demo Next=423, predict Commit=474); live `/api/apt` + `/api/sstv` honest-503
+(tools absent); the `/media` serving route proven on the real deploy (a dropped PNG served 200, a
+non-image folder 404). **Deferred (install + physical):** build satdump + colaclanth/sstv, then a
+real pass/transmission to decode an actual picture — the image-display path is unit- and
+HIL-plumbing-tested, but a genuine decoded image needs a 137 MHz antenna + NOAA pass (APT) or an
+SSTV transmission (SSTV). No fake/placeholder image is ever shown — the honest empty frame stands in.
 
 ## CURRICULUM ROADMAP (pinned 2026-10-29)
 Lesson ids assigned by build order from M17 up; unit/track placement finalized per lesson at build
