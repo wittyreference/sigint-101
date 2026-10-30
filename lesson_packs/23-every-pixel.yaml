@@ -6,45 +6,35 @@ slug: every-pixel
 title: "What Every Pixel Is"
 type: intro
 concept: >-
-  Sampling turns the wave into I/Q numbers; Nyquist sets the window's width and folds anything past
-  its edge back as an alias. The FFT turns each block into the waterfall you have watched.
+  Sampling, Nyquist, and the FFT turn a stream of I/Q numbers into every pixel of the waterfall.
 requires_tx: false
 hardware: []
 panels: []
 
 stages:
   frame: >-
-    The last lesson of the instrument, comrade, and tonight there is no new signal to chase — tonight
-    you turn the radio on itself. All course you trusted the waterfall: that scrolling picture where
-    every station showed up as a line. You read it, tuned by it, caught packets, planes and pages in
-    it. But you never asked what it is. Tonight you find out — what a single pixel actually is, and
-    the three ideas that build the image: sampling, Nyquist, and the FFT.
+    The last lesson, comrade: tonight you turn the radio on itself. All course you trusted the
+    waterfall but never asked what it is. Tonight you find out — what one pixel really is, built from
+    three ideas: sampling, Nyquist, and the FFT.
   demo: >-
-    Here is the machine, comrade. First, sampling: the radio measures the wave on a steady clock —
-    each tick a number, two per tick, an I and a Q. That stream is all the computer ever has. Second,
-    Nyquist: sample at least twice the bandwidth, so the rate sets the window — 2.4 MSPS gives a 2.4
-    MHz slice. Third, the FFT turns one block into the energy at each frequency — one line of the
-    spectrum. Stack the lines and you have the waterfall.
+    Three moves, comrade. Sampling: the radio reads the wave on a clock, two numbers a tick — I and
+    Q. Nyquist: the rate sets the window, 2.4 MSPS giving a 2.4 MHz slice. The FFT turns each block
+    into one line; stack the lines and you have the waterfall.
   try: >-
-    Think it through before the next screen, comrade. You have the three moves now: the radio samples,
-    Nyquist fixes how wide a window one rate shows, the FFT turns each block into a line. But a window
-    has edges — your 2.4 MHz slice stops somewhere, and the spectrum out there does not. So the
-    question the theorem is really about: a real, strong signal sits past the edge of your slice,
-    outside your window. Does that mean it is not in your picture?
+    You have the three moves, comrade. But a window has edges — your 2.4 MHz slice stops somewhere,
+    and the spectrum out there does not. A real, strong signal sits just past that edge. Does that
+    mean it is not in your picture?
   predict: >-
     A strong signal sits just past the top edge of your sampled window, unfiltered. On the waterfall —
     gone, true spot, or ghost? Lock it in.
   observe: >-
-    Hold your guess against one stubborn fact, comrade: energy does not know where you drew your edges.
-    The sampler ticks at its fixed rate no matter what arrives at the antenna. Ask yourself — if a wave
-    is wiggling faster than your ticks can keep up with, what does a too-slow string of samples make
-    that wave look like?
+    Hold your guess against one fact, comrade: energy does not know where you drew your edges. The
+    sampler ticks at its fixed rate no matter what arrives. So a wave wiggling faster than your ticks
+    — what does it look like?
   explain: >-
-    Here is the straight answer, comrade: a ghost — aliasing. A signal past half your sample rate
-    folds back and paints a false line at the wrong frequency, indistinguishable from a real station.
-    That is why every receiver runs an anti-aliasing filter ahead of the sampler, dumping out-of-band
-    energy before it can fold in. Now the payoff: every pixel is an FFT number — its place across is a
-    frequency, its colour the energy there, its row the time. You know what every pixel is.
+    A ghost, comrade — aliasing. A signal past half your rate folds back and paints a false line at
+    the wrong frequency, so every receiver filters it out first. Now the payoff: every pixel is an FFT
+    number — place is frequency, colour is energy, row is time.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text, and so
 # each chip's tap records a plain string. Labels kept to one short phrase for the 800x480 console.

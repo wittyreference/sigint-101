@@ -6,31 +6,24 @@ slug: iq-sampling
 title: "Two Streams"
 type: intro
 concept: >-
-  The dongle hands you two streams, not one — in-phase (I) and quadrature (Q), a quarter-cycle apart.
-  Together they carry amplitude and phase; phase tells a signal above the tuned frequency from one below.
+  The dongle hands up two streams, I and Q, whose phase tells signals above the tuning from below.
 requires_tx: false
 hardware: []
 panels: []
 
 stages:
   frame: >-
-    This whole unit, comrade, we have lifted the radio's lid. Tonight we look at the numbers
-    themselves. All course the waterfall has painted signals as colour across a band — but what is
-    the dongle actually handing up, millions of times a second, to draw that picture? Not one stream
-    of numbers. Two. The radio takes the air in pairs, and once you see why there must be two, the
-    waterfall stops being magic and becomes arithmetic you could almost do by hand.
+    All course, comrade, the waterfall has painted signals as colour across a band. But what is the
+    dongle handing up to draw it? Not one stream of numbers. Two. See why there must be two, and the
+    waterfall becomes arithmetic.
   demo: >-
-    Here it is, comrade. The radio measures the wave twice per sample, against two references a
-    quarter-cycle apart: the in-phase I and the quadrature Q. Together they make one complex sample.
-    One value alone gives only amplitude; the pair gives phase. Picture a clock hand: I is its shadow
-    on the floor, Q its shadow on the wall. One shadow cannot tell which way the hand turns; two can.
-    That direction is how the radio tells a signal above your tuned frequency from one below.
+    The radio measures each sample twice, a quarter-cycle apart: I and Q. One gives only amplitude;
+    the pair gives phase. Picture a clock hand — I its shadow on the floor, Q on the wall. One shadow
+    cannot tell which way it spins; two can, telling above from below.
   try: >-
-    Your turn to reason it out, comrade. Hold two facts together. One: because each sample is a
-    complex pair, the radio separates frequencies above and below where you tuned — the band splits
-    cleanly around the centre. Two: the dongle takes these pairs at 2.4 million a second, 2.4 MSPS. So
-    how wide a slice of spectrum can the radio watch at once — and how does that compare to the
-    waterfall you have stared at all course?
+    Your turn, comrade. Each complex pair lets the radio separate frequencies above and below where
+    you tuned. The dongle takes 2.4 million pairs a second. So how wide a slice can it watch at once —
+    and how does that compare to the waterfall?
   predict: >-
     Your dongle samples at 2.4 MSPS of I/Q. Tuned to 100 MHz, how wide a slice can you watch at
     once? Lock it in.
@@ -39,11 +32,9 @@ stages:
     width on a mirror image it cannot read; I and Q together keep both halves. So ask yourself: does
     the slice reach only above the centre, or the same distance below it too?
   explain: >-
-    Here is the straight answer, comrade: 2.4 MHz — the full sample rate, not half. A plain real
-    stream covers only half its rate; the rest folds back as a mirror, so it would buy just 1.2 MHz.
-    But your samples are complex — I and Q — and the pair resolves that mirror, so the slice runs the
-    full 2.4 MHz: 1.2 above where you tuned and 1.2 below. Sample rate equals bandwidth, the
-    waterfall's width; wider sweeps stitch many bites side by side.
+    2.4 MHz, comrade — the full rate, not half. A plain stream folds half back as a mirror, giving
+    only 1.2 MHz; your complex I/Q pair resolves that mirror. So the slice runs the full 2.4 MHz, 1.2
+    above your tuning and 1.2 below — the waterfall's width.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}; keys are quoted so a YAML-boolean word stays text, and so

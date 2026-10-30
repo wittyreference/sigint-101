@@ -6,45 +6,35 @@ slug: mixing-downconversion
 title: "Slide It Down"
 type: intro
 concept: >-
-  A mixer multiplies the RF against a tone the radio makes itself, the local oscillator, and keeps
-  the difference — sliding the signal down where the ADC can sample. Tuning is moving that oscillator.
+  A mixer slides your signal down by multiplying it against the radio's own tone; tuning moves that tone.
 requires_tx: false
 hardware: []
 panels: []
 
 stages:
   frame: >-
-    Last lesson, comrade, the front-end did its work: the antenna caught the faint RF and the
-    amplifier lifted it clear of the noise. But it is still RF — a wave wobbling a hundred million
-    times a second — and the little chip that must turn it into numbers can count only a few million
-    times a second. It cannot keep up. So tonight you learn the oldest trick in radio: before you
-    measure the wave, you slow it down.
+    Last lesson the front-end lifted the faint RF clear of the noise, comrade. But it is still a wave
+    wobbling a hundred million times a second, and the chip can count only a few million. So tonight:
+    before you measure the wave, slow it down.
   demo: >-
-    Here is the trick. Multiply the antenna signal against a clean tone the radio makes itself — the
-    local oscillator, the LO. Out come two tones: their sum, too high, and their difference, low.
-    Filter the sum away, keep the difference, and it lands where the slow ADC can count it. You never
-    move the chip or filter; to change stations you move only the LO. Tuning is sliding the oscillator
-    until what you want drops into the same low spot — the superheterodyne.
+    Multiply the antenna signal against a clean tone the radio makes itself — the local oscillator.
+    Keep their difference, which lands low where the slow ADC can count it. To change stations you
+    move only that oscillator: tuning is sliding the LO. That is the superheterodyne.
   try: >-
-    Think it through before the next screen, comrade. The mixer is blunt: it does not care whether
-    your station sits above the LO or below. It keeps the difference, and a difference carries no
-    sign. Picture the LO parked at 100.0 and the station you want at 100.1, a tenth above — it lands a
-    tenth of a megahertz out. Now the uncomfortable question: is 100.1 really the only signal in the
-    sky that would slide down and land on that exact same spot?
+    The mixer is blunt, comrade: it keeps only the difference, which carries no sign. Park the LO at
+    100.0 and a station at 100.1 lands at 0.1. Is 100.1 really the only signal that would land on that
+    same spot?
   predict: >-
     LO parked at 100.0 MHz. A station at 100.1 lands at 0.1. Is a SECOND frequency landing on that
     same spot? Lock it in.
   observe: >-
-    Hold your guess against the one rule the mixer obeys: it keeps the distance between your signal and
-    the LO, and nothing else. The LO sits at 100.0, and you know 100.1 is a tenth above it. Ask
-    yourself what else in the band sits exactly a tenth away from 100.0 — and whether a blunt mixer,
-    keeping only distance, could possibly tell the two of them apart.
+    Hold your guess against the one rule: the mixer keeps the distance from the LO, nothing else. The
+    LO sits at 100.0, and 100.1 is a tenth above. What else sits a tenth away — and could a blunt
+    mixer tell them apart?
   explain: >-
-    Yes, comrade — the image. The LO sits at 100.0; your station at 100.1 is a tenth above, but 99.9
-    is a tenth below, and the mixer keeps the distance. Both are a tenth from the LO, so both
-    land on 0.1, stacked — your signal and a ghost. Radio beats it two ways: old way filters 99.9 off
-    before the mixer; modern SDR runs two mixers a quarter-turn apart to tell above from below.
-    Quadrature — I and Q — is the next lesson.
+    Yes, comrade — the image. A station at 99.9 is also a tenth from the LO, so it lands on 0.1 too,
+    stacked under your signal: an unwanted ghost. The fix runs two mixers a quarter-turn apart —
+    quadrature, I and Q — the next lesson.
 
 # Keyboard-free predict chips: each a {key, label} — the key is what the commit records, the label is
 # what the learner reads. Keys are quoted so a YAML-boolean word stays text, never True/False. Labels

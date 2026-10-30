@@ -6,46 +6,35 @@ slug: the-front-end
 title: "The First Inch"
 type: intro
 concept: >-
-  The antenna turns a passing wave into a microvolt whisper. The first amplifier it meets sets how
-  faint a signal the receiver can hear; too much front-end gain overloads on a strong nearby signal.
+  The first amplifier a faint signal meets sets what the receiver can hear; too much gain overloads it.
 requires_tx: false
 hardware: []
 panels: []
 
 stages:
   frame: >-
-    Tonight, comrade, we lift the lid. Every lesson so far you worked the radio from the outside —
-    tuned it, aimed an antenna, read a waterfall. Now we go inside, to the first inch of the
-    receiver: the stretch between the antenna and everything else. No radio in your hands tonight,
-    just theory. But it is the inch that decides how faint a signal you can ever hear, so it is worth
-    knowing in your bones.
+    Tonight, comrade, we lift the lid. Every lesson so far you worked the radio from outside. Now we
+    go inside, to the first inch between antenna and everything else — pure theory, but the inch that
+    decides how faint a signal you can ever hear.
   demo: >-
-    Follow the signal in. A wave rolls past your antenna and wiggles the electrons — a voltage,
-    millionths of a volt. That microvolt tremor is all a signal ever is at the door. Behind it sits
-    the first amplifier, the low-noise amplifier or LNA, lifting that whisper before the receiver's
-    own hiss buries it. Each stage adds a little hiss — its noise figure. The surprise: the FIRST
-    stage's noise figure sets the receiver's sensitivity, because every later stage works on a signal
-    already loud.
+    Follow the signal in. A wave wiggles your antenna's electrons into a microvolt whisper. The first
+    amplifier, the LNA, lifts it before the receiver's own hiss buries it. Each stage adds hiss — its
+    noise figure — but the FIRST stage's sets the whole receiver's sensitivity.
   try: >-
-    Reason it through before the next screen, comrade. You have two amplifiers to chain behind the
-    antenna — one very quiet, one ordinary and a bit hissy — and you must put them in some order. One
-    meets the raw microvolt whisper first, while the signal is faintest; the other only ever sees a
-    signal already lifted. Which position does more to decide what you can hear: the one that touches
-    the whisper first, or the one that comes after?
+    Reason it through, comrade. Two amplifiers go behind the antenna — one quiet, one ordinary and
+    hissy. One meets the bare whisper first; the other sees a signal already lifted. Which position
+    does more to decide what you can hear?
   predict: >-
     Two amplifiers go behind the antenna: one quiet, one ordinary. To hear the faintest signal, which
     goes first — quiet or ordinary? Lock it in.
   observe: >-
-    Hold your guess against the chain you just walked. The first amplifier is the only one that meets
-    the signal while it is still a bare whisper, and whatever hiss it adds lands right on top of that
-    whisper — no later stage can ever pull the two apart again. Everything downstream works on a
-    signal already lifted. So ask yourself: which amplifier's hiss ends up mattering most?
+    Hold your guess against the chain. The first amplifier is the only one that meets the signal
+    while it is still a bare whisper, and whatever hiss it adds no later stage can undo. So whose hiss
+    matters most?
   explain: >-
-    The quiet one goes first, comrade — always. It meets the signal at its faintest, so its own hiss
-    lands on the whisper and rides forever after; a noisy amp there poisons the well. Put the quiet
-    one first and the ordinary amp after it barely shows — that is why the first stage's noise figure
-    sets sensitivity. But gain is not free: too much, and a strong nearby signal overloads the front
-    end and sprays false copies across the band.
+    The quiet one first, comrade — always. Its hiss lands on the bare whisper and rides forever; a
+    noisy amp there poisons the well. That is why the first stage's noise figure sets sensitivity. But
+    too much gain overloads the front end on a strong signal, spraying false copies.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text, and
 # because none of these is bare yes/no/true/false the quotes also just keep the house style.
