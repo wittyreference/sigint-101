@@ -6,9 +6,8 @@ slug: the-front-end
 title: "The First Inch"
 type: intro
 concept: >-
-  The antenna turns a passing wave into a microvolt whisper, and the first amplifier it meets
-  decides everything: that first stage's noise figure sets how faint a signal the whole receiver can
-  hear, while too much front-end gain overloads it on a strong nearby signal.
+  The antenna turns a passing wave into a microvolt whisper. The first amplifier it meets sets how
+  faint a signal the receiver can hear; too much front-end gain overloads on a strong nearby signal.
 requires_tx: false
 hardware: []
 panels: []
@@ -17,28 +16,22 @@ stages:
   frame: >-
     Tonight, comrade, we lift the lid. Every lesson so far you worked the radio from the outside —
     tuned it, aimed an antenna, read a waterfall. Now we go inside, to the first inch of the
-    receiver: the little stretch between the antenna and everything else. No radio in your hands
-    tonight, this one is pure theory. But it is the inch that decides how faint a signal you can ever
-    hear, so it is worth knowing in your bones.
+    receiver: the stretch between the antenna and everything else. No radio in your hands tonight,
+    just theory. But it is the inch that decides how faint a signal you can ever hear, so it is worth
+    knowing in your bones.
   demo: >-
-    Follow the signal in. A radio wave rolls past your antenna and wiggles the electrons in the
-    metal, and that wiggle is a voltage — a tiny one, a few millionths of a volt. That faint tremor
-    is all a signal ever is at the door: the music, the packets, the aircraft's words, all of it
-    arrives riding on microvolts. Right behind the antenna sits the first amplifier — the low-noise
-    amplifier, the LNA — and its one job is to lift that whisper before the receiver's own circuitry,
-    which always hisses a little, can bury it. Here is the word that matters: noise figure. Every
-    amplifier adds a touch of its own hiss as it works, and a stage's noise figure is simply how much
-    hiss it adds. Now the surprise — the FIRST amplifier's noise figure sets the sensitivity of the
-    whole receiver. Once it has lifted the signal high, every stage after it is working on something
-    already loud, so their hiss barely registers against it. Get the first inch quiet and clean and
-    the rest hardly matters; let the first inch be noisy and nothing downstream can ever undo it.
+    Follow the signal in. A wave rolls past your antenna and wiggles the electrons — a voltage,
+    millionths of a volt. That microvolt tremor is all a signal ever is at the door. Behind it sits
+    the first amplifier, the low-noise amplifier or LNA, lifting that whisper before the receiver's
+    own hiss buries it. Each stage adds a little hiss — its noise figure. The surprise: the FIRST
+    stage's noise figure sets the receiver's sensitivity, because every later stage works on a signal
+    already loud.
   try: >-
-    Reason it through before the next screen, comrade. Picture two amplifiers to chain behind the
-    antenna — one very quiet, one ordinary and a bit hissy — and you have to put them in some order.
-    One of them meets the raw microvolt whisper first, while the signal is at its faintest and most
-    fragile; the other only ever sees a signal that has already been lifted. Ask yourself which
-    position does more to decide what you can hear: the one that touches the whisper first, or the
-    one that comes after.
+    Reason it through before the next screen, comrade. You have two amplifiers to chain behind the
+    antenna — one very quiet, one ordinary and a bit hissy — and you must put them in some order. One
+    meets the raw microvolt whisper first, while the signal is faintest; the other only ever sees a
+    signal already lifted. Which position does more to decide what you can hear: the one that touches
+    the whisper first, or the one that comes after?
   predict: >-
     Two amplifiers go behind the antenna: one quiet, one ordinary. To hear the faintest signal, which
     goes first — quiet or ordinary? Lock it in.
@@ -48,28 +41,11 @@ stages:
     whisper — no later stage can ever pull the two apart again. Everything downstream works on a
     signal already lifted. So ask yourself: which amplifier's hiss ends up mattering most?
   explain: >-
-    Here's the straight answer, comrade: the quiet one goes first — always. The first amplifier meets
-    the signal at its faintest, so its own hiss lands right on the whisper and rides along forever
-    after; put a noisy amp there and you have poisoned the well, however clean everything downstream
-    is. Put the quiet one first and lift the signal high, and the ordinary amp after it is working on
-    something already loud, so its hiss barely shows. That is why the first stage's noise figure sets
-    the whole receiver's sensitivity — sensitivity being just the faintest signal you can pull out of
-    the thermal hiss every receiver starts with, about minus 174 dBm in each hertz of bandwidth, a
-    floor set by physics itself. It is also why a serious operator bolts a low-noise amplifier out at
-    the antenna, not back at the radio: anything lossy before the first amplifier — a long cable run,
-    a cheap connector — adds its loss straight onto the noise figure, undiluted. The tuner in your own
-    dongle claims about 3.5 dB of noise figure on paper, yet a stock setup measured at the antenna
-    often lands nearer 7 to 10, which is exactly why an LNA up front buys real sensitivity. But now
-    the catch, the other half of the gift. More front-end gain is not free and it is not simply
-    "better" — remember Lesson 2, where turning the gain up lifted the signal and the noise floor
-    together and past a point stopped helping. Out here it is sharper: pile on too much gain and a
-    strong transmitter nearby — the near-field monster you have watched flatten a whole band in
-    earlier lessons — drives the amplifier past what it can handle. It stops amplifying cleanly and
-    starts folding, spraying false copies across the band and going deaf to the faint signal you
-    actually wanted. So the front end lives on a knife-edge: enough quiet gain up front to beat the
-    hiss, never so much that the loudest thing in the sky overloads it. Quiet first, and only as much
-    gain as the band will bear — that is the whole art of the first inch, and the rest of this unit
-    builds on it.
+    The quiet one goes first, comrade — always. It meets the signal at its faintest, so its own hiss
+    lands on the whisper and rides forever after; a noisy amp there poisons the well. Put the quiet
+    one first and the ordinary amp after it barely shows — that is why the first stage's noise figure
+    sets sensitivity. But gain is not free: too much, and a strong nearby signal overloads the front
+    end and sprays false copies across the band.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text, and
 # because none of these is bare yes/no/true/false the quotes also just keep the house style.

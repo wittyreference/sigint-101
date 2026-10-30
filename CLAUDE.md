@@ -108,3 +108,7 @@ capable instrument, not a locked toy.
     MC called out. One unavoidable tap remains (EnterWorktree); flag it, then stay heads-down.
 - **nomad-b (user `spec5` @ 100.108.20.20, host `spec5b`) is the WORKING HIL target**; spec5
   (100.90.68.20) is the deaf one (busted RX antenna). Don't conflate them. (Session 2026-10-26.)
+- **Lesson copy ALWAYS shrinks to fit the fixed 800x480 — never scroll, never ask.** When a stage
+  overflows (the Next/Commit button pushed past 480px), trim the prose and the concept banner until
+  it fits; do not add scrolling and do not ask scroll-vs-trim — the answer is always trim. Fit at
+  800x480 is a required check in every lesson's HIL. (Session 2026-10-29.)

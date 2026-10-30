@@ -6,41 +6,31 @@ slug: mixing-downconversion
 title: "Slide It Down"
 type: intro
 concept: >-
-  The front-end hands you raw RF wobbling far too fast for any cheap chip to count. A mixer
-  multiplies that RF against a tone the radio makes itself — the local oscillator — and keeps only
-  the difference, sliding your signal down to a low frequency the ADC can sample. Tuning the radio is
-  nothing more than moving that oscillator. And because a difference carries no sign, two input
-  frequencies — one just above the oscillator, one just below — fold onto the very same output: the
-  image problem, the catch this whole idea is built around.
+  A mixer multiplies the RF against a tone the radio makes itself, the local oscillator, and keeps
+  the difference — sliding the signal down where the ADC can sample. Tuning is moving that oscillator.
 requires_tx: false
 hardware: []
 panels: []
 
 stages:
   frame: >-
-    Last lesson, comrade, the front-end did its work: the antenna caught the faint RF out of the air
-    and the amplifier lifted it clear of the noise, clean and strong. But it is still RF — a wave
-    wobbling a hundred million times a second — and the little chip that must turn it into numbers can
-    count only a few million times a second. It simply cannot keep up. So tonight you learn the oldest
-    trick in the radio: before you measure the wave, you slow it down.
+    Last lesson, comrade, the front-end did its work: the antenna caught the faint RF and the
+    amplifier lifted it clear of the noise. But it is still RF — a wave wobbling a hundred million
+    times a second — and the little chip that must turn it into numbers can count only a few million
+    times a second. It cannot keep up. So tonight you learn the oldest trick in radio: before you
+    measure the wave, you slow it down.
   demo: >-
-    Here is the trick, and it is one move. You take the signal from the antenna and multiply it,
-    instant by instant, against a clean tone the radio generates for itself — the local oscillator,
-    the LO. Multiply two tones and out come two new ones: their sum, far too high to bother with, and
-    their difference, pleasantly low. Throw the sum away with a filter and keep the difference. Park
-    the LO right next to your station and that difference lands down where the slow chip — the ADC,
-    the analogue-to-digital converter — can count it comfortably. Now the part worth carrying: you
-    never move the chip, never move the filter. To change stations you move only the LO. That dial you
-    turn, that frequency you type — tuning the radio is nothing but sliding the oscillator until the
-    thing you want drops into the same low spot every time. That is the superheterodyne, the idea
-    sitting under almost every receiver built since 1918.
+    Here is the trick. Multiply the antenna signal against a clean tone the radio makes itself — the
+    local oscillator, the LO. Out come two tones: their sum, too high, and their difference, low.
+    Filter the sum away, keep the difference, and it lands where the slow ADC can count it. You never
+    move the chip or filter; to change stations you move only the LO. Tuning is sliding the oscillator
+    until what you want drops into the same low spot — the superheterodyne.
   try: >-
     Think it through before the next screen, comrade. The mixer is blunt: it does not care whether
-    your station sits above the LO or below it. It keeps the difference, and a difference carries no
-    sign — a tenth above and a tenth below look identical to it. So picture the LO parked at 100.0 and
-    the station you want humming at 100.1, one tenth above. It lands a tenth of a megahertz out. Now
-    ask the uncomfortable question: is 100.1 really the only signal in the sky that would slide down
-    and land on that exact same spot?
+    your station sits above the LO or below. It keeps the difference, and a difference carries no
+    sign. Picture the LO parked at 100.0 and the station you want at 100.1, a tenth above — it lands a
+    tenth of a megahertz out. Now the uncomfortable question: is 100.1 really the only signal in the
+    sky that would slide down and land on that exact same spot?
   predict: >-
     LO parked at 100.0 MHz. A station at 100.1 lands at 0.1. Is a SECOND frequency landing on that
     same spot? Lock it in.
@@ -50,22 +40,11 @@ stages:
     yourself what else in the band sits exactly a tenth away from 100.0 — and whether a blunt mixer,
     keeping only distance, could possibly tell the two of them apart.
   explain: >-
-    The honest answer, comrade, is yes — and it has a name: the image. The LO sits at 100.0; your
-    station at 100.1 is a tenth above it, but a station at 99.9 is a tenth below it, and the mixer
-    keeps only the distance. Both are one tenth from the LO, so both slide down and land on 0.1 —
-    stacked right on top of each other, your wanted signal and an unwanted ghost from the far side of
-    the oscillator. That ghost is the image, and it always lives twice the landing frequency away from
-    the real thing. Radio has beaten this two ways. The old way: a filter ahead of the mixer that
-    passes 100.1 and chokes 99.9 off before either ever reaches the LO — move the LO, and that filter
-    tracks along with it. The modern way, the one your SDR leans on, does not filter the image out at
-    all; it runs two mixers a quarter-turn apart so the radio can finally tell above-the-LO from
-    below-the-LO and keep the two from stacking. That second trick has a name — quadrature, I and Q —
-    and it is the whole of the next lesson, so sit with the question it answers: how can a difference,
-    which has no sign, be taught to remember which side it came from? One last honest note: the trick
-    is never perfect. Stare at a strong carrier on your waterfall and you will sometimes catch a faint
-    mirror of it on the other side of centre — a leftover image the maths did not fully cancel. The
-    radio slowed the wave down so it could count it; next you learn how it counts in a way that
-    remembers direction.
+    Yes, comrade — the image. The LO sits at 100.0; your station at 100.1 is a tenth above, but 99.9
+    is a tenth below, and the mixer keeps the distance. Both are a tenth from the LO, so both
+    land on 0.1, stacked — your signal and a ghost. Radio beats it two ways: old way filters 99.9 off
+    before the mixer; modern SDR runs two mixers a quarter-turn apart to tell above from below.
+    Quadrature — I and Q — is the next lesson.
 
 # Keyboard-free predict chips: each a {key, label} — the key is what the commit records, the label is
 # what the learner reads. Keys are quoted so a YAML-boolean word stays text, never True/False. Labels

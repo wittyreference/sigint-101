@@ -6,13 +6,8 @@ slug: every-pixel
 title: "What Every Pixel Is"
 type: intro
 concept: >-
-  Every picture the radio has shown you is built from three ideas. Sampling: the receiver measures
-  the wave on a steady clock, and that stream of I/Q numbers is all the computer ever has. Nyquist:
-  you must sample at least twice the bandwidth you want to see, so the sample rate sets the width of
-  the window — and anything past the edge folds back in as an alias unless a filter kills it first.
-  The FFT turns each block of samples into one line of the spectrum; stack the lines and you have the
-  waterfall. Decimation — filter, then keep one sample in a few — narrows the window to zoom in. The
-  payoff: you now know what every pixel of the waterfall actually is.
+  Sampling turns the wave into I/Q numbers; Nyquist sets the window's width and folds anything past
+  its edge back as an alias. The FFT turns each block into the waterfall you have watched.
 requires_tx: false
 hardware: []
 panels: []
@@ -20,33 +15,22 @@ panels: []
 stages:
   frame: >-
     The last lesson of the instrument, comrade, and tonight there is no new signal to chase — tonight
-    you turn the radio on itself. All course you have trusted the waterfall: that scrolling picture of
-    light where every station showed up as a line. You read it, you tuned by it, you caught packets and
-    planes and pages in it. But you never once asked what it is. Tonight you find out — what a single
-    pixel of that picture actually is, and the three ideas that build the whole image out of nothing
-    but numbers: sampling, Nyquist, and the FFT.
+    you turn the radio on itself. All course you trusted the waterfall: that scrolling picture where
+    every station showed up as a line. You read it, tuned by it, caught packets, planes and pages in
+    it. But you never asked what it is. Tonight you find out — what a single pixel actually is, and
+    the three ideas that build the image: sampling, Nyquist, and the FFT.
   demo: >-
-    Here is the whole machine, comrade, in three moves. First, sampling: the radio cannot hold a wave,
-    only measure it, so it reads the incoming signal on a steady clock — millions of ticks a second —
-    and each tick is one sample, a number. Your SDR takes two numbers per tick, an I and a Q, the
-    wave's position on two axes ninety degrees apart. That stream of numbers is the only thing the
-    computer ever has; every picture you have seen was computed from it. Second, Nyquist — the law that
-    says how fast you must tick. To capture a slice of spectrum faithfully you must sample at least
-    twice its bandwidth; tick too slowly and fast waves become impossible to tell from slow ones. The
-    rate sets the width of the window: your dongle clocks about 2.4 million samples a second, so one
-    capture sees a 2.4 MHz-wide slice centred on wherever you tuned. (Two numbers per tick — I and Q —
-    is the trick that lets the rate equal the full window instead of only half of it.) Third, the FFT,
-    the Fast Fourier Transform: feed it one block of those samples and it returns how much energy sits
-    at each frequency across the window. That is one horizontal line of the waterfall. Stack the lines
-    as time runs, paint each by its power, and the picture you have watched all course is simply FFT
-    after FFT, scrolling.
+    Here is the machine, comrade. First, sampling: the radio measures the wave on a steady clock —
+    each tick a number, two per tick, an I and a Q. That stream is all the computer ever has. Second,
+    Nyquist: sample at least twice the bandwidth, so the rate sets the window — 2.4 MSPS gives a 2.4
+    MHz slice. Third, the FFT turns one block into the energy at each frequency — one line of the
+    spectrum. Stack the lines and you have the waterfall.
   try: >-
     Think it through before the next screen, comrade. You have the three moves now: the radio samples,
-    Nyquist fixes how wide a window one sample rate can show, and the FFT turns each block into a line
-    of the picture. But a window has edges — your 2.4 MHz slice stops somewhere, and the spectrum out
-    there does not. So ask the question the whole theorem is really about: a signal is on the air, real
-    and strong, but it sits past the edge of the slice you are sampling. It is not in your window. Does
-    that mean it is simply not in your picture?
+    Nyquist fixes how wide a window one rate shows, the FFT turns each block into a line. But a window
+    has edges — your 2.4 MHz slice stops somewhere, and the spectrum out there does not. So the
+    question the theorem is really about: a real, strong signal sits past the edge of your slice,
+    outside your window. Does that mean it is not in your picture?
   predict: >-
     A strong signal sits just past the top edge of your sampled window, unfiltered. On the waterfall —
     gone, true spot, or ghost? Lock it in.
@@ -56,22 +40,11 @@ stages:
     is wiggling faster than your ticks can keep up with, what does a too-slow string of samples make
     that wave look like?
   explain: >-
-    Here is the straight answer, comrade: a ghost. This is aliasing, and it is the sharp edge of
-    Nyquist. A signal that sits more than half your sample rate away from where you tuned — past the
-    edge of the window — does not vanish and does not land at its true place. Sampled too slowly, it is
-    indistinguishable from a wave that sits inside the window, so it folds back in and paints a false
-    line at the wrong frequency, a trace you cannot tell apart from a real station sitting right there.
-    That is why every honest receiver, your SDR included, runs an anti-aliasing filter — a low-pass
-    filter ahead of the sampler that throws the out-of-band energy away before it can fold in. The
-    theorem is not advice; it is the reason that filter has to exist. And the same idea, run on purpose,
-    is how you zoom: to study a narrow slice in fine detail you filter down to just that slice, then
-    decimate — keep one sample in every few and discard the rest — which lowers the effective rate,
-    narrows the window, and packs each FFT bin into less spectrum, so the detail sharpens. Filter first,
-    always, or the part you were about to throw away aliases straight back in. Now look at the waterfall
-    one last time. Every pixel is a number the FFT computed from a block of samples your radio clocked
-    in: its place across is a frequency bin, its colour is how much energy lived there, its row is when.
-    Sampling gave you the numbers, Nyquist set the width, the FFT drew the line. The instrument has no
-    mystery left in it — you know what every pixel is. Unit complete.
+    Here is the straight answer, comrade: a ghost — aliasing. A signal past half your sample rate
+    folds back and paints a false line at the wrong frequency, indistinguishable from a real station.
+    That is why every receiver runs an anti-aliasing filter ahead of the sampler, dumping out-of-band
+    energy before it can fold in. Now the payoff: every pixel is an FFT number — its place across is a
+    frequency, its colour the energy there, its row the time. You know what every pixel is.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text, and so
 # each chip's tap records a plain string. Labels kept to one short phrase for the 800x480 console.
