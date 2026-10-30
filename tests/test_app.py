@@ -13,6 +13,7 @@ from sigint101.adsb import AdsbDecoder
 from sigint101.ais import AisDecoder
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
+from sigint101.apt import AptDecoder
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.dmr import DmrDecoder
 from sigint101.flock import FlockDetector
@@ -21,6 +22,7 @@ from sigint101.lora import LoRaListener, parse_lora_packet
 from sigint101.pocsag import PocsagDecoder
 from sigint101.rds import RDSDecoder, RDSStation, parse_rds_group
 from sigint101.spectrum import Sweeper, SweepRow, validate_span
+from sigint101.sstv import SstvDecoder
 
 # The suite owns its lesson content: the real lesson_packs/ are authored in parallel, so a test
 # that read them would go red on someone else's unfinished pack. These fixtures are stable.
@@ -442,6 +444,82 @@ def _dmr_calls():
     }]
 
 
+class _StubApt:
+    """An app-boundary stand-in for the satdump AptDecoder (no real radio, no pass)."""
+
+    def __init__(self, images):
+        self._images = images
+        self._started = False
+        self._released = False
+        self.freq_hz = 137_100_000
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def images(self, limit=None):
+        return self._images
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _apt_images():
+    """One decoded APT image, in the dict shape AptDecoder.images() hands the route."""
+    return [{
+        "path": "apt/NOAA-19/avhrr.png", "received_at": "2026-10-30T12:00:00+00:00",
+        "satellite": "NOAA-19", "meta": {"filename": "avhrr.png", "size_bytes": 4096},
+    }]
+
+
+class _StubSstv:
+    """An app-boundary stand-in for the rtl_fm|sox|sstv SstvDecoder (no real radio, no picture)."""
+
+    def __init__(self, images):
+        self._images = images
+        self._started = False
+        self._released = False
+        self.freq_hz = 145_800_000
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def images(self, limit=None):
+        return self._images
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _sstv_images():
+    """One decoded SSTV picture, in the dict shape SstvDecoder.images() hands the route."""
+    return [{
+        "path": "sstv/20261030T120000-000.png", "received_at": 1793150400.0,
+        "mode": "Martin 1", "meta": {"freq_hz": 145_800_000},
+    }]
+
+
 class _StubFlock:
     """An app-boundary stand-in for the FlockDetector (no real wlan1 monitor radio)."""
 
@@ -475,7 +553,7 @@ def _flock_detections():
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
             aprs_factory=None, pocsag_factory=None, acars_factory=None, ais_factory=None,
-            dmr_factory=None, flock_factory=None):
+            dmr_factory=None, apt_factory=None, sstv_factory=None, flock_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
@@ -484,6 +562,7 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
                      adsb_factory=adsb_factory, aprs_factory=aprs_factory,
                      pocsag_factory=pocsag_factory, acars_factory=acars_factory,
                      ais_factory=ais_factory, dmr_factory=dmr_factory,
+                     apt_factory=apt_factory, sstv_factory=sstv_factory,
                      flock_factory=flock_factory)
     return TestClient(app)
 
@@ -772,14 +851,15 @@ def test_spectrum_reclaims_the_dongle_from_the_decoder(tmp_path):
 
 
 # The seven consumers that share the one RTL-SDR; the arbitration contract names them all.
-_SDR_CONSUMERS = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr")
+_SDR_CONSUMERS = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
+                  "apt", "sstv")
 
 
 def _recording_sdr_client(tmp_path):
     """A client whose seven SDR consumers record every release/resume, plus untouched LoRa/Flock.
 
     The RTL-SDR is single-tenant: claiming it for one route must resume that consumer and release
-    the other eight, while the separate-radio LoRa (meshtasticd) and Flock (wlan1 monitor) consumers
+    the other ten, while the separate-radio LoRa (meshtasticd) and Flock (wlan1 monitor) consumers
     are never disturbed. Returns the client and a {"release", "resume"} ledger of consumer names.
     """
     calls = {"release": [], "resume": []}
@@ -807,6 +887,8 @@ def _recording_sdr_client(tmp_path):
         acars_factory=lambda: recorder(_StubAcars, "acars", _acars_messages()),
         ais_factory=lambda: recorder(_StubAis, "ais", _ais_vessels()),
         dmr_factory=lambda: recorder(_StubDmr, "dmr", _dmr_calls()),
+        apt_factory=lambda: recorder(_StubApt, "apt", _apt_images()),
+        sstv_factory=lambda: recorder(_StubSstv, "sstv", _sstv_images()),
         lora_factory=lambda: _StubLora(_packets()),
         flock_factory=lambda: _StubFlock(_flock_detections()),
     )
@@ -823,9 +905,11 @@ def _recording_sdr_client(tmp_path):
     ("/api/acars", "acars"),
     ("/api/ais", "ais"),
     ("/api/dmr", "dmr"),
+    ("/api/apt", "apt"),
+    ("/api/sstv", "sstv"),
 ])
 def test_claiming_an_sdr_route_stands_down_every_other_sdr_consumer(tmp_path, route, target):
-    """One RTL-SDR, one tenant: a route resumes its own consumer and releases the other eight.
+    """One RTL-SDR, one tenant: a route resumes its own consumer and releases the other ten.
 
     The separate-radio consumers (LoRa, Flock) are never touched. This pins the claim()
     arbitration so a Decode+ consumer can be added to the set without hand-editing every rival's
@@ -1242,6 +1326,110 @@ def test_dmr_returns_the_calls_when_running(tmp_path):
     assert c["talkgroup"] == 2001
     assert c["source"] == 1234567
     assert c["kind"] == "group"
+
+
+# --- apt (NOAA APT weather image, M24) ----------------------------------------
+
+
+def test_apt_reports_503_and_a_reason_when_no_radio(tmp_path):
+    with _client(tmp_path,
+                 apt_factory=lambda: AptDecoder(
+                     output_dir=tmp_path / "apt",
+                     radio_present=lambda: False,
+                     which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/apt")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["images"] == []            # never a placeholder image
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_apt_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/apt")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_apt_returns_the_images_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 apt_factory=lambda: _StubApt(_apt_images())) as client:
+        resp = client.get("/api/apt")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["freq_hz"] == 137_100_000
+    img = body["images"][0]
+    assert img["satellite"] == "NOAA-19"
+    assert img["path"] == "apt/NOAA-19/avhrr.png"
+
+
+# --- sstv (SSTV picture, M25) --------------------------------------------------
+
+
+def test_sstv_reports_503_and_a_reason_when_no_radio(tmp_path):
+    with _client(tmp_path,
+                 sstv_factory=lambda: SstvDecoder(
+                     output_dir=tmp_path / "sstv",
+                     radio_present=lambda: False,
+                     which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/sstv")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["images"] == []            # never a placeholder image
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_sstv_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/sstv")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_sstv_returns_the_images_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 sstv_factory=lambda: _StubSstv(_sstv_images())) as client:
+        resp = client.get("/api/sstv")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    img = body["images"][0]
+    assert img["mode"] == "Martin 1"
+    assert img["path"] == "sstv/20261030T120000-000.png"
+
+
+# --- /media (serves only the image decoders' PNGs, nothing else under data/) ---
+
+
+def test_media_serves_a_decoded_png_under_apt(tmp_path):
+    png = tmp_path / "apt" / "shot.png"
+    png.parent.mkdir(parents=True)
+    png.write_bytes(b"\x89PNG\r\n\x1a\n fake png bytes")
+    with _client(tmp_path) as client:
+        resp = client.get("/media/apt/shot.png")
+    assert resp.status_code == 200
+    assert resp.content.startswith(b"\x89PNG")
+
+
+def test_media_refuses_a_path_outside_the_image_folders(tmp_path):
+    # A PNG that sits under data/ but NOT in apt/sstv must not be served (no DB/events leak).
+    loose = tmp_path / "loose.png"
+    loose.write_bytes(b"\x89PNG not in an image folder")
+    with _client(tmp_path) as client:
+        assert client.get("/media/loose.png").status_code == 404
+        # Path traversal back out of the image folders is refused too.
+        assert client.get("/media/apt/../loose.png").status_code == 404
+
+
+def test_media_refuses_a_non_png(tmp_path):
+    txt = tmp_path / "sstv" / "notes.txt"
+    txt.parent.mkdir(parents=True)
+    txt.write_text("nope")
+    with _client(tmp_path) as client:
+        assert client.get("/media/sstv/notes.txt").status_code == 404
 
 
 def test_flock_reports_503_and_a_reason_when_no_monitor_radio(tmp_path):

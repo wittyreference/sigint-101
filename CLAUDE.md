@@ -112,3 +112,8 @@ capable instrument, not a locked toy.
   overflows (the Next/Commit button pushed past 480px), trim the prose and the concept banner until
   it fits; do not add scrolling and do not ask scroll-vs-trim — the answer is always trim. Fit at
   800x480 is a required check in every lesson's HIL. (Session 2026-10-29.)
+- **Don't stop to checkpoint mid-build.** Once a plan or phase is approved, execute straight through
+  the whole build — review → integrate → HIL → ship — without pausing to report progress or to say
+  "proceeding next" between sub-steps. MC resumes from STATUS, not from mid-session checkpoints, so a
+  milestone report belongs at the END of the build or on a real blocker, never at every phase
+  boundary. This sharpens the autonomy rule above. (Session 2026-10-30: "Quit stopping bro".)

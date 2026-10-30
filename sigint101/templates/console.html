@@ -160,6 +160,28 @@
                 <div class="decoder__axis" aria-hidden="true">dsd-fme &middot; DMR / P25 on 450 MHz</div>
               </div>
             </div>
+            {% elif lesson.uses_apt %}
+            {# An APT lesson seals the decoded weather image, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; IMAGE HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">satdump &middot; NOAA APT on 137.1 MHz</div>
+              </div>
+            </div>
+            {% elif lesson.uses_sstv %}
+            {# An SSTV lesson seals the decoded picture, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; IMAGE HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">sstv &middot; SSTV on 145.8 MHz</div>
+              </div>
+            </div>
             {% elif lesson.uses_flock %}
             {# A Flock-detector lesson seals the detections list, not a waterfall. #}
             <div class="instrument instrument--frozen">
@@ -452,6 +474,58 @@
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
+            {% elif lesson.uses_apt %}
+            {# ---- NOAA APT image (M24): a weather picture from a ~137 MHz satellite pass, which a
+               waterfall shows only as a wandering FM carrier. satdump decodes the pass to a PNG;
+               apt.js polls /api/apt and shows the newest image (served from /media). No radio / no
+               satdump / no pass decoded shows an honest empty frame, never a placeholder picture. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder gallery" data-apt-panel aria-label="Live NOAA APT weather image">
+                <div class="decoder__head">
+                  <span class="decoder__title">satdump &middot; NOAA APT</span>
+                  <span class="decoder__status" data-apt-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <figure class="gallery__frame">
+                  <img class="gallery__img" data-apt-img alt="Decoded NOAA APT weather image" hidden>
+                  <figcaption class="gallery__cap" data-apt-cap></figcaption>
+                </figure>
+                <div class="decoder__empty" data-apt-empty>waiting for a pass on 137.100 MHz&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">137.100<span>MHz</span></div>
+                  <div class="tune__caption">NOAA APT &middot; satdump decoding a pass</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
+            {% elif lesson.uses_sstv %}
+            {# ---- SSTV image (M25): a picture sent as audio tones on 2m, which a waterfall shows
+               only as a warbling FM signal. rtl_fm|sox|sstv decodes it to a PNG; sstv.js polls
+               /api/sstv and shows the newest image (served from /media). No radio / no tools /
+               nothing decoded shows an honest empty frame, never a placeholder picture. ---- #}
+            <div class="instrument instrument--decode">
+              <div class="decoder gallery" data-sstv-panel aria-label="Live SSTV picture">
+                <div class="decoder__head">
+                  <span class="decoder__title">sstv &middot; SSTV</span>
+                  <span class="decoder__status" data-sstv-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <figure class="gallery__frame">
+                  <img class="gallery__img" data-sstv-img alt="Decoded SSTV picture" hidden>
+                  <figcaption class="gallery__cap" data-sstv-cap></figcaption>
+                </figure>
+                <div class="decoder__empty" data-sstv-empty>waiting for a picture on 145.800 MHz&hellip;</div>
+              </div>
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">145.800<span>MHz</span></div>
+                  <div class="tune__caption">2m SSTV &middot; rtl_fm|sox|sstv decoding a picture</div>
+                </div>
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
             {% elif lesson.uses_flock %}
             {# ---- Flock detector (M18): 802.11 management frames off wlan1 in monitor mode, matched
                against the camera's OUI + IE fingerprint. flock.js polls /api/flock and lists each
@@ -610,6 +684,12 @@
 <!-- The live DMR/P25 log (M27): polls /api/dmr and lists each call dsd-fme decoded, by talkgroup +
      source. No radio / no dsd-fme / quiet channel shows honestly; never a fabricated call. -->
 <script src="/static/dmr.js"></script>
+<!-- The live NOAA APT image (M24): polls /api/apt and shows the newest weather image satdump
+     decoded (served from /media). No radio / no satdump / no pass shows honestly; never a placeholder. -->
+<script src="/static/apt.js"></script>
+<!-- The live SSTV image (M25): polls /api/sstv and shows the newest picture the rtl_fm|sox|sstv
+     pipeline decoded (served from /media). No radio / no tools / nothing decoded shows honestly. -->
+<script src="/static/sstv.js"></script>
 <!-- The live Flock detections (M18): polls /api/flock and lists each device matched by OUI + IE
      fingerprint on wlan1 in monitor mode. No monitor radio / no tcpdump / no camera shows honestly;
      never a fabricated detection. -->

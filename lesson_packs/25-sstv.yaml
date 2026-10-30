@@ -1,0 +1,72 @@
+# ABOUTME: Lesson pack M25 "A Picture in the Air" — SSTV, a still image sent as warbling audio tones,
+# ABOUTME: decoded line by line into a real photo; ham bands and the ISS overhead on 145.800 MHz FM.
+
+id: 25
+slug: sstv
+title: "A Picture in the Air"
+type: intro
+concept: >-
+  Every decode so far turned a signal into words — a tail number, a page, a packet. SSTV turns one
+  into a picture. Slow-scan television sends a still image as a minute or two of warbling audio: the
+  pitch of a tone is a pixel's brightness, its place in time is the pixel's place across the line, and
+  a sync tone starts each new line. rtl_fm demodulates the FM audio and an SSTV decoder repaints the
+  tones into an image, top to bottom. Hams swap pictures this way on HF and 2 metres, and the ISS
+  beams them down on 145.800 MHz FM. Same unit lesson, new payload: energy becomes a photograph.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [sstv]
+tune:
+  center_hz: 145800000
+  span_hz: 200000
+  step_hz: 100000
+
+stages:
+  frame: >-
+    Every decode in this unit, comrade, has handed you words — a tail number, a pager line, a packet,
+    an aircraft's report. Tonight the air hands you something else: a picture. Slow-scan television —
+    SSTV — is how an operator sends a still image over a voice channel, with nothing but sound. For a
+    minute or two the radio warbles, a rising-and-falling tone that means nothing to your ear, and when
+    a decoder reads it a photograph paints itself down the screen. Hams trade them on the HF nets and
+    up on 2 metres; the Space Station itself drops them to Earth on 145.800. A signal, and inside it,
+    an image.
+  demo: >-
+    Watch — hands off. Here is the trick of it, comrade. The image is sent one line at a time, and
+    inside a line the rule is simple: the pitch of the tone is the brightness of a pixel — low for
+    dark, high for bright — and where that tone falls in time is where the pixel sits across the line.
+    A short sync tone marks the start of each new line so the picture does not slide. Up front rides a
+    VIS header, a little burst of tones that names the mode — Robot 36, Martin, Scottie — so the
+    decoder knows the timing and colour order before the picture even begins. rtl_fm pulls the FM
+    audio off the air; the SSTV decoder reads the tones and lays down pixels, line after line, until a
+    full frame stands finished. Nothing was hidden. It is a photograph spelled out loud, slowly.
+  try: >-
+    Your turn, comrade — tune the band and wait. SSTV is not a stream of chatter; it comes when an
+    operator sends a frame, and a frame is slow by design, so give it the minute or two it needs and
+    watch the image build from the top edge down. 145.800 is the one to dream about: catch an ISS pass
+    during an event and the picture crawling onto your screen was transmitted from orbit. Ask yourself,
+    before the next screen, what actually comes out the far end of all that warbling.
+  predict: >-
+    A minute of warbling tones — no words, no station name. Feed it to the decoder: a real photo, or
+    just noise? Lock it in.
+  observe: >-
+    Hold your guess against what the decoder is really doing. It is not translating a language or
+    cracking a code; it is reading pitch as brightness and time as position, exactly as the sender
+    laid them down. Ask yourself whether anything in that chain was ever hidden from you.
+  explain: >-
+    The straight answer, comrade: a real photo. SSTV hides nothing — it is a picture written in sound.
+    Each line is a sweep of tones where frequency is brightness; a 1200-hertz sync tone opens every
+    line; and the VIS header up front tells the decoder which mode it is, so the timing and the colour
+    channels line up. Give the decoder a mode it knows how to read — Robot 36, Martin, Scottie are the
+    common ham ones — and it repaints the frame pixel by pixel. No encryption, no key, just a format
+    agreed between sender and receiver. The ISS sends its images on 145.800 FM during ARISS events,
+    often in a mode called PD120, so a decoder has to know that format too — the VIS header is what
+    tells it. This is the unit's whole lesson wearing a new coat: a receiver only hears energy, and a
+    decoder that knows the format turns that energy into meaning. For the pager it was a line of text;
+    here it is a face, a map, a postcard from orbit. Receive-only, as ever — you read the picture out
+    of the air, you do not transmit one back.
+
+# Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text, and so
+# the commit records the string, not True/False.
+choices:
+  - {key: "photo", label: "A real photo appears"}
+  - {key: "noise", label: "Just noise and static"}
+  - {key: "numbers", label: "Only raw numbers"}

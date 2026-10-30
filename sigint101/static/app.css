@@ -950,6 +950,36 @@ body {
   font-family: var(--font-mono);
   font-size: 14px;
 }
+/* The image gallery (M24 APT, M25 SSTV): a decoded picture shown where the decoder list sits.
+   The frame fills the panel band and the image scales to fit it (contain), so a tall weather
+   strip or a square SSTV frame both read without distortion; the caption names the source and
+   when it arrived. Until a real picture decodes, the frame stays empty and the honest "waiting"
+   note shows instead — there is no placeholder image. */
+.gallery__frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px;
+}
+.gallery__img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  border: 1px solid var(--border);
+}
+.gallery__cap {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
 /* The frozen predict frame on a decode lesson seals the decoder, mirroring the waterfall's seal.
    Compact (not the live panel's 150px) so the predict prompt, chips and Commit all stay on the
    fixed 800x480 screen — predict is the tightest stage. */
