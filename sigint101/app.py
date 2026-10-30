@@ -21,8 +21,10 @@ from fastapi.templating import Jinja2Templates
 
 from .acars import AcarsDecoder, AcarsUnavailable
 from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
+from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .decode import Decoder, DecodeUnavailable
+from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event
 from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
 from .flock import FlockDetector, FlockUnavailable
@@ -170,7 +172,8 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
-               acars_factory=None, flock_factory=None, pool_path=None,
+               acars_factory=None, ais_factory=None, dmr_factory=None,
+               flock_factory=None, pool_path=None,
                ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
@@ -277,6 +280,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_acars = acars_factory
 
+    # The AIS decoder runs rtl_ais, which opens the dongle directly on the marine AIS channels — it
+    # joins the sweeper / rtl_433 / rds / adsb / aprs / pocsag / acars release/resume turn-taking.
+    if ais_factory is None:
+        def build_ais():
+            return AisDecoder(
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_ais = ais_factory
+
+    # The DMR/P25 decoder runs dsd-fme, which opens the dongle directly on the digital-voice
+    # channel — it joins the same release/resume turn-taking as the other SDR-exclusive decoders.
+    if dmr_factory is None:
+        def build_dmr():
+            return DmrDecoder(
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_dmr = dmr_factory
+
     # The Flock detector runs tcpdump on wlan1 in monitor mode — a separate radio from the RTL-SDR,
     # like the LoRa listener, so it needs no arbitration with the sweeper or the SDR decoders.
     if flock_factory is None:
@@ -302,6 +329,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.aprs = build_aprs()
         app.state.pocsag = build_pocsag()
         app.state.acars = build_acars()
+        app.state.ais = build_ais()
+        app.state.dmr = build_dmr()
         app.state.flock = build_flock()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
@@ -323,6 +352,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.aprs.stop()
             app.state.pocsag.stop()
             app.state.acars.stop()
+            app.state.ais.stop()
+            app.state.dmr.stop()
             app.state.flock.stop()
             app.state.progress.close()
             app.state.exam_store.close()
@@ -682,7 +713,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # by naming only itself to _claim_sdr, which stands every other consumer down (release) and
     # clears any prior stand-down on the caller (resume). LoRa (meshtasticd) and Flock (wlan1
     # monitor) ride their own radios and are deliberately absent from this set.
-    sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars")
+    sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr")
 
     def _claim_sdr(target: str) -> None:
         """Hand the one RTL-SDR to `target`, standing every other SDR-exclusive consumer down."""
@@ -927,6 +958,60 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "available": True,
             "freq_hz": decoder.freq_hz,
             "messages": decoder.messages(limit),
+        }
+
+    @app.get("/api/ais")
+    def ais(limit: int | None = None):
+        """The vessels rtl_ais is decoding on the marine AIS channels, freshest contact first.
+
+        rtl_ais opens the dongle the waterfall otherwise sweeps, so the sweep and the other SDR
+        tools are released first and stay released until a /api/spectrum poll takes the radio. No
+        radio, no rtl_ais, or an inland empty sea is an honest empty roster — a 503 with the reason
+        when the feed cannot be read, never a fabricated vessel.
+        """
+        decoder = app.state.ais
+        if not decoder.running:
+            _claim_sdr("ais")
+            try:
+                decoder.start()
+            except AisUnavailable as exc:
+                log_event(app.state.events_path, "ais_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "vessels": []})
+            log_event(app.state.events_path, "ais_start",
+                      {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ})
+        return {
+            "available": True,
+            "channel_a_hz": AIS_CHANNEL_A_HZ,
+            "channel_b_hz": AIS_CHANNEL_B_HZ,
+            "vessels": decoder.vessels(limit),
+        }
+
+    @app.get("/api/dmr")
+    def dmr(limit: int | None = None):
+        """The DMR/P25 calls dsd-fme is decoding on the digital-voice channel, newest first.
+
+        dsd-fme opens the dongle the waterfall otherwise sweeps, so the sweep and the other SDR
+        tools are released first and stay released until a /api/spectrum poll takes the radio. No
+        radio, no dsd-fme, or a quiet channel is an honest empty log — a 503 with the reason when
+        the process cannot be read, never a fabricated call.
+        """
+        decoder = app.state.dmr
+        if not decoder.running:
+            _claim_sdr("dmr")
+            try:
+                decoder.start()
+            except DmrUnavailable as exc:
+                log_event(app.state.events_path, "dmr_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "calls": []})
+            log_event(app.state.events_path, "dmr_start", {"freq_hz": decoder.freq_hz})
+        return {
+            "available": True,
+            "freq_hz": decoder.freq_hz,
+            "calls": decoder.calls(limit),
         }
 
     @app.get("/api/hardware")

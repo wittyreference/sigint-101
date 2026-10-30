@@ -10,9 +10,11 @@ from fastapi.testclient import TestClient
 from sigint101 import exam
 from sigint101.acars import AcarsDecoder
 from sigint101.adsb import AdsbDecoder
+from sigint101.ais import AisDecoder
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder, parse_decode_line
+from sigint101.dmr import DmrDecoder
 from sigint101.flock import FlockDetector
 from sigint101.hardware import RadioProbe
 from sigint101.lora import LoRaListener, parse_lora_packet
@@ -364,6 +366,82 @@ def _acars_messages():
     }]
 
 
+class _StubAis:
+    """An app-boundary stand-in for the rtl_ais AisDecoder (no real radio)."""
+
+    def __init__(self, vessels):
+        self._vessels = vessels
+        self._started = False
+        self._released = False
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def vessels(self, limit=None):
+        return self._vessels
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _ais_vessels():
+    """One decoded vessel, in the dict shape AisDecoder.vessels() hands the route."""
+    return [{
+        "mmsi": 351759000, "name": "EVER DIADEM", "lat": 47.58283, "lon": -122.34583,
+        "sog_kt": 0.0, "cog_deg": 51.0, "heading_deg": 181, "nav_status": "Moored",
+        "ship_type": 70, "message_count": 4, "last_seen": 2.0,
+    }]
+
+
+class _StubDmr:
+    """An app-boundary stand-in for the dsd-fme DmrDecoder (no real radio)."""
+
+    def __init__(self, calls):
+        self._calls = calls
+        self._started = False
+        self._released = False
+        self.freq_hz = 450_000_000
+
+    @property
+    def running(self):
+        return self._started and not self._released
+
+    def start(self):
+        self._started = True
+
+    def calls(self, limit=None):
+        return self._calls
+
+    def release(self):
+        self._released = True
+        self._started = False
+
+    def resume(self):
+        self._released = False
+
+    def stop(self):
+        self._started = False
+
+
+def _dmr_calls():
+    """One decoded call, in the dict shape DmrDecoder.calls() hands the route."""
+    return [{
+        "protocol": "P25", "talkgroup": 2001, "source": 1234567, "slot": None,
+        "color_code": None, "kind": "group", "last_seen": "13:50:22",
+    }]
+
+
 class _StubFlock:
     """An app-boundary stand-in for the FlockDetector (no real wlan1 monitor radio)."""
 
@@ -396,7 +474,8 @@ def _flock_detections():
 
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
-            aprs_factory=None, pocsag_factory=None, acars_factory=None, flock_factory=None):
+            aprs_factory=None, pocsag_factory=None, acars_factory=None, ais_factory=None,
+            dmr_factory=None, flock_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
@@ -404,6 +483,7 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
                      lora_factory=lora_factory, rds_factory=rds_factory,
                      adsb_factory=adsb_factory, aprs_factory=aprs_factory,
                      pocsag_factory=pocsag_factory, acars_factory=acars_factory,
+                     ais_factory=ais_factory, dmr_factory=dmr_factory,
                      flock_factory=flock_factory)
     return TestClient(app)
 
@@ -692,14 +772,14 @@ def test_spectrum_reclaims_the_dongle_from_the_decoder(tmp_path):
 
 
 # The seven consumers that share the one RTL-SDR; the arbitration contract names them all.
-_SDR_CONSUMERS = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars")
+_SDR_CONSUMERS = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr")
 
 
 def _recording_sdr_client(tmp_path):
     """A client whose seven SDR consumers record every release/resume, plus untouched LoRa/Flock.
 
     The RTL-SDR is single-tenant: claiming it for one route must resume that consumer and release
-    the other six, while the separate-radio LoRa (meshtasticd) and Flock (wlan1 monitor) consumers
+    the other eight, while the separate-radio LoRa (meshtasticd) and Flock (wlan1 monitor) consumers
     are never disturbed. Returns the client and a {"release", "resume"} ledger of consumer names.
     """
     calls = {"release": [], "resume": []}
@@ -725,6 +805,8 @@ def _recording_sdr_client(tmp_path):
         aprs_factory=lambda: recorder(_StubAprs, "aprs", _aprs_stations()),
         pocsag_factory=lambda: recorder(_StubPocsag, "pocsag", _pocsag_pages()),
         acars_factory=lambda: recorder(_StubAcars, "acars", _acars_messages()),
+        ais_factory=lambda: recorder(_StubAis, "ais", _ais_vessels()),
+        dmr_factory=lambda: recorder(_StubDmr, "dmr", _dmr_calls()),
         lora_factory=lambda: _StubLora(_packets()),
         flock_factory=lambda: _StubFlock(_flock_detections()),
     )
@@ -739,9 +821,11 @@ def _recording_sdr_client(tmp_path):
     ("/api/aprs", "aprs"),
     ("/api/pocsag", "pocsag"),
     ("/api/acars", "acars"),
+    ("/api/ais", "ais"),
+    ("/api/dmr", "dmr"),
 ])
 def test_claiming_an_sdr_route_stands_down_every_other_sdr_consumer(tmp_path, route, target):
-    """One RTL-SDR, one tenant: a route resumes its own consumer and releases the other six.
+    """One RTL-SDR, one tenant: a route resumes its own consumer and releases the other eight.
 
     The separate-radio consumers (LoRa, Flock) are never touched. This pins the claim()
     arbitration so a Decode+ consumer can be added to the set without hand-editing every rival's
@@ -1081,6 +1165,83 @@ def test_spectrum_releases_the_acars_decoder(tmp_path):
         client.get("/api/acars")         # acarsdec takes the dongle
         client.get("/api/spectrum")      # sweep reclaims it
     assert released["value"] is True
+
+
+# --- ais (AIS vessel roster, M26) ---------------------------------------------
+
+
+def test_ais_reports_503_and_a_reason_when_no_radio(tmp_path):
+    # rtl_ais present (injected which) so this pins the no-radio refusal, not a missing-tool one.
+    with _client(tmp_path,
+                 ais_factory=lambda: AisDecoder(
+                     radio_present=lambda: False,
+                     which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/ais")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["vessels"] == []           # never a fabricated vessel
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_ais_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/ais")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_ais_returns_the_vessels_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 ais_factory=lambda: _StubAis(_ais_vessels())) as client:
+        resp = client.get("/api/ais")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["channel_a_hz"] == 161_975_000
+    assert body["channel_b_hz"] == 162_025_000
+    v = body["vessels"][0]
+    assert v["mmsi"] == 351759000
+    assert v["name"] == "EVER DIADEM"
+    assert v["nav_status"] == "Moored"
+
+
+# --- dmr (DMR/P25 call log, M27) ----------------------------------------------
+
+
+def test_dmr_reports_503_and_a_reason_when_no_radio(tmp_path):
+    with _client(tmp_path,
+                 dmr_factory=lambda: DmrDecoder(
+                     radio_present=lambda: False,
+                     which=lambda name: "/usr/bin/" + name)) as client:
+        resp = client.get("/api/dmr")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["calls"] == []             # never a fabricated call
+    assert "RTL-SDR" in body["reason"]
+
+
+def test_dmr_default_decoder_also_refuses_without_a_radio(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/dmr")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_dmr_returns_the_calls_when_running(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 dmr_factory=lambda: _StubDmr(_dmr_calls())) as client:
+        resp = client.get("/api/dmr")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["freq_hz"] == 450_000_000
+    c = body["calls"][0]
+    assert c["protocol"] == "P25"
+    assert c["talkgroup"] == 2001
+    assert c["source"] == 1234567
+    assert c["kind"] == "group"
 
 
 def test_flock_reports_503_and_a_reason_when_no_monitor_radio(tmp_path):
