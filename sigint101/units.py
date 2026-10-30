@@ -36,6 +36,7 @@ UNITS: tuple = (
     Unit(6, "under-the-hood", "Under the Hood", "gear", (20, 21, 22, 23)),
     Unit(7, "counter-surveillance", "Counter-Surveillance", "counter-surv", (17, 18, 19)),
     Unit(8, "images", "Images", "images", (24, 25)),
+    Unit(9, "mesh", "Mesh", "mesh", (28,)),
 )
 
 

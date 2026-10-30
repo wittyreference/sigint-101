@@ -4,16 +4,16 @@
 **CURRICULUM PINNED (MC, 2026-10-29).** Unit 5 Decode is complete (M13-M16 landed). MC scoped the
 rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
 AskUserQuestion pass. Full map in **CURRICULUM ROADMAP** below. **Build order (MC's call): Counter-
-surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **LANDED: CS1 (M17), CS2
-(M18), all of Unit 6 (M20-M23), the `claim()` arbitration refactor, Decode+ data/voice (M26 AIS,
-M27 DMR/P25), and Decode+ Images (M24 APT, M25 SSTV) — all HIL-verified at 800x480.** U7
-counter-surveillance is live in `units.py` (ids 17-19; U6 = 20-23); M26/M27 join Unit 5 Decode
-(13-16, 26, 27); M24/M25 are the new Unit 8 Images. Decode+ Images (M24 NOAA APT + M25
-SSTV) is now **LANDED** too — new Unit 8 Images, with the first image panel. **Next: CS3 Rayhunter
-(M19, needs the Orbic on WiFi) and M28 Meshtastic (meshtasticd, needs a 2nd mesh node), then the
-Flipper Companion FAP (LAST).** All lesson packs were drafted + verified by the
-`sigint-curriculum-fanout` workflow and staged in scratchpad `lessons/` (19-catch-the-catcher.yaml,
-28-meshtastic.yaml remain).
+surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **ALL 12 CURRICULUM LESSONS
+LANDED: CS1 (M17), CS2 (M18), CS3 Rayhunter (M19), Unit 6 (M20-M23), Decode+ data/voice (M26 AIS,
+M27 DMR/P25), Decode+ Images (M24 APT, M25 SSTV), Meshtastic (M28), plus the `claim()` arbitration
+refactor — all HIL-verified at 800x480.** Units: U7 counter-surveillance = 17-19; M26/M27 join Unit 5
+Decode (13-16, 26, 27); M24/M25 are Unit 8 Images; M28 is Unit 9 Mesh. **Next (LAST track): the
+Flipper Companion FAP** — Pulse Scope + lesson sync (show the current lesson on the Flipper, push a
+capture back to the console). An on-device C app, its own build track.
+- **Deferred live HIL (hardware, not code):** M19 live needs the Orbic powered on its WiFi (honest-503
+  verified); M27 live needs the dsd-fme build + a DMR repeater; M28 live mesh needs MC's 2nd node
+  (the LoRa panel runs live honest-empty on nomad-b now); M24/M25 real images need an antenna + pass.
 
 **Unit 6 fit note (durable, now in CLAUDE.md Corrections):** the reading-stage layout has ~250-300px
 of fixed overhead (concept banner on every stage + title + footer), so a reading body must be **≤~50

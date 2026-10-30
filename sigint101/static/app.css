@@ -980,6 +980,27 @@ body {
   letter-spacing: 0.06em;
   color: var(--accent);
 }
+/* Rayhunter's recording "line" (M19): the one-glance status the device itself shows — green while
+   it records and nothing is wrong, red when a heuristic fires, grey when it is not recording. State
+   is carried by brightness + the words, never colour alone, so it reads in red-night too. */
+.rayhunter__line {
+  flex: none;
+  padding: 7px 10px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-mute);
+}
+.rayhunter__line--clean { color: var(--ok); border-bottom-color: var(--ok); }
+.rayhunter__line--warning {
+  color: var(--warn);
+  border-bottom-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 18%, var(--surface));
+  font-weight: 600;
+}
 /* The frozen predict frame on a decode lesson seals the decoder, mirroring the waterfall's seal.
    Compact (not the live panel's 150px) so the predict prompt, chips and Commit all stay on the
    fixed 800x480 screen — predict is the tightest stage. */
