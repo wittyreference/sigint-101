@@ -41,6 +41,7 @@ from .provenance import (
     read_baseline,
     record_baseline_sample,
 )
+from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
@@ -176,7 +177,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
                apt_factory=None, sstv_factory=None,
-               flock_factory=None, pool_path=None,
+               flock_factory=None, rayhunter_factory=None, pool_path=None,
                ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
@@ -342,6 +343,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_flock = flock_factory
 
+    # The Rayhunter monitor polls an Orbic over WiFi, receive-only — a separate device, like the
+    # Flock detector and the LoRa listener, so it never arbitrates with the SDR.
+    if rayhunter_factory is None:
+        build_rayhunter = RayhunterMonitor
+    else:
+        build_rayhunter = rayhunter_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -365,6 +373,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.apt = build_apt()
         app.state.sstv = build_sstv()
         app.state.flock = build_flock()
+        app.state.rayhunter = build_rayhunter()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -390,6 +399,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.apt.stop()
             app.state.sstv.stop()
             app.state.flock.stop()
+            app.state.rayhunter.stop()
             app.state.progress.close()
             app.state.exam_store.close()
 
@@ -865,6 +875,34 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "available": True,
             "interface": detector.interface,
             "detections": detector.detections(limit),
+        }
+
+    @app.get("/api/rayhunter")
+    def rayhunter(limit: int | None = None):
+        """The Orbic's Rayhunter recording line + heuristic findings, newest finding first.
+
+        The monitor polls an Orbic over WiFi, receive-only — a separate device from the RTL-SDR, so
+        this never disturbs a sweep or a decode. No Orbic reachable is a 503 with the reason, never
+        a clean line pretending the air was checked — a quiet line never proves no catcher was near.
+        """
+        monitor = app.state.rayhunter
+        try:
+            if not monitor.running:
+                monitor.start()
+                log_event(app.state.events_path, "rayhunter_start", {"base_url": monitor.base_url})
+            status = monitor.status()
+            warnings = monitor.warnings(limit)
+        except RayhunterUnavailable as exc:
+            log_event(app.state.events_path, "rayhunter_blocked", {"reason": str(exc)})
+            return JSONResponse(
+                status_code=503,
+                content={"available": False, "reason": str(exc), "status": "off", "warnings": []})
+        return {
+            "available": True,
+            "host": monitor.host,
+            "port": monitor.port,
+            "status": status,
+            "warnings": warnings,
         }
 
     @app.get("/api/rds")

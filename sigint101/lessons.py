@@ -49,9 +49,10 @@ DMR_PANEL = "dmr"
 APT_PANEL = "apt"
 SSTV_PANEL = "sstv"
 FLOCK_PANEL = "flock"
+RAYHUNTER_PANEL = "rayhunter"
 INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL,
                      POCSAG_PANEL, ACARS_PANEL, AIS_PANEL, DMR_PANEL, APT_PANEL, SSTV_PANEL,
-                     FLOCK_PANEL)
+                     FLOCK_PANEL, RAYHUNTER_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -208,6 +209,15 @@ class Lesson:
         console renders the detections list and polls /api/flock with no contention with the sweep.
         """
         return FLOCK_PANEL in self.panels
+
+    @property
+    def uses_rayhunter(self) -> bool:
+        """True when the instrument is the Rayhunter monitor (the rayhunter panel), not a waterfall.
+
+        It polls an Orbic running EFF's Rayhunter over WiFi — a separate device, receive-only — so
+        the console renders the recording state + warnings from /api/rayhunter, never the SDR.
+        """
+        return RAYHUNTER_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:

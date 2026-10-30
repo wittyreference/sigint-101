@@ -20,6 +20,7 @@ from sigint101.flock import FlockDetector
 from sigint101.hardware import RadioProbe
 from sigint101.lora import LoRaListener, parse_lora_packet
 from sigint101.pocsag import PocsagDecoder
+from sigint101.rayhunter import RayhunterMonitor
 from sigint101.rds import RDSDecoder, RDSStation, parse_rds_group
 from sigint101.spectrum import Sweeper, SweepRow, validate_span
 from sigint101.sstv import SstvDecoder
@@ -550,10 +551,50 @@ def _flock_detections():
     }]
 
 
+class _StubRayhunter:
+    """An app-boundary stand-in for the RayhunterMonitor (no real Orbic over WiFi)."""
+
+    def __init__(self, status, warnings):
+        self._status = status
+        self._warnings = warnings
+        self._started = False
+        self.host, self.port = "192.168.1.1", 8080
+
+    @property
+    def base_url(self):
+        return f"http://{self.host}:{self.port}"
+
+    @property
+    def running(self):
+        return self._started
+
+    def start(self):
+        self._started = True
+
+    def status(self):
+        return self._status
+
+    def warnings(self, limit=None):
+        return self._warnings
+
+    def stop(self):
+        self._started = False
+
+
+def _rayhunter_warnings():
+    """One heuristic finding, in the dict shape RayhunterMonitor.warnings() hands the route."""
+    return [{
+        "name": "IMSI Requested", "severity": "low", "packet": 5102,
+        "description": "IMSI requested without authentication (packet 5102)",
+        "timestamp": "2026-10-29T11:03:04-07:00",
+    }]
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
             aprs_factory=None, pocsag_factory=None, acars_factory=None, ais_factory=None,
-            dmr_factory=None, apt_factory=None, sstv_factory=None, flock_factory=None):
+            dmr_factory=None, apt_factory=None, sstv_factory=None, flock_factory=None,
+            rayhunter_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
@@ -563,7 +604,7 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
                      pocsag_factory=pocsag_factory, acars_factory=acars_factory,
                      ais_factory=ais_factory, dmr_factory=dmr_factory,
                      apt_factory=apt_factory, sstv_factory=sstv_factory,
-                     flock_factory=flock_factory)
+                     flock_factory=flock_factory, rayhunter_factory=rayhunter_factory)
     return TestClient(app)
 
 
@@ -1477,6 +1518,63 @@ def test_flock_is_a_separate_radio_and_leaves_the_sweeper_alone(tmp_path):
                  sweeper_factory=lambda: _RecordingSweeper(_rows()),
                  flock_factory=lambda: _StubFlock(_flock_detections())) as client:
         client.get("/api/flock")
+    assert released["value"] is False
+
+
+# --- rayhunter (Orbic cell-site-simulator detector, M19) ----------------------
+
+
+def _unreachable_fetch(url, timeout):
+    raise OSError("connection refused")
+
+
+def test_rayhunter_reports_503_and_a_reason_when_the_orbic_is_unreachable(tmp_path):
+    with _client(tmp_path,
+                 rayhunter_factory=lambda: RayhunterMonitor(fetch=_unreachable_fetch)) as client:
+        resp = client.get("/api/rayhunter")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["warnings"] == []          # never a fabricated finding
+    assert body["status"] == "off"
+    assert "Rayhunter" in body["reason"] or "reachable" in body["reason"]
+
+
+def test_rayhunter_default_monitor_also_refuses_without_an_orbic(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/api/rayhunter")
+    assert resp.status_code == 503
+    assert resp.json()["available"] is False
+
+
+def test_rayhunter_returns_the_line_and_findings_when_reachable(tmp_path):
+    warns = _rayhunter_warnings()
+    with _client(tmp_path,
+                 rayhunter_factory=lambda: _StubRayhunter("warning", warns)) as client:
+        resp = client.get("/api/rayhunter")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["status"] == "warning"
+    assert body["host"] == "192.168.1.1"
+    w = body["warnings"][0]
+    assert w["name"] == "IMSI Requested"
+    assert w["severity"] == "low"
+
+
+def test_rayhunter_is_a_separate_device_and_leaves_the_sweeper_alone(tmp_path):
+    """The Orbic is read over WiFi, not the SDR, so /api/rayhunter never stands the sweeper down."""
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 rayhunter_factory=lambda: _StubRayhunter("clean", [])) as client:
+        client.get("/api/rayhunter")
     assert released["value"] is False
 
 
