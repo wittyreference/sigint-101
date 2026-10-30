@@ -5,12 +5,14 @@
 rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
 AskUserQuestion pass. Full map in **CURRICULUM ROADMAP** below. **Build order (MC's call): Counter-
 surveillance FIRST**, then Unit 6 → Decode+ → Meshtastic → Flipper FAP. **LANDED: CS1 (M17), CS2
-(M18), and all of Unit 6 (M20-M23) — HIL-verified at 800x480.** U7 counter-surveillance track is
-live in `units.py` (ids 17-19; U6 = 20-23). **Next: the 6 remaining lessons' backends** — CS3
-Rayhunter (M19, needs Orbic on WiFi), Decode+ (M24 NOAA APT, M25 SSTV, M26 AIS, M27 DMR/P25 — each an
-SDR-exclusive decoder), M28 Meshtastic (meshtasticd). All 10 were drafted + verified by the
-`sigint-curriculum-fanout` workflow; the verified packs are staged in this session's scratchpad
-(`lessons/`), and the per-lesson build specs (tool, band, backend shape) are in the workflow result.
+(M18), all of Unit 6 (M20-M23), the `claim()` arbitration refactor, and Decode+ data/voice (M26 AIS,
+M27 DMR/P25) — all HIL-verified at 800x480.** U7 counter-surveillance is live in `units.py` (ids
+17-19; U6 = 20-23); M26/M27 join Unit 5 Decode (13-16, 26, 27). **Next: Decode+ Images — M24 NOAA
+APT + M25 SSTV** (image decoders, a NEW console panel pattern — the backends are built + TDD'd by the
+`decode-plus-backends` workflow and staged in this session's scratchpad `decode-plus/`; they produce
+a PNG under data/, not a record list, so the panel is a new design). Then CS3 Rayhunter (M19, needs
+Orbic on WiFi) and M28 Meshtastic (meshtasticd, needs a 2nd node). All lesson packs were drafted +
+verified by the `sigint-curriculum-fanout` workflow and staged in scratchpad `lessons/`.
 
 **Unit 6 fit note (durable, now in CLAUDE.md Corrections):** the reading-stage layout has ~250-300px
 of fixed overhead (concept banner on every stage + title + footer), so a reading body must be **≤~50
@@ -26,10 +28,27 @@ arbitration. **DEPLOYMENT FOLLOW-UP (not automated yet):** the kiosk must (a) `s
 cap_net_raw,cap_net_admin+eip` on tcpdump and (b) put wlan1 into monitor mode before the detector runs
 — today those are manual HIL steps, not a boot service. Log as a CS-track provisioning item.
 
-**Parallel build in flight:** a `sigint-curriculum-fanout` Workflow (run `wkdcewsyr`) is drafting +
-verifying the other 10 lessons (CS3 · Unit 6 ×4 · Decode+ ×4 · Meshtastic). Integrate each as it
-clears verify (a stray `25-sstv.yaml` a workflow agent wrote into the cs2-flock worktree was NOT
-committed — discard it; use the workflow's structured output instead).
+**Backends built by workflow (2026-10-30):** the `decode-plus-backends` Workflow (4 agents, isolated
+worktrees, TDD) built all four Decode+ decoder modules. AIS + DMR landed (below); APT + SSTV sources
+are staged in scratchpad `decode-plus/` (apt.py/sstv.py + tests) for the Images unit — reviewed-on-
+integration, not yet wired. The earlier `sigint-curriculum-fanout` run drafted + verified all 10
+lesson packs (staged in scratchpad `lessons/`).
+
+**M26 (AIS) + M27 (DMR/P25) DONE and landed (observed, 2026-10-30) — Decode+ data/voice, join Unit 5.**
+`sigint101/ais.py`: rtl_ais opens the dongle and pushes AIVDM over UDP; the decoder binds that
+socket and decodes types 1/2/3 (position) + 5 (static, two-fragment reassembly) in pure Python into
+a roster keyed by MMSI (the sea's twin of the ADS-B radar). TDD against the **published gpsd AIVDM
+vectors** (MMSI 477553000 position; EVER DIADEM static) — real-data proof at the unit level.
+`sigint101/dmr.py`: dsd-fme auto-detects DMR/P25 and prints signaling to stderr; the parser reads
+sync + talkgroup/source/slot/colour into a call log (requires a sync AND an ID — a bare sync is not
+a call). Both are the **8th and 9th SDR-exclusive consumers**, registered in `sdr_consumers` (one
+line each, thanks to `claim()`). `/api/ais` + `/api/dmr` + `ais`/`dmr` panels (ais.js/dmr.js) +
+frozen branches (VESSELS/CALLS HIDDEN) + packs `26-ais.yaml` / `27-digital-voice.yaml`. **HIL on
+nomad-b:** both lessons' demo + predict render at a forced 800x480 (demo Next=423, predict
+Commit=474 — same as the shipped instrument lessons); `rtl_ais` built from source + installed, live
+`/api/ais` runs honest-empty on the real radio (available:true, vessels:[] — no ships inland) with
+rtl_ais genuinely running, and the `claim()` arbitration released it when `/api/spectrum` reclaimed
+the dongle. **Deferred:** dsd-fme build for live `/api/dmr` + a real DMR capture (see open items).
 
 ## CURRICULUM ROADMAP (pinned 2026-10-29)
 Lesson ids assigned by build order from M17 up; unit/track placement finalized per lesson at build
@@ -76,11 +95,18 @@ nodes, channels, messages. Needs a second mesh node (MC acquiring; maybe a Flipp
 **Installs:** MC pre-approved everything these tracks need, incl. daemons/services for Flock ingest
 and Rayhunter.
 Open items:
-- **Follow-up (ask MC): collapse the dongle-arbitration release lists into a `claim(target)` helper.**
-  There are now **7 SDR-exclusive consumers** (sweeper, rtl_433, rds, adsb, aprs, pocsag, acars) and
-  each route open-codes "release the other six, resume me". A `claim()` helper on app.state would make
-  it one line per route and one-line registration per consumer — but it edits the existing working
-  routes, so it needs MC's OK (don't-reimplement gate). See learnings 2026-10-28 (M14).
+- **DONE (MC-approved 2026-10-30, squash-merged `6b23996`): `claim(target)` arbitration helper.** The
+  SDR routes' open-coded "release the others, resume me" lists are now one `_claim_sdr(target)` call
+  off the `sdr_consumers` tuple in `app.py`; adding a consumer is one tuple entry + its route. A
+  parametrized contract test pins the full set for every SDR route (resume self, release the rest,
+  never touch LoRa/Flock). Proven live on nomad-b: starting rtl_ais then hitting `/api/spectrum`
+  released it (dongle handed back). There are now **9 SDR-exclusive consumers** (+ ais, dmr).
+- **DEFERRED (install + physical): dsd-fme for live DMR/P25 (M27).** `dsd-fme` is a source build
+  (cmake + mbelib + libsndfile/ncurses/libusb) — not in Debian. The M27 route is HIL-verified
+  honest-503 (tool absent) and the arbitration is proven via AIS (identical pattern), but a live
+  `/api/dmr` honest-empty run, and later a real DMR/P25 capture to exercise the parser on live
+  output, await the build + a digital-voice repeater in range. The parser is TDD'd against dsd-fme's
+  own source format strings.
 - **ACARS live capture (deferred, physical)** — M16's pipeline is HIL-proven BOTH ways: live
   `/api/acars` runs honest-empty on the real radio (nomad-b hears no aircraft on 131.55), AND the
   full chain was proven with REAL data by feeding acarsdec's own `test.wav` through the real decoder
