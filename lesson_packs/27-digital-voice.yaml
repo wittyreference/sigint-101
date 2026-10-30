@@ -1,0 +1,75 @@
+# ABOUTME: Lesson pack M27 "The Coded Voice" — digital voice (DMR / P25): speech sent as a bitstream,
+# ABOUTME: decoded with DSD-FME into talkgroup and source IDs, call activity, and — when open — speech.
+
+id: 27
+slug: digital-voice
+title: "The Coded Voice"
+type: intro
+concept: >-
+  The world's two-way radio went digital. DMR (business and amateur) and P25 (public safety) carry
+  voice not as an analog tone you can simply tune in, but as a bitstream: a four-level FSK signal —
+  C4FM on P25 Phase 1 — that a decoder like DSD-FME demodulates, frames, and splits in two. The
+  signaling half rides in the clear — a talkgroup ID (which conversation) and a source ID (which
+  radio) — because the system itself must read it to route the call; the voice half is compressed by
+  a vocoder and, on many systems, encrypted. On a trunked network many talkgroups share a pool of
+  channels, so what you watch is call activity: IDs lighting up as conversations hop. It is the
+  unit's one move again — energy into meaning — with a new final stage: the vocoder.
+requires_tx: false
+hardware: [rtl-sdr]
+panels: [dmr]
+tune:
+  center_hz: 450000000
+  span_hz: 200000
+  step_hz: 12500
+
+stages:
+  frame: >-
+    All unit long, comrade, you turned energy into meaning — a plane's position, a ham's packet, a
+    pager's line, an aircraft's typed note. One kind of meaning is still missing: a human voice. Back
+    in the modulation lessons an FM voice was easy — demodulate, and you simply hear it. Tonight the
+    voice is harder, because the radios that carry it went digital. DMR runs business and amateur UHF;
+    P25 runs public safety. Both turn speech into a bitstream before it ever leaves the antenna. You
+    cannot just listen to it. You have to decode it.
+  demo: >-
+    Watch — hands off. rtl_fm feeds the channel to DSD-FME, and DSD-FME does the work: it locks to
+    the four-level FSK, finds the frame, and reads the two halves inside. First the signaling, in the
+    clear — the talkgroup ID, naming which conversation this is, and the source ID, naming the radio
+    that keyed up. Those scroll as call activity: who is talking to whom, moment by moment. Second
+    the voice, which is not an analog tone but compressed bits; DSD-FME runs them back through a
+    vocoder to rebuild speech. DMR packs two of these calls into one channel on alternating time
+    slots; P25 Phase 1 uses one. The panel shows you the IDs as they land, and tells you whether
+    real voice came through with them.
+  try: >-
+    Your log now, comrade. Digital voice comes in calls, not a steady stream — a source ID keys up on
+    a talkgroup, says its piece, releases. Give it time and watch the IDs arrive. When a call lands,
+    listen: did clear speech come with it? Watch a few. You will notice something — some calls scroll
+    their IDs cleanly and still hand you nothing you can understand. Sit with that before the next
+    screen, because it is the whole question of this lesson.
+  predict: >-
+    You decode a busy DMR channel. Talkgroup IDs keep scrolling past. Will every one of those calls
+    also give you clear speech? Lock it in.
+  observe: >-
+    Hold your guess against what the panel showed you. The IDs arrived for every call — the system
+    needed them in the clear to route the traffic, so the decoder read them too. The voice is a
+    separate thing. Ask yourself what stands between a stream of bits and a sentence you understand:
+    a vocoder to rebuild it, and sometimes a lock you do not hold.
+  explain: >-
+    Here's the straight answer, comrade: the IDs, yes — every call — but clear speech only sometimes.
+    The signaling layer is sent plainly because the network must read it to connect the call, so the
+    talkgroup and source IDs are yours the moment you decode the frame. The voice payload is its own
+    problem twice over. First it is compressed: DMR and P25 Phase 2 use the AMBE+2 vocoder, P25 Phase
+    1 the older IMBE, and DSD-FME leans on mbelib to rebuild speech from those bits — a proprietary,
+    patent-touched codec, not a plain demodulation. Second, on many systems the voice is encrypted —
+    DMR's privacy modes, P25's DES or AES — while the header is not. Encrypted voice bits run through
+    the vocoder as noise: the IDs keep scrolling, the audio comes out silent or garbled. That is why
+    a channel can look busy and tell you nothing. And it closes the unit. An analog FM voice you
+    simply demodulated and heard; a digital voice you demodulate, frame, de-interleave, then
+    synthesize through a vocoder — one more stage on the same path from energy to meaning. Same
+    dongle, same move, a harder signal.
+
+# Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text; none of
+# these are booleans, but the quotes keep the whole set consistent and safe to extend.
+choices:
+  - {key: "always-voice", label: "Yes — always clear speech"}
+  - {key: "ids-voice-sometimes", label: "IDs always, voice sometimes"}
+  - {key: "nothing", label: "No — nothing decodes"}
