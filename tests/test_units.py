@@ -9,27 +9,30 @@ from sigint101.units import UNITS, get_unit, unit_for_lesson
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_there_are_seven_units_spine_plus_counter_surveillance():
-    # Six numbered spine units (U1-U6) plus the counter-surveillance track (U7),
-    # activated 2026-10-29 when MC scoped the rest of the course.
-    assert [u.id for u in UNITS] == [1, 2, 3, 4, 5, 6, 7]
+def test_the_units_are_the_spine_plus_counter_surveillance_and_images():
+    # Six numbered spine units (U1-U6), the counter-surveillance track (U7, 2026-10-29), and the
+    # Decode+ Images unit (U8, 2026-10-30) for the NOAA APT / SSTV picture lessons.
+    assert [u.id for u in UNITS] == [1, 2, 3, 4, 5, 6, 7, 8]
     # Names come from the plan's curriculum spine.
     assert get_unit(1).title == "Instrument"
     assert get_unit(6).slug == "under-the-hood"
     assert get_unit(7).slug == "counter-surveillance"
     assert get_unit(7).title == "Counter-Surveillance"
+    assert get_unit(8).slug == "images"
+    assert get_unit(8).title == "Images"
 
 
 def test_units_partition_the_planned_lessons_without_overlap_or_gap():
     """Every placed lesson id lives in exactly one unit, with no duplicate across units.
 
     The numbered spine M1-M23 is fully placed; the Decode+ data/voice pair (M26 AIS, M27 DMR/P25)
-    joins Unit 5 Decode. M24/M25 (Images) and M28 (Meshtastic) are placed when those units land.
+    joins Unit 5 Decode and the Images pair (M24 APT, M25 SSTV) forms Unit 8. M28 (Meshtastic) is
+    placed when its unit lands.
     """
     seen = []
     for u in UNITS:
         seen.extend(u.lesson_ids)
-    assert sorted(seen) == [*range(1, 24), 26, 27]
+    assert sorted(seen) == list(range(1, 28))
     assert len(seen) == len(set(seen)), "a lesson id appears in two units"
 
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -23,6 +23,7 @@ from .acars import AcarsDecoder, AcarsUnavailable
 from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
+from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event
@@ -42,6 +43,7 @@ from .provenance import (
 )
 from .rds import RDSDecoder, RDSUnavailable
 from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
+from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
 from .units import UNITS, get_unit
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -173,6 +175,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
+               apt_factory=None, sstv_factory=None,
                flock_factory=None, pool_path=None,
                ppm_measure=None) -> FastAPI:
     """Build the console with its collaborators injectable.
@@ -304,6 +307,34 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_dmr = dmr_factory
 
+    # The NOAA APT decoder runs satdump on a ~137 MHz pass, writing decoded weather images under
+    # data/apt — it opens the dongle directly and joins the SDR release/resume turn-taking.
+    if apt_factory is None:
+        def build_apt():
+            return AptDecoder(
+                output_dir=Path(data_dir) / "apt",
+                data_dir=Path(data_dir),
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_apt = apt_factory
+
+    # The SSTV decoder runs rtl_fm|sox|sstv on 2m, writing decoded pictures under data/sstv — it
+    # holds the one dongle (via rtl_fm) and joins the same release/resume turn-taking.
+    if sstv_factory is None:
+        def build_sstv():
+            return SstvDecoder(
+                output_dir=Path(data_dir) / "sstv",
+                data_dir=Path(data_dir),
+                radio_present=lambda: probe().present,
+                serial=os.environ.get(RTLSDR_SERIAL_ENV),
+                list_devices=list_rtlsdr_devices,
+            )
+    else:
+        build_sstv = sstv_factory
+
     # The Flock detector runs tcpdump on wlan1 in monitor mode — a separate radio from the RTL-SDR,
     # like the LoRa listener, so it needs no arbitration with the sweeper or the SDR decoders.
     if flock_factory is None:
@@ -331,6 +362,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.acars = build_acars()
         app.state.ais = build_ais()
         app.state.dmr = build_dmr()
+        app.state.apt = build_apt()
+        app.state.sstv = build_sstv()
         app.state.flock = build_flock()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
@@ -354,6 +387,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.acars.stop()
             app.state.ais.stop()
             app.state.dmr.stop()
+            app.state.apt.stop()
+            app.state.sstv.stop()
             app.state.flock.stop()
             app.state.progress.close()
             app.state.exam_store.close()
@@ -713,7 +748,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # by naming only itself to _claim_sdr, which stands every other consumer down (release) and
     # clears any prior stand-down on the caller (resume). LoRa (meshtasticd) and Flock (wlan1
     # monitor) ride their own radios and are deliberately absent from this set.
-    sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr")
+    sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
+                     "apt", "sstv")
 
     def _claim_sdr(target: str) -> None:
         """Hand the one RTL-SDR to `target`, standing every other SDR-exclusive consumer down."""
@@ -1013,6 +1049,71 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": decoder.freq_hz,
             "calls": decoder.calls(limit),
         }
+
+    @app.get("/api/apt")
+    def apt(limit: int | None = None):
+        """The NOAA APT weather images satdump has decoded, newest pass first.
+
+        satdump opens the dongle the waterfall otherwise sweeps, so the sweep and the other SDR
+        tools are released first; a pass holds the radio for its ~15-minute duration. No radio, no
+        satdump, or no pass decoded yet is an honest empty gallery — a 503 with the reason when the
+        capture cannot start, never a placeholder picture.
+        """
+        decoder = app.state.apt
+        if not decoder.running:
+            _claim_sdr("apt")
+            try:
+                decoder.start()
+            except AptUnavailable as exc:
+                log_event(app.state.events_path, "apt_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "images": []})
+            log_event(app.state.events_path, "apt_start", {"freq_hz": DEFAULT_APT_HZ})
+        return {
+            "available": True,
+            "freq_hz": decoder.freq_hz,
+            "images": decoder.images(limit),
+        }
+
+    @app.get("/api/sstv")
+    def sstv(limit: int | None = None):
+        """The SSTV pictures the rtl_fm|sox|sstv pipeline has decoded, newest first.
+
+        The pipeline opens the dongle the waterfall otherwise sweeps, so the sweep and the other SDR
+        tools are released first. No radio, no tools, or nothing decoded yet is an honest empty
+        gallery — a 503 with the reason when the pipeline cannot start, never a placeholder picture.
+        """
+        decoder = app.state.sstv
+        if not decoder.running:
+            _claim_sdr("sstv")
+            try:
+                decoder.start()
+            except SstvUnavailable as exc:
+                log_event(app.state.events_path, "sstv_blocked", {"reason": str(exc)})
+                return JSONResponse(
+                    status_code=503,
+                    content={"available": False, "reason": str(exc), "images": []})
+            log_event(app.state.events_path, "sstv_start", {"freq_hz": DEFAULT_SSTV_HZ})
+        return {
+            "available": True,
+            "freq_hz": decoder.freq_hz,
+            "images": decoder.images(limit),
+        }
+
+    # The image decoders (APT, SSTV) write their decoded PNGs under data/apt and data/sstv; this
+    # serves those files to the panels and nothing else. The path is confined to those two folders
+    # and to .png files, so the console never serves the progress or events stores that also live
+    # under data/. A produced PNG is a real reception; there is no placeholder to serve.
+    media_roots = tuple((Path(data_dir) / name).resolve() for name in ("apt", "sstv"))
+
+    @app.get("/media/{path:path}")
+    def media(path: str):
+        target = (Path(data_dir) / path).resolve()
+        if (target.suffix.lower() == ".png" and target.is_file()
+                and any(target.is_relative_to(root) for root in media_roots)):
+            return FileResponse(target)
+        raise HTTPException(status_code=404, detail="no such image")
 
     @app.get("/api/hardware")
     def hardware():

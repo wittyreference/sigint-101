@@ -46,9 +46,12 @@ POCSAG_PANEL = "pocsag"
 ACARS_PANEL = "acars"
 AIS_PANEL = "ais"
 DMR_PANEL = "dmr"
+APT_PANEL = "apt"
+SSTV_PANEL = "sstv"
 FLOCK_PANEL = "flock"
 INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL,
-                     POCSAG_PANEL, ACARS_PANEL, AIS_PANEL, DMR_PANEL, FLOCK_PANEL)
+                     POCSAG_PANEL, ACARS_PANEL, AIS_PANEL, DMR_PANEL, APT_PANEL, SSTV_PANEL,
+                     FLOCK_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -178,6 +181,24 @@ class Lesson:
         /api/dmr; like the other SDR instruments it takes turns with the sweep on the one dongle.
         """
         return DMR_PANEL in self.panels
+
+    @property
+    def uses_apt(self) -> bool:
+        """True when the instrument is the NOAA APT decoder (the apt panel), not the waterfall.
+
+        It runs satdump on a ~137 MHz pass and writes a weather image, so the console renders the
+        decoded picture and polls /api/apt, sharing the one dongle like the other SDR instruments.
+        """
+        return APT_PANEL in self.panels
+
+    @property
+    def uses_sstv(self) -> bool:
+        """True when the instrument is the SSTV decoder (the sstv panel), not the waterfall.
+
+        It runs rtl_fm|sox|sstv on 2m and writes a picture, so the console renders the decoded image
+        and polls /api/sstv, sharing the one dongle like the other SDR instruments.
+        """
+        return SSTV_PANEL in self.panels
 
     @property
     def uses_flock(self) -> bool:
