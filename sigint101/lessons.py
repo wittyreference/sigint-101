@@ -44,9 +44,11 @@ ADSB_PANEL = "adsb"
 APRS_PANEL = "aprs"
 POCSAG_PANEL = "pocsag"
 ACARS_PANEL = "acars"
+AIS_PANEL = "ais"
+DMR_PANEL = "dmr"
 FLOCK_PANEL = "flock"
 INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL,
-                     POCSAG_PANEL, ACARS_PANEL, FLOCK_PANEL)
+                     POCSAG_PANEL, ACARS_PANEL, AIS_PANEL, DMR_PANEL, FLOCK_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -158,6 +160,24 @@ class Lesson:
         /api/acars; like the other SDR instruments it takes turns with the sweep on the one dongle.
         """
         return ACARS_PANEL in self.panels
+
+    @property
+    def uses_ais(self) -> bool:
+        """True when the instrument is the AIS decoder (the ais panel), not the waterfall.
+
+        It runs rtl_ais on the marine AIS channels, so the console renders the vessel roster and
+        polls /api/ais; like the other SDR instruments it takes turns with the sweep on the dongle.
+        """
+        return AIS_PANEL in self.panels
+
+    @property
+    def uses_dmr(self) -> bool:
+        """True when the instrument is the DMR/P25 decoder (the dmr panel), not the waterfall.
+
+        It runs dsd-fme on the digital-voice channel, so the console renders the call log and polls
+        /api/dmr; like the other SDR instruments it takes turns with the sweep on the one dongle.
+        """
+        return DMR_PANEL in self.panels
 
     @property
     def uses_flock(self) -> bool:

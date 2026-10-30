@@ -32,7 +32,7 @@ UNITS: tuple = (
     Unit(2, "rules", "Rules", "rules", (5,)),
     Unit(3, "antennas", "Antennas", "antenna", (6, 7)),
     Unit(4, "modulation", "Modulation", "wave", (8, 9, 10, 11, 12)),
-    Unit(5, "decode", "Decode", "decode", (13, 14, 15, 16)),
+    Unit(5, "decode", "Decode", "decode", (13, 14, 15, 16, 26, 27)),
     Unit(6, "under-the-hood", "Under the Hood", "gear", (20, 21, 22, 23)),
     Unit(7, "counter-surveillance", "Counter-Surveillance", "counter-surv", (17, 18, 19)),
 )

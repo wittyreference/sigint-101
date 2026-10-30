@@ -21,11 +21,15 @@ def test_there_are_seven_units_spine_plus_counter_surveillance():
 
 
 def test_units_partition_the_planned_lessons_without_overlap_or_gap():
-    """Every planned lesson id 1..23 lives in exactly one unit."""
+    """Every placed lesson id lives in exactly one unit, with no duplicate across units.
+
+    The numbered spine M1-M23 is fully placed; the Decode+ data/voice pair (M26 AIS, M27 DMR/P25)
+    joins Unit 5 Decode. M24/M25 (Images) and M28 (Meshtastic) are placed when those units land.
+    """
     seen = []
     for u in UNITS:
         seen.extend(u.lesson_ids)
-    assert sorted(seen) == list(range(1, 24))
+    assert sorted(seen) == [*range(1, 24), 26, 27]
     assert len(seen) == len(set(seen)), "a lesson id appears in two units"
 
 
