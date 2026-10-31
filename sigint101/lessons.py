@@ -50,9 +50,10 @@ APT_PANEL = "apt"
 SSTV_PANEL = "sstv"
 FLOCK_PANEL = "flock"
 RAYHUNTER_PANEL = "rayhunter"
+FLIPPER_PANEL = "flipper"
 INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL,
                      POCSAG_PANEL, ACARS_PANEL, AIS_PANEL, DMR_PANEL, APT_PANEL, SSTV_PANEL,
-                     FLOCK_PANEL, RAYHUNTER_PANEL)
+                     FLOCK_PANEL, RAYHUNTER_PANEL, FLIPPER_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -218,6 +219,16 @@ class Lesson:
         the console renders the recording state + warnings from /api/rayhunter, never the SDR.
         """
         return RAYHUNTER_PANEL in self.panels
+
+    @property
+    def uses_flipper(self) -> bool:
+        """True when the instrument is the attached Flipper (the flipper panel), not a waterfall.
+
+        The console reads the Flipper over its USB serial CLI — a separate device, like the Flock
+        detector and the Rayhunter monitor — so it renders the device/capture from /api/flipper and
+        never touches the SDR.
+        """
+        return FLIPPER_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:
