@@ -37,8 +37,7 @@ stages:
     watching. So what does setting it next to the nomad — plugging it into the console you have built
     all course — actually buy you that the Flipper alone, screen the size of a postage stamp, cannot?
   predict: >-
-    You plug the Flipper into the nomad and its name appears on the big screen. Plugged in like this,
-    what does the Flipper gain? Lock it in.
+    Plugged into the nomad like this, what does the Flipper gain? Lock it in.
   observe: >-
     Hold your guess against the device in front of you. The Flipper's own screen is tiny — a few lines
     of pixels — and its storage is a microSD you cannot read at a glance. The nomad has an 800-by-480
@@ -57,6 +56,6 @@ stages:
 
 # Keyboard-free predict chips: {key, label}.
 choices:
-  - {key: "more-radios", label: "More radios and range"}
-  - {key: "a-bench", label: "A bench: big screen, storage, lessons"}
-  - {key: "nothing", label: "Nothing — it's only charging"}
+  - {key: "more-radios", label: "More radios / range"}
+  - {key: "a-bench", label: "A bench: screen + storage"}
+  - {key: "nothing", label: "Nothing, just charging"}
