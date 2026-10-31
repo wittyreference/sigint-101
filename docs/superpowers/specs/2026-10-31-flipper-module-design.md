@@ -40,6 +40,17 @@ FAP in the core; that is a possible later extension, explicitly out of scope her
   cannot be run while an application is open`) — they need the device at the desktop (or a
   `loader close` first). `storage` usage: `list`/`read`/`read_chunks`/`stat`/`md5`/`info`/`tree`;
   `loader` usage: `list`/`open`/`info`/`close`/`signal`.
+- **Existing work to build ON, not duplicate (2026-10-26, commit `8a3c739`):**
+  `sigint101/flipper.py` is a complete, tested USB-CDC **transport** — `find_flipper_port`/
+  `probe_flipper` (by-id resolution; `None` if absent; `FlipperSelectionError` if two are
+  attached), `FlipperCli` (context-managed session: `.command(text, wait=)` with the load-bearing
+  bare-CR terminator, connect-banner settle, drain, and `.read_file(path, size)` for binary SD
+  pulls via `storage read_chunks` with short-read refusal), and errors `FlipperError` /
+  `FlipperSelectionError`. `sigint101/subfile.py` is a complete, tested **`.sub` RAW parser**
+  (`parse_sub` → `SubCapture` with `frequency_hz`/`preset`/`protocol`/`pulses`, `duration_us`,
+  `edge_count`, `width_histogram()`). **Nothing is wired to the kiosk yet.** So the transport and
+  M30's Sub-GHz parsing already exist; this module adds the product layer on top and reuses
+  `FlipperError` (no new exception type).
 - Access: the droplet reaches nomad-b directly as user **`spec5`** (`ssh spec5@100.108.20.20`);
   the `spec5->claude-factory` key in nomad-b's `authorized_keys` is the droplet's. `spec5` is in
   `dialout`, so it can open `/dev/ttyACM0`. (Registry: `machines/hosts/nomad-b.md`.)
@@ -85,22 +96,28 @@ full set.
 
 ## 5. The live-mirror seam
 
-New backend `sigint101/flipper.py`, mirroring the established decoder-module pattern
-(`acars.py`/`ais.py`): module-level constants, `FlipperUnavailable(RuntimeError)`, a frozen
-dataclass per record with `as_dict()`, pure parse functions, and a `FlipperLink` class with an
-injected serial seam.
+Built **on the existing transport** (`sigint101/flipper.py`, §2): `FlipperCli` already is the
+injected serial seam (its `opener` is the single hardware boundary — a scripted channel is the only
+test double), `probe_flipper`/`find_flipper_port` already do presence/absence/ambiguity, and
+`FlipperError`/`FlipperSelectionError` are the refusal types. The module does **not** reimplement
+any of that. What is new:
 
-- `FlipperLink(*, port="/dev/ttyACM0", serial_factory=_open_serial, which=shutil.which)` — the
-  `serial_factory` is the single hardware boundary (a fake serial port is the only test double).
-- **No-mock refusal ladder** (no fake data in the product): `start()` raises `FlipperUnavailable`
-  when the port is absent (no device), when the port is held by another process (busy — qFlipper),
-  or when pyserial is missing. Honest-empty otherwise.
+- **`sigint101/deviceinfo.py`** — `parse_device_info(text) -> DeviceInfo` (frozen dataclass:
+  `model`/`name`/`firmware`/`region`/`radio_alive`/`raw`, `as_dict()`), a tolerant `key : value`
+  parser of the `device_info` reply (missing keys → empty, never a KeyError). Mirrors `subfile.py`
+  as a per-concern parser module.
+- **`sigint101/flipperconsole.py`** — a thin `FlipperConsole` read layer the routes call:
+  `__init__(*, probe=probe_flipper, cli_factory=FlipperCli, glob=...)`; `device() -> dict` (probe →
+  if absent/ambiguous raise `FlipperError`/`FlipperSelectionError`; else a short `FlipperCli`
+  session runs `device_info` and returns `parse_device_info(...).as_dict()`); per-capability reads
+  added in Phase 2 that pull a saved file via `cli.read_file(path, size)` and hand it to that
+  capability's parser (`subfile.parse_sub` for M30, already built). Read-only.
+- **No new exception type and no `FlipperLink`.** Presence/absence/ambiguity and the no-mock
+  refusal live in the existing transport; `FlipperConsole` just surfaces them and an app-open
+  reply (`this command cannot be run while an application is open`) as `FlipperError`.
 - **Not an SDR consumer.** The Flipper is its own USB device, like LoRa/Flock/Rayhunter — it is
-  **not** added to `sdr_consumers` and gets **no `_claim_sdr` arbitration**. It owns `/dev/ttyACM0`
-  exclusively and must not fight a qFlipper session.
-- CLI transaction primitive: write `cmd\r\n`, read until the `>: ` prompt or a timeout, strip the
-  echoed command. Pure parsers turn each response into a record (`device_info`, a tag read, a
-  `storage list` listing).
+  **not** added to `sdr_consumers` and gets **no `_claim_sdr` arbitration**. `FlipperCli` owns the
+  port for the span of one session and releases it on exit (must not fight a qFlipper session).
 - **Live-mirror mechanism (resolved by the §2 recon):** the primary path is **SD-file-polled** —
   the learner captures/saves on the device, the console pulls the saved file off `/ext/<cap>/` via
   `storage read`/`read_chunks` and parses/renders it. This works for *every* capability regardless
@@ -113,9 +130,9 @@ injected serial seam.
   are the parse targets; their real contents are the TDD fixtures.
 
 Routes (mirroring `/api/ais` etc.): `GET /api/flipper` (presence + `device_info`), and
-per-capability endpoints the lesson panels poll. `app.py` gains a `build_flipper` factory and the
-routes wrap `FlipperUnavailable` in try/except to render honest-unavailable, exactly like
-`/api/rayhunter`.
+per-capability endpoints the lesson panels poll. `app.py` gains a `build_flipper` factory returning
+a `FlipperConsole`, and the routes wrap `FlipperError`/`FlipperSelectionError` in try/except to
+render honest-unavailable, exactly like `/api/rayhunter` wraps `RayhunterUnavailable`.
 
 Frontend: a `flipper.js` (and per-capability renderers as needed) following `acars.js`/`ais.js` —
 pure exported helpers for node tests, list/scalar renderers for the panels. `console.html` gains
@@ -168,8 +185,11 @@ nothing to restore *from*. So a real restore story requires **creating that base
 
 ## 8. Testing & acceptance
 
-- **Unit:** `tests/test_flipper.py` — parsers vs real CLI fixtures; the refusal ladder with a fake
-  serial boundary (no device / busy / no pyserial). `tests/flipper.test.js` — the JS pure helpers.
+- **Unit:** `tests/test_deviceinfo.py` — `parse_device_info` vs the real `device_info` fixture
+  (`tests/fixtures/flipper/device_info.txt`), tolerant of missing keys. `tests/test_flipperconsole.py`
+  — `FlipperConsole.device()` with a fake `cli_factory`/`glob` (present / absent → `FlipperError` /
+  ambiguous → `FlipperSelectionError` / app-open → `FlipperError`). The existing `tests/test_flipper.py`
+  (transport) and `tests/test_subfile.py` (`.sub`) stay untouched. `tests/flipper.test.js` — JS helpers.
 - **Route:** `tests/test_app.py` gains a `_StubFlipper` and the `build_flipper` factory; the
   parametrized contract test and route tests cover `/api/flipper*`. The Flipper is NOT in the
   SDR-arbitration contract list.

@@ -13,7 +13,8 @@
 ## Global Constraints
 
 - Target: nomad-b (`spec5b`), Flipper on `/dev/ttyACM0`, official fw 1.4.3. Dev loop: author in this droplet worktree → push branch → on nomad-b `git fetch && git checkout -f <branch>` → run uvicorn → HIL over `ssh spec5@100.108.20.20`.
-- **No fake/mock mode in the product.** The only test double is the injected serial-transaction seam (`transact`); a fake returns canned CLI text. Acceptance is real device output.
+- **No fake/mock mode in the product.** The only test double is `FlipperCli`'s `opener` seam (a scripted byte channel) and `FlipperConsole`'s injected `cli_factory`/`glob`; no real serial in unit tests. Acceptance is real device output.
+- **Build on the existing transport** (`flipper.py`: `FlipperCli`/`probe_flipper`/`read_file`, errors `FlipperError`/`FlipperSelectionError`) and `.sub` parser (`subfile.py`). Do not reimplement them or edit their tests. No new exception type (reuse `FlipperError`).
 - **TDD for logic:** parsers are test-first against **real captured fixtures** (CLI text / saved `.sub`/`.nfc`/`.ir`/RFID/iButton files pulled from the device), the way AIS used the gpsd vectors. Never edit a test to fit a bug.
 - The Flipper is its own USB device: **not** in `sdr_consumers`, **no** `_claim_sdr`. It owns the serial port exclusively (must not fight qFlipper).
 - 800×480 fixed; lesson copy shrinks to fit (reading body ≤~50 words); instrument lessons render demo Next≈423 / predict Commit≈474; never scroll, never ask.
@@ -21,11 +22,11 @@
 
 ## Review Focus
 
-- **Port held by qFlipper / another reader** → `start()` must raise `FlipperUnavailable` ("busy"), not hang or return stale data. (Task 1.)
-- **An app is open on the Flipper** → a direct CLI read returns `this command cannot be run while an application is open`; `FlipperLink` must surface that as unavailable-for-now, not parse it as data. (Task 1.)
-- **A partial/short serial read** (prompt not yet returned within timeout) → the transaction returns what it has without blocking forever, and the parser rejects an incomplete block rather than inventing fields. (Task 1.)
-- **`device_info` with a missing/renamed key** (fw variant) → parser yields the keys present, never KeyErrors. (Task 1.)
-- **A saved capture file that is empty or malformed** → the capability parser raises/returns empty, the panel shows honest-empty, no invented capture. (Phase 2 per-capability tasks.)
+- **An app is open on the Flipper** → a read returns `this command cannot be run while an application is open`; `FlipperConsole` must surface that as `FlipperError`, not parse it as data. (Task 1, `test_device_app_open_raises_flippererror`.)
+- **`device_info` with a missing/renamed key** (fw variant) → `parse_device_info` yields the keys present, never KeyErrors. (Task 1, `test_parse_device_info_tolerates_missing_key`.)
+- **Two Flippers on the bus** → `probe_flipper`/`find_flipper_port` already refuse (`FlipperSelectionError`); `FlipperConsole.device()` must propagate, not pick one. (Task 1, `test_device_two_attached_raises_selection_error`.)
+- **A saved capture file that is empty or malformed** → the capability parser raises/returns empty, the panel shows honest-empty, no invented capture. (`.sub` already covered by `test_subfile.py`; Phase 2 per-capability tasks for the rest.)
+- **Port busy / partial serial read / connect-banner leak** → already handled and tested in the existing transport (`test_flipper.py`); not re-tested here.
 
 ---
 
@@ -33,34 +34,41 @@
 
 Proves the whole live mirror end-to-end on real hardware: the console shows real `device_info` and answers "is the Flipper plugged into the nomad?".
 
-### Task 1: `FlipperLink` + `device_info` parser
+> **Builds on existing work (commit `8a3c739`).** The transport `sigint101/flipper.py`
+> (`FlipperCli`, `probe_flipper`, `find_flipper_port`, `read_file`, `FlipperError`,
+> `FlipperSelectionError`) and the `.sub` parser `sigint101/subfile.py` (`parse_sub`→`SubCapture`)
+> already exist and are tested. Do NOT reimplement them; do NOT edit `tests/test_flipper.py` or
+> `tests/test_subfile.py`. Task 1 adds the parser + read layer on top.
+
+### Task 1: `device_info` parser + `FlipperConsole` read layer
 
 **Files:**
-- Create: `sigint101/flipper.py`
-- Test: `tests/test_flipper.py`
-- Fixture: `tests/fixtures/flipper/device_info.txt` (real CLI output captured from nomad-b)
+- Create: `sigint101/deviceinfo.py` (the `device_info` parser)
+- Create: `sigint101/flipperconsole.py` (the console-facing read layer on `FlipperCli`)
+- Test: `tests/test_deviceinfo.py`, `tests/test_flipperconsole.py`
+- Fixture: `tests/fixtures/flipper/device_info.txt` (already captured from the live device)
 
 **Interfaces:**
-- Consumes: nothing.
+- Consumes: `FlipperCli`, `probe_flipper`, `find_flipper_port`, `FlipperError`, `FlipperSelectionError` from `sigint101/flipper.py`.
 - Produces:
-  - `class FlipperUnavailable(RuntimeError)`
-  - `@dataclass(frozen=True) class DeviceInfo` with fields `model: str`, `name: str`, `firmware: str`, `region: str`, `radio_alive: bool`, `raw: dict` and `as_dict() -> dict`.
-  - `parse_device_info(text: str) -> DeviceInfo` — pure; parses the `key : value` block.
-  - `APP_OPEN_MARKER = "cannot be run while an application is open"`, `EXT_CMD_MISSING = "failed to load external command"`.
-  - `def _default_transact(port: str, command: str, timeout: float) -> str` — opens the serial port, writes `command + "\r\n"`, reads until the `>: ` prompt or timeout, returns the body with the echoed command and prompt stripped. Raises `FlipperUnavailable` on `serial.SerialException` (absent/busy port).
-  - `class FlipperLink` — `__init__(self, *, port="/dev/ttyACM0", transact=_default_transact, which=shutil.which, timeout=3.0)`; `running` property; `start()` (one `device_info` probe; raises `FlipperUnavailable` if the port is absent/busy or pyserial missing); `stop()`; `device_info() -> dict` (raises `FlipperUnavailable` if unreachable); `loader_state() -> dict` (parses `loader info` / `open?`); helper `_cmd(command) -> str` that raises `FlipperUnavailable` when the response contains `APP_OPEN_MARKER`.
+  - `@dataclass(frozen=True) class DeviceInfo` — `model`, `name`, `firmware`, `region`, `radio_alive: bool`, `raw: dict`; `as_dict() -> dict`. (`region` from `hardware_region_provisioned`.)
+  - `parse_device_info(text: str) -> DeviceInfo` — tolerant `key : value` parser; missing keys → empty string, never a KeyError.
+  - `APP_OPEN_MARKER = "cannot be run while an application is open"`.
+  - `class FlipperConsole` — `__init__(self, *, probe=probe_flipper, cli_factory=FlipperCli, glob=glob.glob)`; `device() -> dict` — `probe()`; if absent raise `FlipperError`, if two attached `probe` already raised `FlipperSelectionError`; else open one `cli_factory()` session, run `device_info`, return `parse_device_info(reply).as_dict()`; a reply containing `APP_OPEN_MARKER` raises `FlipperError`.
 
-- [ ] **Step 1: Capture the fixture.** From the droplet: `ssh spec5@100.108.20.20 python3 - < .claude/tmp/fprobe.py` already prints `device_info`; save the real block to `tests/fixtures/flipper/device_info.txt`. (It is device output, not invented.)
-- [ ] **Step 2: Write failing tests** in `tests/test_flipper.py`:
-  - `test_parse_device_info_reads_core_fields` — load the fixture; assert `model == "Flipper Zero"`, `name == "Lle0zik"`, `firmware == "1.4.3"`, `region == "US"`, `radio_alive is True`.
-  - `test_parse_device_info_tolerates_missing_key` — feed a block missing `hardware_region`; assert it parses and `region == ""` (no KeyError).
-  - `test_start_raises_when_port_absent` — `transact` raises `FlipperUnavailable`; assert `start()` propagates it and `running is False`.
-  - `test_cmd_app_open_is_unavailable` — `transact` returns a string containing `APP_OPEN_MARKER`; assert `_cmd("rfid")` raises `FlipperUnavailable`.
-  - `test_device_info_via_fake_transact` — a fake `transact` returns the fixture text; assert `FlipperLink(transact=fake).device_info()["firmware"] == "1.4.3"`.
-- [ ] **Step 3: Run** `./.venv/bin/pytest tests/test_flipper.py -q` → FAIL (module/functions missing).
-- [ ] **Step 4: Implement** `sigint101/flipper.py` to pass. Parser: split lines on the first `:`; keep a `raw` dict; map the known keys; `radio_alive` from `raw.get("radio_alive") == "true"`.
-- [ ] **Step 5: Run** the tests → PASS; `ruff check sigint101/flipper.py tests/test_flipper.py` clean.
-- [ ] **Step 6: Commit** (`git add sigint101/flipper.py tests/test_flipper.py tests/fixtures/flipper/device_info.txt`).
+- [ ] **Step 1: Fixture** — already captured at `tests/fixtures/flipper/device_info.txt` (real device output). Confirm it is present.
+- [ ] **Step 2: Write failing** `tests/test_deviceinfo.py`:
+  - `test_parse_device_info_reads_core_fields` — load the fixture; `model == "Flipper Zero"`, `name == "Lle0zik"`, `firmware == "1.4.3"`, `region == "US"`, `radio_alive is True`.
+  - `test_parse_device_info_tolerates_missing_key` — a block without `hardware_region_provisioned`; `region == ""`, no KeyError.
+  and `tests/test_flipperconsole.py` (fake `cli_factory` returning a context manager whose `.command("device_info")` yields the fixture; fake `glob`):
+  - `test_device_returns_parsed_dict_when_present` — present glob; `console.device()["firmware"] == "1.4.3"`.
+  - `test_device_absent_raises_flippererror` — empty glob (`probe` reports absent) → `FlipperError`.
+  - `test_device_two_attached_raises_selection_error` — two by-id matches → `FlipperSelectionError`.
+  - `test_device_app_open_raises_flippererror` — `.command` returns `APP_OPEN_MARKER` text → `FlipperError`.
+- [ ] **Step 3: Run** `./.venv/bin/pytest tests/test_deviceinfo.py tests/test_flipperconsole.py -q` → FAIL.
+- [ ] **Step 4: Implement** `deviceinfo.py` (parser: `key.partition(":")`; `raw` dict; map known keys; `radio_alive == "true"`) and `flipperconsole.py` (compose `probe` + `cli_factory` + `parse_device_info`).
+- [ ] **Step 5: Run** both → PASS; `ruff check sigint101/deviceinfo.py sigint101/flipperconsole.py tests/test_deviceinfo.py tests/test_flipperconsole.py` clean.
+- [ ] **Step 6: Commit** (`git add sigint101/deviceinfo.py sigint101/flipperconsole.py tests/test_deviceinfo.py tests/test_flipperconsole.py tests/fixtures/flipper/device_info.txt`).
 
 ### Task 2: `/api/flipper` route, factory, stub
 
@@ -69,12 +77,12 @@ Proves the whole live mirror end-to-end on real hardware: the console shows real
 - Test: `tests/test_app.py` (add `_StubFlipper`, register `build_flipper`, route tests).
 
 **Interfaces:**
-- Consumes: `FlipperLink`, `FlipperUnavailable` from Task 1.
-- Produces: `build_flipper(...) -> FlipperLink`; `GET /api/flipper` → `{"available": bool, "device": {...} | None, "error": str | None}`.
+- Consumes: `FlipperConsole`, `FlipperError`, `FlipperSelectionError` from Task 1 / existing transport.
+- Produces: `build_flipper(...) -> FlipperConsole`; `GET /api/flipper` → `{"available": bool, "device": {...} | None, "error": str | None}`.
 
-- [ ] **Step 1: Write failing route tests** in `tests/test_app.py`: `_StubFlipper` with a `device_info()` returning a canned dict and a mode that raises `FlipperUnavailable`; assert `/api/flipper` returns `available:true` + device when present, and `available:false` + `error` (HTTP 200) when it raises. Add `/api/flipper` to the honest-unavailable route list (NOT the SDR-arbitration contract list).
+- [ ] **Step 1: Write failing route tests** in `tests/test_app.py`: `_StubFlipper` with a `device()` returning a canned dict and a mode that raises `FlipperError`; assert `/api/flipper` returns `available:true` + device when present, and `available:false` + `error` (HTTP 200) when it raises. Add `/api/flipper` to the honest-unavailable route list (NOT the SDR-arbitration contract list).
 - [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement** the factory + route in `app.py`, wrapping `FlipperUnavailable` like `/api/rayhunter`.
+- [ ] **Step 3: Implement** the factory + route in `app.py`, wrapping `FlipperError`/`FlipperSelectionError` like `/api/rayhunter` wraps `RayhunterUnavailable`.
 - [ ] **Step 4: Run** `./.venv/bin/pytest tests/test_app.py -q` → PASS.
 - [ ] **Step 5: Commit.**
 
@@ -126,13 +134,13 @@ Not code — the named device-output acceptance for the core.
 
 Each is the same shape. **Capability-lesson task template** (instantiate once per lesson):
 
-**Files (per lesson X / capability C):** `sigint101/flipper.py` (+`parse_<C>(text|file) -> record`), `tests/test_flipper.py` (+parser tests vs a real fixture), `tests/fixtures/flipper/<C>.<ext>` (a real saved file pulled from the device), `sigint101/app.py` (+`GET /api/flipper/<C>`), `tests/test_app.py` (+stub/route), `sigint101/static/flipper.js` (+`<C>Line`/renderer) + `tests/flipper.test.js`, `sigint101/lessons.py` (+panel), `sigint101/templates/console.html` (+branch), `lesson_packs/X-<slug>.yaml`, `tests/test_lesson_mX.py`.
+**Files (per lesson X / capability C):** `sigint101/<C>file.py` (+`parse_<C>(text) -> record`, a per-format parser module in the `subfile.py` style — NOT added to the transport `flipper.py`), `tests/test_<C>file.py` (+parser tests vs a real fixture), `tests/fixtures/flipper/<C>.<ext>` (a real saved file pulled from the device), `sigint101/flipperconsole.py` (+a `<C>(path)` read method using `cli.read_file`), `sigint101/app.py` (+`GET /api/flipper/<C>`), `tests/test_app.py` (+stub/route), `sigint101/static/flipper.js` (+`<C>Line`/renderer) + `tests/flipper.test.js`, `sigint101/lessons.py` (+panel), `sigint101/templates/console.html` (+branch), `lesson_packs/X-<slug>.yaml`, `tests/test_lesson_mX.py`.
 
-**Steps (per lesson):** (1) capture the real fixture from the device (`storage read /ext/<C>/<saved>` or an idle CLI read); (2) write failing parser + route + lesson tests; (3) run → FAIL; (4) implement parser + route + panel + pack; (5) run → PASS, `ruff`/node green; (6) commit; (7) HIL on nomad-b: present a real object (fob/card/remote) → save on device → console mirrors it; record evidence.
+**Steps (per lesson):** (1) capture the real fixture from the device (`storage read_chunks /ext/<C>/<saved>` via `cli.read_file`, or an idle CLI read); (2) write failing parser + console-read + route + lesson tests; (3) run → FAIL; (4) implement parser + console read + route + panel + pack; (5) run → PASS, `ruff`/node green; (6) commit; (7) HIL on nomad-b: present a real object (fob/card/remote) → save on device → console mirrors it; record evidence. (M30's parser is already done — see Task 6.)
 
 **Instances:**
 
-- [ ] **Task 6 — M30 Sub-GHz** (`C=subghz`, file `.sub`): parse the Flipper `.sub` (Filetype/Version/Frequency/Preset/Protocol/RAW_Data or key). Mirror shows frequency + modulation + protocol. HIL: capture a real remote.
+- [ ] **Task 6 — M30 Sub-GHz** (`C=subghz`, file `.sub`): **parser already done** — `subfile.parse_sub`→`SubCapture` (`frequency_hz`/`preset`/`protocol`/`pulses`, `duration_us`, `edge_count`, `width_histogram()`), tested in `test_subfile.py`. This task only wires it: a `FlipperConsole.subghz(path)` read that pulls the `.sub` via `cli.read_file` and returns `parse_sub(...)`, the `/api/flipper/subghz` route, the panel (frequency + preset/modulation + edge count + the width histogram as the pulse-scope view, tying to M9/M10), and the M30 lesson. HIL: capture a real remote.
 - [ ] **Task 7 — M31 125 kHz RFID** (`C=lfrfid`, `.rfid` text): parse Key type + Data. Mirror shows tag type + ID. Direct `rfid read` allowed only when idle. HIL: a real EM4100/HID fob.
 - [ ] **Task 8 — M32 NFC** (`C=nfc`, `.nfc`): parse Device type + UID + ATQA/SAK. Mirror shows UID + tech. HIL: a real MIFARE/NTAG card.
 - [ ] **Task 9 — M33 Infrared** (`C=infrared`, `.ir`): parse name + protocol + address/command (or raw). Mirror shows protocol + code. HIL: a real TV remote button.
@@ -174,5 +182,5 @@ Each task ships green; batch into one Phase-2 PR or ship per-lesson (per STATUS 
 
 - **Spec coverage:** §4 unit → Tasks 3/4/6–14; §5 seam → Tasks 1–2; §6 rig/runbook → Task 13; §6a SD-image → Task 13 Step 3 gate; §7 constraints → Global Constraints; §8 testing → each task's tests + HIL steps; §9 phasing → Phases 1–4.
 - **Review Focus** inputs are pinned to Task 1 (port busy / app-open / short read / missing key) and the Phase-2 template (malformed saved file).
-- **Type consistency:** `FlipperLink`, `FlipperUnavailable`, `parse_device_info`, `DeviceInfo.as_dict`, `build_flipper`, `/api/flipper[/<C>]`, `uses_flipper`, `deviceLine` used consistently across tasks.
+- **Type consistency:** `FlipperConsole`, `FlipperError`/`FlipperSelectionError` (reused from the transport), `parse_device_info`/`DeviceInfo.as_dict`, `build_flipper`, `/api/flipper[/<C>]`, `uses_flipper`, `deviceLine` used consistently across tasks. No `FlipperLink`/`FlipperUnavailable`.
 - **Proportion:** Phase 1 is detailed because its interfaces are novel; M30–M36 are one template × 7 parameterics (DRY), not seven transcripts.
