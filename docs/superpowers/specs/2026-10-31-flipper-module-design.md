@@ -33,6 +33,13 @@ FAP in the core; that is a possible later extension, explicitly out of scope her
   `led`/`vibro`/`buzzer`/`input`. `device_info` prints a clean `key : value` block.
 - SD (`/ext`) maps 1:1 to capabilities: `subghz/ nfc/ lfrfid/ infrared/ ibutton/ badusb/ apps/
   dolphin/ update/ …`.
+- **CLI capability-command recon (2026-10-31):** `storage`, `loader`, `power`, `device_info`
+  always respond. `subghz`/`nfc`/`ir` are **external** CLI commands and fail to load on this
+  stock firmware (`failed to load external command`) — no reliable text-CLI read for them.
+  `rfid`/`ikey`/`onewire`/`gpio`/`i2c`/`bt` exist but refuse while an app is open (`this command
+  cannot be run while an application is open`) — they need the device at the desktop (or a
+  `loader close` first). `storage` usage: `list`/`read`/`read_chunks`/`stat`/`md5`/`info`/`tree`;
+  `loader` usage: `list`/`open`/`info`/`close`/`signal`.
 - Access: the droplet reaches nomad-b directly as user **`spec5`** (`ssh spec5@100.108.20.20`);
   the `spec5->claude-factory` key in nomad-b's `authorized_keys` is the droplet's. `spec5` is in
   `dialout`, so it can open `/dev/ttyACM0`. (Registry: `machines/hosts/nomad-b.md`.)
@@ -66,6 +73,11 @@ live-mirrors over the CLI.
 | M37 | Console rig: diagnose · restore · update | (see §6) | rig diagnostics: fw version, SD free, services |
 | M38 | The nomad bench (capstone) | Everything together: Flipper as field tool, nomad as analyzer/library | the full live-mirror panel |
 
+Mirror note: the "live mirror" column is sourced per §5 — for M30/M32/M33 (sub-GHz/NFC/IR) by
+parsing the file the learner just saved on the SD; for M31/M34/M35 (RFID/iButton/GPIO) either that
+way or by a direct idle-only CLI read. M29's mirror (`device_info`) and the "plugged in?" check are
+always-on.
+
 Scope note: the capability set (M30–M36) is the base Flipper feature spine MC named ("rfid, IR,
 etc."). U2F, Apps and JS scripting are mentioned in M29/M38, not given full lessons, to keep the
 unit bounded. Capability lessons may be paired down later at MC's discretion; this spec builds the
@@ -89,9 +101,16 @@ injected serial seam.
 - CLI transaction primitive: write `cmd\r\n`, read until the `>: ` prompt or a timeout, strip the
   echoed command. Pure parsers turn each response into a record (`device_info`, a tag read, a
   `storage list` listing).
-- Reads exposed to the panels: `device_info()`, per-capability live reads, and `storage` pulls of
-  files the learner saved on the SD. Read-only; the module never writes to the device beyond
-  issuing read/scan commands.
+- **Live-mirror mechanism (resolved by the §2 recon):** the primary path is **SD-file-polled** —
+  the learner captures/saves on the device, the console pulls the saved file off `/ext/<cap>/` via
+  `storage read`/`read_chunks` and parses/renders it. This works for *every* capability regardless
+  of firmware, and is the only path for `subghz`/`nfc`/`ir` (no text-CLI read on stock fw).
+  Always-on console reads: `device_info`, `loader` state (what app is open), `storage` (FS info,
+  listings). Direct CLI reads (`rfid`/`ikey`/`gpio`/`i2c`) are an *enhancement* available only when
+  the device is idle — the console issues `loader close` or the lesson returns to the desktop first.
+- Read-only: the module never writes to the device beyond issuing read/scan/`loader` commands and
+  pulling files. The Flipper's own saved-file formats (`.sub`, `.nfc`, `.ir`, RFID/iButton text)
+  are the parse targets; their real contents are the TDD fixtures.
 
 Routes (mirroring `/api/ais` etc.): `GET /api/flipper` (presence + `device_info`), and
 per-capability endpoints the lesson panels poll. `app.py` gains a `build_flipper` factory and the
@@ -104,10 +123,10 @@ frozen + live branches; `lessons.py` gains a `FLIPPER_PANEL` (and per-capability
 `INSTRUMENT_PANELS` with `uses_flipper` properties. Instrument-lesson 800×480 fit is unchanged
 (Next 423 / Commit 474).
 
-**Plan recon (first implementation task, does not change this design):** confirm the exact
-per-capability CLI read subcommands (`subghz`/`rfid`/`nfc`/`ir`/`ikey` usage) and decide, per
-capability, whether the live read is CLI-driven (console issues the read) or SD-file-polled (the
-learner saves on-device, the console pulls the file). `FlipperLink` abstracts both.
+**CLI recon: done (2026-10-31, §2).** The per-capability read mechanism is resolved above —
+SD-file-polled primary, with direct CLI reads as an idle-only enhancement. Remaining plan recon:
+capture a real saved file of each format (`.sub`, `.nfc`, `.ir`, `.rfid`, iButton) from the device
+as parser fixtures before writing each capability lesson's parser.
 
 ## 6. M37 — console rig: diagnose · restore · update (whole rig)
 
