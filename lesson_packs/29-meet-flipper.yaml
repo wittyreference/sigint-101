@@ -1,0 +1,62 @@
+# ABOUTME: Lesson M29 "Meet the Flipper" — the Flipper Zero unit's orientation: what it is, how it
+# ABOUTME: stands alone, and what plugging it into the nomad adds. The console mirrors it over USB.
+
+id: 29
+slug: meet-flipper
+title: "Meet the Flipper"
+type: intro
+concept: >-
+  The Flipper Zero is a pocket multi-tool for the short-range radios and wired protocols around you —
+  sub-GHz remotes, RFID and NFC cards, infrared, iButton keys, the GPIO header. It works alone in your
+  hand; plugged into the nomad it gains a big screen, storage, and the lessons that read what it caught.
+requires_tx: false
+hardware: [flipper]
+panels: [flipper]
+
+stages:
+  frame: >-
+    New unit, comrade. Set the SDR down — tonight you pick up a different instrument, one that fits in
+    a pocket. The Flipper Zero is a small orange-and-white slab with a screen, a d-pad, and a cartoon
+    dolphin that lives inside it. Where your dongle listens to radio you cannot touch, the Flipper
+    reaches the signals right next to you: the fob on your keyring, the remote for the gate, the card
+    in your wallet, the TV across the room. Over this unit you will drive each of those yourself. But
+    first, meet the device — and see what changes the moment you set it next to the nomad.
+  demo: >-
+    Watch — hands off. The Flipper is plugged into the console by USB, and it speaks a plain text
+    command line over that cable. The nomad opens the port, asks the device to describe itself, and
+    reads the answer onto the panel: the model, the firmware it is running, the region it was
+    provisioned for, and whether its sub-GHz radio is alive. That is the whole trick of this unit —
+    the Flipper is its own device, not one of your SDR tools, so reading it never disturbs a sweep or
+    a decode. The panel simply shows you what is on the other end of the cable. When no Flipper is
+    attached it says so plainly and invents nothing; a device line only ever appears when a real
+    device answered.
+  try: >-
+    Your turn to look, comrade. The panel names the device and shows its radio state in words, not just
+    a colour, so it reads the same in bright sun or red-night. Sit with the question this unit is built
+    around. You already know what the Flipper can do in your hand, out in the field, with nobody
+    watching. So what does setting it next to the nomad — plugging it into the console you have built
+    all course — actually buy you that the Flipper alone, screen the size of a postage stamp, cannot?
+  predict: >-
+    You plug the Flipper into the nomad and its name appears on the big screen. Plugged in like this,
+    what does the Flipper gain? Lock it in.
+  observe: >-
+    Hold your guess against the device in front of you. The Flipper's own screen is tiny — a few lines
+    of pixels — and its storage is a microSD you cannot read at a glance. The nomad has an 800-by-480
+    panel, a disk, and every lesson in this course. The cable between them carries the Flipper's
+    command line and its saved files both ways.
+  explain: >-
+    Here is the honest shape of it, comrade. The Flipper does not gain radios or range by being plugged
+    in — it has exactly the same antennas on the bench as in your pocket. What it gains is a bench. On
+    its own it is the field tool: you carry it, you capture with it, you read a cramped line on a
+    postage-stamp screen. Next to the nomad it becomes half of a pair — the field tool plus the
+    analyst's desk. The console reads the device over the cable, pulls the capture you just saved off
+    its card, and draws it large enough to actually study, beside the lesson that explains what you are
+    looking at. Standalone, the Flipper is what you take into the world. Plugged into the nomad, it is
+    what you take apart what you found. The rest of this unit is you doing exactly that, one capability
+    at a time.
+
+# Keyboard-free predict chips: {key, label}.
+choices:
+  - {key: "more-radios", label: "More radios and range"}
+  - {key: "a-bench", label: "A bench: big screen, storage, lessons"}
+  - {key: "nothing", label: "Nothing — it's only charging"}
