@@ -1001,6 +1001,18 @@ body {
   background: color-mix(in srgb, var(--warn) 18%, var(--surface));
   font-weight: 600;
 }
+/* The Flipper device line: model / firmware / region read off the attached device. When nothing
+   is attached the panel carries flipper--empty, which dims the line and reads as "plug it in" —
+   state by brightness + words, never colour alone, so it holds in red-night. */
+.flipper__line {
+  flex: none;
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  color: var(--fg);
+}
+.flipper--empty .flipper__line { color: var(--fg-mute); }
+.flipper--empty .decoder__title { color: var(--fg-mute); }
 /* The frozen predict frame on a decode lesson seals the decoder, mirroring the waterfall's seal.
    Compact (not the live panel's 150px) so the predict prompt, chips and Commit all stay on the
    fixed 800x480 screen — predict is the tightest stage. */

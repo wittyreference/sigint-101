@@ -590,11 +590,30 @@ def _rayhunter_warnings():
     }]
 
 
+class _StubFlipper:
+    """An app-boundary stand-in for FlipperConsole (no real serial device)."""
+
+    def __init__(self, device=None, error=None):
+        self._device = device
+        self._error = error
+
+    def device(self):
+        if self._error is not None:
+            raise self._error
+        return self._device
+
+
+def _flipper_device():
+    """The dict shape FlipperConsole.device() hands the route."""
+    return {"model": "Flipper Zero", "name": "Lle0zik", "firmware": "1.4.3",
+            "region": "US", "radio_alive": True}
+
+
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
             aprs_factory=None, pocsag_factory=None, acars_factory=None, ais_factory=None,
             dmr_factory=None, apt_factory=None, sstv_factory=None, flock_factory=None,
-            rayhunter_factory=None):
+            rayhunter_factory=None, flipper_factory=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
@@ -604,7 +623,8 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
                      pocsag_factory=pocsag_factory, acars_factory=acars_factory,
                      ais_factory=ais_factory, dmr_factory=dmr_factory,
                      apt_factory=apt_factory, sstv_factory=sstv_factory,
-                     flock_factory=flock_factory, rayhunter_factory=rayhunter_factory)
+                     flock_factory=flock_factory, rayhunter_factory=rayhunter_factory,
+                     flipper_factory=flipper_factory)
     return TestClient(app)
 
 
@@ -1575,6 +1595,46 @@ def test_rayhunter_is_a_separate_device_and_leaves_the_sweeper_alone(tmp_path):
                  sweeper_factory=lambda: _RecordingSweeper(_rows()),
                  rayhunter_factory=lambda: _StubRayhunter("clean", [])) as client:
         client.get("/api/rayhunter")
+    assert released["value"] is False
+
+
+def test_flipper_reports_the_device_when_attached(tmp_path):
+    with _client(tmp_path,
+                 flipper_factory=lambda: _StubFlipper(device=_flipper_device())) as client:
+        resp = client.get("/api/flipper")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["device"]["firmware"] == "1.4.3"
+    assert body["device"]["name"] == "Lle0zik"
+
+
+def test_flipper_reports_503_and_a_reason_when_absent(tmp_path):
+    from sigint101.flipper import FlipperError
+    with _client(tmp_path,
+                 flipper_factory=lambda: _StubFlipper(
+                     error=FlipperError("no Flipper attached"))) as client:
+        resp = client.get("/api/flipper")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["device"] is None          # never a fabricated device line
+    assert "no Flipper" in body["reason"]
+
+
+def test_flipper_is_a_separate_device_and_leaves_the_sweeper_alone(tmp_path):
+    """The Flipper is read over USB serial, not the SDR, so /api/flipper leaves the sweep alone."""
+    released = {"value": False}
+
+    class _RecordingSweeper(_StubSweeper):
+        def release(self):
+            released["value"] = True
+            self.stop()
+
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _RecordingSweeper(_rows()),
+                 flipper_factory=lambda: _StubFlipper(device=_flipper_device())) as client:
+        client.get("/api/flipper")
     assert released["value"] is False
 
 

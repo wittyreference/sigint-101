@@ -1,6 +1,27 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
+**FLIPPER MODULE (U10) IN PROGRESS — branch `flipper-module`, PR open.** MC reframed the last track
+(2026-10-31): not a Flipper FAP but a comprehensive **Flipper unit** — a device-in-hand tour of the
+base capabilities (sub-GHz, RFID, NFC, IR, iButton, GPIO, BadUSB), standalone + what the device adds
+plugged into the nomad (a **live mirror** over the USB serial CLI), plus a whole-rig troubleshoot/
+restore/firmware section. Spec `docs/superpowers/specs/2026-10-31-flipper-module-design.md`, plan
+`docs/superpowers/plans/2026-10-31-flipper-module.md`. Built ON the existing transport (`flipper.py`
+`FlipperCli`/`probe_flipper`/`read_file`) + `.sub` parser (`subfile.py`), both from 8a3c739.
+- **Phase 1 DONE + HIL-verified on nomad-b (observed 2026-10-31):** `deviceinfo.parse_device_info`
+  + `flipperconsole.FlipperConsole`, `/api/flipper`, U10 unit + `flipper` glyph/panel/JS, and M29
+  "Meet the Flipper". Live `/api/flipper` returns the real device
+  (`Flipper Zero / Lle0zik / fw 1.4.3 / US / radio alive`) read over `/dev/ttyACM0`; M29 renders at
+  800x480 with demo Next=423px, predict Commit=474px (both clear the 480 fold).
+- **NEXT: Phase 2 — capability lessons M30-M36.** Each needs MC's hands: a real object presented to
+  the Flipper (RFID fob, NFC card, TV remote, iButton key) to capture the parser fixture and do the
+  HIL. M30 Sub-GHz parsing is already done (`subfile.parse_sub`); that task is wiring only.
+- **nomad-b access:** `ssh spec5@100.108.20.20` (droplet key authorized as `spec5`). Deploy loop:
+  push branch, then on nomad-b `git fetch origin <branch> && git checkout -f -B <branch> FETCH_HEAD`
+  (no `origin/<branch>` tracking ref there), run uvicorn :8008, HIL over SSH.
+
+---
+
 **CURRICULUM PINNED (MC, 2026-10-29).** Unit 5 Decode is complete (M13-M16 landed). MC scoped the
 rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
 AskUserQuestion pass. Full map in **CURRICULUM ROADMAP** below. **Build order (MC's call): Counter-
