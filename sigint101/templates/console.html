@@ -38,7 +38,7 @@
   {# ---- One stage at a time. Sealed stages are not rendered at all until a
          prediction is committed: commit-before-reveal is enforced server-side,
          so the answer is never in the page for the learner to peek at. ---- #}
-  <div class="stage">
+  <div class="stage" data-lesson-id="{{ lesson.id }}">
     {% for stage in lesson.stage_order %}
       {% set sealed = stage in lesson.sealed_stages %}
       {% if (not sealed) or prediction_committed %}
@@ -677,7 +677,11 @@
              stages, and the no-hardware instrument stages that render as text) keeps the footer. #}
           {% if stage != 'predict' and not (stage in INSTRUMENT and lesson.needs_hardware) %}
             <footer class="stage-foot">
+              {% if loop.last %}
+              <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}">Complete lesson</button>
+              {% else %}
               <button class="btn btn--primary" type="button" data-nav="next">Next step</button>
+              {% endif %}
             </footer>
           {% endif %}
         </section>
@@ -765,11 +769,56 @@
     function show(idx) {
       panels.forEach(function (p, i) { p.hidden = (i !== idx); });
     }
+    // Finish the lesson: record completion, then return home. On any refusal still go home so
+    // the learner is never trapped on the last screen (worst case the lesson stays un-ticked).
+    var stageEl = document.querySelector(".stage");
+    var lessonId = stageEl && stageEl.getAttribute("data-lesson-id");
+    function complete() {
+      if (!lessonId) { window.location = "/"; return; }
+      fetch("/api/complete?lesson_id=" + encodeURIComponent(lessonId), { method: "POST" })
+        .then(function () { window.location = "/"; })
+        .catch(function () { window.location = "/"; });
+    }
+
     document.querySelectorAll("[data-nav='next']").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var cur = panels.findIndex(function (p) { return !p.hidden; });
         if (cur > -1 && cur < panels.length - 1) show(cur + 1);
+        else if (cur === panels.length - 1) complete();   // last stage: Next finishes the lesson
       });
+    });
+    document.querySelectorAll("[data-complete]").forEach(function (btn) {
+      btn.addEventListener("click", complete);
+    });
+
+    // Keyboard scrolling for the readable band (the Nomad's keys, not just touch). Arrows and
+    // PageUp/Down/Space/Home/End scroll whichever stage body actually overflows; arrows are left
+    // to the predict radios when a chip has focus so choosing still works.
+    function activeBand() {
+      var panel = panels.find(function (p) { return !p.hidden; });
+      if (!panel) return null;
+      var bands = panel.querySelectorAll(".stage-panel__body");
+      for (var i = 0; i < bands.length; i++) {
+        var el = bands[i], cs = getComputedStyle(el);
+        if ((cs.overflowY === "auto" || cs.overflowY === "scroll") && el.scrollHeight - el.clientHeight > 2) return el;
+      }
+      return null;
+    }
+    document.addEventListener("keydown", function (ev) {
+      var ae = document.activeElement;
+      if (ae && ae.name === "prediction" && (ev.key === "ArrowUp" || ev.key === "ArrowDown")) return;
+      var band = activeBand();
+      if (!band) return;
+      var step = 48, page = Math.max(80, band.clientHeight - 48);
+      if (ev.key === "ArrowDown") band.scrollBy(0, step);
+      else if (ev.key === "ArrowUp") band.scrollBy(0, -step);
+      else if (ev.key === "PageDown") band.scrollBy(0, page);
+      else if (ev.key === "PageUp") band.scrollBy(0, -page);
+      else if (ev.key === "Home") band.scrollTo(0, 0);
+      else if (ev.key === "End") band.scrollTo(0, band.scrollHeight);
+      else if (ev.key === " ") { if (ae && /^(BUTTON|A|INPUT)$/.test(ae.tagName)) return; band.scrollBy(0, ev.shiftKey ? -page : page); }
+      else return;
+      ev.preventDefault();
     });
   })();
 </script>

@@ -620,6 +620,33 @@ body {
   margin: 0;
 }
 
+/* A text stage (frame, explain) scrolls its own body so a long reveal never shoves the footer
+   button off the fixed 800x480 screen — the footer is flex:none, so the body takes the space
+   between the title and it and scrolls within that. Keeps the Complete button always reachable. */
+.stage-panel > .stage-panel__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 16px;          /* room beside the scrollbar so text never hides under it */
+}
+
+/* A scrollbar you can actually hit (MC: the old one was "pitifully small"). Tinted off --fg so it
+   reads in every theme, red-night included. Applies to the text bodies and the instrument band. */
+.stage-panel__body::-webkit-scrollbar { width: 16px; }
+.stage-panel__body::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  border-radius: 8px;
+}
+.stage-panel__body::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg) 45%, transparent);
+  border-radius: 8px;
+}
+.stage-panel__body::-webkit-scrollbar-thumb:active,
+.stage-panel__body::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+
 /* ===== Predict gate (keyboard-free) ====================================== */
 .predict {
   display: flex;
