@@ -1439,7 +1439,7 @@ body {
   grid-template-columns: repeat(3, 1fr);
   /* A readable minimum per row that grows for a two-line name (U7), so a tile is never shorter
      than its content and the progress bar at its foot is never clipped. 1fr squished 9+ units. */
-  grid-auto-rows: minmax(116px, auto);
+  grid-auto-rows: minmax(124px, auto);
   align-content: start;          /* rows stack from the top rather than stretching to fill */
   gap: 12px;
   padding: 14px var(--gutter);
@@ -1470,7 +1470,8 @@ body {
   text-align: left;
   text-decoration: none;
   cursor: pointer;
-  min-height: 0;
+  /* No min-height:0 here: it would let the grid keep an auto row at its 116px minimum and clip a
+     two-line tile (U7) instead of growing the row to fit. Without it the row grows to the content. */
   overflow: hidden;
 }
 
