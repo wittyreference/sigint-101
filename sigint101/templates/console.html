@@ -791,35 +791,7 @@
       btn.addEventListener("click", complete);
     });
 
-    // Keyboard scrolling for the readable band (the Nomad's keys, not just touch). Arrows and
-    // PageUp/Down/Space/Home/End scroll whichever stage body actually overflows; arrows are left
-    // to the predict radios when a chip has focus so choosing still works.
-    function activeBand() {
-      var panel = panels.find(function (p) { return !p.hidden; });
-      if (!panel) return null;
-      var bands = panel.querySelectorAll(".stage-panel__body");
-      for (var i = 0; i < bands.length; i++) {
-        var el = bands[i], cs = getComputedStyle(el);
-        if ((cs.overflowY === "auto" || cs.overflowY === "scroll") && el.scrollHeight - el.clientHeight > 2) return el;
-      }
-      return null;
-    }
-    document.addEventListener("keydown", function (ev) {
-      var ae = document.activeElement;
-      if (ae && ae.name === "prediction" && (ev.key === "ArrowUp" || ev.key === "ArrowDown")) return;
-      var band = activeBand();
-      if (!band) return;
-      var step = 48, page = Math.max(80, band.clientHeight - 48);
-      if (ev.key === "ArrowDown") band.scrollBy(0, step);
-      else if (ev.key === "ArrowUp") band.scrollBy(0, -step);
-      else if (ev.key === "PageDown") band.scrollBy(0, page);
-      else if (ev.key === "PageUp") band.scrollBy(0, -page);
-      else if (ev.key === "Home") band.scrollTo(0, 0);
-      else if (ev.key === "End") band.scrollTo(0, band.scrollHeight);
-      else if (ev.key === " ") { if (ae && /^(BUTTON|A|INPUT)$/.test(ae.tagName)) return; band.scrollBy(0, ev.shiftKey ? -page : page); }
-      else return;
-      ev.preventDefault();
-    });
+    // Keyboard scrolling is shared across screens — see /static/scroll-keys.js (loaded in base).
   })();
 </script>
 {% endblock %}
