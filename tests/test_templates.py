@@ -183,6 +183,17 @@ def test_the_no_radio_reason_is_large_and_readable_in_every_theme():
         assert _contrast(tokens["--wf-ink"], tokens["--wf-bg"]) >= 4.5, theme
 
 
+def test_the_waterfall_axis_reads_on_the_dark_band_in_every_theme():
+    # The axis labels ride the waterfall, which stays dark in every theme. In sunlight the page's
+    # dark-green ink measured about 2.1:1 there, so the axis takes the waterfall's own ink tokens.
+    assert "var(--wf-axis)" in _css_rule(".waterfall__axis")
+    assert "var(--wf-ink)" in _css_rule(".waterfall__axis b")
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        for ink in ("--wf-axis", "--wf-ink"):
+            assert _contrast(tokens[ink], tokens["--wf-bg"]) >= 4.5, (theme, ink)
+
+
 def test_honest_empty_states_are_large_and_readable_in_every_theme():
     # "listening…" / "no radio" is the honest state a learner sees most: read it at a glance.
     for selector in (".decoder__empty", ".gain-meter__empty"):

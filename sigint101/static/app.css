@@ -59,6 +59,8 @@
   --wf-bg: #040806;
   --wf-grid: #0f3a20;
   --wf-ink: #2ee66a;
+  /* The waterfall's quieter labels (the frequency axis): ink that reads on the dark band. */
+  --wf-axis: #1f9e4e;
   --glow: 0 0 6px rgba(46, 230, 106, 0.5);
   --glow-strong: 0 0 11px rgba(46, 230, 106, 0.6);
   --sel-bg: #2ee66a;
@@ -94,6 +96,7 @@
   --wf-grid: #223742;
   /* The waterfall stays dark in sunlight, so text over it is light, not the page's dark ink. */
   --wf-ink: #e5ebd7;
+  --wf-axis: #c3ceb5;
   --glow: none;
   --glow-strong: none;
   --sel-bg: #0b3d1f;
@@ -128,6 +131,7 @@
   --wf-bg: #050000;
   --wf-grid: #2a0707;
   --wf-ink: #ff4b4b;
+  --wf-axis: #de4242;
   /* The waterfall's level ramp, floor to peak, in red alone (waterfall.js reads it); the other
      themes define none and keep the conventional blue-to-red map. The floor stop sits above
      --wf-bg so a measured quiet bin still reads apart from an unmeasured one. */
@@ -1569,16 +1573,19 @@ button.rail-pip:disabled {
 .instrument--frozen {
   flex: 0 0 auto;
 }
+/* The frame and the hidden band are dimmed, not the axis under them: dimming the whole frame would
+   take its labels below 4.5:1 (about 3.7:1 in dark and 3.1:1 in red-night). */
 .waterfall-wrap--frozen {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  opacity: 0.8;
+  border-color: color-mix(in srgb, var(--border-strong) 80%, transparent);
 }
 .waterfall-wrap--frozen .waterfall__empty {
   flex: none;
   height: 40px;
   position: relative;
+  opacity: 0.8;
   background:
     linear-gradient(0deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.18)),
     repeating-linear-gradient(90deg, var(--wf-grid) 0 1px, transparent 1px 64px);
@@ -1660,12 +1667,13 @@ button.rail-pip:disabled {
   font-family: var(--font-mono);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
-  color: var(--fg-dim);
+  /* Waterfall ink, not page ink: the band stays dark in every theme, sunlight included. */
+  color: var(--wf-axis);
   background: color-mix(in srgb, var(--wf-bg) 70%, transparent);
   pointer-events: none;
 }
 .waterfall__axis b {
-  color: var(--fg);
+  color: var(--wf-ink);
   text-shadow: var(--glow);
 }
 
