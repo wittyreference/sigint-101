@@ -11,12 +11,17 @@ import pytest
 
 from sigint101.spectrum import (
     MAX_BINS,
+    SPAN_GUARD_BINS,
+    TUNER_MAX_HZ,
+    TUNER_MIN_HZ,
     SpectrumUnavailable,
     Sweeper,
     SweepRow,
     TuneError,
+    hop_plan,
     merge_chunks,
     parse_line,
+    target_span,
     validate_gain,
     validate_span,
 )
@@ -435,9 +440,12 @@ def test_the_reason_is_reported_once_and_then_the_sweep_is_retried():
         spawned.append(proc)
         return proc
 
-    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True)
+    clock = _Clock()
+    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True, clock=clock)
     sweeper.start()
     sweeper.drain()
+    # The poll that reports the death lands once the back-off has run out.
+    clock.now += sweeper.retry_in()
     with pytest.raises(SpectrumUnavailable):
         sweeper.start()
     # A death must not wedge the console permanently: the poll after the report tries
@@ -912,3 +920,164 @@ def test_as_dict_carries_the_readout_fields():
     assert flat["peak_db"] == -10.0
     assert flat["snr_db"] == 20.0
     assert flat["peak_hz"] == 88_000_000 + 78125.0
+
+
+# --- a span built around a target: keep the target off every hop's unmeasured centre ----------
+# rtl_power cannot measure the bin at each hop's centre (its DC copy, kept as None). A span built
+# straight around a target puts the target exactly there on a single-hop span (M9's 433.92 carrier
+# vanished into it), and on a hop edge for an even hop count. The sweep is offset instead, so the
+# target sits a few measured bins from the centre of the hop that holds it.
+
+def _hops_in_capture(name):
+    """(hop centres, bin step) of one real capture, read off its first pass."""
+    centres, step, seen = [], None, set()
+    for line in _capture(name):
+        fields = [f.strip() for f in line.split(",")]
+        low, high, step = int(fields[2]), int(fields[3]), float(fields[4])
+        if low in seen:
+            break
+        seen.add(low)
+        centres.append((low + high) // 2)
+    return centres, step
+
+
+@pytest.mark.parametrize("name, low, high, bin_size", [
+    ("fm-88-108-125k.csv", 88_000_000, 108_000_000, 125_000),
+    ("adsb-1089-1091-31k.csv", 1_089_000_000, 1_091_000_000, 31_250),
+    ("fm-narrow-95.9-96.3-10k.csv", 95_900_000, 96_300_000, 10_000),
+])
+def test_the_hop_plan_matches_what_rtl_power_really_swept(name, low, high, bin_size):
+    centres, step = _hops_in_capture(name)
+    plan = hop_plan(low, high, bin_size)
+    assert plan.centres == centres
+    assert plan.step == step
+
+
+def _clearances(low, high, bin_size, target):
+    """How far the target sits from the nearest hop centre and from the edges of its own hop."""
+    plan = hop_plan(low, high, bin_size)
+    nearest = min(plan.centres, key=lambda c: abs(c - target))
+    to_centre = abs(target - nearest)
+    to_edge = plan.hop_width / 2 - to_centre
+    return to_centre, to_edge, plan.step
+
+
+def test_a_target_on_a_single_hop_centre_moves_a_few_bins_off_it():
+    # M9's band: one 2 MHz hop, centred where the carrier is.
+    low, high, bin_size = target_span(433_920_000, 2_000_000, 15_625)
+    assert high - low == 2_000_000
+    to_centre, to_edge, step = _clearances(low, high, bin_size, 433_920_000)
+    assert to_centre == SPAN_GUARD_BINS * step
+    assert to_edge > SPAN_GUARD_BINS * step
+
+
+def test_a_target_on_a_hop_edge_moves_near_the_centre_of_a_hop():
+    # The FM default: eight 2.5 MHz hops, and 98.0 MHz is the edge between the 4th and 5th.
+    low, high, bin_size = target_span(98_000_000, 20_000_000, 125_000)
+    assert high - low == 20_000_000
+    to_centre, to_edge, step = _clearances(low, high, bin_size, 98_000_000)
+    assert to_centre == SPAN_GUARD_BINS * step
+    assert to_edge > SPAN_GUARD_BINS * step
+
+
+def test_a_target_already_clear_of_the_centre_still_lands_the_same_way():
+    # A target anywhere is placed the same few bins from the centre of its hop, so a tap on a
+    # station always lands it where the hop measures best, not on a roll-off at the hop edge.
+    for target in (433_000_000, 433_455_000, 434_010_000):
+        low, high, bin_size = target_span(target, 2_000_000, 15_625)
+        to_centre, _, step = _clearances(low, high, bin_size, target)
+        assert to_centre == SPAN_GUARD_BINS * step
+
+
+def test_the_offset_span_stays_inside_the_tuner():
+    low, high, _ = target_span(25_000_000, 2_000_000, 15_625)
+    assert low >= TUNER_MIN_HZ
+    low, high, _ = target_span(1_765_000_000, 2_000_000, 15_625)
+    assert high <= TUNER_MAX_HZ
+
+
+def test_giant_bins_have_no_centre_gap_so_the_span_stays_centred():
+    # One bin per hop prints no DC copy, so there is nothing to step around.
+    assert target_span(100_000_000, 10_000_000, 1_000_000) == (95_000_000, 105_000_000, 1_000_000)
+
+
+def test_a_span_with_too_few_bins_per_hop_to_offset_stays_centred():
+    # Two bins a hop leave no measured bin a guard away from the centre that is not an edge.
+    assert target_span(100_000_000, 200_000, 100_000) == (99_900_000, 100_100_000, 100_000)
+
+
+def test_retune_to_a_target_offsets_the_sweep_and_remembers_the_target():
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc([LINE_A]), radio_present=lambda: True)
+    sweeper.retune_to(433_920_000, 2_000_000, 15_625)
+    assert sweeper.target == 433_920_000
+    assert (sweeper.low, sweeper.high, sweeper.bin_size) == target_span(
+        433_920_000, 2_000_000, 15_625)
+    assert (sweeper.low + sweeper.high) // 2 != 433_920_000
+
+
+def test_a_span_given_by_its_edges_has_no_target():
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc([LINE_A]), radio_present=lambda: True)
+    sweeper.retune_to(433_920_000, 2_000_000, 15_625)
+    sweeper.retune(144_000_000, 148_000_000, 25_000)
+    assert sweeper.target is None
+
+
+def test_retune_to_refuses_a_target_whose_span_the_radio_cannot_reach():
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc([LINE_A]), radio_present=lambda: True)
+    with pytest.raises(TuneError):
+        sweeper.retune_to(10_000_000, 2_000_000, 15_625)
+    assert sweeper.target is None
+
+
+# --- a sweep that keeps dying backs off, like every other radio tool ---------------------------
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_sweep_that_keeps_dying_is_not_respawned_on_every_poll():
+    spawned = []
+
+    def spawn(cmd):
+        proc = DeadProc([], stderr=BAD_DEVICE_STDERR)
+        spawned.append(proc)
+        return proc
+
+    clock = _Clock()
+    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True, clock=clock)
+    sweeper.start()
+    sweeper.drain()
+    for _ in range(5):
+        with pytest.raises(SpectrumUnavailable, match="No matching devices found."):
+            sweeper.start()
+    assert len(spawned) == 1
+    assert sweeper.retry_in() > 0
+
+
+def test_the_back_off_grows_while_the_deaths_keep_coming():
+    def spawn(cmd):
+        return DeadProc([], stderr=BAD_DEVICE_STDERR)
+
+    clock = _Clock()
+    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True, clock=clock)
+    waits = []
+    for _ in range(3):
+        sweeper.start()
+        sweeper.drain()
+        waits.append(sweeper.retry_in())
+        clock.now += sweeper.retry_in()
+        with pytest.raises(SpectrumUnavailable):
+            sweeper.start()           # the reason is reported once the wait is over, then retried
+    assert waits == sorted(waits) and waits[0] < waits[-1]
+
+
+def test_a_deliberate_stop_starts_no_back_off():
+    sweeper = Sweeper(spawn=lambda cmd: BlockingProc([LINE_A], returncode=-15),
+                      radio_present=lambda: True, clock=_Clock())
+    sweeper.start()
+    sweeper.stop()
+    assert sweeper.retry_in() is None
