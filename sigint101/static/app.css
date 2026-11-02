@@ -1608,14 +1608,63 @@ body {
 }
 
 /* ===== Exam trainer (study card) ========================================= */
+/* Two rows, the lesson .stage-foot pattern: a body (eyebrow, question, chips) that scrolls inside
+   itself, and a pinned footer for Commit / Skip / Next. The body takes whatever height the footer
+   leaves, so a long pool question scrolls instead of pushing the action off the 800x480 screen.
+   The body always reserves its scrollbar gutter (the section's right padding shrinks to match),
+   so text and chips sit in the same place whether or not the card scrolls, never under the bar. */
 .exam {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 10px var(--gutter);
+  padding: 10px 2px 10px var(--gutter);
   overflow: hidden;
+}
+.exam__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+/* Nothing in the body shrinks to make room — the body scrolls instead — so the question is never
+   squeezed to nothing and every chip keeps its full touch height. */
+.exam__body > * {
+  flex: none;
+}
+.exam__body::-webkit-scrollbar { width: 16px; }
+.exam__body::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  border-radius: 8px;
+}
+.exam__body::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg) 45%, transparent);
+  border-radius: 8px;
+}
+.exam__body::-webkit-scrollbar-thumb:active,
+.exam__body::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+.exam__foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-right: 16px;          /* line up with the body's content, left of its scrollbar gutter */
+}
+.exam__foot .btn {
+  flex: none;
+  white-space: nowrap;
+}
+.exam__foot .predict__hint {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .exam__question {
   font-family: var(--font-mono);
@@ -1625,21 +1674,16 @@ body {
   margin: 0;
   color: var(--fg);
   text-shadow: var(--glow);
-  /* A long pool question scrolls on its own; the tap chips and commit stay put below it. */
-  overflow-y: auto;
-  min-height: 0;
 }
 /* The question and (when it cites one) its diagram button share a row, so a figure question
-   spends no extra height: the 800x480 card still fits its four chips and Commit. */
+   spends no extra height on the button. */
 .exam__ask {
   display: flex;
   gap: 10px;
   align-items: flex-start;
-  min-height: 0;
 }
 .exam__ask .exam__question {
   flex: 1 1 auto;
-  max-height: 100%;
 }
 .exam-figure__open {
   flex: 0 0 auto;
@@ -1717,6 +1761,18 @@ body {
 .exam-chip--correct .predict-chip__label,
 .exam-chip--correct .predict-chip__key {
   color: var(--sel-ink);
+}
+/* On the lit chip the key letter is ink on the chip's own fill, like a tapped predict chip — a
+   dark key box here would put dark ink on dark and hide the right letter. */
+.exam-chip--correct .predict-chip__key {
+  background: transparent;
+  border-color: var(--sel-ink);
+  text-shadow: none;
+}
+/* Room for the corner glyph (drawn 10px in, ~11px wide), so it never sits against the text. */
+.exam-chip--correct,
+.exam-chip--chosen {
+  padding-right: 34px;
 }
 .exam-chip--correct::after {
   content: "\2713";
@@ -1809,11 +1865,7 @@ body {
 }
 
 .exam__sim-link {
-  font-size: 15px;
-  color: var(--accent);
   text-decoration: none;
-  border-bottom: 1px dotted var(--accent);
-  align-self: flex-start;
 }
 /* The running score above the question — state by number, dim so the question leads. */
 .exam-sim__score {

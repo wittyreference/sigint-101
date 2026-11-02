@@ -27,7 +27,15 @@ from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event
-from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
+from .exam import (
+    EXAM_SIZE,
+    PASS_MARK,
+    ExamStore,
+    build_exam,
+    load_pool,
+    next_sim_question,
+    score_exam,
+)
 from .flock import FlockDetector, FlockUnavailable
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
 from .lessons import load_lessons
@@ -571,15 +579,20 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # --- scored 35-question practice exam (answer-then-advance) ---------------------------
 
     def _sim_progress(sim):
-        """From a sim dict: (first-unanswered id or None, that question's 1-based position,
-        correct-so-far). The current question is always the first the learner has not answered."""
+        """From a sim dict: (the question to serve now or None, its 1-based sheet position,
+        correct-so-far). The question to serve is the first unanswered, passing over skipped
+        ones until only they are left (next_sim_question)."""
         pool = app.state.exam_pool
         ids, answers = sim["question_ids"], sim["answers"]
         correct = sum(1 for qid, c in answers.items()
                       if pool.get(qid) is not None and c == pool.get(qid).answer)
-        current = next((qid for qid in ids if qid not in answers), None)
+        current = next_sim_question(ids, answers, sim["skipped"])
         pos = (ids.index(current) + 1) if current is not None else len(ids)
         return current, pos, correct
+
+    def _sim_skipped(sim):
+        """How many skipped questions are still waiting for an answer."""
+        return sum(1 for qid in sim["skipped"] if qid not in sim["answers"])
 
     def _sim_breakdown(questions, answers):
         """Per-subelement correct/total for the results screen, in exam order (T1..T9, T0 last)."""
@@ -597,9 +610,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def exam_sim(request: Request):
         """Serve the current question of a scored practice exam, starting one if none is active.
 
-        The current question is the first unanswered on the drawn sheet; once all 35 are in, this
-        hands off to the results screen. The correct answer is never in the question HTML —
-        commit-before-reveal, exactly like the study card and the lesson predict gate.
+        The current question is the first unanswered on the drawn sheet, passing over skipped
+        ones until only they remain; once all 35 are in, this hands off to the results screen.
+        Skip is offered while another question is still waiting. The correct answer is never in
+        the question HTML — commit-before-reveal, like the study card and the lesson predict gate.
         """
         store = app.state.exam_store
         sim = store.sim()
@@ -609,44 +623,66 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         current, pos, correct = _sim_progress(sim)
         if current is None:
             return RedirectResponse("/exam/sim/results", status_code=303)
+        waiting = len(sim["question_ids"]) - len(sim["answers"])
         return templates.TemplateResponse(
             request=request,
             name="exam_sim.html",
             context={"title": "Practice Exam", "back_href": "/exam", "back_label": "Exam",
                      "question": app.state.exam_pool.get(current), "reviewed": False,
                      "position": pos, "total": len(sim["question_ids"]),
-                     "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK},
+                     "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK,
+                     "skipped": _sim_skipped(sim), "can_skip": waiting > 1},
         )
 
     @app.post("/api/exam/sim/answer")
     async def exam_sim_answer(question_id: str, request: Request):
-        """Record one sim answer and redirect to its review — no JS, like the study card."""
+        """Record one sim answer and redirect to its review — no JS, like the study card.
+
+        An answer is final: a second POST for a question already answered (browser history, a
+        resubmit) changes nothing and is not credited again; it just lands on the review. So a
+        choice that is not one of the question's options is never stored — it goes back to the
+        question rather than locking it in as wrong.
+        """
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
         choice = (await _field(request, "choice")).strip().upper()
+        if choice not in question.options:
+            return RedirectResponse("/exam/sim", status_code=303)
         correct = choice == question.answer
-        app.state.exam_store.record_sim_answer(question_id, choice)
-        # Also credit the Leitner history so the sim feeds the study card's weak-first order.
-        app.state.exam_store.record(question_id, correct)
-        log_event(app.state.events_path, "exam_sim_answer",
-                  {"question": question_id, "choice": choice, "correct": correct})
-        return RedirectResponse(f"/exam/sim/review/{question_id}?choice={choice}", status_code=303)
+        if app.state.exam_store.record_sim_answer(question_id, choice):
+            # Also credit the Leitner history so the sim feeds the study card's weak-first order.
+            app.state.exam_store.record(question_id, correct)
+            log_event(app.state.events_path, "exam_sim_answer",
+                      {"question": question_id, "choice": choice, "correct": correct})
+        return RedirectResponse(f"/exam/sim/review/{question_id}", status_code=303)
+
+    @app.post("/api/exam/sim/skip")
+    def exam_sim_skip(question_id: str):
+        """Defer a sim question until the others are done; it stays answerable, and the results
+        wait for it (a skip never leaves a question blank)."""
+        if app.state.exam_pool.get(question_id) is None:
+            raise HTTPException(status_code=404, detail=f"question {question_id} not found")
+        app.state.exam_store.skip_sim_question(question_id)
+        return RedirectResponse("/exam/sim", status_code=303)
 
     @app.get("/exam/sim/review/{question_id}", response_class=HTMLResponse)
-    def exam_sim_review(request: Request, question_id: str, choice: str = ""):
-        """Show the answered sim question revealed, with Next pointing at the next question or,
-        once the sheet is done, the results screen."""
+    def exam_sim_review(request: Request, question_id: str):
+        """Show an answered sim question revealed, with Next pointing at the next question or,
+        once the sheet is done, the results screen.
+
+        Only an answered question is revealed, and the choice shown is the stored one: a question
+        not yet answered goes back to the sim, so the review can never leak an answer early.
+        """
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
         sim = app.state.exam_store.sim()
-        if sim is None or question_id not in sim["question_ids"]:
+        if sim is None or question_id not in sim["answers"]:
             return RedirectResponse("/exam/sim", status_code=303)
         ids = sim["question_ids"]
-        _, _, correct = _sim_progress(sim)
-        nxt = next((qid for qid in ids if qid not in sim["answers"]), None)
-        chosen = choice.strip().upper()
+        nxt, _, correct = _sim_progress(sim)
+        chosen = sim["answers"][question_id]
         return templates.TemplateResponse(
             request=request,
             name="exam_sim.html",
@@ -655,6 +691,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "chosen": chosen, "correct": chosen == question.answer,
                      "position": ids.index(question_id) + 1, "total": len(ids),
                      "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK,
+                     "skipped": _sim_skipped(sim),
                      "next_href": "/exam/sim" if nxt is not None else "/exam/sim/results",
                      "last": nxt is None},
         )

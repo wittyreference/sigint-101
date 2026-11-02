@@ -1861,6 +1861,132 @@ def test_exam_sim_answer_for_an_unknown_question_is_404(tmp_path):
     assert resp.status_code == 404
 
 
+_FORM = {"content-type": "application/x-www-form-urlencoded"}
+
+
+def _sim_current(client):
+    """The question id /exam/sim is serving now, and the page."""
+    page = client.get("/exam/sim", follow_redirects=False)
+    return re.search(r"sim/answer\?question_id=(T\w+)", page.text).group(1), page
+
+
+def _sim_answer(client, qid, choice):
+    return client.post(f"/api/exam/sim/answer?question_id={qid}", data={"choice": choice},
+                       headers=_FORM, follow_redirects=False)
+
+
+def _wrong(qid):
+    return next(c for c in "ABCD" if c != _pool_answer(qid))
+
+
+def test_exam_sim_answer_cannot_change_after_review(tmp_path):
+    # T-10: answer wrong, see the reveal, then POST the right letter (history/resubmit or a direct
+    # POST). The stored answer, the running score and the Leitner credit must all stay put.
+    with _client(tmp_path) as client:
+        qid, _ = _sim_current(client)
+        _sim_answer(client, qid, _wrong(qid))
+        again = _sim_answer(client, qid, _pool_answer(qid))
+        assert again.status_code == 303
+        assert again.headers["location"].endswith(f"/exam/sim/review/{qid}")
+        review = client.get(again.headers["location"])
+        store = client.app.state.exam_store
+        assert store.sim()["answers"] == {qid: _wrong(qid)}
+        state = store.state(qid)
+    assert state["seen"] == 1 and state["correct"] == 0      # not re-credited
+    assert "Not quite" in review.text
+    assert "0 right of 1 answered" in review.text
+
+
+def test_exam_sim_answer_that_is_not_an_option_is_not_recorded(tmp_path):
+    # Answers are final, so a blank or stray letter (a direct POST; the card's radios are
+    # required) must not lock the question in as wrong. It goes back to the question instead.
+    with _client(tmp_path) as client:
+        qid, _ = _sim_current(client)
+        for bad in ("", "Z"):
+            resp = _sim_answer(client, qid, bad)
+            assert resp.status_code == 303
+            assert resp.headers["location"].endswith("/exam/sim")
+        sim = client.app.state.exam_store.sim()
+        state = client.app.state.exam_store.state(qid)
+    assert sim["answers"] == {}
+    assert state is None
+
+
+def test_exam_sim_review_shows_the_stored_answer_not_the_query(tmp_path):
+    # The review reads the learner's choice from the sim, so a hand-edited ?choice= can't
+    # turn a miss into "Correct".
+    with _client(tmp_path) as client:
+        qid, _ = _sim_current(client)
+        _sim_answer(client, qid, _wrong(qid))
+        review = client.get(f"/exam/sim/review/{qid}?choice={_pool_answer(qid)}")
+    assert "Not quite" in review.text
+    assert "exam-chip--chosen" in review.text
+
+
+def test_exam_sim_review_refuses_an_unanswered_question(tmp_path):
+    # The reveal is only for a question already answered; asking for one early goes back to it.
+    with _client(tmp_path) as client:
+        qid, _ = _sim_current(client)
+        resp = client.get(f"/exam/sim/review/{qid}", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"].endswith("/exam/sim")
+        page = client.get(resp.headers["location"])
+    assert "exam-chip--correct" not in page.text
+    assert "exam-reveal" not in page.text
+
+
+def test_exam_sim_card_offers_skip(tmp_path):
+    with _client(tmp_path) as client:
+        qid, page = _sim_current(client)
+    assert f"/api/exam/sim/skip?question_id={qid}" in page.text
+    assert ">Skip<" in page.text
+
+
+def test_exam_sim_skip_serves_the_next_question_and_keeps_the_skipped_one(tmp_path):
+    with _client(tmp_path) as client:
+        first, page = _sim_current(client)
+        assert "Question 1 of 35" in page.text
+        skipped = client.post(f"/api/exam/sim/skip?question_id={first}", follow_redirects=False)
+        assert skipped.status_code == 303
+        assert skipped.headers["location"].endswith("/exam/sim")
+        second, page = _sim_current(client)
+        sim = client.app.state.exam_store.sim()
+    assert second != first
+    assert "Question 2 of 35" in page.text
+    assert "1 skipped" in page.text
+    assert first not in sim["answers"]                   # deferred, not answered or dropped
+
+
+def test_exam_sim_results_wait_for_a_skipped_question_then_score_it(tmp_path):
+    # Results score only once every question is answered: a skipped one comes back after the
+    # rest, and the sheet can't be finished around it.
+    with _client(tmp_path) as client:
+        first, _ = _sim_current(client)
+        client.post(f"/api/exam/sim/skip?question_id={first}")
+        for _ in range(34):
+            qid, _ = _sim_current(client)
+            assert qid != first
+            _sim_answer(client, qid, _pool_answer(qid))
+        back, page = _sim_current(client)
+        assert back == first
+        assert "Question 1 of 35" in page.text
+        assert ">Skip<" not in page.text                 # the last one left: nowhere to skip to
+        early = client.get("/exam/sim/results", follow_redirects=False)
+        assert early.headers["location"].endswith("/exam/sim")
+        last = _sim_answer(client, first, _pool_answer(first))
+        review = client.get(last.headers["location"])
+        assert 'href="/exam/sim/results"' in review.text
+        results = client.get("/exam/sim/results")
+    assert "35 of 35" in results.text
+
+
+def test_exam_sim_skip_for_an_unknown_question_is_404(tmp_path):
+    with _client(tmp_path) as client:
+        client.get("/exam/sim")
+        resp = client.post("/api/exam/sim/skip?question_id=NOPE99")
+    assert resp.status_code == 404
+
+
 # --- provenance panel (M3): the radio's account of itself + baseline (deaf vs. empty) ---------
 
 
