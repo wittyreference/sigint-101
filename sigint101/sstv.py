@@ -1,4 +1,4 @@
-# ABOUTME: Decodes SSTV on 2m (145.8 MHz) via rtl_fm|sox|sstv for M25 — a picture in the air.
+# ABOUTME: Decodes SSTV (the ISS downlink, 437.550 MHz) via rtl_fm|sox|sstv for M25 — a picture.
 # ABOUTME: No radio, no tools, no signal — reports an empty gallery, never a placeholder image.
 
 from __future__ import annotations
@@ -28,9 +28,10 @@ SSTV = "sstv"
 # stream in a WAV container (and bounds it — see pipeline_commands) before sstv ever sees it.
 SOX = "sox"
 
-# Where the SSTV lesson listens. 145.800 MHz is the 2m SSTV calling frequency; a pack can retune it
-# via the frequency seam, but this is where a picture is most likely to appear.
-DEFAULT_SSTV_HZ = 145_800_000
+# Where the SSTV lesson listens: the ISS SSTV downlink. ARISS has sent its SSTV events on
+# 437.550 MHz FM in Robot36 since 2026 (allow about +/-10 kHz of Doppler); through October 2025
+# they ran on 145.800 MHz FM, mostly PD120. A caller can pass another frequency via freq_hz.
+DEFAULT_SSTV_HZ = 437_550_000
 
 # The audio rate the pipeline runs at. SSTV occupies roughly 1200-2300 Hz, so this is ample; sstv
 # resamples to its own internal rate regardless.

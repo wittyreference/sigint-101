@@ -298,6 +298,62 @@ def test_a_sealed_stage_requested_without_a_commit_stays_sealed():
     assert "OBSERVE_BODY_marker" not in leaked
 
 
+# --- the explain verdict (a scored predict gate) ------------------------------
+
+
+def _scored_lesson():
+    data = {
+        "id": 1, "slug": "gain-snr", "title": "Gain and SNR", "type": "intro",
+        "concept": "the gap over the noise floor is the signal",
+        "hardware": [],
+        "stages": {"frame": "f", "demo": "d", "try": "t",
+                   "predict": "Turn the gain up. What happens to the gap over the floor?",
+                   "observe": "o", "explain": "EXPLAIN_SCORED_marker"},
+        "choices": CHOICES,
+        "answer": ["b", "c"],
+        "verdict": "VERDICT_marker the gap holds, then shrinks at the top.",
+    }
+    return parse_lesson(data)
+
+
+def _verdict_block(html):
+    m = re.search(r'data-stage="explain".*?(<div class="verdict.*?</div>\s*</div>)', html, re.S)
+    return m.group(1) if m else ""
+
+
+def test_explain_header_says_what_you_said_and_the_answer():
+    html = _console(lesson=_scored_lesson(), prediction_committed=True,
+                    current_stage="explain", committed_choice="a")
+    block = _verdict_block(html)
+    assert "You said" in block and CHOICES[0]["label"] in block
+    assert "Answer" in block
+    assert CHOICES[1]["label"] in block and CHOICES[2]["label"] in block
+    assert "VERDICT_marker" in block
+    assert "verdict--miss" in block
+    # The header rides at the top of the explain's scrolling body, so a long eyebrow can never
+    # squeeze the reading itself to nothing on the fixed 800x480 panel.
+    assert re.search(r'<div class="stage-panel__body">\s*<div class="verdict', html)
+    assert "EXPLAIN_SCORED_marker" in html
+
+
+def test_explain_header_marks_a_right_call():
+    html = _console(lesson=_scored_lesson(), prediction_committed=True,
+                    current_stage="explain", committed_choice="c")
+    assert "verdict--hit" in _verdict_block(html)
+
+
+def test_the_verdict_stays_sealed_until_a_commit():
+    html = _console(lesson=_scored_lesson(), prediction_committed=False)
+    assert "VERDICT_marker" not in html
+    assert 'class="verdict' not in html
+
+
+def test_an_unscored_lesson_renders_no_verdict_header():
+    html = _console(lesson=_intro_lesson(), prediction_committed=True,
+                    current_stage="explain", committed_choice="a")
+    assert 'class="verdict' not in html
+
+
 # --- no-hardware (knowledge) lessons: no radio chrome -------------------------
 
 
@@ -586,27 +642,54 @@ def _pocsag_intro_lesson():
         "id": 15, "slug": "pocsag", "title": "Not Meant for You", "type": "intro",
         "concept": "POCSAG sends pager messages in the clear, addressed to one cap code",
         "panels": ["pocsag"], "hardware": ["rtl-sdr"],
-        "tune": {"center_hz": 929_600_000, "span_hz": 200_000},
+        "tune": {"center_hz": 929_612_500, "span_hz": 200_000},
         "stages": {"frame": "f", "demo": "DEMO watch the pages arrive", "try": "t",
                    "predict": "p", "observe": "o", "explain": "e"},
     })
 
 
 def test_a_pocsag_lesson_shows_the_page_log_not_a_waterfall():
-    html = _console(lesson=_pocsag_intro_lesson(), current_stage="demo", tuned_hz=929_600_000)
+    html = _console(lesson=_pocsag_intro_lesson(), current_stage="demo", tuned_hz=929_612_500)
     assert "data-pocsag-panel" in html
     assert "data-pocsag-list" in html
     assert "multimon-ng" in html
-    assert "929.6" in html
+    assert "929.6125" in html
+    # MC's call for M15: framing live, text hidden; the instrument says so on its dial.
+    assert "text withheld" in html
     assert "canvas class=\"waterfall\"" not in html
     assert "data-aprs-panel" not in html
 
 
 def test_a_pocsag_lessons_predict_frame_seals_the_log():
     html = _console(lesson=_pocsag_intro_lesson(), current_stage="predict",
-                    prediction_committed=False, tuned_hz=929_600_000)
+                    prediction_committed=False, tuned_hz=929_612_500)
     assert "PAGES HIDDEN" in html
+    assert "POCSAG on 929.6125 MHz" in html
     assert "waterfall-wrap--frozen" not in html
+
+
+def _sstv_intro_lesson():
+    """An intro lesson whose instrument is the SSTV decoder (M25's), on the ISS downlink."""
+    return parse_lesson({
+        "id": 25, "slug": "sstv", "title": "A Picture in the Air", "type": "intro",
+        "concept": "SSTV paints a picture in pitch",
+        "panels": ["sstv"], "hardware": ["rtl-sdr"],
+        "tune": {"center_hz": 437_550_000, "span_hz": 200_000},
+        "stages": {"frame": "f", "demo": "d", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_an_sstv_lesson_names_the_frequency_its_pack_tunes():
+    # The ISS SSTV downlink moved to 437.550 MHz in 2026; the dial and the waiting note read the
+    # pack's band rather than a frequency baked into the template.
+    demo = _console(lesson=_sstv_intro_lesson(), current_stage="demo", tuned_hz=437_550_000)
+    assert "data-sstv-panel" in demo
+    assert "437.550" in demo
+    assert "145.8" not in demo
+    sealed = _console(lesson=_sstv_intro_lesson(), current_stage="predict",
+                      prediction_committed=False, tuned_hz=437_550_000)
+    assert "SSTV on 437.550 MHz" in sealed
 
 
 def _acars_intro_lesson():

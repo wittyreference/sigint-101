@@ -17,19 +17,17 @@ stages:
     gap between it and the noise — and why the knob everyone reaches for first, gain, is not
     that number.
   demo: >-
-    Watch — hands off the gain for now. At 0 dB the whole picture sits low: that grassy band
-    along the bottom is the noise floor, and the station's stripe pokes up just above it. The
-    gap between them — peak minus floor — is the SNR, the one number worth chasing. Now I raise
-    the gain: the floor and the peak climb together, so the gap opens, then stalls, and near the
-    top it can even close.
+    Watch — hands off the gain for now. Decibels first: a dB is a ratio, and every 10 dB is ten
+    times the power. The grassy band along the bottom is the noise floor; the station pokes up
+    above it. The meter reads both. Peak minus floor is the SNR — the one number worth chasing.
   try: >-
-    Now you drive, comrade. Step the gain from the bottom up and stop at three settings — low,
-    middle, maximum. At each, read the floor, the peak, and the gap off the meter and jot them
-    down. Don't chase the tallest peak — just record what you see.
+    Now you drive, comrade. Step the gain with its − and + from the bottom up, and stop at three
+    settings — low, middle, maximum. At each, read the floor, the peak and the gap off the meter
+    and note them. Don't chase the tallest peak — just record what you see.
   predict: >-
-    You've watched that gap open up and then stall. Before you push to the very top, make the
-    call: going from your middle setting to maximum gain, will the gap get WIDER, stay about the
-    SAME, or get NARROWER? Lock in your answer — the rest of the lesson stays hidden until you do.
+    You've read the gap at low and middle gain. Before you push to the very top, make the call:
+    from middle to maximum, will the gap get WIDER, stay about the SAME, or get NARROWER? Lock it
+    in — the rest of the lesson stays hidden until you do.
   observe: >-
     Take the gain to maximum and hold it against your middle setting. Tell me what actually
     happened: did the floor and the peak move together or apart — and did the gap grow, hold, or
@@ -38,7 +36,8 @@ stages:
     Here's what you were looking at. Gain is just an amplifier, and an amplifier cannot tell
     signal from noise — it multiplies both at once. So when you turned it up, the station's peak
     and the noise floor rose together, and past the middle the gap barely moved; at the very top
-    it often shrinks, because the radio starts adding hiss of its own. That gap is SNR, and the
+    it often shrinks, because strong signals start to overload the receiver and smear false
+    copies across the band. That gap is SNR, and the
     gap — not the height of the peak — is what decides whether you can actually hear something.
     Picture one friend talking in a loud restaurant: what matters isn't how loudly they talk,
     it's how far their voice rises above the room. Turning up a hearing aid lifts your friend and
@@ -57,3 +56,10 @@ choices:
   - {key: wider, label: Wider}
   - {key: same, label: About the same}
   - {key: narrower, label: Narrower}
+
+# The scored gate. Two chips are right: the explain defends "about the same" past the middle and
+# "narrower" at the very top, where overload can close the gap.
+answer: [same, narrower]
+verdict: >-
+  About the same, or narrower: gain lifts signal and noise together, and at the top overload can
+  close the gap.

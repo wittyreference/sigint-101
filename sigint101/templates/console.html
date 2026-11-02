@@ -138,7 +138,7 @@
                   <span>&mdash; PAGES HIDDEN &mdash;</span>
                   <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
                 </div>
-                <div class="decoder__axis" aria-hidden="true">multimon-ng &middot; POCSAG on 929.6 MHz</div>
+                <div class="decoder__axis" aria-hidden="true">multimon-ng &middot; POCSAG on {{ "%.4f"|format(mhz) }} MHz</div>
               </div>
             </div>
             {% elif lesson.uses_acars %}
@@ -193,7 +193,7 @@
                   <span>&mdash; IMAGE HIDDEN &mdash;</span>
                   <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
                 </div>
-                <div class="decoder__axis" aria-hidden="true">sstv &middot; SSTV on 145.8 MHz</div>
+                <div class="decoder__axis" aria-hidden="true">sstv &middot; SSTV on {{ "%.3f"|format(mhz) }} MHz</div>
               </div>
             </div>
             {% elif lesson.uses_flock %}
@@ -348,7 +348,7 @@
               </div>
               <div class="tune tune--fixed">
                 <div class="tune__dial">
-                  <div class="tune__freq">{{ "%.1f"|format(mhz) }}<span>MHz</span></div>
+                  <div class="tune__freq" data-rds-freq>{{ "%.1f"|format(mhz) }}<span>MHz</span></div>
                   <div class="tune__caption">FM station &middot; redsea decoding RDS</div>
                 </div>
                 {{ prev_step(loop.first) }}
@@ -428,12 +428,13 @@
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
             {% elif lesson.uses_pocsag %}
-            {# ---- POCSAG page log (M15): pager messages on the paging band, which a waterfall shows
+            {# ---- POCSAG page log (M15): pager framing on the paging band, which a waterfall shows
                only as a burst of FSK. rtl_fm|multimon-ng decodes the pages; pocsag.js polls
-               /api/pocsag and lists each page with its address and text. No radio / no multimon-ng /
-               a silent channel shows an honest empty log, never a fabricated page. ---- #}
+               /api/pocsag and lists each page's cap code, kind, length and baud. On the commercial
+               band the words are dropped server-side (MC's call: framing live, text hidden). No
+               radio / no multimon-ng / a silent channel shows an honest empty log. ---- #}
             <div class="instrument instrument--decode">
-              <div class="decoder" data-pocsag-panel aria-label="Live POCSAG page log">
+              <div class="decoder" data-pocsag-panel aria-label="Live POCSAG page framing">
                 <div class="decoder__head">
                   <span class="decoder__title">multimon-ng &middot; POCSAG</span>
                   <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
@@ -441,12 +442,12 @@
                   <span class="decoder__status" data-pocsag-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <ul class="decoder__list" data-pocsag-list></ul>
-                <div class="decoder__empty" data-pocsag-empty>listening on 929.6 MHz&hellip;</div>
+                <div class="decoder__empty" data-pocsag-empty>listening on {{ "%.4f"|format(mhz) }} MHz&hellip;</div>
               </div>
               <div class="tune tune--fixed">
                 <div class="tune__dial">
-                  <div class="tune__freq">929.6<span>MHz</span></div>
-                  <div class="tune__caption">pager band &middot; multimon-ng decoding POCSAG</div>
+                  <div class="tune__freq">{{ "%.4f"|format(mhz) }}<span>MHz</span></div>
+                  <div class="tune__caption">pager band &middot; framing only, text withheld</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
@@ -561,7 +562,7 @@
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
             {% elif lesson.uses_sstv %}
-            {# ---- SSTV image (M25): a picture sent as audio tones on 2m, which a waterfall shows
+            {# ---- SSTV image (M25): a picture sent as audio tones (the ISS downlink), which a waterfall shows
                only as a warbling FM signal. rtl_fm|sox|sstv decodes it to a PNG; sstv.js polls
                /api/sstv and shows the newest image (served from /media). No radio / no tools /
                nothing decoded shows an honest empty frame, never a placeholder picture. ---- #}
@@ -577,12 +578,12 @@
                   <img class="gallery__img" data-sstv-img alt="Decoded SSTV picture" hidden>
                   <figcaption class="gallery__cap" data-sstv-cap></figcaption>
                 </figure>
-                <div class="decoder__empty" data-sstv-empty>waiting for a picture on 145.800 MHz&hellip;</div>
+                <div class="decoder__empty" data-sstv-empty>waiting for a picture on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
               </div>
               <div class="tune tune--fixed">
                 <div class="tune__dial">
-                  <div class="tune__freq">145.800<span>MHz</span></div>
-                  <div class="tune__caption">2m SSTV &middot; rtl_fm|sox|sstv decoding a picture</div>
+                  <div class="tune__freq">{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
+                  <div class="tune__caption">ISS SSTV &middot; rtl_fm|sox|sstv decoding a picture</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
@@ -737,7 +738,18 @@
             {# The reveal leads; the concept closes it as the lesson's takeaway. It runs 80-140 words
                on the later lessons, so it rides inside the scrolling body after the explanation
                rather than ahead of it, where it would push the answer below the fold. #}
+            {# The scored predict gate: the explain opens on what the learner committed against the
+               pack's answer and its one-line verdict, at the top of the scrolling body. Explain only
+               renders after a commit, so the answer never reaches the page early; an unscored pack
+               shows no header. #}
+            {% set scored = lesson.score(committed_choice) if prediction_committed else none %}
             <div class="stage-panel__body">
+              {% if scored %}
+              <div class="verdict verdict--{{ 'hit' if scored.correct else 'miss' }}">
+                <div class="verdict__line"><span class="verdict__tag">{{ 'RIGHT' if scored.correct else 'MISSED' }}</span> You said <b>{{ scored.said }}</b> &middot; Answer: <b>{{ scored.answer|join(' or ') }}</b></div>
+                <div class="verdict__why">{{ scored.verdict }}</div>
+              </div>
+              {% endif %}
               <p>{{ lesson.stages[stage] }}</p>
               <p class="stage-panel__concept">{{ lesson.concept }}</p>
             </div>

@@ -7,7 +7,7 @@
   // Under node's test runner the file is loaded for its pure helpers and there is no document.
   // Export them and stop before any DOM access; in the browser there is no `module`, so it runs.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { hasData: hasData, psOrDash: psOrDash };
+    module.exports = { hasData: hasData, psOrDash: psOrDash, mhzLabel: mhzLabel };
     return;
   }
 
@@ -19,6 +19,13 @@
 
   function psOrDash(station) {
     return (station && station.ps) ? station.ps : "—";
+  }
+
+  // The station redsea is on, as the dial shows it (MHz, one decimal). The station is set per site
+  // at provisioning, so the dial follows what the API reports rather than the pack's default.
+  function mhzLabel(hz) {
+    if (hz == null || isNaN(hz)) return null;
+    return (hz / 1e6).toFixed(1);
   }
 
   var panels = Array.prototype.slice.call(document.querySelectorAll("[data-rds-panel]"));
@@ -40,6 +47,10 @@
     var badge = panel.querySelector("[data-rds-badge]");
     DecoderPanel.showLive(badge, body);
     DecoderPanel.showCommand(panel, body.command);
+    var instrument = panel.closest(".instrument");
+    var dial = instrument && instrument.querySelector("[data-rds-freq]");
+    var mhz = mhzLabel(body.freq_hz);
+    if (dial && mhz) dial.innerHTML = mhz + "<span>MHz</span>";
     if (hasData(station)) {
       set(panel, "[data-rds-ps]", psOrDash(station));
       set(panel, "[data-rds-pi]", station.pi);

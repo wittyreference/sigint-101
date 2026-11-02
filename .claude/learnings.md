@@ -463,6 +463,18 @@ because a 72px-tall rail would eat the narration band.
 Re-measure with `.instrument > .stage-panel__body` clientHeight at a forced 800x480; a band under
 about 58px (2 lines) is a regression.
 
+## 2026-11-02: a header above a scrolling body steals its height; scored gates leak by position
+**Finding.** The explain verdict ("You said X · Answer: Y" plus a line) first went between the
+title and the explain body as a `flex: none` block. At 800x480 it took ~100px, and under a long
+eyebrow it squeezed the reading to 0px (M15) and 7px (M24/M27): the page "fit" because the body
+had nothing left to show. Inside the scrolling body, as its first child, the reading kept 195px.
+Separately, scoring exposed a pattern: with chip A committed everywhere, 14 of 28 lessons scored
+RIGHT, because authors put the right answer first.
+**How to apply.** Anything added to a reading stage goes inside `.stage-panel__body`, not beside
+it. Measure the body's clientHeight, not only the button bottom. Keep answer positions spread
+(`test_lesson_answers` caps any one chip at 40%). The YAML reloads only on a server restart, so
+restart before re-rendering a pack change.
+
 ## 2026-11-02: PR_SET_PDEATHSIG fires when the forking *thread* exits, not the process
 **Finding.** The parent-death signal is tied to the thread that called fork. FastAPI runs sync
 routes on a pooled anyio worker that expires after ~10 s idle, so a tool forked from a request

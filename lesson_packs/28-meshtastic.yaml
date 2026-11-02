@@ -39,8 +39,8 @@ stages:
     your Nomad heard and what it sent. Read the column where the message should be — a line of text
     means that node shares LongFast's public key and the Nomad could read it; "(encrypted — not on
     our channel)" means a real reception it received but cannot read, a node on a channel it is not
-    on. The list stays empty until a second node transmits; MC is bringing one, and when it does its
-    packet is where the first text will land. For now, hold the harder question: how would a text
+    on. The list stays empty until a second node transmits; add one when you can, and its packet is
+    where the first text will land. For now, hold the harder question: how would a text
     even get from a far node to this one?
   predict: >-
     A node too far to hear you directly, one node between. Does your text reach it, or die at your
@@ -60,10 +60,11 @@ stages:
     public default key, so treat anything there as readable by anyone — which is exactly why some
     rows show words and others show "(encrypted — not on our channel)". Second — and this ties
     straight back to Lesson 11 — a relay forwards a packet it cannot read. Routing does not need the
-    key; a node on a channel you are not on still carries your message onward, blind to its contents.
-    Hearing, relaying, and reading are three separate things. One honest limit tonight: with a single
-    node you cannot watch a hop happen — a mesh of one has nowhere to send and nothing coming back.
-    When MC's second node arrives, have it send on LongFast and watch its packet land in the list —
+    key; a node with your radio settings carries your message onward even on a channel it cannot
+    read, blind to its contents. Hearing, relaying, and reading are three separate things. One honest
+    limit tonight: with a single node you cannot watch a hop happen — a mesh of one has nowhere to
+    send and nothing coming back. When a second node is in range, have it send on LongFast and watch
+    its packet land in the list —
     sender, SNR and text; add a third node someday and a packet that reaches you from beyond direct
     range is one the mesh relayed to get there.
 
@@ -72,3 +73,9 @@ choices:
   - {key: "relayed", label: "Reaches it — relayed onward"}
   - {key: "dies", label: "Dies at your range"}
   - {key: "direct-only", label: "Only nodes you hear"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["relayed"]
+verdict: >-
+  It reaches, relayed: the node between rebroadcasts it, and the hop limit (three by default) stops
+  the echo.

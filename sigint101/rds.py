@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -19,8 +20,44 @@ from .hardware import (
 )
 
 # Where the RDS lesson listens. RDS rides a 57 kHz subcarrier on an ordinary FM broadcast station,
-# so this is an FM-band frequency; a pack points it at the strongest local station via tune.
-DEFAULT_RDS_HZ = 96_000_000
+# so this must be a real FM channel, and the best one is the learner's strongest local station —
+# which only the site knows. The provisioner sets it in this environment variable (Hz); without
+# one, the console falls back to 106.5 MHz, the steady station at the box this course was built on.
+RDS_HZ_ENV = "SIGINT101_RDS_HZ"
+DEFAULT_RDS_HZ = 106_500_000
+
+# 47 CFR 73.201: US FM broadcast channels are centred on the odd tenths from 88.1 to 107.9 MHz,
+# 200 kHz apart. A frequency off that raster is not a station (96.0 MHz was a spur comb).
+FM_FIRST_CHANNEL_HZ = 88_100_000
+FM_LAST_CHANNEL_HZ = 107_900_000
+FM_CHANNEL_SPACING_HZ = 200_000
+
+
+def is_fm_channel(hz: int) -> bool:
+    """Is this the centre of a US FM broadcast channel (88.1-107.9 MHz, odd tenths)?"""
+    return (FM_FIRST_CHANNEL_HZ <= hz <= FM_LAST_CHANNEL_HZ
+            and (hz - FM_FIRST_CHANNEL_HZ) % FM_CHANNEL_SPACING_HZ == 0)
+
+
+def configured_fm_hz(name: str, default: int, environ=None) -> int:
+    """An FM station set at provisioning in environment variable `name`, in Hz, or `default`.
+
+    A value that is not an integer FM channel centre falls back to the default rather than taking
+    the kiosk down at boot; the console reports the frequency it actually used, so a bad setting
+    shows on the dial instead of hiding.
+    """
+    env = os.environ if environ is None else environ
+    raw = (env.get(name) or "").strip()
+    try:
+        hz = int(raw)
+    except ValueError:
+        return default
+    return hz if is_fm_channel(hz) else default
+
+
+def configured_rds_hz(environ=None) -> int:
+    """The station RDS decodes: SIGINT101_RDS_HZ when it names an FM channel, else the default."""
+    return configured_fm_hz(RDS_HZ_ENV, DEFAULT_RDS_HZ, environ)
 
 # rtl_fm's FM-multiplex rate. 171 kHz = 9 x 19 kHz keeps the whole baseband through the 57 kHz
 # RDS subcarrier, and is the rate redsea is told to expect.
@@ -110,9 +147,10 @@ class RDSDecoder:
     path and release/resume so it takes turns with the waterfall on the one dongle.
     """
 
-    def __init__(self, *, freq_hz=DEFAULT_RDS_HZ, device=0, spawn=_popen,
+    def __init__(self, *, freq_hz=None, device=0, spawn=_popen,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None):
-        self.freq_hz = int(freq_hz)
+        # No frequency given means the site's provisioned station (SIGINT101_RDS_HZ).
+        self.freq_hz = int(freq_hz) if freq_hz is not None else configured_rds_hz()
         self.device = device
         self.serial = serial or None
         self._list_devices = list_devices
