@@ -12,6 +12,15 @@ concept: >-
 requires_tx: false
 hardware: [rtl-sdr]
 panels: []
+# The instrument sits on the whole VHF airband, 118-137 MHz, so a controller's channel shows wherever
+# it is. rtl_power sweeps it in 7 hops and splits the 50 kHz request into ~42 kHz bins (448 a row):
+# an AM voice channel is one thin line, and the row fits the waterfall one bin per pixel. The step
+# is the 25 kHz airband channel spacing.
+tune:
+  center_hz: 127500000
+  span_hz: 19000000
+  step_hz: 25000
+  bin_hz: 50000
 
 stages:
   frame: >-

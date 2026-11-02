@@ -17,9 +17,11 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .acars import AcarsDecoder, AcarsUnavailable
 from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
@@ -53,7 +55,7 @@ from .provenance import (
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
-from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
+from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_gain, validate_span
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
 from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
@@ -454,6 +456,26 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+    @app.exception_handler(StarletteHTTPException)
+    async def error_page(request: Request, exc: StarletteHTTPException):
+        """A browser asking for a screen gets the console's own themed error page.
+
+        The kiosk renders raw JSON as a full white sheet, which at night is the one thing
+        red-night exists to prevent. Only a request that asks for HTML outside /api/ gets the page;
+        the panels' fetch() calls read the JSON reason, so /api/ and non-browser clients keep it.
+        """
+        wants_page = (not request.url.path.startswith("/api/")
+                      and "text/html" in request.headers.get("accept", ""))
+        if not wants_page:
+            return await http_exception_handler(request, exc)
+        heading = "Not found" if exc.status_code == 404 else f"Error {exc.status_code}"
+        return templates.TemplateResponse(
+            request=request, name="error.html", status_code=exc.status_code,
+            headers=getattr(exc, "headers", None),
+            context={"title": heading, "back_href": "/", "back_label": "Home",
+                     "status": exc.status_code, "heading": heading, "detail": exc.detail},
+        )
 
     def _require_lesson(lesson_id: int):
         """Refuse an unknown lesson id the same way from every lesson route."""
@@ -1346,6 +1368,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         tuned = {"low": low, "high": high, "bin_size": bin_size}
         log_event(app.state.events_path, "tune", tuned)
         return {"tuned": True, **tuned}
+
+    @app.post("/api/gain")
+    def gain(payload: dict = Body(default={})):
+        """Set the tuner gain in dB, or null for automatic, failing closed with the reason.
+
+        The gain meets validate_gain first, so a gain this tuner cannot do is refused (400) with
+        the gate's own words. A valid gain with no radio is a 503 and changes nothing, like a tune.
+        The sweep stands down and the next spectrum poll restarts it with `-g` at the new gain.
+        """
+        try:
+            value = validate_gain(payload.get("gain"))
+        except TuneError as exc:
+            log_event(app.state.events_path, "gain_rejected", {"reason": str(exc)})
+            return JSONResponse(status_code=400, content={"set": False, "reason": str(exc)})
+
+        radio = probe()
+        if not radio.present:
+            reason = f"no RTL-SDR to set the gain on — {radio.detail}"
+            log_event(app.state.events_path, "gain_blocked", {"reason": reason})
+            return JSONResponse(status_code=503, content={"set": False, "reason": reason})
+
+        app.state.sweeper.set_gain(value)
+        log_event(app.state.events_path, "gain", {"gain": value})
+        return {"set": True, "gain": value}
 
     return app
 

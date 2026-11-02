@@ -23,3 +23,16 @@ test("no pilot reads as an honest refusal, never a guessed number", () => {
   assert.equal(v.kind, "na");
   assert.match(v.detail, /pilot/);
 });
+
+// Which station the Measure button captures. The waterfall puts data-tuned-hz on the dial only for
+// a frequency the radio has confirmed; the dial's printed text is never parsed, because it can be
+// a pending target the radio is not on.
+test("the measure captures the frequency the radio confirmed, to the hertz", () => {
+  assert.equal(panel.measureHz("91515625", "98100000"), 91515625);
+});
+
+test("with nothing confirmed the measure falls back to the panel's own station", () => {
+  assert.equal(panel.measureHz(null, "98100000"), 98100000);
+  assert.equal(panel.measureHz("", "98100000"), 98100000);
+  assert.equal(panel.measureHz("junk", null), 98100000);
+});

@@ -40,6 +40,11 @@ MAX_SPAN_HZ = 100_000_000
 MIN_BIN_HZ = 1
 MAX_BIN_HZ = 2_800_000
 
+# How many bins one row may ask for: about the waterfall's width in pixels. rtl_power splits each
+# hop into a power-of-two count of bins no wider than the request, so it can deliver up to twice
+# this. Unbounded, a 1 Hz bin over 100 MHz asks for 10^8 values per row, every poll.
+MAX_BINS = 1024
+
 # What an R828D's input amplifier can do. rtl_power snaps a request to the tuner's
 # nearest supported step (asking for 30 gets ~29.7), so the range is checked here
 # but the step table is the tuner's business.
@@ -110,6 +115,10 @@ def validate_span(low=None, high=None, bin_size=None) -> tuple:
         raise TuneError(
             f"span {span / 1e6:.1f} MHz is wider than {MAX_SPAN_HZ // 1_000_000} MHz; "
             "a sweep that wide takes minutes per row")
+    if span / bin_size > MAX_BINS:
+        raise TuneError(
+            f"{span / 1e6:.3f} MHz in {bin_size} Hz bins is {span // bin_size} bins per row; "
+            f"the waterfall holds at most {MAX_BINS}")
 
     return low, high, bin_size
 
@@ -138,7 +147,11 @@ def validate_gain(gain):
 
 @dataclass(frozen=True)
 class SweepRow:
-    """One full-band sweep: the power across every bin at a single moment."""
+    """One full-band sweep: the power across every bin at a single moment.
+
+    A bin rtl_power did not measure is None in `dbm`, never a borrowed neighbour's value, so
+    every number in a row is a measurement at the frequency it is drawn at.
+    """
 
     ts: str
     freq_low: float
@@ -150,25 +163,30 @@ class SweepRow:
         """Where each power reading sits in frequency, in Hz. Pairs one-to-one with `dbm`.
 
         A "bin" is one slice of spectrum the receiver measured power in — the finest
-        detail this sweep can show. These are the bins' *edges*, not their centres:
-        rtl_power reports both edges of the span, so value i sits at low + i*step and
-        the last lands exactly on freq_high.
+        detail this sweep can show. These are the bins' *centres*: FFT bin k of a hop is
+        centred at low + k*step, so the first sits on freq_low and the last a step short
+        of freq_high, where the next hop's first bin is measured.
         """
         return tuple(self.freq_low + i * self.freq_step for i in range(len(self.dbm)))
+
+    def measured(self) -> list:
+        """The power readings rtl_power actually measured, without the unmeasured bins."""
+        return [v for v in self.dbm if v is not None]
 
     def noise_floor_db(self) -> float:
         """The power of the quiet bins — what the receiver hears when nobody transmits.
 
         The median across bins, because stations occupy a minority of any real span:
         the middle value lands in the noise however bright the few busy bins are.
-        Rows always carry at least one bin (parse_line refuses anything shorter).
+        Rows always carry at least one measured bin (each hop prints at least one).
         """
-        return statistics.median(self.dbm)
+        return statistics.median(self.measured())
 
     def peak(self) -> tuple:
         """The strongest bin, as (frequency in Hz, power in dB). First bin wins a tie."""
-        index = self.dbm.index(max(self.dbm))
-        return (self.freq_low + index * self.freq_step, self.dbm[index])
+        strongest = max(self.measured())
+        index = self.dbm.index(strongest)
+        return (self.freq_low + index * self.freq_step, strongest)
 
     def snr_db(self) -> float:
         """Signal-to-noise ratio: how far the strongest bin stands above the floor.
@@ -206,6 +224,16 @@ def parse_line(line) -> SweepRow | None:
     """Parse one rtl_power CSV line, or return None if it isn't one.
 
     Columns: date, time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
+
+    rtl_power 0.6.0 (the Debian build on the Nomad) prints two values that are not
+    measurements, and both are taken out here (csv_dbm() in rtl_power.c):
+    - The trailing duplicate. Its loop prints bins 0..len-1, then prints the last bin a
+      second time, so a line carries len+1 values and the last two are always equal. That
+      extra value would be drawn at freq_high, which is the next hop's first bin.
+    - The DC copy. Before printing, it overwrites the hop's DC bin with its neighbour
+      ("nuke DC component"). After its 180-degree rotation that bin sits at the hop centre.
+      It is kept in place as None, so the bins either side stay at their own frequencies and
+      the waterfall can show the gap honestly instead of a borrowed value.
     """
     if not line:
         return None
@@ -229,33 +257,34 @@ def parse_line(line) -> SweepRow | None:
         step = float(fields[4])
         # Everything after the header is power in dB: a logarithmic scale, so a reading
         # 10 higher is ten times the power, not ten units more of it.
-        dbm = tuple(float(x) for x in fields[6:])
+        printed = [float(x) for x in fields[6:]]
     except ValueError:
         # A partially written line is normal when the process is killed mid-sweep.
         return None
 
+    # The trailing duplicate needs a value before it to duplicate; a lone value is a line cut
+    # short, not a hop.
+    if len(printed) < 2:
+        return None
+    dbm = printed[:-1]
+    # One bin per hop ("giant bins") has no neighbour, so rtl_power copies nothing into it.
+    dc = round((high - low) / (2 * step)) if step > 0 else -1
+    if len(dbm) > 1 and 0 <= dc < len(dbm):
+        dbm[dc] = None
+
     return SweepRow(ts=f"{fields[0]} {fields[1]}", freq_low=low, freq_high=high,
-                    freq_step=step, dbm=dbm)
-
-
-def _adjacent(left: SweepRow, right: SweepRow) -> bool:
-    """Do these two chunks meet, so that they share the bin at their boundary?
-
-    Compared with a tolerance rather than for equality because the frequencies are
-    floats and rarely land exactly equal. Half a bin is the natural tolerance: two
-    edges closer together than that cannot be different measurement points. The
-    `or 1` covers a chunk reporting a step of zero — a zero tolerance would mean no
-    two edges could ever read as adjacent, so it falls back to 1 Hz.
-    """
-    return abs(left.freq_high - right.freq_low) < (left.freq_step / 2 or 1)
+                    freq_step=step, dbm=tuple(dbm))
 
 
 def merge_chunks(chunks) -> SweepRow:
     """Join the per-chunk lines of one sweep into a single full-band row.
 
-    rtl_power splits a span wider than the dongle's bandwidth into chunks and
-    reports both edges of each, so neighbouring chunks repeat the bin they share.
-    Keeping both would double-count it and skew the frequency axis.
+    rtl_power splits a span wider than the dongle's bandwidth into chunks (hops) that
+    abut: each hop's bins run from its low edge up to a step short of its high edge,
+    which is where the next hop's first bin is measured. So the hops simply join end to
+    end. A gap between two hops is held open with unmeasured bins rather than closed,
+    because closing it would slide every later value onto a frequency it was not
+    measured at.
     """
     chunks = sorted(chunks, key=lambda c: c.freq_low)
     if not chunks:
@@ -263,12 +292,17 @@ def merge_chunks(chunks) -> SweepRow:
     if len(chunks) == 1:
         return chunks[0]
 
+    step = chunks[0].freq_step
     dbm = list(chunks[0].dbm)
     for previous, chunk in zip(chunks, chunks[1:]):
-        dbm.extend(chunk.dbm[1:] if _adjacent(previous, chunk) else chunk.dbm)
+        # Rounded rather than compared exactly: the edges are floats, and rtl_power's own
+        # integer edge arithmetic can land a hop a hertz short of its neighbour.
+        missing = round((chunk.freq_low - previous.freq_high) / step) if step > 0 else 0
+        dbm.extend([None] * max(missing, 0))
+        dbm.extend(chunk.dbm)
 
     return SweepRow(ts=chunks[0].ts, freq_low=chunks[0].freq_low,
-                    freq_high=chunks[-1].freq_high, freq_step=chunks[0].freq_step,
+                    freq_high=chunks[-1].freq_high, freq_step=step,
                     dbm=tuple(dbm))
 
 

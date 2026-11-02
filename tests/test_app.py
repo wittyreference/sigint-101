@@ -845,6 +845,44 @@ def test_opening_an_unknown_lesson_is_404(tmp_path):
     assert resp.status_code == 404
 
 
+# --- error pages: a browser gets a themed page, never raw JSON or a white sheet ----------------
+
+_BROWSER = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+
+
+def test_an_unknown_lesson_is_a_themed_page_for_the_kiosk_browser(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/lesson/999", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert resp.headers["content-type"].startswith("text/html")
+    # The console's own shell, so it takes the learner's theme (red-night stays red) and keeps Back.
+    assert 'class="app"' in resp.text and "btn-back" in resp.text
+    assert "lesson 999 not found" in resp.text
+    assert 'href="/"' in resp.text
+
+
+def test_an_unknown_path_is_a_themed_page_for_the_kiosk_browser(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/no/such/screen", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert 'class="app"' in resp.text
+
+
+def test_api_errors_stay_json_even_for_a_browser(tmp_path):
+    # The panels' fetch() calls read the JSON reason; an HTML page there would break them.
+    with _client(tmp_path) as client:
+        resp = client.post("/api/complete?lesson_id=999", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "lesson 999 not found"
+
+
+def test_a_client_that_does_not_ask_for_html_still_gets_json(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/lesson/999")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "lesson 999 not found"
+
+
 # --- complete -----------------------------------------------------------------
 
 
@@ -1950,6 +1988,27 @@ def test_tune_refuses_an_out_of_range_span_with_the_reason(tmp_path):
     assert "tunes" in resp.json()["reason"]  # "this radio tunes 24-1766 MHz ..."
 
 
+def test_tune_refuses_a_span_that_asks_for_more_bins_than_a_row_holds(tmp_path):
+    # 2 MHz at 100 Hz asks rtl_power for 20,000 bins every row; refused before any radio is touched.
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.post("/api/tune",
+                           json={"low": 95_000_000, "high": 97_000_000, "bin_size": 100})
+    assert resp.status_code == 400
+    assert "bins" in resp.json()["reason"]
+
+
+def test_tune_reports_the_bin_size_it_applied(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.post("/api/tune", json={"low": 1_089_000_000, "high": 1_091_000_000,
+                                              "bin_size": 31_250})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.json()["bin_size"] == 31_250
+    assert (spectrum["freq_low"], spectrum["freq_high"], spectrum["bin_size"]) == (
+        1_089_000_000, 1_091_000_000, 31_250)
+
+
 def test_tune_without_a_radio_is_503(tmp_path):
     with _client(tmp_path, probe=_absent) as client:
         resp = client.post("/api/tune", json={"low": 100_000_000, "high": 104_000_000})
@@ -1966,6 +2025,78 @@ def test_tune_accepts_a_valid_span_when_a_radio_is_present(tmp_path):
     assert body["tuned"] is True
     assert body["low"] == 100_000_000
     assert body["high"] == 104_000_000
+
+
+# --- gain (M2: "step the gain from the bottom up") ------------------------------------
+
+
+class _IdleProc:
+    """A launched rtl_power at the process boundary: alive, printing nothing yet."""
+
+    def __init__(self):
+        self.stdout = iter(())
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _gain_client(tmp_path, spawned):
+    """A console whose real Sweeper launches recorded rtl_power command lines."""
+    def spawn(cmd):
+        spawned.append(list(cmd))
+        return _IdleProc()
+    return _client(tmp_path, probe=_present,
+                   sweeper_factory=lambda: Sweeper(spawn=spawn, radio_present=lambda: True))
+
+
+def test_a_gain_step_restarts_the_sweep_with_that_gain(tmp_path):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        client.get("/api/spectrum")
+        resp = client.post("/api/gain", json={"gain": 29.7})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.status_code == 200
+    assert resp.json() == {"set": True, "gain": 29.7}
+    # The new gain reaches the rtl_power actually launched, not just the reply.
+    assert spawned[-1][spawned[-1].index("-g") + 1] == "29.7"
+    assert spectrum["gain"] == 29.7
+
+
+def test_a_null_gain_hands_the_tuner_back_to_automatic(tmp_path):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        client.post("/api/gain", json={"gain": 12.5})
+        client.get("/api/spectrum")
+        resp = client.post("/api/gain", json={"gain": None})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.json() == {"set": True, "gain": None}
+    assert "-g" not in spawned[-1]
+    assert spectrum["gain"] is None
+
+
+@pytest.mark.parametrize("bad", [60, -1, "loud"])
+def test_a_gain_the_tuner_cannot_do_is_refused_with_the_reason(tmp_path, bad):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        resp = client.post("/api/gain", json={"gain": bad})
+    assert resp.status_code == 400
+    assert resp.json()["set"] is False
+    assert "gain" in resp.json()["reason"]
+
+
+def test_gain_without_a_radio_is_503_and_changes_nothing(tmp_path):
+    with _client(tmp_path, probe=_absent) as client:
+        resp = client.post("/api/gain", json={"gain": 29.7})
+        spectrum = client.get("/api/spectrum")
+    assert resp.status_code == 503
+    assert resp.json()["set"] is False
+    assert spectrum.status_code == 503
 
 
 # --- exam trainer: one study card, commit-before-reveal (like the predict gate) ---------

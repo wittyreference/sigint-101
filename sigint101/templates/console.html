@@ -650,20 +650,30 @@
               <div class="instrument__row">
                 <div class="waterfall-wrap">
                   <canvas class="waterfall" width="760" height="200" data-tune data-sample="1"
-                          {% if tune_band %}data-tune-low="{{ tune_band.low_hz }}" data-tune-high="{{ tune_band.high_hz }}"{% endif %}
+                          {% if tune_band %}data-tune-low="{{ tune_band.low_hz }}" data-tune-high="{{ tune_band.high_hz }}"{% if tune_band.bin_hz %} data-tune-bin="{{ tune_band.bin_hz }}"{% endif %}{% endif %}
                           aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
                   <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
+                  {# Why the band is empty (no radio, radio busy), as page text over the canvas: text
+                     drawn into the stretched canvas bitmap came out ~7 px tall. #}
+                  <div class="waterfall__reason" data-wf-reason hidden><span></span></div>
+                  {# The axis labels only a span the sweep is pointed at: the lesson's own band until
+                     the radio reports, otherwise blank. waterfall.js redraws it from each live span. #}
                   <div class="waterfall__axis" aria-hidden="true">
-                    <span>{{ "%.1f"|format(mhz - 1.3) }}</span>
-                    <span>{{ "%.3f"|format(mhz) }} MHz</span>
-                    <span>{{ "%.1f"|format(mhz + 1.3) }}</span>
+                    {% if tune_band %}
+                    <span>{{ "%.1f"|format(tune_band.low_hz / 1000000) }} MHz</span>
+                    <span>{{ "%.3f"|format(tune_band.center_hz / 1000000) }} MHz</span>
+                    <span>{{ "%.1f"|format(tune_band.high_hz / 1000000) }} MHz</span>
+                    {% endif %}
                   </div>
                 </div>
                 {% if 'gain' in lesson.panels %}
                 {# Gain / SNR level meter (M2): the floor and peak as lines on a vertical dB scale,
                    the gap between them — the SNR — shaded and labelled. Driven live by waterfall.js
-                   from the same sweep as the waterfall; no radio shows an honest empty meter. #}
+                   from the same sweep as the waterfall; no radio shows an honest empty meter. The
+                   -/+ stepper beside it really changes the sweep's gain through /api/gain, under the
+                   gain the radio reports (unknown until it does). #}
                 <aside class="gain-meter" data-gain-meter aria-label="Gain and SNR level meter">
+                  <div class="gain-meter__scale">
                   <div class="gain-meter__title">GAIN</div>
                   <div class="gain-meter__track">
                     <div class="gain-meter__mark gain-meter__mark--peak" data-gain-peak hidden>
@@ -676,6 +686,14 @@
                       <span class="gain-meter__tag">FLOOR</span><b data-gain-floor-v>&mdash;</b>
                     </div>
                     <div class="gain-meter__empty" data-gain-empty>&mdash; no radio &mdash;</div>
+                  </div>
+                  </div>
+                  <div class="gain-meter__control">
+                    <b class="gain-meter__value" data-gain-value>&mdash;</b>
+                    <div class="gain-meter__buttons">
+                      <button class="tune-btn gain-meter__btn" type="button" data-gain-step="-1" aria-label="Gain down">&minus;</button>
+                      <button class="tune-btn gain-meter__btn" type="button" data-gain-step="1" aria-label="Gain up">+</button>
+                    </div>
                   </div>
                 </aside>
                 {% endif %}
@@ -715,11 +733,14 @@
               <button class="cmdstrip cmdstrip--sweep" type="button" data-command hidden
                       aria-expanded="false"
                       aria-label="The command the waterfall is running; tap to show it whole"><code data-command-text></code></button>
-              <div class="tune">
+              {# +/- and a tap on the waterfall retune the live sweep through /api/tune (waterfall.js).
+                 The dial starts on the lesson's target, marked pending, and reads as tuned only once
+                 the radio confirms the span. #}
+              <div class="tune" data-tune-strip data-step-hz="{{ step_hz|default(100000) }}">
                 <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
                 <div class="tune__dial">
-                  <div class="tune__freq" data-freq>{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
-                  <div class="tune__caption">Tap to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz</div>
+                  <div class="tune__freq tune__freq--pending" data-freq>{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
+                  <div class="tune__caption" data-tune-caption>Tap to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz</div>
                 </div>
                 <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
                 {# Next-step rides on the tune strip here (not a separate footer) so the fixed 800x480
@@ -775,6 +796,16 @@
       {% endif %}
     {% endfor %}
   </div>
+  {% if lesson.uses_apt or lesson.uses_sstv %}
+  {# Red-night re-inks a decoded picture: its luminance (Rec. 709 weights) goes to red, and green
+     and blue get nothing, so the picture keeps its shading in one hue. Same technique as the exam
+     figures' ink filters; applied by app.css only in red-night. #}
+  <svg class="sr-only" aria-hidden="true" focusable="false">
+    <filter id="gallery-ink-red" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.2126 0.7152 0.0722 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+    </filter>
+  </svg>
+  {% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -825,37 +856,11 @@
 <!-- The live Rayhunter monitor (M19): polls /api/rayhunter and shows the recording line + heuristic
      findings from the Orbic. No Orbic reachable shows honestly; a quiet line never proves no catcher. -->
 <script src="/static/rayhunter.js"></script>
-<script>
-  // Shell behaviour that is NOT the waterfall: the tune readout (display only). Stepping between
-  // the lesson's rendered stage panels lives in /static/lesson-nav.js. The waterfall itself is drawn by
-  // /static/waterfall.js, so nothing here paints the canvas — a placeholder spectrogram would be
-  // invented signal, which the RF honesty invariant forbids once the real renderer exists.
-  (function () {
-    // --- tune readout: +/- buttons and tap-to-tune (display only) ------
-    var STEP_MHZ = 0.1;
-    document.querySelectorAll(".stage-panel").forEach(function (panel) {
-      var freqEl = panel.querySelector("[data-freq]");
-      if (!freqEl) return;
-      var mhz = parseFloat(freqEl.textContent) || 100.3;
-      function render() { freqEl.innerHTML = mhz.toFixed(3) + "<span>MHz</span>"; }
-      panel.querySelectorAll(".tune-btn").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          mhz += (parseInt(btn.getAttribute("data-tune-step"), 10) || 0) * STEP_MHZ;
-          render();
-        });
-      });
-      var wf = panel.querySelector("canvas.waterfall[data-tune]");
-      if (wf) wf.addEventListener("click", function (ev) {
-        var rect = wf.getBoundingClientRect();
-        var frac = (ev.clientX - rect.left) / rect.width;      // 0..1 across the span
-        mhz = (mhz - 1.3) + frac * 2.6;                         // map tap to the shown span
-        render();
-      });
-    });
-
-    // Keyboard scrolling is shared across screens — see /static/scroll-keys.js (loaded in base).
-  })();
-</script>
+<!-- Shell behaviour that is NOT the waterfall lives in its own files: stepping between the
+     lesson's rendered stage panels in /static/lesson-nav.js (below), and the tune strip (+/- and
+     tap-to-tune retune the live sweep) in /static/waterfall.js, which alone paints the canvas — a
+     placeholder spectrogram would be invented signal, which the RF honesty invariant forbids.
+     Keyboard scrolling is shared across screens — see /static/scroll-keys.js (loaded in base). -->
 <!-- Stage navigation: Next, Previous and rail-pip jumps; each step is remembered server-side so a
      reload resumes in place, and Complete leads on to the next lesson or back to the unit. -->
 <script src="/static/lesson-nav.js"></script>

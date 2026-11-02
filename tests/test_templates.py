@@ -130,6 +130,115 @@ def test_the_waterfall_canvas_is_scaled_without_smoothing():
     assert "image-rendering: pixelated" in rule
 
 
+APP_CSS = TEMPLATES_DIR.parent / "static" / "app.css"
+THEMES = ("dark", "sunlight", "red-night")
+
+
+def _css_rule(selector):
+    """The body of the first top-level rule for exactly this selector in app.css."""
+    css = APP_CSS.read_text()
+    match = re.search(r"\n" + re.escape(selector) + r" \{(.*?)\}", css, re.S)
+    assert match, f"no {selector} rule in app.css"
+    return match.group(1)
+
+
+def _theme_tokens(theme):
+    """Every custom property a theme defines, merged across its .app[data-theme] blocks."""
+    css = APP_CSS.read_text()
+    tokens = {}
+    block_re = r'\.app\[data-theme="' + re.escape(theme) + r'"\] \{(.*?)\}'
+    for block in re.findall(block_re, css, re.S):
+        tokens.update(dict(re.findall(r"(--[\w-]+):\s*([^;]+);", block)))
+    return tokens
+
+
+def _contrast(fg, bg):
+    """WCAG 2 contrast ratio between two #rrggbb colours."""
+    def luminance(hex_colour):
+        channels = [int(hex_colour.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    hi, lo = sorted((luminance(fg), luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _font_px(rule):
+    return int(re.search(r"font-size:\s*(\d+)px", rule).group(1))
+
+
+def test_the_no_radio_reason_is_page_text_over_the_canvas_not_canvas_pixels():
+    # Text drawn into the canvas is squashed with the bitmap (~7 px tall on the panel), so the
+    # reason rides in a DOM slot over the canvas instead; the canvas holds only real bins.
+    html = _console(prediction_committed=True, current_stage="operate")
+    wrap = re.search(r'class="waterfall-wrap">(.*?)</div>\s*</div>', html, re.S).group(1)
+    assert "data-wf-reason" in wrap
+
+
+def test_the_no_radio_reason_is_large_and_readable_in_every_theme():
+    rule = _css_rule(".waterfall__reason")
+    assert _font_px(rule) >= 18
+    assert "var(--wf-ink)" in rule
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        assert _contrast(tokens["--wf-ink"], tokens["--wf-bg"]) >= 4.5, theme
+
+
+def test_honest_empty_states_are_large_and_readable_in_every_theme():
+    # "listening…" / "no radio" is the honest state a learner sees most: read it at a glance.
+    for selector in (".decoder__empty", ".gain-meter__empty"):
+        rule = _css_rule(selector)
+        assert _font_px(rule) >= 18, selector
+        assert "var(--fg-dim)" in rule, selector
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        assert _contrast(tokens["--fg-dim"], tokens["--surface"]) >= 4.5, theme
+
+
+def _hex_rgb(colour):
+    return tuple(int(colour.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def test_red_night_paints_the_waterfall_from_a_red_only_ramp():
+    # Red-night keeps night vision: the waterfall's levels are shades of red alone, never the
+    # blue-to-yellow rainbow. Each stop has no more green or blue than a dim red tint.
+    stops = _theme_tokens("red-night")["--wf-ramp"].split()
+    assert len(stops) >= 2
+    for stop in stops:
+        r, g, b = _hex_rgb(stop)
+        assert g == b and g <= r * 0.35, stop
+    # Brighter is stronger: the ramp climbs from floor to peak.
+    assert _hex_rgb(stops[-1])[0] > _hex_rgb(stops[0])[0]
+
+
+def test_the_other_themes_keep_the_conventional_waterfall_map():
+    assert "--wf-ramp" not in _theme_tokens("dark")
+    assert "--wf-ramp" not in _theme_tokens("sunlight")
+
+
+def _apt_lesson():
+    return parse_lesson({
+        "id": 24, "slug": "apt", "title": "APT", "type": "intro", "concept": "c",
+        "panels": ["apt"], "hardware": ["rtl-sdr"],
+        "stages": {"frame": "f", "demo": "d", "try": "t", "predict": "p", "observe": "o",
+                   "explain": "e"},
+    })
+
+
+def test_a_decoded_picture_is_re_inked_red_in_red_night():
+    # A decoded weather picture or SSTV frame is full colour; red-night maps its brightness onto red
+    # alone with an SVG colour matrix (the technique the exam figures use), so no other hue shows.
+    html = _console(lesson=_apt_lesson(), current_stage="demo")
+    matrix = re.search(r'<filter id="gallery-ink-red"[^>]*>\s*<feColorMatrix type="matrix" '
+                       r'values="([^"]+)"', html)
+    assert matrix, "no red-night filter for the decoded picture"
+    rows = [matrix.group(1).split()[i:i + 5] for i in range(0, 20, 5)]
+    assert all(float(v) == 0 for v in rows[1] + rows[2])   # nothing reaches green or blue
+    assert html.count('id="gallery-ink-red"') == 1
+    css = APP_CSS.read_text()
+    assert re.search(r'\.app\[data-theme="red-night"\] \.gallery__img \{[^}]*'
+                     r'filter: url\(#gallery-ink-red\)', css)
+
+
 def _env():
     return Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
@@ -477,6 +586,22 @@ def test_a_gain_lesson_shows_the_gain_meter_beside_the_waterfall():
     assert "data-gain-gap" in html and "data-gain-floor" in html
 
 
+def test_the_gain_panel_carries_a_real_gain_stepper_and_its_value():
+    # M2's try stage is "step the gain from the bottom up": the panel has - and + that drive
+    # /api/gain, and the gain the radio is on is shown beside them (unknown until it reports).
+    html = _console(lesson=_gain_intro_lesson(), current_stage="demo")
+    demo = re.search(r'<section class="stage-panel[^"]*" data-stage="demo"(.*?)</section>',
+                     html, re.S).group(1)
+    meter = re.search(r'<aside class="gain-meter"(.*?)</aside>', demo, re.S).group(1)
+    assert 'data-gain-step="-1"' in meter and 'data-gain-step="1"' in meter
+    assert re.search(r"data-gain-value[^>]*>&mdash;<", meter)
+
+
+def test_the_gain_stepper_buttons_are_full_touch_targets():
+    rule = _css_rule(".gain-meter .gain-meter__btn")
+    assert re.search(r"width:\s*72px", rule) and re.search(r"height:\s*72px", rule)
+
+
 def test_a_lesson_without_the_gain_panel_has_no_gain_meter():
     # The intro fixture declares only the ppm panel, so its instrument stage draws no gain meter.
     html = _console(lesson=_intro_lesson(), current_stage="demo")
@@ -819,6 +944,61 @@ def test_an_untuned_lesson_carries_no_band_to_retune_to():
     html = _console(lesson=_consolidation_lesson(), current_stage="operate",
                     prediction_committed=True)
     assert "data-tune-low" not in html
+
+
+def _live_instrument(html):
+    """The live (operate) instrument's markup: its waterfall wrap and tune strip."""
+    return re.search(r'<section class="stage-panel[^"]*" data-stage="operate".*?'
+                     r'<div class="instrument(?: instrument--gain)?">(.*?)'
+                     r'<p class="stage-panel__body">', html, re.S).group(1)
+
+
+def test_a_tuned_lesson_names_its_bin_size_and_step_for_the_live_tune():
+    lesson = parse_lesson({
+        "id": 6, "slug": "res", "title": "Res", "concept": "c", "hardware": ["rtlsdr"],
+        "tune": {"center_hz": 1_090_000_000, "span_hz": 2_000_000, "step_hz": 1_000_000,
+                 "bin_hz": 31_250},
+        "stages": {"predict": "p", "operate": "o", "observe": "ob", "explain": "e"},
+    })
+    html = _live_instrument(_console(
+        lesson=lesson, current_stage="operate", prediction_committed=True,
+        tuned_hz=lesson.tune["center_hz"], step_hz=lesson.tune["step_hz"],
+        tune_band=lesson.tune))
+    assert 'data-tune-bin="31250"' in html
+    assert 'data-step-hz="1000000"' in html
+
+
+def test_the_tune_strip_steps_by_the_default_when_a_lesson_names_none():
+    html = _live_instrument(_console(lesson=_consolidation_lesson(), current_stage="operate",
+                                     prediction_committed=True))
+    assert 'data-step-hz="100000"' in html
+    assert "data-tune-bin" not in html
+
+
+def test_the_dial_is_not_shown_as_tuned_until_the_radio_confirms_it():
+    # The readout only reads as tuned once the server has confirmed a span; until then it is the
+    # lesson's target, marked pending, so a dead radio never looks tuned.
+    html = _live_instrument(_console(current_stage="operate", prediction_committed=True))
+    assert "tune__freq--pending" in html
+
+
+def test_the_instrument_axis_never_labels_a_span_nobody_tuned():
+    # The default sweep is 88-108 MHz; an axis drawn as dial +/- 1.3 MHz labelled a span that was
+    # never swept. Until the radio reports its span the axis carries no numbers.
+    html = _live_instrument(_console(lesson=_consolidation_lesson(), current_stage="operate",
+                                     prediction_committed=True))
+    axis = re.search(r'class="waterfall__axis"[^>]*>(.*?)</div>', html, re.S).group(1)
+    assert not re.search(r"\d", axis)
+
+
+def test_a_tuned_lesson_axis_starts_on_its_own_band_edges():
+    lesson = _tuned_lesson()
+    html = _live_instrument(_console(
+        lesson=lesson, current_stage="operate", prediction_committed=True,
+        tuned_hz=lesson.tune["center_hz"], step_hz=lesson.tune["step_hz"],
+        tune_band=lesson.tune))
+    axis = re.search(r'class="waterfall__axis"[^>]*>(.*?)</div>', html, re.S).group(1)
+    assert "432.9" in axis and "434.9" in axis
 
 
 # --- the home / tile screen ---------------------------------------------------

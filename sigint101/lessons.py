@@ -8,7 +8,14 @@ from pathlib import Path
 
 import yaml
 
-from .spectrum import MAX_SPAN_HZ, MIN_SPAN_HZ, TUNER_MAX_HZ, TUNER_MIN_HZ
+from .spectrum import (
+    MAX_SPAN_HZ,
+    MIN_SPAN_HZ,
+    TUNER_MAX_HZ,
+    TUNER_MIN_HZ,
+    TuneError,
+    validate_span,
+)
 
 # A pack declares its shape with `type`. An intro lesson teaches a concept from a blank
 # slate, so it opens with frame/demo/try before the learner predicts; a consolidation
@@ -320,12 +327,13 @@ def _require(data: dict, key: str, ctx: str):
 def _parse_tune(data: dict, ctx: str) -> dict | None:
     """Validate an optional `tune` band and normalise it to centre/span/step + edges.
 
-    A pack names where its instrument should start — `tune: {center_hz, span_hz, step_hz?}` —
-    because the eight FM-band lessons predate any need to leave 88-108 MHz, and a lesson on a
-    signal elsewhere (OOK at 433.92 MHz) cannot be hand-tuned there a hundred kHz at a time. The
-    band is checked against what the radio can actually reach and what the sweeper can sweep, at
-    load, so an unreachable pack fails here rather than mid-lesson in front of a learner. A pack
-    with no `tune` returns None and keeps the default FM sweep.
+    A pack names where its instrument should start — `tune: {center_hz, span_hz, step_hz?,
+    bin_hz?}` — because the eight FM-band lessons predate any need to leave 88-108 MHz, and a
+    lesson on a signal elsewhere (OOK at 433.92 MHz) cannot be hand-tuned there a hundred kHz at
+    a time. The band is checked against what the radio can actually reach and what the sweeper
+    can sweep, at load, so an unreachable pack fails here rather than mid-lesson in front of a
+    learner. A pack with no `tune` returns None and keeps the default FM sweep. `bin_hz` is the
+    sweep's bin size; without one the sweep keeps its FM-sized default bin.
     """
     raw = data.get("tune")
     if raw in (None, {}):
@@ -346,6 +354,7 @@ def _parse_tune(data: dict, ctx: str) -> dict | None:
     center = _positive_int("center_hz", required=True)
     span = _positive_int("span_hz", required=True)
     step = _positive_int("step_hz", required=False, default=DEFAULT_TUNE_STEP_HZ)
+    bin_hz = _positive_int("bin_hz", required=False)
 
     if span < MIN_SPAN_HZ or span > MAX_SPAN_HZ:
         raise LessonError(
@@ -359,7 +368,13 @@ def _parse_tune(data: dict, ctx: str) -> dict | None:
             f"{ctx}: 'tune' band {low / 1e6:.3f}-{high / 1e6:.3f} MHz is outside the radio's "
             f"{TUNER_MIN_HZ // 1_000_000}-{TUNER_MAX_HZ // 1_000_000} MHz range"
         )
-    return {"center_hz": center, "span_hz": span, "step_hz": step,
+    if bin_hz is not None:
+        # The same gate /api/tune applies, so a pack can never name a sweep the console refuses.
+        try:
+            validate_span(low, high, bin_hz)
+        except TuneError as exc:
+            raise LessonError(f"{ctx}: 'tune.bin_hz' {bin_hz} Hz: {exc}") from exc
+    return {"center_hz": center, "span_hz": span, "step_hz": step, "bin_hz": bin_hz,
             "low_hz": low, "high_hz": high}
 
 

@@ -473,6 +473,27 @@ def test_a_tune_band_missing_its_centre_is_refused():
         parse_lesson(_consolidation(tune={"span_hz": 2_000_000}))
 
 
+def test_a_tune_band_carries_its_own_bin_size():
+    # A narrow signal needs finer bins than the FM default; the pack names the bin it sweeps at.
+    lesson = parse_lesson(_consolidation(tune={
+        "center_hz": 1_090_000_000, "span_hz": 2_000_000, "bin_hz": 31_250}))
+    assert lesson.tune["bin_hz"] == 31_250
+
+
+def test_a_tune_band_without_a_bin_size_leaves_the_sweep_default():
+    lesson = parse_lesson(_consolidation(tune={"center_hz": 433_920_000, "span_hz": 2_000_000}))
+    assert lesson.tune["bin_hz"] is None
+
+
+@pytest.mark.parametrize("bin_hz", [10, 0, 3_000_000, True])
+def test_a_tune_bin_the_sweep_cannot_do_is_refused(bin_hz):
+    # 10 Hz over 2 MHz is 200,000 bins a row; 0 and a boolean are not sizes; 3 MHz is wider than
+    # rtl_power's own limit and the span itself.
+    with pytest.raises(LessonError, match="bin"):
+        parse_lesson(_consolidation(tune={
+            "center_hz": 433_920_000, "span_hz": 2_000_000, "bin_hz": bin_hz}))
+
+
 # --- answer key and verdict (the predict gate is scored) ----------------------
 # A pack names which of its own chips is right (`answer`, a list so a lesson whose explain
 # defends two keys can accept both) and a one-line `verdict` the explain header prints. The
