@@ -561,3 +561,21 @@ def test_the_answer_rides_the_sealed_reveal():
     revealed = lesson.reveal(prediction_committed=True)
     assert revealed["answer"] == ["same"]
     assert revealed["verdict"] == "Same width."
+
+
+@pytest.mark.parametrize("hardware, badges", [
+    (["rtl-sdr"], []),                              # the built-in radio needs no badge
+    ([], []),                                       # a no-RF lesson needs nothing
+    (["wifi-monitor"], ["Wi-Fi adapter"]),
+    (["orbic-rayhunter"], ["Orbic"]),
+    (["lora"], ["2nd node"]),                       # the LoRa radio is built in; the peer is not
+    (["flipper"], ["Flipper"]),
+    (["rtl-sdr", "flipper"], ["Flipper"]),
+])
+def test_a_lesson_badges_the_hardware_it_needs_beyond_the_built_in_radio(hardware, badges):
+    assert parse_lesson(_consolidation(hardware=hardware)).hardware_badges == badges
+
+
+def test_hardware_with_no_badge_label_is_named_as_written_never_hidden():
+    # A pack naming kit the console has no label for still shows it, so a need is never invisible.
+    assert parse_lesson(_consolidation(hardware=["hackrf"])).hardware_badges == ["hackrf"]

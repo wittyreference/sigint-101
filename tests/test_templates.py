@@ -159,9 +159,12 @@ def _console(lesson=None, **ctx):
 
 
 def _eyebrow_for(html, stage):
-    """The eyebrow text of one stage's panel (the first eyebrow after its section opens)."""
+    """The eyebrow text of one stage's panel (the first eyebrow after its section opens).
+
+    Anchored on the panel's <section>: the rail's pips carry data-stage too.
+    """
     m = re.search(
-        r'data-stage="' + re.escape(stage) + r'".*?stage-panel__eyebrow">(.*?)</div>',
+        r'<section[^>]*data-stage="' + re.escape(stage) + r'".*?stage-panel__eyebrow">(.*?)</div>',
         html,
         re.S,
     )
@@ -389,36 +392,70 @@ def test_a_hardware_lesson_still_renders_the_radio():
     assert "SIGNAL HIDDEN" in html
 
 
-def test_instrument_stage_eyebrow_drops_the_repeated_concept():
-    # The instrument stages (demo/try/observe) have a tight scrolling narration band at 800x480,
-    # so their eyebrow carries only the step + stage label; the concept already rode the frame
-    # stage and must not eat that band again here.
+def _section(html, stage):
+    """One stage panel's whole <section>, by its data-stage."""
+    m = re.search(r'<section[^>]*data-stage="' + re.escape(stage) + r'".*?</section>', html, re.S)
+    return m.group(0) if m else ""
+
+
+@pytest.mark.parametrize("lesson_fn", [_intro_lesson, _rules_lesson])
+def test_every_eyebrow_is_the_step_and_stage_only(lesson_fn):
+    # The eyebrow once reprinted the whole concept in 13px caps on frame and explain, squeezing the
+    # L11-L28 bodies to 7-82px (UX S0-2). It now reads "Step n of 6 · STAGE" on every stage, radio
+    # lesson or not.
+    lesson = lesson_fn()
+    html = _console(lesson=lesson, current_stage="frame", prediction_committed=True)
+    for n, stage in enumerate(lesson.stage_order, start=1):
+        eyebrow = " ".join(_eyebrow_for(html, stage).split())
+        assert eyebrow == f"Step {n} of {len(lesson.stage_order)} &middot; {stage.upper()}"
+
+
+def test_the_concept_never_shows_before_the_commit():
+    # On most lessons the concept states the predict answer (curriculum verify §6a), so nothing
+    # before the gate may carry it — not the frame, not an eyebrow.
     lesson = _intro_lesson()
-    html = _console(lesson=lesson, current_stage="demo", prediction_committed=False)
-    demo_eyebrow = _eyebrow_for(html, "demo")
-    assert "DEMO" in demo_eyebrow
-    assert lesson.concept not in demo_eyebrow
-    # The frame still carries the lesson's thesis.
-    assert lesson.concept in _eyebrow_for(html, "frame")
+    html = _console(lesson=lesson, current_stage="frame", prediction_committed=False)
+    assert lesson.concept not in html
 
 
-def test_the_predict_eyebrow_drops_the_repeated_concept():
-    # Predict is the tightest screen (prompt + frozen frame + chips + Commit all on 800x480), so its
-    # eyebrow carries only the step + stage label; the concept already rode the frame stage.
+def test_the_explain_stage_carries_the_concept_once_inside_its_scrolling_body():
+    # After the reveal the concept is the lesson's takeaway: once, in the explain body that scrolls
+    # (the Complete button stays pinned in the footer), after the explanation it sums up.
     lesson = _intro_lesson()
-    html = _console(lesson=lesson, current_stage="predict", prediction_committed=False)
-    predict_eyebrow = _eyebrow_for(html, "predict")
-    assert "PREDICT" in predict_eyebrow
-    assert lesson.concept not in predict_eyebrow
-    assert lesson.concept in _eyebrow_for(html, "frame")
+    html = _console(lesson=lesson, current_stage="explain", prediction_committed=True)
+    assert html.count(lesson.concept) == 1
+    explain = _section(html, "explain")
+    body = re.search(r'<div class="stage-panel__body">(.*?)</div>', explain, re.S).group(1)
+    assert body.index("EXPLAIN_INTRO_marker") < body.index(lesson.concept)
+    assert "stage-foot" in explain and "data-complete" in explain
 
 
-def test_a_no_hardware_instrument_stage_keeps_the_concept_in_its_eyebrow():
-    # A no-radio lesson's demo renders as plain text (no tight waterfall band), so it is not an
-    # instrument stage and keeps the concept in its eyebrow like any text stage.
-    lesson = _rules_lesson()
-    html = _console(lesson=lesson, current_stage="demo")
-    assert lesson.concept in _eyebrow_for(html, "demo")
+def test_every_stage_but_the_first_offers_a_previous_step():
+    lesson = _intro_lesson()
+    html = _console(lesson=lesson, current_stage="frame", prediction_committed=True)
+    for stage in lesson.stage_order:
+        assert ('data-nav="prev"' in _section(html, stage)) == (stage != "frame"), stage
+
+
+def test_a_committed_predict_screen_steps_on_instead_of_committing_again():
+    # Going back to predict after the commit shows the locked-in choice; Next carries on from it.
+    html = _console(lesson=_intro_lesson(), current_stage="predict", prediction_committed=True,
+                    committed_choice="a")
+    predict = _section(html, "predict")
+    assert 'data-nav="next"' in predict
+    assert "btn-commit" not in predict
+
+
+def test_only_a_radio_lessons_hands_on_stages_are_instrument_panels():
+    # The instrument layout (title and eyebrow on one row, narration band under the radio) applies
+    # to the stages that draw the radio, and to nothing else.
+    html = _console(lesson=_intro_lesson(), current_stage="frame", prediction_committed=True)
+    for stage in ("demo", "try", "observe"):
+        assert "stage-panel--instrument" in _section(html, stage).split(">", 1)[0]
+    for stage in ("frame", "predict", "explain"):
+        assert "stage-panel--instrument" not in _section(html, stage).split(">", 1)[0]
+    rules = _console(lesson=_rules_lesson(), current_stage="demo")
+    assert "stage-panel--instrument" not in rules
 
 
 def _gain_intro_lesson():
@@ -872,6 +909,64 @@ def test_a_figure_question_shows_its_diagram_behind_a_tap(template):
     assert 'id="figure-T-1"' in html
     assert 'src="/static/exam/T-1.jpg"' in html
     assert "not shown here yet" not in html
+
+
+def _pinned(html, button):
+    """True when `button` sits in the exam's pinned footer, after the scrolling body that holds
+    the question and the chips — so a long question can never push it off the 800x480 screen."""
+    body = html.index('class="exam__body"')
+    foot = html.index('class="exam__foot')
+    return body < html.index('class="exam__question"') < foot and html.index(button) > foot
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_exam_card_pins_commit_below_a_scrolling_body(template):
+    q = exam.load_pool().get("T1D01")
+    html = _render(template, **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False,
+        position=1, total=35, score=0, answered=0, pass_mark=26))
+    assert _pinned(html, "Commit answer")
+    assert html.index('name="choice"') < html.index('class="exam__foot')
+    # Commit lives outside the form's markup, so it names the form it submits.
+    assert 'form="exam-answer"' in html and 'id="exam-answer"' in html
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_exam_review_pins_next_below_a_scrolling_body(template):
+    q = exam.load_pool().get("T1D01")
+    html = _render(template, **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=True,
+        chosen="A", correct=False, position=1, total=35, score=0, answered=1, pass_mark=26,
+        next_href="/exam/sim", last=False))
+    assert _pinned(html, "exam-reveal")
+    assert 'class="exam__question"' in html          # the question is never dropped on review
+
+
+def test_exam_study_card_offers_the_practice_exam_from_its_footer():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam.html", **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False))
+    assert _pinned(html, 'href="/exam/sim"')
+
+
+def test_exam_sim_card_offers_skip_while_another_question_waits():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam_sim.html", **_exam_ctx(
+        title="Practice Exam", back_href="/exam", back_label="Exam", question=q, reviewed=False,
+        position=4, total=35, score=1, answered=2, pass_mark=26, skipped=1, can_skip=True))
+    # Skip submits the same form to the skip endpoint, without needing a choice tapped first.
+    assert 'formaction="/api/exam/sim/skip?question_id=T1A01"' in html
+    assert "formnovalidate" in html
+    assert _pinned(html, ">Skip<")
+    assert "1 skipped" in html
+
+
+def test_exam_sim_card_has_no_skip_on_the_last_question_left():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam_sim.html", **_exam_ctx(
+        title="Practice Exam", back_href="/exam", back_label="Exam", question=q, reviewed=False,
+        position=1, total=35, score=30, answered=34, pass_mark=26, skipped=1, can_skip=False))
+    assert "/api/exam/sim/skip" not in html
 
 
 def test_a_question_without_a_figure_offers_no_diagram():

@@ -171,3 +171,86 @@ def test_the_store_defaults_under_data(tmp_path, monkeypatch):
     prog = Progress()
     assert Path(DEFAULT_DB_PATH).exists()
     prog.close()
+
+
+# --- where the learner is inside a lesson (resume after a reload or a power cut) ---------------
+
+
+def test_a_lesson_with_no_stage_recorded_has_none(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    assert prog.get_stage(1) is None
+    prog.close()
+
+
+def test_recording_a_stage_remembers_it_and_how_far_the_learner_got(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_stage(1, "demo", 1)
+    assert prog.get_stage(1) == {"stage": "demo", "furthest": 1}
+    prog.record_stage(1, "try", 2)
+    assert prog.get_stage(1) == {"stage": "try", "furthest": 2}
+    prog.close()
+
+
+def test_stepping_back_keeps_the_furthest_stage_reached(tmp_path):
+    # Re-reading the setup after reaching the explanation must not forget the explanation was
+    # reached: the rail keeps every visited stage tappable.
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_stage(1, "explain", 5)
+    prog.record_stage(1, "frame", 0)
+    assert prog.get_stage(1) == {"stage": "frame", "furthest": 5}
+    prog.close()
+
+
+def test_stages_are_kept_per_lesson(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_stage(1, "try", 2)
+    prog.record_stage(2, "demo", 1)
+    assert prog.get_stage(1)["stage"] == "try"
+    assert prog.get_stage(2)["stage"] == "demo"
+    prog.close()
+
+
+def test_the_stage_survives_a_reopen(tmp_path):
+    # The kiosk loses power in the field; the place in the lesson must survive it.
+    db = tmp_path / "progress.db"
+    first = Progress(db)
+    first.record_stage(3, "predict", 3)
+    first.close()
+    second = Progress(db)
+    assert second.get_stage(3) == {"stage": "predict", "furthest": 3}
+    second.close()
+
+
+@pytest.mark.parametrize("stage, position", [("", 0), ("   ", 1), ("demo", -1)])
+def test_a_blank_stage_or_negative_position_is_refused(tmp_path, stage, position):
+    prog = Progress(tmp_path / "progress.db")
+    with pytest.raises(ValueError):
+        prog.record_stage(1, stage, position)
+    assert prog.get_stage(1) is None
+    prog.close()
+
+
+def test_an_existing_db_from_before_stages_were_kept_still_opens(tmp_path):
+    # A box that ran an earlier build has progress and predictions but no stage table. Opening it
+    # must keep that history and start keeping stages, with no migration step.
+    db = tmp_path / "progress.db"
+    import sqlite3
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE progress (lesson_id INTEGER PRIMARY KEY, opened INTEGER NOT NULL "
+        "DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0, updated REAL);"
+        "CREATE TABLE responses (lesson_id INTEGER NOT NULL, kind TEXT NOT NULL, "
+        "body TEXT NOT NULL, updated REAL, PRIMARY KEY (lesson_id, kind));"
+        "INSERT INTO progress(lesson_id, opened, completed) VALUES(1, 1, 1);"
+        "INSERT INTO responses(lesson_id, kind, body) VALUES(1, 'prediction', 'b');"
+    )
+    conn.commit()
+    conn.close()
+
+    prog = Progress(db)
+    assert prog.get(1)["completed"] == 1
+    assert prog.get_prediction(1) == "b"
+    assert prog.get_stage(1) is None
+    prog.record_stage(1, "observe", 4)
+    assert prog.get_stage(1) == {"stage": "observe", "furthest": 4}
+    prog.close()
