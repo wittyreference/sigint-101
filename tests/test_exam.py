@@ -52,6 +52,15 @@ def test_figure_questions_are_tagged():
     assert figs == {"T-1", "T-2", "T-3"}
 
 
+def test_every_figure_the_pool_cites_ships_as_an_image():
+    # A figure question with no diagram is unanswerable; the NCVEC pool's own T-1/T-2/T-3 ship
+    # beside the app so the card can show what the question is asking about.
+    static = Path(exam.__file__).parent / "static" / "exam"
+    figs = {q.figure for q in exam.load_pool().questions if q.figure}
+    for fig in figs:
+        assert (static / f"{fig}.jpg").is_file(), f"diagram {fig} is not shipped"
+
+
 def test_loader_raises_on_missing_file(tmp_path):
     with pytest.raises(exam.PoolError):
         exam.load_pool(tmp_path / "nope.json")

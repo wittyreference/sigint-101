@@ -1588,10 +1588,75 @@ body {
   overflow-y: auto;
   min-height: 0;
 }
-.exam__figure-note {
-  margin: 0;
-  font-size: 15px;
-  color: var(--fg-dim);
+/* The question and (when it cites one) its diagram button share a row, so a figure question
+   spends no extra height: the 800x480 card still fits its four chips and Commit. */
+.exam__ask {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-height: 0;
+}
+.exam__ask .exam__question {
+  flex: 1 1 auto;
+  max-height: 100%;
+}
+.exam-figure__open {
+  flex: 0 0 auto;
+  width: 120px;
+  padding: 0 8px;
+  font-size: 18px;
+  line-height: 1.15;
+  text-align: center;
+  text-decoration: none;
+}
+/* Full-screen diagram: hidden until its #figure-T-n is the URL target; tapping anywhere closes.
+   The NCVEC art is black line work on white, so each theme re-inks it (green / red on black,
+   or dark on cream) rather than flashing a white sheet — red-night must stay red. */
+.exam-figure {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--bg);
+}
+.exam-figure:target {
+  display: flex;
+}
+.exam-figure__close {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  text-decoration: none;
+  min-height: 0;
+}
+.exam-figure__img {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: 100%;
+  object-fit: contain;
+  filter: var(--figure-ink);
+  /* The re-inked paper is pure black (or white in sunlight); blending drops it into the theme's
+     own background instead of leaving a mismatched rectangle. */
+  mix-blend-mode: var(--figure-blend);
+}
+.exam-figure__bar {
+  width: 100%;
+  flex: 0 0 auto;
+}
+.app[data-theme="dark"] {
+  --figure-ink: url(#figure-ink-dark);
+  --figure-blend: screen;
+}
+.app[data-theme="sunlight"] {
+  --figure-ink: none;
+  --figure-blend: multiply;
+}
+.app[data-theme="red-night"] {
+  --figure-ink: url(#figure-ink-red);
+  --figure-blend: screen;
 }
 /* Four options, two across — keeps the touch targets wide and the card inside 800x480. */
 .exam-chips {
