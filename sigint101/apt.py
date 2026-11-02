@@ -9,6 +9,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .childproc import ChildWatch, running_command, spawn, stop_process
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
@@ -60,7 +61,7 @@ def satellite_for(freq_hz: int) -> str:
 
 def _popen(freq_hz: int, device: int, output_dir: Path):
     """Launch satdump on the NOAA APT pipeline, writing decoded image products into output_dir."""
-    return subprocess.Popen(
+    return spawn(
         [SATDUMP, "live", APT_PIPELINE, str(output_dir),
          "--source", "rtlsdr", "--source_id", str(device),
          "--samplerate", str(APT_SAMPLE_RATE_HZ), "--frequency", str(freq_hz),
@@ -94,11 +95,18 @@ class AptDecoder:
         self._proc = None
         self._released = False
         self.error = None
+        # Who ended the child, and when the console may launch it again after it died on its own.
+        # A pass ends by design when satdump's timeout runs out, so a clean exit is not a death.
+        self.watch = ChildWatch(SATDUMP, finite=True)
 
     @property
     def running(self) -> bool:
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the live process; None when nothing runs."""
+        return running_command(self._proc)
 
     @property
     def released(self) -> bool:
@@ -134,6 +142,7 @@ class AptDecoder:
     def _start_locked(self) -> None:
         if self.running:
             return
+        self._settle()
         if self._released:
             raise AptUnavailable(
                 "the radio was released to another program; resume APT to take it back")
@@ -145,6 +154,11 @@ class AptDecoder:
         if self.error:
             reason, self.error = self.error, None
             raise AptUnavailable(reason)
+        # A child that died on its own is not relaunched on every poll: the reason stands, and the
+        # console waits out a back-off that grows while the deaths keep coming.
+        blocked = self.watch.blocked()
+        if blocked:
+            raise AptUnavailable(blocked)
         self.device = self._choose_device()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -152,7 +166,20 @@ class AptDecoder:
         except (OSError, ValueError) as exc:
             self._proc = None
             raise AptUnavailable(f"cannot run satdump: {exc}") from exc
+        self.watch.spawned(self._proc)
         self.error = None
+
+    def _note_end(self, proc) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+        reason = self.watch.ended(proc)
+        if reason and self.error is None:
+            self.error = reason
+
+    def _settle(self) -> None:
+        """Account for a child that ended since the last poll, then clear away what it left."""
+        if self._proc is not None:
+            self._note_end(self._proc)
+            self._stop_locked()
 
     def stop(self) -> None:
         """End the capture and let go of the dongle."""
@@ -160,15 +187,11 @@ class AptDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        # Marked first, so a pass we end is never reported as a death.
+        self.watch.stopping()
         proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.error = "satdump did not stop; the dongle may still be held"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        if proc is not None and not stop_process(proc):
+            self.error = "satdump survived kill; the dongle may still be held"
 
     def drain(self, timeout: float = APT_PASS_TIMEOUT_S) -> None:
         """Wait for the current pass to finish. Unlike a live feed, a satdump capture is finite."""

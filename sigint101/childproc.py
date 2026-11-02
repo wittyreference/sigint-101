@@ -347,7 +347,7 @@ def command_line(proc) -> str | None:
     return " | ".join(lines) or None
 
 
-def live_command(proc) -> str | None:
+def running_command(proc) -> str | None:
     """The command line of a process that is running right now, else None."""
     if proc is None or proc.poll() is not None:
         return None
@@ -366,7 +366,7 @@ class ChildWatch:
     def __init__(self, tool: str = "the decoder", *, finite=False, clock=time.monotonic):
         self.tool = tool
         self.finite = finite
-        self._clock = clock
+        self.clock = clock
         self._lock = threading.Lock()
         self._current = None
         self._started_at = None
@@ -377,7 +377,7 @@ class ChildWatch:
     def spawned(self, proc) -> None:
         with self._lock:
             self._current = proc
-            self._started_at = self._clock()
+            self._started_at = self.clock()
             self.reason = None
 
     def stopping(self) -> None:
@@ -395,7 +395,7 @@ class ChildWatch:
                     self._current = None  # a finite capture's clean end: nothing to report
                 return None
             self._current = None
-            now = self._clock()
+            now = self.clock()
             lived = now - self._started_at if self._started_at is not None else 0.0
             self._deaths = 1 if lived >= STABLE_AFTER_S else self._deaths + 1
             delay = min(FIRST_RETRY_S * 2 ** (self._deaths - 1), MAX_RETRY_S)
@@ -412,7 +412,7 @@ class ChildWatch:
         """Seconds until the console may try the tool again, or None if it may now."""
         if self.reason is None or self._retry_at is None:
             return None
-        left = self._retry_at - self._clock()
+        left = self._retry_at - self.clock()
         return left if left > 0 else None
 
     def blocked(self) -> str | None:
