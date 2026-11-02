@@ -88,6 +88,7 @@
     var count = panel.querySelector("[data-adsb-count]");
     var ring = panel.querySelector("[data-adsb-ring]");
     if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showCommand(panel, body.command);
     if (count) count.textContent = String(aircraft.length);
     clear(group);
 
@@ -119,15 +120,14 @@
     }
   }
 
-  function showEmpty(panel, reason) {
+  function showEmpty(panel, body) {
     var group = panel.querySelector("[data-adsb-dots]");
     var empty = panel.querySelector("[data-adsb-empty]");
     var badge = panel.querySelector("[data-adsb-badge]");
     var count = panel.querySelector("[data-adsb-count]");
     clear(group);
     if (count) count.textContent = "0";
-    if (badge) { badge.textContent = "NO RADIO"; badge.className = "decoder__status decoder__status--empty"; }
-    if (empty) { empty.hidden = false; empty.textContent = reason || "no radio to decode ADS-B"; }
+    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode ADS-B");
   }
 
   function tick() {
@@ -136,8 +136,7 @@
       .then(function (res) {
         var waiting = false;
         if (!res.ok || res.body.available === false) {
-          var reason = (res.body && res.body.reason) || "no radio to decode ADS-B";
-          panels.forEach(function (p) { showEmpty(p, reason); });
+          panels.forEach(function (p) { showEmpty(p, res.body); });
           waiting = true;
         } else {
           panels.forEach(function (p) { render(p, res.body); });

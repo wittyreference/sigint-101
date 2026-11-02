@@ -63,19 +63,19 @@
       list.appendChild(li);
     });
     if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = stations.length > 0;
       if (!stations.length) empty.textContent = "listening… no stations heard yet";
     }
   }
 
-  function showEmpty(panel, reason) {
+  function showEmpty(panel, body) {
     var list = panel.querySelector("[data-aprs-list]");
     var empty = panel.querySelector("[data-aprs-empty]");
     var badge = panel.querySelector("[data-aprs-badge]");
     if (list) list.innerHTML = "";
-    if (badge) { badge.textContent = "NO RADIO"; badge.className = "decoder__status decoder__status--empty"; }
-    if (empty) { empty.hidden = false; empty.textContent = reason || "no radio to decode APRS"; }
+    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode APRS");
   }
 
   function tick() {
@@ -84,8 +84,7 @@
       .then(function (res) {
         var waiting = false;
         if (!res.ok || res.body.available === false) {
-          var reason = (res.body && res.body.reason) || "no radio to decode APRS";
-          panels.forEach(function (p) { showEmpty(p, reason); });
+          panels.forEach(function (p) { showEmpty(p, res.body); });
           waiting = true;
         } else {
           panels.forEach(function (p) { render(p, res.body); });

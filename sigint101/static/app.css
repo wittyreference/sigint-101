@@ -953,6 +953,49 @@ button.rail-pip:disabled {
   border-color: var(--fg-mute);
   background: transparent;
 }
+/* A tool that died on its own reads STOPPED in the critical colour, never the LIVE green: an
+   empty list under a dead decoder must not look like a quiet band. */
+.decoder__status--stopped {
+  color: var(--crit);
+  border-color: var(--crit);
+  background: color-mix(in srgb, var(--crit) 20%, var(--surface));
+}
+/* The command strip (R12): the exact command the console is running, read off the live process.
+   It rides the panel head between the title and the badge, so the fixed-height panel gives up no
+   height for it. One line with an ellipsis; a tap opens it to the whole line, a second closes it. */
+.decoder__head > .decoder__title,
+.decoder__head > .decoder__status {
+  flex: none;
+}
+.cmdstrip {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 0;
+  cursor: pointer;
+}
+.cmdstrip[hidden] { display: none; }
+.cmdstrip::before { content: "$ "; color: var(--accent); }
+.cmdstrip code { font: inherit; }
+.cmdstrip--open {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* On the waterfall instrument the strip is its own row between the waterfall and the tune strip. */
+.cmdstrip--sweep { flex: none; }
 .decoder__list {
   flex: 1 1 auto;
   min-height: 0;
