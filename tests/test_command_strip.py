@@ -6,7 +6,7 @@ import re
 import pytest
 
 from sigint101.lessons import parse_lesson
-from tests.test_templates import _console
+from tests.test_templates import APP_CSS, _console, _css_rule, _font_px
 
 # Panel name -> the data attribute its panel carries. Each runs a real process the strip names.
 PANELS = {
@@ -52,11 +52,35 @@ def test_the_strip_helper_loads_before_the_panels_that_use_it():
 
 
 def test_the_waterfall_instrument_leaves_a_command_hook():
-    # The waterfall owner wires it from /api/spectrum's `command`; it starts empty and hidden.
+    # The waterfall owner wires it from /api/spectrum's `command`; it starts empty and hidden. Its
+    # row has the instrument's full width, so it shows the whole line and is no tap target: the
+    # panel beside it is the waterfall, where a tap tunes.
     html = _console(lesson=parse_lesson({
         "id": 41, "slug": "wf", "title": "t", "type": "intro", "concept": "c",
         "panels": [], "hardware": ["rtl-sdr"],
         "stages": {"frame": "f", "demo": "DEMO", "try": "t", "predict": "p", "observe": "o",
                    "explain": "e"},
     }), current_stage="demo")
-    assert re.search(r"<button[^>]*data-command[^>]*hidden", html)
+    strip = re.search(r"<(\w+)[^>]*cmdstrip--sweep[^>]*>", html)
+    assert strip and strip.group(1) == "div"
+    assert " data-command" in strip.group(0) and " hidden" in strip.group(0)
+    assert "white-space: normal" in _css_rule(".cmdstrip--sweep")
+
+
+def test_the_strip_text_meets_the_font_floor():
+    # CLAUDE.md: body text 18-20 px. The strip is something to read, not chrome.
+    assert _font_px(_css_rule(".cmdstrip")) >= 18
+    for modifier in (".cmdstrip--sweep", ".cmdstrip--rack"):
+        assert "font-size" not in _css_rule(modifier), modifier
+
+
+def test_a_lesson_strip_opens_over_its_whole_panel():
+    # The one-line strip in the head is a preview; the panel it sits in (124 px tall, the full
+    # width) is the tap target, and the whole command opens over that panel rather than growing
+    # the head, so the panel keeps its height and Next stays where it is.
+    assert "position: relative" in _css_rule(".decoder")
+    opened = _css_rule(".cmdstrip--open")
+    assert "position: absolute" in opened and "inset: 0" in opened
+    assert "white-space: normal" in opened
+    js = (APP_CSS.parent / "decoder-panel.js").read_text()
+    assert 'closest(".decoder")' in js

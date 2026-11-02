@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -30,6 +31,12 @@ DEFAULT_HISTORY = 40
 # line is a reading the device actually reported (temperature, humidity, id, channel, ...).
 _ENVELOPE_KEYS = frozenset({"time", "model", "mod", "freq", "freq1", "freq2",
                             "rssi", "snr", "noise"})
+
+# rtl_433 prints every copy of a packet a sensor repeats: an Acurite-Tower sends each reading three
+# times in one burst, and all three decode (captured on nomad-b: three identical lines inside 6 ms,
+# the next reading ~17 s later). Copies of one transmission land milliseconds apart and a sensor's
+# next reading seconds later, so a copy inside this window is the same reception.
+REPEAT_WINDOW_S = 2.0
 
 
 class DecodeUnavailable(RuntimeError):
@@ -112,6 +119,27 @@ def parse_decode_line(raw: str) -> Decode | None:
     )
 
 
+class RepeatFilter:
+    """Tells a sensor's repeated copies of one transmission from a reading it has not sent before.
+
+    A decode is a copy when its model and every reading (the id included) match one heard less
+    than the window ago; the envelope (signal level, frequency estimate, timestamp) is left out.
+    Changed values, another sensor, or the same values after the window are new receptions.
+    """
+
+    def __init__(self, window_s: float = REPEAT_WINDOW_S):
+        self.window_s = window_s
+        self._heard = {}   # (model, readings) -> when the copy that was reported arrived
+
+    def is_repeat(self, decode: Decode, now: float) -> bool:
+        self._heard = {key: at for key, at in self._heard.items() if now - at < self.window_s}
+        key = (decode.model, json.dumps(decode.readings, sort_keys=True, default=str))
+        if key in self._heard:
+            return True
+        self._heard[key] = now
+        return False
+
+
 def _popen(cmd):
     """Launch rtl_433 so its JSON can be read line by line as devices transmit.
 
@@ -146,8 +174,10 @@ class Decoder:
         self._reads = deque(maxlen=history)
         # Called with each sensor read as a plain dict, from the reader thread only and outside
         # the buffer lock. The console's hook logs it as a reception and never raises, so the call
-        # is made directly: it cannot end the decode.
+        # is made directly: it cannot end the decode. A sensor's repeated copies of one
+        # transmission report once (RepeatFilter); the panel's buffer keeps every copy printed.
         self.on_reception = None
+        self._repeats = RepeatFilter()
         # Two locks, same discipline as the sweeper: _lock guards the buffer the reader writes,
         # _life guards start/stop/release so two request threads cannot race over the dongle.
         self._lock = threading.Lock()
@@ -264,8 +294,9 @@ class Decoder:
                 if decode is not None:
                     with self._lock:
                         self._reads.append(decode)
+                        repeat = self._repeats.is_repeat(decode, time.monotonic())
                     report = self.on_reception
-                    if report is not None:
+                    if report is not None and not repeat:
                         report(decode.as_dict())
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
