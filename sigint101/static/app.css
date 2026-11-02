@@ -1316,7 +1316,10 @@ button.rail-pip:disabled {
   justify-content: center;
   color: var(--accent);
   font-family: var(--font-mono);
-  overflow: hidden;
+  line-height: 1;
+  /* Not clipped: a real low SNR makes the band only a few px tall, and the reading must still show.
+     PEAK and FLOOR sit outside the band, so the overflow lands on nothing but the dashed edges. */
+  overflow: visible;
 }
 /* The marks and the gap are flex boxes, which beats the UA [hidden] rule; without this the empty
    meter shows PEAK, FLOOR and SNR piled on its "no radio" line. */
@@ -1326,7 +1329,7 @@ button.rail-pip:disabled {
   display: none;
 }
 .gain-meter__gap-label { font-size: 12px; letter-spacing: 0.16em; }
-.gain-meter__gap b { font-size: 17px; text-shadow: var(--glow); }
+.gain-meter__gap b { font-size: 15px; text-shadow: var(--glow); }
 .gain-meter__empty {
   position: absolute;
   inset: 0;
