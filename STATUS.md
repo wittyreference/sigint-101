@@ -13,7 +13,8 @@
     S1s, item 8 being real tuning and gain) plus `/operate` v1, all before 11-08.
 - **Sprint base:** `ux-polish` with main merged in. Sprint branches stack on it. ux-polish itself
   merges to main only after MC's panel look (MC's gate; draft PR #15).
-- **Sprint progress (on `ux-polish` @1aae527, deployed to the nomad-b kiosk):**
+- **The sprint is complete on `ux-polish` @494e268, deployed to the nomad-b kiosk.** All of the
+  cut line except item 19:
   - #18 exam: 0 hidden Commit/Next across all 409 questions, plus Skip and answers that are final.
   - #19 shell: two-way nav and resume, no concept wall, room for narration, teaching-order
     codes, hardware badges, touch targets.
@@ -24,27 +25,39 @@
     KILL escalation, a claim lock, the command strip, ppm/LoRa/AIS/events fixes.
   - #23 waterfall: measured bins only (unmeasured bins are gaps), real tuning and gain
     (HIL-proven), red-night all red, themed 404.
-  - **In progress:** operator mode v1 (`/operate`, the rack). The same branch also offsets the
-    centre bin so M9's 433.92 carrier isn't hidden in rtl_power's unmeasured DC bin, applies the
-    same offset to taps, and gives the Sweeper restart back-off.
+  - #25 operator mode v1 (`/operate`, the rack):
+    - 16 instruments, free tuning, per-decoder frequency override within band limits;
+    - a reception log in `events` with provenance;
+    - panel partials shared with the lessons (render diff of 0 pixels);
+    - centre-bin offset, so M9's 433.92 is a measured bin;
+    - Sweeper back-off.
+    - HIL: rtl_433 retuned in the rack, and a real Acurite reading (16.6 °C) logged.
+  - #26 home: the exam and operator bars sit side by side (MC's call: "Bars side by side
+    (Recommended)").
+  - #27 polish:
+    - the command strip at 18 px, with the whole panel as its tap target;
+    - sunlight axis at 11.7:1;
+    - gain-meter labels never overlap;
+    - rtl_433 repeats collapse to one reception (HIL: 27 decodes became 9 receptions).
   - **Remaining in the cut line:** item 19 (prove provision on a spare SD, then cold boot).
-- **Known small follow-ups (not in the cut line yet):**
-  - the command strip tap target is 22 px;
-  - sunlight waterfall axis labels are about 2.1:1 contrast;
-  - the gain meter's SNR overlaps FLOOR near 3 dB;
+- **Known small follow-ups (not in the cut line):**
+  - the sunlight "LIVE" badge on the waterfall is low contrast;
   - the red-night image filter is verified on a test pattern only;
   - LoRa staleness isn't proven live;
   - FLEX paging isn't decoded;
-  - the RDS station is a provisioning value (no auto-pick).
+  - DMR repeat de-dup is unverified (no capture);
+  - the RDS station is a provisioning value (no auto-pick);
+  - home's second unit row tucks about 20 px under the bars (the grid scrolls).
 - **Hand-over is 2026-11-08.**
 
 **Needed from MC, one at a time when reached:**
 1. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
    triage item 19.
-2. OK to run `deploy/provision.sh` for real on nomad-b. The `--check` pass predicts 6 changes:
-   wlan1 monitor-mode persistence and the tcpdump-caps apt hook. The auto-mode classifier
-   blocked it.
-3. One look at the panel. The kiosk shows `ux-polish` @1aae527 (the whole sprint), and
+2. Run `deploy/provision.sh` on nomad-b (MC's call: "I'll run it with !"). The fixed script is
+   staged at `/tmp/provision.sh` on nomad-b, and `--check` predicts 6 changes. Command:
+   `! ssh spec5@100.108.20.20 'bash /tmp/provision.sh 2>&1 | tee /tmp/provision-run.txt'`.
+   Afterwards Claude verifies wlan1 monitor mode and a Flock capture.
+3. One look at the panel. The kiosk shows `ux-polish` @494e268 (the whole sprint), and
    confirming it unblocks merging it to main (PR #15).
 4. Re-plug the Flipper on nomad-b and update it 1.4.3 → 1.5.1 in the app.
 5. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
