@@ -6,7 +6,7 @@ slug: catch-the-catcher
 title: "Catch the Catcher"
 type: intro
 concept: >-
-  A cell-site simulator hides inside the control-plane handshake your SDR cannot sweep, so you borrow
+  A cell-site simulator hides inside the control-plane handshake your SDR cannot read, so you borrow
   a hotspot running EFF's Rayhunter to read it. A red flag means look closer, never a proven catcher;
   a green line never proves none was near.
 requires_tx: false
@@ -19,8 +19,9 @@ stages:
     detector never proves you are safe. In the second you turned your own radio into a camera-catcher.
     Tonight the quarry is the fake tower: the cell-site simulator, the Stingray, the IMSI-catcher. And
     here is the twist — your SDR cannot catch this one. To hear a Stingray you must sit inside the
-    private conversation your phone has with the tower, and that conversation never touches the open
-    air you can sweep. So tonight you borrow a different radio.
+    private conversation your phone has with the tower, and that conversation is on the air, but
+    packed inside an LTE carrier wider than your dongle and addressed to one phone; only a modem in
+    the conversation can read it. So tonight you borrow a different radio.
   demo: >-
     Watch — hands off. The radio you borrow is a cheap mobile hotspot, an Orbic, flashed with
     Rayhunter, the EFF's open-source catcher-catcher. It does what your dongle cannot: it taps its own
@@ -28,9 +29,9 @@ stages:
     modem and tower, before any of your data rides. Rayhunter watches that handshake for red flags a
     normal tower has no reason to raise: a tower that shoves your connection down to flimsy 2G, where
     it is easy to intercept, or one that demands your phone's permanent IMSI out of turn. A green line
-    runs across the device's little screen while it records and nothing is wrong; the moment a
-    heuristic fires, that line turns red — green for a clean capture, red for a warning to go read,
-    white when it is not recording. Its web page at 192.168.1.1:8080 serves the recordings, the
+    runs across the device's little screen while it records and nothing is wrong; when a heuristic
+    fires, the line turns yellow, orange or solid red as the warning grows, and it goes white when
+    recording is paused. Its web page at 192.168.1.1:8080 serves the recordings, the
     heuristic findings as JSON, and the capture files you can download. In this course your console
     joins the Orbic's WiFi and simply polls that page. You read; you never transmit. The Orbic is
     yours, off the tailnet, and nothing you do reaches the tower.
@@ -66,6 +67,12 @@ stages:
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:
-  - {key: "proves-catcher", label: "Yes — red proves a catcher"}
-  - {key: "look-closer", label: "No — red means look closer"}
-  - {key: "near-proof", label: "Nearly — it's near-proof"}
+  - {key: "proves-catcher", label: "Yes"}
+  - {key: "look-closer", label: "No"}
+  - {key: "near-proof", label: "Nearly"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["look-closer"]
+verdict: >-
+  No: red means a heuristic fired, and a new or misconfigured tower can trip the same rule. Look
+  closer.

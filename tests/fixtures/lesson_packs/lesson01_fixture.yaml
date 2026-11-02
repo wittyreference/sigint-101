@@ -19,3 +19,6 @@ choices:
     label: "The gap holds"
   - key: c
     label: "The gap shrinks past a point"
+# The scored gate: "c" is right, and the verdict sentinel proves the header stays sealed.
+answer: [c]
+verdict: "VERDICT_SENTINEL past a point gain lifts both and the gap shrinks"

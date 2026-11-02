@@ -494,6 +494,96 @@ def test_a_tune_bin_the_sweep_cannot_do_is_refused(bin_hz):
             "center_hz": 433_920_000, "span_hz": 2_000_000, "bin_hz": bin_hz}))
 
 
+# --- answer key and verdict (the predict gate is scored) ----------------------
+# A pack names which of its own chips is right (`answer`, a list so a lesson whose explain
+# defends two keys can accept both) and a one-line `verdict` the explain header prints. The
+# answer must be one of the pack's choice keys, checked at load, so a typo can never score
+# every learner wrong in front of them.
+
+_CHIPS = [
+    {"key": "wider", "label": "Wider"},
+    {"key": "same", "label": "About the same"},
+    {"key": "narrower", "label": "Narrower"},
+]
+
+
+def test_a_pack_without_an_answer_scores_nothing():
+    lesson = parse_lesson(_consolidation(choices=_CHIPS))
+    assert lesson.answer == ()
+    assert lesson.verdict == ""
+    assert lesson.is_correct("same") is None
+    assert lesson.score("same") is None
+
+
+def test_an_answer_list_and_verdict_parse_onto_the_lesson():
+    lesson = parse_lesson(_consolidation(
+        choices=_CHIPS, answer=["narrower", "same"], verdict="The gap stalls, then shrinks."))
+    assert lesson.answer == ("narrower", "same")
+    assert lesson.verdict == "The gap stalls, then shrinks."
+
+
+def test_a_single_answer_may_be_written_as_a_bare_key():
+    lesson = parse_lesson(_consolidation(choices=_CHIPS, answer="same", verdict="Same width."))
+    assert lesson.answer == ("same",)
+
+
+def test_an_answer_that_is_not_a_choice_key_is_refused():
+    with pytest.raises(LessonError, match="answer 'wide' is not one of its choice keys"):
+        parse_lesson(_consolidation(choices=_CHIPS, answer=["wide"], verdict="v"))
+
+
+def test_an_answer_without_choices_is_refused():
+    with pytest.raises(LessonError, match="answer"):
+        parse_lesson(_consolidation(answer=["same"], verdict="v"))
+
+
+def test_an_answer_coerced_to_a_yaml_boolean_is_refused():
+    chips = [{"key": "yes", "label": "Yes"}, {"key": "no", "label": "No"}]
+    with pytest.raises(LessonError, match="quote"):
+        parse_lesson(_consolidation(choices=chips, answer=[False], verdict="v"))
+
+
+def test_an_answer_needs_a_verdict_and_a_verdict_needs_an_answer():
+    with pytest.raises(LessonError, match="verdict"):
+        parse_lesson(_consolidation(choices=_CHIPS, answer=["same"]))
+    with pytest.raises(LessonError, match="answer"):
+        parse_lesson(_consolidation(choices=_CHIPS, verdict="Same width."))
+
+
+def test_a_verdict_must_be_one_line():
+    with pytest.raises(LessonError, match="one line"):
+        parse_lesson(_consolidation(choices=_CHIPS, answer=["same"], verdict="Same.\nWidth."))
+
+
+def test_a_committed_key_is_scored_against_the_answer():
+    lesson = parse_lesson(_consolidation(
+        choices=_CHIPS, answer=["narrower", "same"], verdict="The gap stalls, then shrinks."))
+    assert lesson.is_correct("same") is True
+    assert lesson.is_correct("narrower") is True
+    assert lesson.is_correct("wider") is False
+
+
+def test_score_names_what_the_learner_said_and_the_answer_by_label():
+    lesson = parse_lesson(_consolidation(
+        choices=_CHIPS, answer=["narrower", "same"], verdict="The gap stalls, then shrinks."))
+    assert lesson.score("wider") == {
+        "said": "Wider",
+        "answer": ["Narrower", "About the same"],
+        "correct": False,
+        "verdict": "The gap stalls, then shrinks.",
+    }
+    assert lesson.score("same")["correct"] is True
+
+
+def test_the_answer_rides_the_sealed_reveal():
+    lesson = parse_lesson(_intro(choices=_CHIPS, answer=["same"], verdict="Same width."))
+    with pytest.raises(RevealLockedError):
+        lesson.reveal(prediction_committed=False)
+    revealed = lesson.reveal(prediction_committed=True)
+    assert revealed["answer"] == ["same"]
+    assert revealed["verdict"] == "Same width."
+
+
 @pytest.mark.parametrize("hardware, badges", [
     (["rtl-sdr"], []),                              # the built-in radio needs no badge
     ([], []),                                       # a no-RF lesson needs nothing

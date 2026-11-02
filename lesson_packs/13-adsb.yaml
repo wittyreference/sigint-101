@@ -24,8 +24,8 @@ stages:
     A new unit, comrade, and a new kind of listening. All of Unit 4 you spent naming shapes — on,
     off, a pitch, a chirp, a phase. Tonight you stop naming and start reading. Above you, right now,
     airliners are shouting their names into the sky: an open broadcast on 1090 MHz, several times a
-    second, carrying a plane's identity, its altitude, its exact position over the ground. No permit,
-    no key, no secret — the standard is published, meant to be received. Tonight you build a radar.
+    second, carrying a plane's identity, its altitude, its exact position over the ground. Tonight
+    you build a radar.
   demo: >-
     Watch — hands off. No waterfall tonight; a waterfall would show you a faint smudge at 1090 MHz
     and nothing more, because the meaning is in the data, not the picture. dump1090 is listening, and
@@ -43,16 +43,16 @@ stages:
     what just changed: you are not identifying a modulation any more — you are reading a message.
   predict: >-
     An airliner overhead is transmitting on 1090 MHz. To put it on your scope — callsign, altitude,
-    position — must you break a code, or just decode an open standard? Lock it in.
+    position — what must you have? Lock it in.
   observe: >-
     Look at what the scope gives you. Not "there is a signal at 1090 MHz" — that is all a waterfall
     could ever say — but a name, a height, a place. Ask yourself: how much of this did you have to
     unlock, and how much simply arrived, formatted and readable, the moment you decoded it? And if the
     scope is empty, is that the decoder failing, or the honest answer that nothing up there is talking?
   explain: >-
-    Here's the straight answer: nothing is broken into. ADS-B — Automatic Dependent Surveillance,
-    Broadcast — is exactly that: every equipped aircraft automatically broadcasts its own position and
-    identity, in the clear, on 1090 MHz, because the air-traffic system is built on everyone hearing
+    Here's the straight answer: nothing extra — no key, no licence, nothing broken into. ADS-B —
+    Automatic Dependent Surveillance, Broadcast — is exactly that: every equipped aircraft
+    automatically broadcasts its own position and identity, in the clear, on 1090 MHz, because the air-traffic system is built on everyone hearing
     everyone. There is no encryption and no key; the message format is a published international
     standard. So "decoding" it is just that — demodulating the pulses into bits and reading the fields
     the standard defines: a 24-bit address that names the aircraft, a callsign, a barometric altitude,
@@ -62,12 +62,18 @@ stages:
     signal's value was its shape — what kind of modulation it was. Here a signal's value is its
     content — what it says. A waterfall was the right instrument for shape; a decoder and a scope are
     the right instruments for meaning. One honest footnote: receiving ADS-B is as ordinary as a flight
-    tracker on your phone — it is a public broadcast, and listening is passive. Next, you keep
+    tracker on your phone — it is a public broadcast, listening is passive, and receiving it needs
+    no licence (18 USC 2511(2)(g)(ii)(IV) covers aeronautical systems). Next, you keep
     decoding: more signals that carry words, not just waveforms.
 
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
 # (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
 choices:
-  - {key: open, label: "Open data, just decode"}
-  - {key: locked, label: "Encrypted, needs a key"}
-  - {key: garbled, label: "Only broken fragments"}
+  - {key: key, label: "A key"}
+  - {key: licence, label: "A licence"}
+  - {key: nothing, label: "Nothing extra"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [nothing]
+verdict: >-
+  Nothing extra: ADS-B is an open, published broadcast; decoding it needs no key and no licence.

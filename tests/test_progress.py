@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sigint101.progress import Progress
+from sigint101.progress import PredictionAlreadyCommitted, Progress
 
 
 def test_open_and_complete(tmp_path):
@@ -67,11 +67,65 @@ def test_a_blank_prediction_is_refused(tmp_path, blank):
     prog.close()
 
 
-def test_a_second_prediction_replaces_the_first(tmp_path):
+def test_a_second_prediction_is_refused_and_the_first_stands(tmp_path):
+    # A committed prediction is the learner's word before the reveal; once the explain has shown
+    # the answer, letting them overwrite it would turn the score into a copy of the reveal.
     prog = Progress(tmp_path / "progress.db")
-    prog.record_prediction(1, "first guess")
-    prog.record_prediction(1, "second guess")
-    assert prog.get_prediction(1) == "second guess"
+    prog.record_prediction(1, "first guess", correct=False)
+    with pytest.raises(PredictionAlreadyCommitted):
+        prog.record_prediction(1, "second guess", correct=True)
+    assert prog.get_prediction(1) == "first guess"
+    assert prog.get_correct(1) is False
+    prog.close()
+
+
+def test_a_prediction_stores_whether_it_was_right(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_prediction(1, "same", correct=True)
+    prog.record_prediction(2, "wider", correct=False)
+    assert prog.get_correct(1) is True
+    assert prog.get_correct(2) is False
+    prog.close()
+
+
+def test_an_unscored_prediction_stores_no_verdict(tmp_path):
+    # A pack with no answer key cannot be scored; the store says "unknown", never a guessed False.
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_prediction(1, "a free answer")
+    assert prog.get_correct(1) is None
+    assert prog.get_correct(9) is None
+    prog.close()
+
+
+def test_correctness_persists_across_connections(tmp_path):
+    db = tmp_path / "progress.db"
+    first = Progress(db)
+    first.record_prediction(4, "bigger", correct=True)
+    first.close()
+    second = Progress(db)
+    assert second.get_correct(4) is True
+    second.close()
+
+
+def test_an_existing_responses_table_gains_the_correct_column(tmp_path):
+    # A box that ran a build before scoring has a responses table with no `correct` column. Opening
+    # it must add the column and keep the predictions already there, not fail or drop them.
+    db = tmp_path / "progress.db"
+    import sqlite3
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE responses (lesson_id INTEGER NOT NULL, kind TEXT NOT NULL, "
+        "body TEXT NOT NULL, updated REAL, PRIMARY KEY (lesson_id, kind));"
+        "INSERT INTO responses(lesson_id, kind, body) VALUES(1, 'prediction', 'old guess');"
+    )
+    conn.commit()
+    conn.close()
+
+    prog = Progress(db)
+    assert prog.get_prediction(1) == "old guess"
+    assert prog.get_correct(1) is None
+    prog.record_prediction(2, "same", correct=True)
+    assert prog.get_correct(2) is True
     prog.close()
 
 

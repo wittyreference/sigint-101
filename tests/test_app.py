@@ -299,7 +299,7 @@ class _StubPocsag:
         self._pages = pages
         self._started = False
         self._released = False
-        self.freq_hz = 929_600_000
+        self.freq_hz = 929_612_500
 
     @property
     def running(self):
@@ -323,10 +323,11 @@ class _StubPocsag:
 
 
 def _pocsag_pages():
-    """One decoded pager page, in the dict shape PocsagDecoder.pages() hands the route."""
+    """One decoded pager page, in the dict shape PocsagDecoder.pages() hands the route: framing
+    only, the words withheld, as the real decoder serves the commercial paging band."""
     return [{
         "baud": 1200, "address": 1234567, "function": 3,
-        "kind": "alpha", "text": "CALL EXT 2210 URGENT",
+        "kind": "alpha", "text": None, "length": 20, "text_withheld": True,
     }]
 
 
@@ -779,6 +780,42 @@ def test_a_prediction_accepts_json_too(tmp_path):
         assert posted.status_code == 303
         resp = client.get("/lesson/1")
     assert "OPERATE_SENTINEL" in resp.text
+
+
+def test_a_committed_prediction_is_scored_against_the_pack_answer(tmp_path):
+    with _client(tmp_path) as client:
+        client.post("/api/predict?lesson_id=1", data={"prediction": "c"}, follow_redirects=False)
+        client.post("/api/predict?lesson_id=2", data={"prediction": "a"}, follow_redirects=False)
+        progress = client.app.state.progress
+        assert progress.get_correct(1) is True
+        # Fixture 2 names no answer, so it is stored unscored rather than guessed wrong.
+        assert progress.get_correct(2) is None
+
+
+def test_a_second_commit_is_refused_and_the_first_prediction_stands(tmp_path):
+    with _client(tmp_path) as client:
+        first = client.post("/api/predict?lesson_id=1", data={"prediction": "a"},
+                            follow_redirects=False)
+        assert first.status_code == 303
+        second = client.post("/api/predict?lesson_id=1", data={"prediction": "c"},
+                             follow_redirects=False)
+        assert second.status_code == 409
+        assert second.json()["recorded"] is False
+        assert "already" in second.json()["reason"]
+        progress = client.app.state.progress
+        assert progress.get_prediction(1) == "a"
+        assert progress.get_correct(1) is False
+
+
+def test_the_explain_header_shows_the_scored_call_after_a_commit(tmp_path):
+    with _client(tmp_path) as client:
+        sealed = client.get("/lesson/1").text
+        assert "VERDICT_SENTINEL" not in sealed
+        client.post("/api/predict?lesson_id=1", data={"prediction": "a"}, follow_redirects=False)
+        html = client.get("/lesson/1").text
+    assert "VERDICT_SENTINEL" in html
+    assert "You said <b>The gap grows</b>" in html
+    assert "Answer: <b>The gap shrinks past a point</b>" in html
 
 
 def test_predict_on_an_unknown_lesson_is_404(tmp_path):
@@ -1418,11 +1455,44 @@ def test_pocsag_returns_the_pages_when_running(tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     assert body["available"] is True
-    assert body["freq_hz"] == 929_600_000
+    assert body["freq_hz"] == 929_612_500
     page = body["pages"][0]
     assert page["address"] == 1234567
     assert page["kind"] == "alpha"
-    assert page["text"] == "CALL EXT 2210 URGENT"
+    assert page["text"] is None
+    assert page["length"] == 20
+
+
+def test_pocsag_never_serves_the_words_of_a_commercial_page(tmp_path):
+    # End to end through the real decoder, faked only at the rtl_fm|multimon-ng boundary: the
+    # framing reaches the API and the words never do — not in the body, not in the event log.
+    line = "POCSAG1200: Address: 1234567  Function: 3  Alpha:   CALL EXT 2210 URGENT"
+
+    class _Pipeline:
+        stdout = iter([line])
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    decoder = PocsagDecoder(spawn=lambda f, d: _Pipeline(), radio_present=lambda: True,
+                            which=lambda name: "/usr/bin/" + name)
+    with _client(tmp_path, probe=_present, pocsag_factory=lambda: decoder) as client:
+        client.get("/api/pocsag")
+        decoder.drain()
+        resp = client.get("/api/pocsag")
+    assert resp.status_code == 200
+    page = resp.json()["pages"][0]
+    assert (page["address"], page["kind"], page["baud"], page["length"]) == (1234567, "alpha",
+                                                                              1200, 20)
+    assert page["text_withheld"] is True
+    assert "CALL EXT" not in resp.text
+    assert "CALL EXT" not in (tmp_path / "events.jsonl").read_text()
 
 
 def test_pocsag_stands_the_sweeper_down(tmp_path):

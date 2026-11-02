@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
+from sigint101.sstv import DEFAULT_SSTV_HZ
 
 PACK = (Path(__file__).resolve().parent.parent / "lesson_packs" / "25-sstv.yaml")
 
@@ -22,14 +23,16 @@ def test_m25_has_all_six_intro_stages_non_empty():
         assert lesson.stages[stage].strip(), f"stage {stage!r} must carry real teaching text"
 
 
-def test_m25_uses_the_sstv_image_instrument_on_2m():
+def test_m25_uses_the_sstv_image_instrument_on_the_iss_downlink():
+    # ARISS has run ISS SSTV on 437.550 MHz FM (Robot36) since 2026; the dial shows the pack's band
+    # and the decoder runs DEFAULT_SSTV_HZ, so the two must agree.
     lesson = load_lesson_file(PACK)
     assert lesson.uses_sstv is True
     assert lesson.panels == ["sstv"]
     assert lesson.needs_hardware is True
     assert lesson.requires_tx is False
     assert lesson.tune is not None
-    assert lesson.tune["center_hz"] == 145_800_000
+    assert lesson.tune["center_hz"] == 437_550_000 == DEFAULT_SSTV_HZ
 
 
 def test_m25_offers_the_real_photo_answer_as_a_predict_choice():
