@@ -27,17 +27,25 @@ def page_ws():
 
 
 def connect():
-    """A CDP client on a fresh tab of its own, attached through the browser endpoint.
+    """A CDP client on the browser's one page, attached through the browser endpoint, focused.
 
-    Chromium 156 headless on nomad-b can leave its start-up tab wedged: the page never answers,
-    though the browser endpoint does. So every run opens its own tab and drives it over a
-    flattened session, never reusing whatever page happens to be first.
+    Headless Chromium throttles a tab it thinks is in the background until commands stall, so
+    the page is brought to the front with focus emulation on, and a missing page is opened in
+    a new window rather than as a background tab. Launch Chromium with --remote-allow-origins=*.
     """
     version = json.load(urllib.request.urlopen(f"http://{HOST}:{PORT}/json/version"))
     c = CDP(version["webSocketDebuggerUrl"])
-    target = c.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+    targets = c.call("Target.getTargets")["targetInfos"]
+    page = next((t for t in targets if t["type"] == "page"), None)
+    if page:
+        target = page["targetId"]
+    else:
+        opened = c.call("Target.createTarget", {"url": "about:blank", "newWindow": True})
+        target = opened["targetId"]
     attached = c.call("Target.attachToTarget", {"targetId": target, "flatten": True})
     c.session = attached["sessionId"]
+    c.call("Page.bringToFront")
+    c.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
     return c
 
 
