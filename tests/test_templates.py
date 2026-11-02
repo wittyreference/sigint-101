@@ -791,6 +791,64 @@ def test_a_figure_question_shows_its_diagram_behind_a_tap(template):
     assert "not shown here yet" not in html
 
 
+def _pinned(html, button):
+    """True when `button` sits in the exam's pinned footer, after the scrolling body that holds
+    the question and the chips — so a long question can never push it off the 800x480 screen."""
+    body = html.index('class="exam__body"')
+    foot = html.index('class="exam__foot')
+    return body < html.index('class="exam__question"') < foot and html.index(button) > foot
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_exam_card_pins_commit_below_a_scrolling_body(template):
+    q = exam.load_pool().get("T1D01")
+    html = _render(template, **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False,
+        position=1, total=35, score=0, answered=0, pass_mark=26))
+    assert _pinned(html, "Commit answer")
+    assert html.index('name="choice"') < html.index('class="exam__foot')
+    # Commit lives outside the form's markup, so it names the form it submits.
+    assert 'form="exam-answer"' in html and 'id="exam-answer"' in html
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_exam_review_pins_next_below_a_scrolling_body(template):
+    q = exam.load_pool().get("T1D01")
+    html = _render(template, **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=True,
+        chosen="A", correct=False, position=1, total=35, score=0, answered=1, pass_mark=26,
+        next_href="/exam/sim", last=False))
+    assert _pinned(html, "exam-reveal")
+    assert 'class="exam__question"' in html          # the question is never dropped on review
+
+
+def test_exam_study_card_offers_the_practice_exam_from_its_footer():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam.html", **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False))
+    assert _pinned(html, 'href="/exam/sim"')
+
+
+def test_exam_sim_card_offers_skip_while_another_question_waits():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam_sim.html", **_exam_ctx(
+        title="Practice Exam", back_href="/exam", back_label="Exam", question=q, reviewed=False,
+        position=4, total=35, score=1, answered=2, pass_mark=26, skipped=1, can_skip=True))
+    # Skip submits the same form to the skip endpoint, without needing a choice tapped first.
+    assert 'formaction="/api/exam/sim/skip?question_id=T1A01"' in html
+    assert "formnovalidate" in html
+    assert _pinned(html, ">Skip<")
+    assert "1 skipped" in html
+
+
+def test_exam_sim_card_has_no_skip_on_the_last_question_left():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam_sim.html", **_exam_ctx(
+        title="Practice Exam", back_href="/exam", back_label="Exam", question=q, reviewed=False,
+        position=1, total=35, score=30, answered=34, pass_mark=26, skipped=1, can_skip=False))
+    assert "/api/exam/sim/skip" not in html
+
+
 def test_a_question_without_a_figure_offers_no_diagram():
     q = exam.load_pool().get("T1A01")
     html = _render("exam.html", **_exam_ctx(
