@@ -1,5 +1,90 @@
 # SIGINT 101 — STATUS
 
+## ⇤ SESSION HANDOVER — 2026-11-02 (read me first)
+
+**State in one line:** the 28-lesson curriculum is shipped on `main` (@2602469); two feature
+branches are open — **`flipper-module`** (Flipper unit U10 Phase 1, PR #5) and **`ux-polish`**
+(lesson/home scroll + lesson-completion fixes) — and **nomad-b has a hardware fan problem + a recent
+crash** to deal with. The kiosk is currently down (nomad-b was rebooted/powered off for the fan).
+
+### Where the work is
+- **`flipper-module`** (PR #5, open, not merged) — the new **Flipper Zero unit U10 (M29–M38)**: a
+  device-in-hand tour of the base capabilities (sub-GHz, RFID, NFC, IR, iButton, GPIO, BadUSB), with
+  the nomad console as a **live mirror over the Flipper USB CLI** (NOT an on-device FAP), plus a
+  whole-rig troubleshoot/restore/firmware section. **Phase 1 done + HIL-verified on nomad-b:**
+  `sigint101/deviceinfo.py` (`parse_device_info`), `sigint101/flipperconsole.py`
+  (`FlipperConsole.device()`), route `/api/flipper`, U10 unit + `flipper` tile glyph/panel/
+  `static/flipper.js`, and lesson **M29 "Meet the Flipper"**. Built **ON pre-existing tested code**
+  `sigint101/flipper.py` (`FlipperCli`/`probe_flipper`/`read_file`) + `sigint101/subfile.py`
+  (`.sub` parser) — both from commit `8a3c739`, discovered mid-session; do NOT reimplement them.
+  Spec: `docs/superpowers/specs/2026-10-31-flipper-module-design.md` · Plan:
+  `docs/superpowers/plans/2026-10-31-flipper-module.md`.
+- **`ux-polish`** (origin @ `345fbfb`, no PR yet — open one after MC confirms on the panel) — live
+  bugs MC hit: (a) the **Explain (final) stage was a trap** — long text overflowed 800×480 with no
+  scroll, AND lessons had **no completion button at all** (nothing called the existing
+  `POST /api/complete`), so a lesson could not be finished; now a scrollable body + a **Complete
+  lesson** button + keyboard scroll. (b) the **home grid** clipped every tile's progress bar and
+  couldn't scroll past U9; now `grid-auto-rows: minmax(124px,auto)` + grid scroll + fat scrollbar.
+  (c) shared `sigint101/static/scroll-keys.js` (node-tested). All three **render-verified at
+  800×480**. Commits `91da96e`, `c538bc6`, `345fbfb`.
+
+### NEXT — prioritized
+1. **nomad-b health (first).** It **crashed** before the last reboot (SD-integrity + repeat-crash
+   risk). When it's back: check `/var/log/apt/history.log`, any `.dpkg-old` (= a replaced config),
+   `meshtasticd` + `/etc/meshtasticd/config.yaml`, `config.txt` (panel pin / gpio4 / miniuart-bt),
+   and run `dmesg`/an `fsck` scan. **The fan noise is mechanical / not software-fixable** — checked
+   GPIO4 (not it), PWM, I²C, services, overlays: the fan is hardwired always-on. Needs a physical
+   look (dust / reseat / replace); optional hardware mod = switchable pin + a `gpio-fan` overlay.
+2. **Flipper apps install (blocked on MC).** MC approved 7 stock-hardware apps: ProtoView,
+   Spectrum Analyzer, POCSAG Pager, Weather Station, TPMS, Sub Analyzer / Sub-GHz RAW Edit, I2C
+   Tools. `ufbt` is installed on nomad-b with the **1.5.1 SDK**. BLOCKED: MC updates the Flipper
+   **1.4.3 → 1.5.1** via the mobile app (1.5.1 is latest), THEN build each from source with `ufbt`
+   against the matching SDK and `ufbt launch` to the device. (MC is getting a WiFi devboard for a
+   later Marauder/WiFi track.)
+3. **ux-polish.** MC confirms the fixes on the panel → open PR → merge to `main`. Then **commit the
+   render-assert harness into the repo as the standing UI test** (currently scratchpad
+   `flipper/render_scroll.py`: headless chromium @800×480 measuring scroll / clipping / button
+   position — this is the "TDD for UI" MC asked for).
+4. **flipper-module.** Merge PR #5 (Phase 1) or keep building on it. **Phase 2 (M30–M36 capability
+   lessons) needs MC's hands:** present a real object to the Flipper (RFID fob, NFC card, IR remote,
+   iButton key, sub-GHz remote) to capture the parser fixture + HIL — the SD is stock-empty. M30
+   Sub-GHz parser is already done (`subfile.py`); **M36 BadUSB + M35 GPIO can be built without MC's
+   objects** (stock demo scripts + a live CLI read).
+5. **Phase 3 M37** whole-rig runbook — **the SD baseline image still does not exist** (no restore
+   possible); creating it is a flagged MC-gated task (spec §6a). **Phase 4 M38** capstone.
+
+### nomad-b / kiosk operations
+- **Access:** `ssh spec5@100.108.20.20` — login user **`spec5`** (host `spec5b`); the droplet key is
+  authorized there. Registry of record: `/home/mc/workspaces/machines/hosts/nomad-b.md`.
+- **Deploy loop:** push the branch, then on nomad-b `cd ~/sigint-101 && git fetch origin <branch> &&
+  git checkout -f -B <branch> FETCH_HEAD`. This clone has **no `origin/<branch>` tracking refs** —
+  use `FETCH_HEAD`, never `origin/<branch>`.
+- **Kiosk:** no auto-start service. `~/start-kiosk.sh` — run **on the device's own tty/seat** (can't
+  from SSH; the panel is on seat0) — starts `labwc` + `chromium --kiosk` at `:8008` with a dedicated
+  `chromium-kiosk` profile and `--disk-cache-size=1` (cache-off). Server alone: `make run`. Once
+  `labwc` runs, a chromium client CAN be launched into its wayland socket from SSH
+  (`XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0`).
+- **Render-verify (the UI test):** isolated `git worktree add /tmp/uxverify FETCH_HEAD` + a separate
+  uvicorn port + headless chromium + `render_scroll.py`; always `Network.setCacheDisabled` in the
+  render (chromium caches `/static/*` and shows stale CSS otherwise).
+
+### Learnings / gotchas (don't relearn)
+- **Render-verify a UI change at 800×480 before claiming it's fixed.** Logic is TDD'd (pytest/node);
+  layout/scroll is only proven by the render-assert. (Now a CLAUDE.md correction.)
+- `pkill -f <pat>` / `pgrep -f <pat>` over SSH **self-match the ssh command's own argv** — kill by
+  PID, `ss` by port, `pkill -x <name>`, or the `[u]vicorn` regex trick. `pkill chromium` (by name)
+  also kills the **kiosk** chromium.
+- **No-mock invariant:** real hardware in the product; test doubles only at the hardware boundary
+  (`FlipperCli.opener`, a fake serial/glob); parsers test-first against **real captured fixtures**.
+
+### Pointers
+- **This session's transcript:** `/home/mc/.claude/projects/-home-mc-workspaces/a6982c67-4a2d-445c-a73b-872b5d698ec3.jsonl`
+- **Repo** `/home/mc/workspaces/sigint-101` (main @ 2602469) · **branches** `flipper-module` (PR #5),
+  `ux-polish` (345fbfb) · **fleet registry** `/home/mc/workspaces/machines/hosts/nomad-b.md`.
+- **Flipper:** Zero "Lle0zik", nomad-b `/dev/ttyACM0`, fw **1.4.3** (→1.5.1 pending).
+
+---
+
 ## NEXT ACTION (resume here)
 **CURRICULUM PINNED (MC, 2026-10-29).** Unit 5 Decode is complete (M13-M16 landed). MC scoped the
 rest of the course across four tracks — **12 new lessons + the Flipper Companion FAP** — in a 4-round
