@@ -419,3 +419,29 @@ A third trap only showed up after several minutes:
 - A nomad-b reboot is the first thing to try when fresh launches hang. Its cold-boot test is
   pending anyway.
 - Render checks can borrow a working instance's page in the meantime.
+
+## 2026-11-02: provisioning inventory — what nomad-b's hand setup actually was
+**Finding.** `deploy/provision.sh --check` on nomad-b, plus a read-only inventory, showed:
+- **wlan1 is back in managed mode.** Monitor mode was a manual step, so the 11-01 reboot undid
+  it, and the Flock lesson on nomad-b can't capture until monitor mode comes back.
+  `provision.sh` now persists it with an NM unmanaged rule (driver `rtw_8821cu`), a udev rule,
+  and a `sigint101-monitor@.service` oneshot.
+- **The kiosk depends on raspi-config's "console autologin" (B2).** nomad-b's `default.target`,
+  `getty@tty1` `autologin.conf` and `lightdm.conf` all share one timestamp (2026-09-08 22:02),
+  which is a B2 run. `install.sh` assumes it, but a stock Recon probably boots to the desktop.
+  `provision.sh` sets B2.
+- **A tcpdump upgrade drops its file caps.** apt replaces the binary. An apt `DPkg::Post-Invoke`
+  hook re-applies `cap_net_raw,cap_net_admin+eip`.
+- **`iw`, `getcap` and `setcap` live in /usr/sbin**, which is off `spec5`'s PATH over
+  non-login SSH. `command -v iw` says "missing" even though iw is installed. Check
+  `/usr/sbin` before calling a tool absent.
+- **Build provenance:** the checkouts in `~` are shallow and have no tags. They give the pins
+  for dump1090 (`465e063`), acarsdec 3.7 (`339f63e`) and redsea (`7555c9f`). The rtl-ais
+  checkout is gone. Its pin (`d84764b`) is inferred: the binary has `-U` (added 2026-08-05),
+  and nothing has landed upstream since. acarsdec must stay on TLeconte 3.x: our argv
+  (`-o 4 -r <dev>`) is 3.x syntax.
+**How to apply.** Offline, side-effect-free probes to reuse:
+- `pip install --dry-run --no-index -r requirements.txt` tells you whether a venv satisfies
+  its requirements.
+- `git --no-optional-locks status` reads status without rewriting the index.
+- `fc-list ':charset=262d' family` lists the fonts that carry a glyph.
