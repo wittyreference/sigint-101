@@ -130,7 +130,9 @@ step_preflight() {
   if [ "$CHECK" = 1 ]; then
     ok "check mode: nothing will be changed"
   else
-    sudo -v || die "sudo is needed for the system steps"
+    # `sudo true`, not `sudo -v`: -v demands a password unless every sudoers entry for the user
+    # is NOPASSWD (verifypw=all), so it refuses on boxes where real commands run password-free.
+    sudo true || die "sudo is needed for the system steps"
   fi
 }
 
