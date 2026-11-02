@@ -13,8 +13,30 @@
     module.exports = {
       colour: colour, formatMHz: formatMHz, formatDb: formatDb,
       gainMeterGeometry: gainMeterGeometry, parseTuneBand: parseTuneBand,
+      rowBounds: rowBounds, binColour: binColour,
     };
     return;
+  }
+
+  // The colour-scale bounds of one row: its weakest and strongest measured bins, or null when it
+  // has none. A bin rtl_power did not measure arrives as null and is skipped — Math.min would read
+  // it as 0 dB and pin the ceiling of every row there.
+  function rowBounds(dbm) {
+    var lo = Infinity, hi = -Infinity;
+    for (var i = 0; i < dbm.length; i++) {
+      var v = dbm[i];
+      if (v === null || v === undefined) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    return lo === Infinity ? null : { lo: lo, hi: hi };
+  }
+
+  // The colour one bin is painted. An unmeasured bin (null) gets the empty-band colour: the panel
+  // shows the gap rather than borrow a neighbour's value for a frequency nobody measured.
+  function binColour(v, floor, range, ramp, emptyColour) {
+    if (v === null || v === undefined) return emptyColour;
+    return colour((v - floor) / range);
   }
 
   // Turn a canvas's data-tune-low/high attribute pair into an /api/tune request, or null when the
@@ -180,17 +202,17 @@
       p.ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
     }
 
-    var lo = Math.min.apply(null, row.dbm);
-    var hi = Math.max.apply(null, row.dbm);
+    var bounds = rowBounds(row.dbm);
+    if (!bounds) return;
     // Ease the bounds so the colour scale doesn't flicker between sweeps.
-    p.floorDbm = p.floorDbm === null ? lo : p.floorDbm * 0.8 + lo * 0.2;
-    p.ceilDbm = p.ceilDbm === null ? hi : p.ceilDbm * 0.8 + hi * 0.2;
+    p.floorDbm = p.floorDbm === null ? bounds.lo : p.floorDbm * 0.8 + bounds.lo * 0.2;
+    p.ceilDbm = p.ceilDbm === null ? bounds.hi : p.ceilDbm * 0.8 + bounds.hi * 0.2;
     var range = Math.max(p.ceilDbm - p.floorDbm, 1);
 
     // Scroll down by one band, then paint the newest sweep across the top.
     p.ctx.drawImage(p.canvas, 0, ROW_H);
     for (var i = 0; i < bins; i++) {
-      p.ctx.fillStyle = colour((row.dbm[i] - p.floorDbm) / range);
+      p.ctx.fillStyle = binColour(row.dbm[i], p.floorDbm, range, null, WF_BG);
       p.ctx.fillRect(i, 0, 1, ROW_H);
     }
     updateGainMeter(p);

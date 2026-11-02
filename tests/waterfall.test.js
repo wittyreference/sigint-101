@@ -89,6 +89,24 @@ test("a complete band attribute pair becomes integer tune edges", () => {
                    { low: 432920000, high: 434920000 });
 });
 
+// A bin rtl_power did not measure (its DC copy) arrives as null. The colour scale must be set by the
+// measured bins alone: Math.min reads null as 0 dB, which would pin the ceiling of every row to 0.
+test("a row's colour bounds come from its measured bins only", () => {
+  assert.deepEqual(panel.rowBounds([-30, -10, null, -31]), { lo: -31, hi: -10 });
+});
+
+test("a row with no measured bins has no colour bounds", () => {
+  assert.equal(panel.rowBounds([null, null]), null);
+  assert.equal(panel.rowBounds([]), null);
+});
+
+test("an unmeasured bin is painted the empty-band colour, never a level", () => {
+  // The panel never borrows a neighbour's value for a bin nobody measured: it shows the gap.
+  assert.equal(panel.binColour(null, -30, 20, null, "#040806"), "#040806");
+  assert.equal(panel.binColour(-30, -30, 20, null, "#040806"), panel.colour(0));
+  assert.equal(panel.binColour(-10, -30, 20, null, "#040806"), panel.colour(1));
+});
+
 test("a missing or partial band pair yields null (no tune is sent)", () => {
   assert.equal(panel.parseTuneBand(null, null), null);
   assert.equal(panel.parseTuneBand("432920000", null), null);
