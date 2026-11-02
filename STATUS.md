@@ -12,7 +12,30 @@
   - Cut line: **"1–19 plus operator mode"**. That is triage items 1–19 (all S0 plus the cheap
     S1s, item 8 being real tuning and gain) plus `/operate` v1, all before 11-08.
 - **Sprint base:** `ux-polish` with main merged in. Sprint branches stack on it. ux-polish itself
-  merges to main only after MC's panel look (MC's gate).
+  merges to main only after MC's panel look (MC's gate; draft PR #15).
+- **Sprint progress (on `ux-polish` @1aae527, deployed to the nomad-b kiosk):**
+  - #18 exam: 0 hidden Commit/Next across all 409 questions, plus Skip and answers that are final.
+  - #19 shell: two-way nav and resume, no concept wall, room for narration, teaching-order
+    codes, hardware badges, touch targets.
+  - #20 exam keyboard scroll.
+  - #21 lesson truth: M15 framing-only on 929.6125, 13 facts fixed, scored predicts with
+    answer/verdict, site constants via env, SSTV 437.550.
+  - #22 decoder truth: dead decoders show STOPPED, process sessions with parent-death kill and
+    KILL escalation, a claim lock, the command strip, ppm/LoRa/AIS/events fixes.
+  - #23 waterfall: measured bins only (unmeasured bins are gaps), real tuning and gain
+    (HIL-proven), red-night all red, themed 404.
+  - **In progress:** operator mode v1 (`/operate`, the rack). The same branch also offsets the
+    centre bin so M9's 433.92 carrier isn't hidden in rtl_power's unmeasured DC bin, applies the
+    same offset to taps, and gives the Sweeper restart back-off.
+  - **Remaining in the cut line:** item 19 (prove provision on a spare SD, then cold boot).
+- **Known small follow-ups (not in the cut line yet):**
+  - the command strip tap target is 22 px;
+  - sunlight waterfall axis labels are about 2.1:1 contrast;
+  - the gain meter's SNR overlaps FLOOR near 3 dB;
+  - the red-night image filter is verified on a test pattern only;
+  - LoRa staleness isn't proven live;
+  - FLEX paging isn't decoded;
+  - the RDS station is a provisioning value (no auto-pick).
 - **Hand-over is 2026-11-08.**
 
 **Needed from MC, one at a time when reached:**
@@ -21,7 +44,8 @@
 2. OK to run `deploy/provision.sh` for real on nomad-b. The `--check` pass predicts 6 changes:
    wlan1 monitor-mode persistence and the tcpdump-caps apt hook. The auto-mode classifier
    blocked it.
-3. One look at the panel. The kiosk shows `ux-polish`, and confirming it unblocks that PR.
+3. One look at the panel. The kiosk shows `ux-polish` @1aae527 (the whole sprint), and
+   confirming it unblocks merging it to main (PR #15).
 4. Re-plug the Flipper on nomad-b and update it 1.4.3 → 1.5.1 in the app.
 5. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
 
