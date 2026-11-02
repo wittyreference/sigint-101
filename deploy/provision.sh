@@ -8,6 +8,9 @@
 #   deploy/provision.sh                  provision (or re-run to update)
 #   deploy/provision.sh --check          report what would change; changes nothing
 #   deploy/provision.sh --with-optional  also build dsd-fme, satdump and sstv (slow; see below)
+#   deploy/provision.sh --with-flock-adapter
+#                                        monitor mode at boot for the RTL8821CU Wi-Fi adapter;
+#                                        only behind a self-powered USB hub (see step_monitor_mode)
 #   deploy/provision.sh --branch NAME    follow a course branch other than main
 #
 # Nothing personal goes on the box: the course comes from the public repo over HTTPS, with no
@@ -25,6 +28,7 @@ SRC_DIR="$HOME/.cache/sigint101-src"
 STAMP_DIR="/usr/local/share/sigint101/builds"
 CHECK=0
 OPTIONAL=0
+FLOCK_ADAPTER=0
 
 # --- Source builds, pinned --------------------------------------------------------------------
 # Core decoders. Each pin is the commit nomad-b (the reference Recon) runs, read from its build
@@ -429,6 +433,14 @@ monitor_adapters() {
 
 step_monitor_mode() {
   step "Monitor mode for the RTL8821CU adapter at boot (Flock, M18)"
+  # Opt-in, because of power. On nomad-b, bringing the adapter up in monitor mode on the Nomad's
+  # own USB port drew more than the port supplies: 192 over-current events in two minutes, each
+  # resetting the adapter and the touch panel that shares the hub. It needs a self-powered USB
+  # hub, so only a box that has one asks for it with --with-flock-adapter.
+  if [ "$FLOCK_ADAPTER" != 1 ]; then
+    skip "not enabled: the adapter needs a powered USB hub (--with-flock-adapter turns it on)"
+    return 0
+  fi
   FILE_CHANGED=0
   put_file /etc/NetworkManager/conf.d/50-sigint101-monitor.conf 0644 "$MONITOR_NM_CONF"
   put_file /etc/udev/rules.d/70-sigint101-monitor.rules 0644 "$MONITOR_UDEV_RULE"
@@ -565,10 +577,11 @@ step_handover_report() {
 
 usage() {
   cat <<'U'
-usage: provision.sh [--check] [--with-optional] [--branch NAME]
-  --check          report what would change; change nothing
-  --with-optional  also build dsd-fme, satdump and sstv (hours on a Pi 4)
-  --branch NAME    follow a course branch other than main
+usage: provision.sh [--check] [--with-optional] [--with-flock-adapter] [--branch NAME]
+  --check               report what would change; change nothing
+  --with-optional       also build dsd-fme, satdump and sstv (hours on a Pi 4)
+  --with-flock-adapter  monitor mode at boot for the RTL8821CU adapter (needs a powered USB hub)
+  --branch NAME         follow a course branch other than main
 U
 }
 
@@ -577,6 +590,7 @@ main() {
     case "$1" in
       --check) CHECK=1 ;;
       --with-optional) OPTIONAL=1 ;;
+      --with-flock-adapter) FLOCK_ADAPTER=1 ;;
       --branch)
         [ $# -ge 2 ] || die "--branch needs a name"
         COURSE_BRANCH="$2"

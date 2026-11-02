@@ -514,3 +514,22 @@ each transmission as three decodes, so the reception log gains three events per 
 **How to apply.** After a HIL session, `pgrep -af` for your port and the rtl_* tools and kill your
 own uvicorn PID (SIGTERM lets the lifespan stop the radio tool), then `rtl_test -t` in the flock.
 Expect reception counts in threes from that sensor; deduplicating repeats is a follow-up.
+
+## 2026-11-02: the RTL8821CU in monitor mode browns out the Nomad's USB
+**Finding.**
+- On nomad-b, `provision.sh` brought wlan1 (RTL8821CU, `rtw_8821cu`) up in monitor mode at
+  10:26:27. Within two minutes `dmesg` showed 192 `usb 1-1-port3: over-current change` events.
+- Each event reset the adapter: it came back in "Driver CDROM Mode" `0bda:1a2b` and then
+  re-enumerated, 34 times.
+- Each event also reset the touch panel's controller (MPI5001 `0484:5750`, on the same hub), 23
+  times. Touch input dropped on the kiosk.
+- While wlan1 sat DOWN (the state before provisioning), the bus was stable. With the radio up,
+  the adapter draws more than the port supplies.
+- Taking it down stopped the events: 0 in 30 s, with 0 touch resets.
+**How to apply.**
+- The Flock adapter needs a **self-powered USB hub** on a Nomad.
+- `provision.sh` makes monitor mode opt-in (`--with-flock-adapter`), and the quick-start says
+  to use the hub.
+- On nomad-b, the udev rule is parked at
+  `/etc/udev/rules.d/70-sigint101-monitor.rules.disabled` until a hub is in place.
+- After any USB or radio change, grep `dmesg` for `over-current` before calling it done.

@@ -33,7 +33,7 @@ transmitting on most bands takes a licence, and this is the on-ramp to one.
 | Telescopic dipole | M6–M7 antennas. It also helps FM reception for M4 and M12 |
 | RTL-SDR Blog V3 (1 ppm clock) | Optional. M4 explains why its clock would read near zero; the console itself uses the built-in radio |
 | Flipper Zero (use a **data** USB cable) | M9 on-off keying |
-| USB Wi-Fi adapter (RTL8821CU) | M18 Flock detector. Plug it in and it switches to listen-only monitor mode by itself |
+| USB Wi-Fi adapter (RTL8821CU) + a **self-powered USB hub** | M18 Flock detector. Plug the adapter into the powered hub, never straight into the Recon: the Recon's own ports can't feed it in monitor mode and brown out, which resets the touch panel too. Then run `provision.sh --with-flock-adapter` once, and it switches to listen-only monitor mode by itself |
 | Orbic hotspot running Rayhunter | M19 IMSI-catcher detection. Power it on and join the box's Wi-Fi to the Orbic's network; the lesson reads its report from there |
 | A second Meshtastic node | M11 LoRa and M28 Meshtastic need someone to hear |
 | An antenna for the band | ADS-B (1090 MHz), APRS (2 m), ISS SSTV (437.550 MHz), NOAA APT (137 MHz), AIS (marine VHF), pager framing (929 MHz). A lesson says when it needs one |
