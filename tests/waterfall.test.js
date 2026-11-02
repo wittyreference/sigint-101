@@ -100,6 +100,36 @@ test("a row with no measured bins has no colour bounds", () => {
   assert.equal(panel.rowBounds([]), null);
 });
 
+// Red-night keeps night vision: its waterfall must be red-only, not the blue-to-red rainbow. The
+// theme declares its ramp as a CSS token (--wf-ramp, a list of colours from floor to peak); a theme
+// without one keeps the conventional map.
+test("a theme's ramp token parses into its colour stops", () => {
+  assert.deepEqual(panel.parseRamp(" #1a0000 #5c0000  #ff5050 "),
+                   [[26, 0, 0], [92, 0, 0], [255, 80, 80]]);
+});
+
+test("a missing or malformed ramp token means the theme keeps the conventional map", () => {
+  assert.equal(panel.parseRamp(""), null);
+  assert.equal(panel.parseRamp(undefined), null);
+  assert.equal(panel.parseRamp("#ff0000"), null);           // one stop is not a ramp
+  assert.equal(panel.parseRamp("#ff0000 red"), null);
+});
+
+test("a ramp runs from its first stop at the floor to its last at the peak", () => {
+  const stops = panel.parseRamp("#000000 #800000 #ff4040");
+  assert.equal(panel.rampColour(0, stops), "rgb(0,0,0)");
+  assert.equal(panel.rampColour(1, stops), "rgb(255,64,64)");
+  assert.equal(panel.rampColour(0.25, stops), "rgb(64,0,0)");
+  assert.equal(panel.rampColour(-3, stops), "rgb(0,0,0)");   // clamped like the default map
+  assert.equal(panel.rampColour(9, stops), "rgb(255,64,64)");
+});
+
+test("a bin is painted from the theme's ramp when the theme has one", () => {
+  const stops = panel.parseRamp("#000000 #ff0000");
+  assert.equal(panel.binColour(-10, -30, 20, stops, "#050000"), "rgb(255,0,0)");
+  assert.equal(panel.binColour(null, -30, 20, stops, "#050000"), "#050000");
+});
+
 test("an unmeasured bin is painted the empty-band colour, never a level", () => {
   // The panel never borrows a neighbour's value for a bin nobody measured: it shows the gap.
   assert.equal(panel.binColour(null, -30, 20, null, "#040806"), "#040806");

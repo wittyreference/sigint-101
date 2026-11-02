@@ -19,7 +19,7 @@
     module.exports = {
       colour: colour, formatMHz: formatMHz, formatDb: formatDb,
       gainMeterGeometry: gainMeterGeometry, parseTuneBand: parseTuneBand,
-      rowBounds: rowBounds, binColour: binColour,
+      rowBounds: rowBounds, binColour: binColour, parseRamp: parseRamp, rampColour: rampColour,
       tapToHz: tapToHz, spanAround: spanAround, formatTuneMHz: formatTuneMHz,
       makeTuner: makeTuner, nextGain: nextGain, formatGain: formatGain,
       makeGainStepper: makeGainStepper, meterReading: meterReading,
@@ -179,10 +179,38 @@
   }
 
   // The colour one bin is painted. An unmeasured bin (null) gets the empty-band colour: the panel
-  // shows the gap rather than borrow a neighbour's value for a frequency nobody measured.
+  // shows the gap rather than borrow a neighbour's value for a frequency nobody measured. A theme
+  // with its own ramp (red-night) paints from it; otherwise the conventional map.
   function binColour(v, floor, range, ramp, emptyColour) {
     if (v === null || v === undefined) return emptyColour;
-    return colour((v - floor) / range);
+    var t = (v - floor) / range;
+    return ramp ? rampColour(t, ramp) : colour(t);
+  }
+
+  // A theme's waterfall ramp, from its --wf-ramp token: two or more #rrggbb colours, floor first.
+  // Anything else is null, and the theme keeps the conventional map.
+  function parseRamp(token) {
+    var parts = String(token || "").trim().split(/\s+/);
+    if (parts.length < 2) return null;
+    var stops = [];
+    for (var i = 0; i < parts.length; i++) {
+      var m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(parts[i]);
+      if (!m) return null;
+      stops.push([parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)]);
+    }
+    return stops;
+  }
+
+  // A level (0 floor .. 1 peak) along a ramp, straight-line between neighbouring stops.
+  function rampColour(t, stops) {
+    t = Math.max(0, Math.min(1, t));
+    var pos = t * (stops.length - 1);
+    var i = Math.min(Math.floor(pos), stops.length - 2);
+    var f = pos - i;
+    var a = stops[i], b = stops[i + 1];
+    return "rgb(" + Math.round(a[0] + (b[0] - a[0]) * f) + "," +
+                    Math.round(a[1] + (b[1] - a[1]) * f) + "," +
+                    Math.round(a[2] + (b[2] - a[2]) * f) + ")";
   }
 
   // Turn a canvas's data-tune-low/high attribute pair into an /api/tune request, or null when the
@@ -272,6 +300,11 @@
   // The theme's empty-band colour, read live so a theme switch repaints in the new palette.
   function emptyColour(p) {
     return getComputedStyle(p.canvas).getPropertyValue("--wf-bg").trim() || WF_BG;
+  }
+
+  // The theme's own level ramp (red-night's red-only one), or null for the conventional map.
+  function themeRamp(p) {
+    return parseRamp(getComputedStyle(p.canvas).getPropertyValue("--wf-ramp"));
   }
 
   // The reason the band is empty, as page text over the canvas (null hides it).
@@ -520,9 +553,10 @@
     var range = Math.max(p.ceilDbm - p.floorDbm, 1);
 
     // Scroll down by one band, then paint the newest sweep across the top.
+    var ramp = themeRamp(p);
     p.ctx.drawImage(p.canvas, 0, ROW_H);
     for (var i = 0; i < bins; i++) {
-      p.ctx.fillStyle = binColour(row.dbm[i], p.floorDbm, range, null, empty);
+      p.ctx.fillStyle = binColour(row.dbm[i], p.floorDbm, range, ramp, empty);
       p.ctx.fillRect(i, 0, 1, ROW_H);
     }
     if (p.meter) {
@@ -556,6 +590,26 @@
       p.ctx.fillStyle = emptyColour(p);
       p.ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
     });
+  }
+
+  // A theme switch repaints the history in the new palette: the canvas is cleared and the painted
+  // timestamps forgotten, so the next poll's replay of recent rows draws them again. The axis and
+  // the span stay, since the band has not changed. Without this, switching to red-night at night
+  // would leave the old rainbow rows on screen until they scrolled away.
+  function repaintForTheme() {
+    seen = [];
+    total = 0;
+    panels.forEach(function (p) {
+      p.floorDbm = null;
+      p.ceilDbm = null;
+      p.ctx.fillStyle = emptyColour(p);
+      p.ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
+    });
+  }
+  var appRoot = document.querySelector(".app");
+  if (appRoot && window.MutationObserver) {
+    new MutationObserver(repaintForTheme).observe(appRoot,
+      { attributes: true, attributeFilter: ["data-theme"] });
   }
 
   // Timestamps of sweeps already painted. Trimmed rather than unbounded because the kiosk runs for

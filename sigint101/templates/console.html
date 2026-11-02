@@ -704,6 +704,16 @@
       {% endif %}
     {% endfor %}
   </div>
+  {% if lesson.uses_apt or lesson.uses_sstv %}
+  {# Red-night re-inks a decoded picture: its luminance (Rec. 709 weights) goes to red, and green
+     and blue get nothing, so the picture keeps its shading in one hue. Same technique as the exam
+     figures' ink filters; applied by app.css only in red-night. #}
+  <svg class="sr-only" aria-hidden="true" focusable="false">
+    <filter id="gallery-ink-red" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.2126 0.7152 0.0722 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+    </filter>
+  </svg>
+  {% endif %}
 {% endblock %}
 
 {% block scripts %}

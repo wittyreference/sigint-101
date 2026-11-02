@@ -128,6 +128,10 @@
   --wf-bg: #050000;
   --wf-grid: #2a0707;
   --wf-ink: #ff4b4b;
+  /* The waterfall's level ramp, floor to peak, in red alone (waterfall.js reads it); the other
+     themes define none and keep the conventional blue-to-red map. The floor stop sits above
+     --wf-bg so a measured quiet bin still reads apart from an unmeasured one. */
+  --wf-ramp: #1a0000 #5c0000 #a01010 #e02020 #ff5050;
   --glow: 0 0 6px rgba(255, 75, 75, 0.5);
   --glow-strong: 0 0 11px rgba(255, 75, 75, 0.6);
   --sel-bg: #ff4b4b;
@@ -1034,6 +1038,11 @@ body {
   image-rendering: pixelated;
   border: 1px solid var(--border);
 }
+/* Red-night re-inks a decoded picture's brightness onto red alone (console.html's colour matrix),
+   so a full-colour weather image or SSTV frame never breaks night vision. */
+.app[data-theme="red-night"] .gallery__img {
+  filter: url(#gallery-ink-red);
+}
 .gallery__cap {
   flex: none;
   font-family: var(--font-mono);
@@ -1525,6 +1534,35 @@ body {
   flex: none;
   display: flex;
   justify-content: flex-end;
+}
+
+/* ===== Error screen (404 and other refusals) ============================= */
+/* The console's own page for a screen that is not there: themed like every other screen, so a
+   wrong link at night is red on black, never a white sheet. */
+.error-screen {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px var(--gutter);
+  text-align: center;
+}
+.error-screen__code {
+  font-family: var(--font-display);
+  font-size: 64px;
+  line-height: 1;
+  color: var(--accent);
+  text-shadow: var(--glow-strong);
+}
+.error-screen__detail {
+  margin: 0;
+  font-size: 18px;
+  color: var(--fg-dim);
+}
+.error-screen__home {
+  min-width: 200px;
 }
 
 /* ===== Home / tiles (boot-menu grid) ===================================== */

@@ -194,6 +194,51 @@ def test_honest_empty_states_are_large_and_readable_in_every_theme():
         assert _contrast(tokens["--fg-dim"], tokens["--surface"]) >= 4.5, theme
 
 
+def _hex_rgb(colour):
+    return tuple(int(colour.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def test_red_night_paints_the_waterfall_from_a_red_only_ramp():
+    # Red-night keeps night vision: the waterfall's levels are shades of red alone, never the
+    # blue-to-yellow rainbow. Each stop has no more green or blue than a dim red tint.
+    stops = _theme_tokens("red-night")["--wf-ramp"].split()
+    assert len(stops) >= 2
+    for stop in stops:
+        r, g, b = _hex_rgb(stop)
+        assert g == b and g <= r * 0.35, stop
+    # Brighter is stronger: the ramp climbs from floor to peak.
+    assert _hex_rgb(stops[-1])[0] > _hex_rgb(stops[0])[0]
+
+
+def test_the_other_themes_keep_the_conventional_waterfall_map():
+    assert "--wf-ramp" not in _theme_tokens("dark")
+    assert "--wf-ramp" not in _theme_tokens("sunlight")
+
+
+def _apt_lesson():
+    return parse_lesson({
+        "id": 24, "slug": "apt", "title": "APT", "type": "intro", "concept": "c",
+        "panels": ["apt"], "hardware": ["rtl-sdr"],
+        "stages": {"frame": "f", "demo": "d", "try": "t", "predict": "p", "observe": "o",
+                   "explain": "e"},
+    })
+
+
+def test_a_decoded_picture_is_re_inked_red_in_red_night():
+    # A decoded weather picture or SSTV frame is full colour; red-night maps its brightness onto red
+    # alone with an SVG colour matrix (the technique the exam figures use), so no other hue shows.
+    html = _console(lesson=_apt_lesson(), current_stage="demo")
+    matrix = re.search(r'<filter id="gallery-ink-red"[^>]*>\s*<feColorMatrix type="matrix" '
+                       r'values="([^"]+)"', html)
+    assert matrix, "no red-night filter for the decoded picture"
+    rows = [matrix.group(1).split()[i:i + 5] for i in range(0, 20, 5)]
+    assert all(float(v) == 0 for v in rows[1] + rows[2])   # nothing reaches green or blue
+    assert html.count('id="gallery-ink-red"') == 1
+    css = APP_CSS.read_text()
+    assert re.search(r'\.app\[data-theme="red-night"\] \.gallery__img \{[^}]*'
+                     r'filter: url\(#gallery-ink-red\)', css)
+
+
 def _env():
     return Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),

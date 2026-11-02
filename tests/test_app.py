@@ -742,6 +742,44 @@ def test_opening_an_unknown_lesson_is_404(tmp_path):
     assert resp.status_code == 404
 
 
+# --- error pages: a browser gets a themed page, never raw JSON or a white sheet ----------------
+
+_BROWSER = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+
+
+def test_an_unknown_lesson_is_a_themed_page_for_the_kiosk_browser(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/lesson/999", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert resp.headers["content-type"].startswith("text/html")
+    # The console's own shell, so it takes the learner's theme (red-night stays red) and keeps Back.
+    assert 'class="app"' in resp.text and "btn-back" in resp.text
+    assert "lesson 999 not found" in resp.text
+    assert 'href="/"' in resp.text
+
+
+def test_an_unknown_path_is_a_themed_page_for_the_kiosk_browser(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/no/such/screen", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert 'class="app"' in resp.text
+
+
+def test_api_errors_stay_json_even_for_a_browser(tmp_path):
+    # The panels' fetch() calls read the JSON reason; an HTML page there would break them.
+    with _client(tmp_path) as client:
+        resp = client.post("/api/complete?lesson_id=999", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "lesson 999 not found"
+
+
+def test_a_client_that_does_not_ask_for_html_still_gets_json(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/lesson/999")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "lesson 999 not found"
+
+
 # --- complete -----------------------------------------------------------------
 
 
