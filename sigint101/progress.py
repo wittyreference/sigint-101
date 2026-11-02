@@ -37,6 +37,19 @@ CREATE TABLE IF NOT EXISTS responses (
 );
 """
 
+# Where the learner is inside each lesson: the stage last shown, and the furthest position (index
+# in the lesson's stage order) ever reached, so a reload or a power cut resumes in place and the
+# rail keeps every visited stage reachable. Its own table for the same reason as responses: a
+# database from an earlier build gains it on open, with its progress and predictions untouched.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS stages (
+    lesson_id INTEGER PRIMARY KEY,
+    stage     TEXT NOT NULL,
+    furthest  INTEGER NOT NULL DEFAULT 0,
+    updated   REAL
+);
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
@@ -129,6 +142,38 @@ class Progress:
                 (lesson_id, PREDICTION),
             ).fetchone()
         return row["body"] if row else None
+
+    def record_stage(self, lesson_id: int, stage: str, position: int, *, clock=None) -> None:
+        """Remember the stage the learner is on, and keep the furthest position ever reached.
+
+        `position` is the stage's index in the lesson's own order. Stepping back lowers the
+        current stage but never the furthest, so going back to re-read the setup does not lock
+        the stages already seen. Fails closed on a blank stage or a negative position, which no
+        real walk produces.
+        """
+        stage = (stage or "").strip()
+        if not stage:
+            raise ValueError("a stage cannot be blank")
+        if position < 0:
+            raise ValueError("a stage position cannot be negative")
+
+        updated = clock() if clock else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO stages(lesson_id, stage, furthest, updated) VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(lesson_id) DO UPDATE SET stage=excluded.stage, "
+                "furthest=MAX(furthest, excluded.furthest), updated=excluded.updated",
+                (lesson_id, stage, position, updated),
+            )
+            self._conn.commit()
+
+    def get_stage(self, lesson_id: int):
+        """The stage last shown and the furthest position reached, or None if never recorded."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT stage, furthest FROM stages WHERE lesson_id=?", (lesson_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def get(self, lesson_id: int):
         """Everything known about one lesson's progress, prediction included."""

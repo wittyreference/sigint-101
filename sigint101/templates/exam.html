@@ -5,47 +5,54 @@
 {% block title %}{{ title|default('Exam Trainer') }}{% endblock %}
 
 {% block content %}
+{# The question and its choices scroll in one body; the footer holding Commit / Next is pinned
+   under it, so a long pool question can never push the action off the fixed 800x480 screen. #}
 <section class="exam">
-  <div class="stage-panel__eyebrow">&#9773; EXAM &middot; {{ question.id }} &middot; {{ question.group }}</div>
+  <div class="exam__body">
+    <div class="stage-panel__eyebrow">&#9773; EXAM &middot; {{ question.id }} &middot; {{ question.group }}</div>
 
-  <a class="exam__sim-link" href="/exam/sim">Take the 35-question practice exam &rarr;</a>
+    <div class="exam__ask">
+      <h1 class="exam__question">{{ question.question }}</h1>
+      {% include "_exam_figure.html" %}
+    </div>
 
-  <div class="exam__ask">
-    <h1 class="exam__question">{{ question.question }}</h1>
-    {% include "_exam_figure.html" %}
+    {% if not reviewed %}
+      {# ---- Answer card: tap a choice, then commit. No typing (keyboard-free gate). ---- #}
+      <form class="exam-form" id="exam-answer" method="post" action="/api/exam/answer?question_id={{ question.id }}">
+        <fieldset class="predict-chips exam-chips">
+          <legend class="sr-only">Tap your answer, then commit &mdash; no typing</legend>
+          {% for letter, text in question.options.items()|sort %}
+            <label class="predict-chip exam-chip">
+              <input type="radio" name="choice" value="{{ letter }}" {% if loop.first %}required{% endif %}>
+              <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
+              <span class="predict-chip__label">{{ text }}</span>
+            </label>
+          {% endfor %}
+        </fieldset>
+      </form>
+    {% else %}
+      {# ---- Review: the right option is marked; a wrong pick is flagged too. ---- #}
+      <div class="exam-chips exam-chips--reviewed">
+        {% for letter, text in question.options.items()|sort %}
+          <div class="predict-chip exam-chip
+                      {%- if letter == question.answer %} exam-chip--correct{% endif %}
+                      {%- if letter == chosen and letter != question.answer %} exam-chip--chosen{% endif %}">
+            <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
+            <span class="predict-chip__label">{{ text }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
   </div>
 
   {% if not reviewed %}
-    {# ---- Answer card: tap a choice, then commit. No typing (keyboard-free gate). ---- #}
-    <form class="predict" method="post" action="/api/exam/answer?question_id={{ question.id }}">
-      <fieldset class="predict-chips exam-chips">
-        <legend class="sr-only">Tap your answer, then commit &mdash; no typing</legend>
-        {% for letter, text in question.options.items()|sort %}
-          <label class="predict-chip exam-chip">
-            <input type="radio" name="choice" value="{{ letter }}" {% if loop.first %}required{% endif %}>
-            <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
-            <span class="predict-chip__label">{{ text }}</span>
-          </label>
-        {% endfor %}
-      </fieldset>
-      <div class="predict__actions">
-        <span class="predict__hint">Tap your answer, comrade &mdash; then commit.</span>
-        <button class="btn btn--primary btn-commit" type="submit">Commit answer</button>
-      </div>
-    </form>
-  {% else %}
-    {# ---- Review: the right option is marked; a wrong pick is flagged too. ---- #}
-    <div class="exam-chips exam-chips--reviewed">
-      {% for letter, text in question.options.items()|sort %}
-        <div class="predict-chip exam-chip
-                    {%- if letter == question.answer %} exam-chip--correct{% endif %}
-                    {%- if letter == chosen and letter != question.answer %} exam-chip--chosen{% endif %}">
-          <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
-          <span class="predict-chip__label">{{ text }}</span>
-        </div>
-      {% endfor %}
+    <div class="exam__foot">
+      <a class="btn exam__sim-link" href="/exam/sim">Practice exam</a>
+      <span class="predict__hint">Tap your answer, comrade &mdash; then commit.</span>
+      <button class="btn btn--primary btn-commit" type="submit" form="exam-answer">Commit answer</button>
     </div>
-    <div class="exam-reveal">
+  {% else %}
+    <div class="exam__foot exam-reveal">
       <p class="exam-result">
         {% if correct %}Correct, comrade.{% else %}Not quite — the answer is {{ question.answer }}.{% endif %}
         {% if question.fcc_refs %}<span class="exam-refs">[{{ question.fcc_refs|join(', ') }}]</span>{% endif %}
