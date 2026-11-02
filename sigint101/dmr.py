@@ -204,6 +204,8 @@ class DmrDecoder:
     def __init__(self, *, freq_hz=DEFAULT_DMR_HZ, device=0, spawn=_popen,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None):
         self.freq_hz = int(freq_hz)
+        # The frequency this decoder was built for; the console tunes a lesson back to it.
+        self.home_hz = self.freq_hz
         self.device = device
         self.serial = serial or None
         self._list_devices = list_devices
@@ -211,6 +213,10 @@ class DmrDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._log = CallLog()
+        # Called with each call event as a plain dict, from the reader thread only and outside
+        # the log lock. The console's hook logs it as a reception and never raises, so the call
+        # is made directly: it cannot end the decode.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
@@ -255,6 +261,20 @@ class DmrDecoder:
     def resume(self) -> None:
         with self._life:
             self._released = False
+
+    def retune(self, freq_hz) -> None:
+        """Move to another frequency: the running dsd-fme stops, and the next start() spawns there.
+
+        The calls heard on the old frequency are cleared as release() clears them, but the dongle
+        is not handed away. Tuning to where the decoder already is changes nothing.
+        """
+        with self._life:
+            if int(freq_hz) == self.freq_hz:
+                return
+            self._stop_locked()
+            self.freq_hz = int(freq_hz)
+            with self._lock:
+                self._log = CallLog()
 
     def start(self) -> None:
         """Begin decoding DMR/P25, unless the radio is absent, dsd-fme is missing, or released."""
@@ -304,6 +324,9 @@ class DmrDecoder:
                 if event is not None:
                     with self._lock:
                         self._log.add(event)
+                    report = self.on_reception
+                    if report is not None:
+                        report(event.as_dict())
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
         finally:

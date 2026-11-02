@@ -126,6 +126,10 @@ class LoRaListener:
         self.port = int(port)
         self._connect = connect
         self._packets = deque(maxlen=history)
+        # Called with each packet received over the air, as a plain dict, from meshtastic's
+        # receive callback only and outside the buffer lock. The console's hook logs it as a
+        # reception and never raises, so the call is made directly.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._interface = None
         self._subscribed = False
@@ -177,6 +181,9 @@ class LoRaListener:
         if parsed is not None:
             with self._lock:
                 self._packets.append(parsed)
+            report = self.on_reception
+            if report is not None:
+                report(parsed.as_dict())
 
     def stop(self) -> None:
         """Disconnect from meshtasticd and stop buffering."""
