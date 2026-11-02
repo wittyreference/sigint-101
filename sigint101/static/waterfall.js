@@ -20,7 +20,7 @@
       colour: colour, formatMHz: formatMHz, formatDb: formatDb,
       gainMeterGeometry: gainMeterGeometry, parseTuneBand: parseTuneBand,
       rowBounds: rowBounds, binColour: binColour, parseRamp: parseRamp, rampColour: rampColour,
-      tapToHz: tapToHz, spanAround: spanAround, formatTuneMHz: formatTuneMHz,
+      tapToHz: tapToHz, bandRequest: bandRequest, formatTuneMHz: formatTuneMHz,
       makeTuner: makeTuner, nextGain: nextGain, formatGain: formatGain,
       makeGainStepper: makeGainStepper, meterReading: meterReading,
     };
@@ -39,10 +39,20 @@
     return Math.round(low + index * (high - low) / bins);
   }
 
-  // A span of the same width, centred on a new frequency: a retune moves the window, not its size.
-  function spanAround(centreHz, widthHz) {
-    var low = Math.round(centreHz - widthHz / 2);
-    return { low: low, high: low + Math.round(widthHz) };
+  // A lesson's band as an /api/tune request: its centre and width (and bin, if it names one). The
+  // console builds the span around the centre itself, offset so the target is not lost in a hop's
+  // unmeasured centre bin, and answers with the span it chose and the centre the dial reads.
+  function bandRequest(band) {
+    if (!band) return null;
+    var request = { center: Math.round((band.low + band.high) / 2), span: band.high - band.low };
+    if (band.bin_size) request.bin_size = band.bin_size;
+    return request;
+  }
+
+  // Where the dial is: the frequency tuned to, which the console reports as the span's `center`
+  // (offset off the span's middle when tuned to a target), or the middle of a span given by edges.
+  function dialHz(span) {
+    return typeof span.center === "number" ? span.center : (span.low + span.high) / 2;
   }
 
   function formatTuneMHz(hz) {
@@ -93,24 +103,29 @@
   }
 
   // The tune strip's coalescer. +/- taps add up steps of `stepHz`; a tap on the waterfall sets an
-  // absolute frequency. Steps always count from the span the server last confirmed, so the dial
-  // never drifts from what the radio is doing; a retune keeps the span's width and bin.
-  //   opts.confirmed()   -> {low, high, binSize} the server confirmed, or null (nothing to tune)
-  //   opts.send(request) -> Promise of {ok, low, high, bin_size} or {ok: false, status, reason}
+  // absolute frequency. Steps always count from the frequency the server last confirmed, so the
+  // dial never drifts from what the radio is doing; a retune keeps the span's width and bin, and
+  // asks for the target by centre so the console can offset the sweep off it.
+  //   opts.stepHz        -> the step in Hz, or a function read at each tap (the rack's step key)
+  //   opts.confirmed()   -> {low, high, binSize, center} the server confirmed, or null
+  //   opts.send(request) -> Promise of {ok, low, high, bin_size, center} or {ok: false, ...}
   //   opts.onPending(hz) -> the target being gathered, or null once it has settled
   //   opts.onResult(res) -> the server's answer
   function makeTuner(opts) {
+    function stepHz() {
+      return typeof opts.stepHz === "function" ? opts.stepHz() : opts.stepHz;
+    }
     var coalescer = makeCoalescer({
       delayMs: opts.delayMs,
       plan: function (steps, absolute) {
         var span = opts.confirmed();
         if (!span) return null;
-        var base = absolute ? absolute.value : (span.low + span.high) / 2;
-        return { value: Math.round(base + steps * opts.stepHz) };
+        var base = absolute ? absolute.value : dialHz(span);
+        return { value: Math.round(base + steps * stepHz()) };
       },
       send: function (hz) {
         var span = opts.confirmed();
-        var request = spanAround(hz, span.high - span.low);
+        var request = { center: hz, span: span.high - span.low };
         if (span.binSize) request.bin_size = span.binSize;
         return opts.send(request);
       },
@@ -386,8 +401,11 @@
         base: caption ? caption.textContent : "",
       };
     });
-  var stepHz = strips.length ? (parseInt(strips[0].el.getAttribute("data-step-hz"), 10) || 100000)
-                             : 100000;
+  // Read at each tap rather than once: the rack's step key rewrites data-step-hz on the strip.
+  function stepHz() {
+    return strips.length ? (parseInt(strips[0].el.getAttribute("data-step-hz"), 10) || 100000)
+                         : 100000;
+  }
   var pendingNote = null;   // "tuning to …" while taps are gathered or a request is in flight
   var tuneNote = null;      // why the last retune was refused, until the next tap
   var radioNote = null;     // why nothing is tuned (no radio), until the radio answers
@@ -401,14 +419,15 @@
     });
   }
 
-  // The dial shows the centre of the span the server confirmed. Until there is one it keeps the
-  // lesson's target, marked pending, and carries no data-tuned-hz — that attribute is what the
-  // ppm panel measures at, so it exists only for a frequency the radio is really on.
+  // The dial shows the frequency the server confirmed it tuned to (dialHz: the target, which an
+  // offset sweep keeps on measured bins). Until there is one it keeps the lesson's target, marked
+  // pending, and carries no data-tuned-hz — that attribute is what the ppm panel measures at, so it
+  // exists only for a frequency the radio is really on.
   function renderDials() {
     strips.forEach(function (s) {
       if (!s.freq) return;
       if (live) {
-        var hz = Math.round((live.low + live.high) / 2);
+        var hz = Math.round(dialHz(live));
         s.freq.innerHTML = formatTuneMHz(hz) + "<span>MHz</span>";
         s.freq.setAttribute("data-tuned-hz", String(hz));
         s.freq.classList.remove("tune__freq--pending");
@@ -446,7 +465,7 @@
     },
     onResult: function (res) {
       if (res.ok) {
-        live = { low: res.low, high: res.high, binSize: res.bin_size };
+        live = { low: res.low, high: res.high, binSize: res.bin_size, center: res.center };
         tuneNote = null;
         renderDials();
       } else {
@@ -664,7 +683,7 @@
         // The span the sweep is really on, as the server reports it: the dial reads this, and a
         // +/- step counts from it.
         live = { low: result.body.freq_low, high: result.body.freq_high,
-                 binSize: result.body.bin_size };
+                 binSize: result.body.bin_size, center: result.body.center };
         liveGain = { gain: result.body.gain === undefined ? null : result.body.gain };
         radioNote = null;
         renderDials();
@@ -709,16 +728,17 @@
   }
 
   // A lesson that names its own band (data-tune-low/high on the canvas) points the shared sweep at
-  // it once on load, so the waterfall shows that band instead of the default FM sweep. The retune
-  // is detected on the next poll like any other span change. Polling starts whatever the outcome —
-  // on no radio the tune 503s and the panel still shows the honest no-radio state.
+  // it once on load, so the waterfall shows that band instead of the default FM sweep. It asks by
+  // the band's centre, so the console offsets the sweep to keep that centre on measured bins. The
+  // retune is detected on the next poll like any other span change. Polling starts whatever the
+  // outcome — on no radio the tune 503s and the panel still shows the honest no-radio state.
   function autoTuneToBand() {
     for (var i = 0; i < panels.length; i++) {
       var c = panels[i].canvas;
       var band = parseTuneBand(c.getAttribute("data-tune-low"), c.getAttribute("data-tune-high"),
                                c.getAttribute("data-tune-bin"));
       // A refusal or no radio needs no handling here: the next poll draws the band honestly.
-      if (band) return postTune(band);
+      if (band) return postTune(bandRequest(band));
     }
     return Promise.resolve();
   }

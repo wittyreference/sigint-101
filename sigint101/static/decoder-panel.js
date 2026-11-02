@@ -48,9 +48,12 @@
   }
 
   // Fill a panel's command strip, or hide it when nothing runs. The full line also rides in the
-  // title so it survives truncation; a tap toggles the strip open to show it whole.
+  // title so it survives truncation; a tap toggles the strip open to show it whole. In the rack
+  // the strip sits under the panel rather than in its head, inside the [data-command-scope] that
+  // holds both; a lesson has no such scope, and its panel's own strip is the one filled.
   function showCommand(panel, command) {
-    var strip = panel.querySelector("[data-command]");
+    var scope = panel.closest("[data-command-scope]") || panel;
+    var strip = scope.querySelector("[data-command]");
     if (!strip) return;
     var text = commandText(command);
     var code = strip.querySelector("[data-command-text]");

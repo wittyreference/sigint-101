@@ -180,9 +180,14 @@ test("a tap off the canvas edge is held to the span", () => {
   assert.equal(panel.tapToHz(1.3, 88e6, 108e6, 256), 108e6 - 78125);
 });
 
-test("a retune keeps the span's width and centres it on the target", () => {
-  assert.deepEqual(panel.spanAround(98.3e6, 20e6), { low: 88.3e6, high: 108.3e6 });
-  assert.deepEqual(panel.spanAround(91515625, 20e6), { low: 81515625, high: 101515625 });
+test("a lesson's band is asked for by its centre and width; the console offsets it", () => {
+  // The console builds the span around the centre itself (spectrum.target_span), offset so the
+  // target is not lost in a hop's unmeasured centre bin, so the band is sent as centre + width.
+  assert.deepEqual(panel.bandRequest({ low: 432920000, high: 434920000 }),
+                   { center: 433920000, span: 2000000 });
+  assert.deepEqual(panel.bandRequest({ low: 1089000000, high: 1091000000, bin_size: 31250 }),
+                   { center: 1090000000, span: 2000000, bin_size: 31250 });
+  assert.equal(panel.bandRequest(null), null);
 });
 
 test("the dial reads MHz to the kHz", () => {
@@ -209,7 +214,8 @@ function harness(t, confirmed) {
     onPending: (hz) => pending.push(hz),
     onResult: (res) => {
       results.push(res);
-      if (res.ok) state.span = { low: res.low, high: res.high, binSize: res.bin_size };
+      if (res.ok) state.span = { low: res.low, high: res.high, binSize: res.bin_size,
+                                 center: res.center };
     },
   });
   const settle = async (res) => { resolveSend(res); await new Promise((r) => setImmediate(r)); };
@@ -224,7 +230,7 @@ test("three quick + taps become one retune three steps up", (t) => {
   t.mock.timers.tick(399);
   assert.equal(h.sent.length, 0, "sent before the taps went quiet");
   t.mock.timers.tick(1);
-  assert.deepEqual(h.sent, [{ low: 88.3e6, high: 108.3e6, bin_size: 125000 }]);
+  assert.deepEqual(h.sent, [{ center: 98.3e6, span: 20e6, bin_size: 125000 }]);
 });
 
 test("the pending target is shown while the taps are being gathered", (t) => {
@@ -238,7 +244,7 @@ test("a tap on the waterfall replaces any pending steps with its own frequency",
   h.tuner.step(1);
   h.tuner.tapTo(91515625);
   t.mock.timers.tick(400);
-  assert.deepEqual(h.sent, [{ low: 81515625, high: 101515625, bin_size: 125000 }]);
+  assert.deepEqual(h.sent, [{ center: 91515625, span: 20e6, bin_size: 125000 }]);
 });
 
 test("taps during a request are sent after it, counted from the span it confirmed", async (t) => {
@@ -249,9 +255,10 @@ test("taps during a request are sent after it, counted from the span it confirme
   h.tuner.step(1);                           // lands while the first request is in flight
   t.mock.timers.tick(400);
   assert.equal(h.sent.length, 1, "two requests in flight at once");
-  await h.settle({ ok: true, low: 88.1e6, high: 108.1e6, bin_size: 125000 });
+  await h.settle({ ok: true, low: 88.4375e6, high: 108.4375e6, bin_size: 125000,
+                   center: 98.1e6 });
   t.mock.timers.tick(400);
-  assert.deepEqual(h.sent[1], { low: 88.2e6, high: 108.2e6, bin_size: 125000 });
+  assert.deepEqual(h.sent[1], { center: 98.2e6, span: 20e6, bin_size: 125000 });
 });
 
 test("a refused tune is reported and the confirmed span stays put", async (t) => {
@@ -262,6 +269,28 @@ test("a refused tune is reported and the confirmed span stays put", async (t) =>
   assert.equal(h.results[0].ok, false);
   assert.deepEqual(h.state.span, FM);
   assert.equal(h.pending[h.pending.length - 1], null, "the refused target is still shown as pending");
+});
+
+test("steps count from the frequency the dial reads, not the offset span's middle", (t) => {
+  const h = harness(t, { low: 88.9375e6, high: 108.9375e6, binSize: 125000, center: 98e6 });
+  h.tuner.step(1);
+  t.mock.timers.tick(400);
+  assert.deepEqual(h.sent, [{ center: 98.1e6, span: 20e6, bin_size: 125000 }]);
+});
+
+test("the step size is read at each tap, so the rack's step key changes it", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let step = 100000;
+  const sent = [];
+  const tuner = panel.makeTuner({
+    stepHz: () => step, delayMs: 400, confirmed: () => FM,
+    send: (req) => { sent.push(req); return new Promise(() => {}); },
+    onPending: () => {}, onResult: () => {},
+  });
+  step = 1000000;
+  tuner.step(2);
+  t.mock.timers.tick(400);
+  assert.deepEqual(sent, [{ center: 100e6, span: 20e6, bin_size: 125000 }]);
 });
 
 test("with no confirmed span there is nothing to step from, so nothing is sent", (t) => {

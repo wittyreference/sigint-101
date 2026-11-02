@@ -254,3 +254,30 @@ def test_an_existing_db_from_before_stages_were_kept_still_opens(tmp_path):
     prog.record_stage(1, "observe", 4)
     assert prog.get_stage(1) == {"stage": "observe", "furthest": 4}
     prog.close()
+
+
+# --- places outside a lesson: where the rack was left -----------------------------------------
+
+
+def test_a_place_is_none_until_one_is_recorded(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    assert prog.get_place("rack") is None
+    prog.close()
+
+
+def test_the_latest_place_wins_and_survives_a_reopen(tmp_path):
+    db = tmp_path / "progress.db"
+    first = Progress(db)
+    first.record_place("rack", "aprs")
+    first.record_place("rack", "ism")
+    first.close()
+    second = Progress(db)
+    assert second.get_place("rack") == "ism"
+    second.close()
+
+
+def test_a_blank_place_is_refused(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    with pytest.raises(ValueError):
+        prog.record_place("rack", "  ")
+    prog.close()
