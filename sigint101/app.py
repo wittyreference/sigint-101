@@ -45,7 +45,7 @@ from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
-from .units import UNITS, get_unit
+from .units import UNITS, get_unit, teaching_position
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
@@ -161,13 +161,16 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
             status = ""
         tiles.append({
             "id": lesson.id,
-            "code": f"L{lesson.id}",
+            # The code a learner reads is the lesson's place in the teaching order, not its id:
+            # ids were handed out as lessons were built and stay the storage keys and URLs.
+            "code": f"L{teaching_position(lesson.id)}",
             "name": lesson.title,
             "glyph": DEFAULT_TILE_GLYPH,
             "status": status,
             "href": f"/lesson/{lesson.id}",
             "lessons_total": 1,
             "lessons_done": 1 if done else 0,
+            "needs": lesson.hardware_badges,
         })
     return tiles
 

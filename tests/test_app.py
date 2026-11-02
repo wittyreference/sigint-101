@@ -644,6 +644,51 @@ def test_unit_page_lists_its_lessons(tmp_path):
     assert 'href="/lesson/2"' in resp.text
 
 
+def _write_pack(pack_dir, lesson_id, *, hardware=("rtl-sdr",), title=None):
+    """Write a minimal consolidation pack, for tests that need a lesson id the fixtures lack."""
+    hw = ", ".join(hardware)
+    (pack_dir / f"{lesson_id:02d}-tmp.yaml").write_text(
+        f"id: {lesson_id}\nslug: tmp-{lesson_id}\ntitle: {title or f'Tmp Lesson {lesson_id}'}\n"
+        f"concept: tmp concept {lesson_id}\nhardware: [{hw}]\nstages:\n"
+        f"  predict: p{lesson_id}\n  operate: o{lesson_id}\n  observe: b{lesson_id}\n"
+        f"  explain: e{lesson_id}\n",
+        encoding="utf-8")
+
+
+def _client_with_packs(tmp_path, *packs):
+    """A console over a temp pack dir holding just the given (lesson_id, kwargs) packs."""
+    pack_dir = tmp_path / "packs"
+    pack_dir.mkdir()
+    for lesson_id, kwargs in packs:
+        _write_pack(pack_dir, lesson_id, **kwargs)
+    return TestClient(create_app(pack_dir=pack_dir, data_dir=tmp_path, probe=_absent))
+
+
+def test_a_lesson_tile_shows_its_teaching_order_code_not_its_id(tmp_path):
+    """AIS is id 26 but the 17th lesson taught, so its tile reads L17; the id stays the URL."""
+    with _client_with_packs(tmp_path, (13, {}), (26, {})) as client:
+        html = client.get("/unit/5").text
+    assert re.search(r'tile__code">\s*L13\s*<', html)
+    assert re.search(r'tile__code">\s*L17\s*<', html)
+    assert "L26" not in html
+    assert 'href="/lesson/26"' in html
+
+
+def test_a_lesson_tile_badges_the_hardware_it_needs_beyond_the_radio(tmp_path):
+    """A need shows on the tile before the lesson starts; the built-in RTL-SDR earns no badge."""
+    with _client_with_packs(tmp_path, (17, {"hardware": []}),
+                            (18, {"hardware": ["wifi-monitor"]}),
+                            (19, {"hardware": ["orbic-rayhunter"]})) as client:
+        html = client.get("/unit/7").text
+    assert re.findall(r'tile__need">\s*([^<]*?)\s*<', html) == ["Wi-Fi adapter", "Orbic"]
+
+
+def test_a_radio_only_lesson_tile_carries_no_badge(tmp_path):
+    with _client_with_packs(tmp_path, (13, {"hardware": ["rtl-sdr"]})) as client:
+        html = client.get("/unit/5").text
+    assert "tile__need" not in html
+
+
 def test_unit_page_for_an_unknown_unit_is_404(tmp_path):
     with _client(tmp_path) as client:
         resp = client.get("/unit/99")

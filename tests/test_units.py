@@ -1,10 +1,19 @@
 # ABOUTME: Tests the six-unit curriculum map (U1-U6) and its lookups, plus the contract
 # ABOUTME: that every shipped lesson pack belongs to exactly one unit.
 
+import re
 from pathlib import Path
 
+import yaml
+
 from sigint101.lessons import load_lessons
-from sigint101.units import UNITS, get_unit, unit_for_lesson
+from sigint101.units import (
+    UNITS,
+    get_unit,
+    teaching_order,
+    teaching_position,
+    unit_for_lesson,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -60,3 +69,62 @@ def test_every_shipped_pack_belongs_to_a_unit(monkeypatch):
     for lesson_id in lessons:
         assert unit_for_lesson(lesson_id) is not None, \
             f"lesson {lesson_id} is in no unit — add it to sigint101/units.py UNITS"
+
+
+def test_teaching_order_walks_the_units_in_display_order():
+    """The order a learner meets lessons: unit by unit as the home grid shows them.
+
+    Ids were handed out as lessons were built, so they drift from that order once a unit holds a
+    later-built lesson (AIS and DMR close Unit 5; counter-surveillance displays after Unit 6).
+    """
+    order = teaching_order()
+    assert order[:16] == tuple(range(1, 17))
+    assert order[16:18] == (26, 27)           # Decode+ pair closes Unit 5
+    assert order[18:22] == (20, 21, 22, 23)   # Unit 6 Under the Hood
+    assert order[22:25] == (17, 18, 19)       # Unit 7 counter-surveillance
+    assert order[25:] == (24, 25, 28)         # Unit 8 Images, Unit 9 Mesh
+
+
+def test_teaching_position_is_where_the_lesson_falls_in_that_order():
+    assert teaching_position(1) == 1
+    assert teaching_position(16) == 16
+    assert teaching_position(26) == 17        # AIS: id 26, the 17th lesson taught
+    assert teaching_position(17) == 23        # counter-surveillance framing
+    assert teaching_position(28) == 28
+    assert teaching_position(999) is None     # not in the curriculum map
+
+
+# A cross-reference in pack copy: "Back in Lesson 13 the aircraft told you where…".
+LESSON_REF = re.compile(r"\bLesson (\d+)\b")
+
+
+def _copy_strings(node):
+    """Every string a pack carries — concept, stage bodies, choices, hints — wherever it nests."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _copy_strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _copy_strings(value)
+
+
+def test_every_lesson_n_in_pack_copy_is_the_lesson_shown_as_ln():
+    """A "Lesson N" in copy must name the lesson whose tile reads LN.
+
+    Tiles show the teaching-order position (LN = the Nth lesson taught), while pack authors number
+    a cross-reference by lesson id. The two agree only when the id-N lesson sits at position N, so
+    this holds every reference to that: a "Lesson 17" written for id 17 (shown as L23) fails here
+    instead of sending the learner to the wrong tile.
+    """
+    order = teaching_order()
+    wrong = []
+    for path in sorted((REPO_ROOT / "lesson_packs").glob("*.yaml")):
+        pack = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for text in _copy_strings(pack):
+            for match in LESSON_REF.finditer(text):
+                n = int(match.group(1))
+                if n > len(order) or order[n - 1] != n:
+                    wrong.append(f"{path.name}: 'Lesson {n}'")
+    assert not wrong, f"copy names a lesson by id where the tile shows another number: {wrong}"

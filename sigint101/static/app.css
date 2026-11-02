@@ -1440,9 +1440,11 @@ body {
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  /* A readable minimum per row that grows for a two-line name (U7), so a tile is never shorter
-     than its content and the progress bar at its foot is never clipped. 1fr squished 9+ units. */
-  grid-auto-rows: minmax(124px, auto);
+  /* A tile is never shorter than its content, so a two-line name (U7) or a hardware badge never
+     clips the glyph or the progress bar at its foot. 1fr squished 9+ units, and minmax(124px, auto)
+     froze every row at 124px once the grid overflowed (auto only grows into free space, and a
+     scrolling grid has none), so rows size to their content and .tile carries the minimum. */
+  grid-auto-rows: max-content;
   align-content: start;          /* rows stack from the top rather than stretching to fill */
   gap: 12px;
   padding: 14px var(--gutter);
@@ -1475,6 +1477,7 @@ body {
   cursor: pointer;
   /* No min-height:0 here: it would let the grid keep an auto row at its 116px minimum and clip a
      two-line tile (U7) instead of growing the row to fit. Without it the row grows to the content. */
+  min-height: 124px;
   overflow: hidden;
 }
 
@@ -1493,6 +1496,7 @@ body {
 }
 
 .tile__glyph {
+  flex: none;          /* the tile is a flex column: a shrinkable glyph squashed to 38x13 */
   width: 38px;
   height: 38px;
   stroke: var(--accent);
@@ -1510,6 +1514,27 @@ body {
   letter-spacing: 0.02em;
   text-shadow: var(--glow);
   margin-top: auto;
+}
+
+/* Hardware a lesson needs beyond the built-in radio (Wi-Fi adapter, Orbic, 2nd node, Flipper):
+   read by the word and a warn border, so it shows before the learner opens the lesson. */
+.tile__needs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tile__need {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 8px;
+  color: var(--warn);
+  border: 2px solid var(--warn);
+}
+.tile--active .tile__need {
+  color: var(--sel-ink);
+  border-color: var(--sel-ink);
 }
 
 .tile__meta {
