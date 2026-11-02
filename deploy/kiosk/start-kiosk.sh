@@ -20,16 +20,21 @@ PROFILE="$HOME/.config/chromium-kiosk"
 rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonCookie" "$PROFILE/SingletonSocket" 2>/dev/null
 CFG="$(mktemp -d)"
 cp "$HOME/.config/labwc/environment" "$CFG/environment" 2>/dev/null || true
-# Chromium runs in a loop so a browser crash puts the course straight back on the panel.
+# A watchdog relaunches Chromium only when no kiosk browser is alive, so a crash puts the course
+# straight back on the panel. It must check, not wait: the /usr/bin/chromium wrapper returns
+# before the browser exits, and a bare relaunch loop hands each new launch to the running
+# browser as yet another window (it ran nomad-b to load 20 in minutes).
 # --disk-cache-size=1 keeps a stale stylesheet from outliving an update. --password-store=basic
 # stops Chromium asking the desktop keyring, which otherwise covers the panel with a
 # "choose password for new keyring" dialog that a keyboard-free kiosk can never dismiss.
 cat > "$CFG/autostart" <<A
 while true; do
-  chromium --kiosk --ozone-platform=wayland --user-data-dir="$PROFILE" --app=$COURSE_URL \
-    --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
-    --disable-features=TranslateUI --disk-cache-size=1 --password-store=basic
-  sleep 2
+  if ! pgrep -f "[u]ser-data-dir=$PROFILE" >/dev/null; then
+    chromium --kiosk --ozone-platform=wayland --user-data-dir="$PROFILE" --app=$COURSE_URL \
+      --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
+      --disable-features=TranslateUI --disk-cache-size=1 --password-store=basic &
+  fi
+  sleep 10
 done &
 A
 exec labwc -C "$CFG"

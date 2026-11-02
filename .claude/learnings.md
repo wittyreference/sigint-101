@@ -373,7 +373,17 @@ unit with linger, and tty1 autologin runs `~/.profile`, which execs `~/.local/bi
 - **`systemctl restart getty@tty1` does not end the old session.** logind leaves session
   processes alive, so you get two labwc instances fighting over DRM, a dead `wayland-0`, and a
   `grim` that hangs.
+A third trap only showed up after several minutes:
+- **`/usr/bin/chromium` returns before the browser exits.** A `while true; do chromium …; done`
+  relaunch loop therefore fires every few seconds. Each launch hands off to the running browser
+  as another window, and nomad-b reached load 20 with about 260 chromium processes.
+- Orphaned autostart loops also outlive their labwc.
+- The launcher is now a watchdog: it relaunches only when no
+  `[u]ser-data-dir=…/chromium-kiosk` process is alive. Crash-tested by killing the browser: it
+  relaunched exactly once.
 **How to apply.**
+- After any kiosk change, check `uptime` and the kiosk process count a few minutes later, not
+  just "it's on screen".
 - To restart the kiosk, kill the running `labwc` by PID. The login shell exits and autologin
   respawns a single fresh kiosk on its own. Never also restart getty.
 - Screenshot the real panel with
