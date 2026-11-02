@@ -48,9 +48,10 @@
   }
 
   // Fill a panel's command strip, or hide it when nothing runs. The full line also rides in the
-  // title so it survives truncation; a tap toggles the strip open to show it whole. In the rack
-  // the strip sits under the panel rather than in its head, inside the [data-command-scope] that
-  // holds both; a lesson has no such scope, and its panel's own strip is the one filled.
+  // title so it survives truncation; a tap on the panel opens the strip to show it whole. In the
+  // rack the strip sits under the panel rather than in its head, inside the [data-command-scope]
+  // that holds both, and shows its whole line there; a lesson has no such scope, and its panel's
+  // own strip is the one filled.
   function showCommand(panel, command) {
     var scope = panel.closest("[data-command-scope]") || panel;
     var strip = scope.querySelector("[data-command]");
@@ -60,10 +61,13 @@
     if (code && code.textContent !== text) code.textContent = text;
     strip.title = text;
     strip.hidden = !text;
-    if (!text) {
-      strip.classList.remove("cmdstrip--open");
-      strip.setAttribute("aria-expanded", "false");
-    }
+    if (!text && strip.classList.contains("cmdstrip--open")) toggle(strip);
+  }
+
+  // Open the strip to its whole line over the panel, or close it back to one line.
+  function toggle(strip) {
+    var open = strip.classList.toggle("cmdstrip--open");
+    strip.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
   // Badge and empty line for a refused poll, through downState.
@@ -74,14 +78,19 @@
     showCommand(panel, null);
   }
 
+  // A lesson's strip is a one-line preview in its panel's head. The touch target that opens it is
+  // the whole panel (124 px by the full width), not the strip row alone, which is far under the
+  // 72 px touch rule; the strip stays a button so a keyboard can open it too, and its click
+  // reaches the panel's handler like any other tap there. Nothing running, nothing to open.
   function wire(strip) {
-    strip.addEventListener("click", function () {
-      var open = strip.classList.toggle("cmdstrip--open");
-      strip.setAttribute("aria-expanded", open ? "true" : "false");
+    var panel = strip.closest(".decoder") || strip;
+    panel.addEventListener("click", function () {
+      if (!strip.hidden) toggle(strip);
     });
   }
 
-  Array.prototype.forEach.call(document.querySelectorAll("[data-command]"), wire);
+  // Only the lesson strips take a tap; the sweep's and the rack's show their whole line.
+  Array.prototype.forEach.call(document.querySelectorAll("button[data-command]"), wire);
 
   root.DecoderPanel = { showCommand: showCommand, showDown: showDown, showLive: showLive,
                         downState: downState };

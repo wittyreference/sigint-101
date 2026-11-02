@@ -97,8 +97,10 @@ def test_every_instrument_view_renders_with_the_picker_and_back_goes_home(tmp_pa
             # The picked instrument reads as current, and only it.
             assert html.count('aria-current="page"') == 1
             assert re.search(rf'href="/operate/{inst.key}"[^>]*aria-current="page"', html)
-            # One command strip under the panel, filled from the API's `command` field.
+            # One command strip under the panel, filled from the API's `command` field. The rack
+            # has the room to show its whole line, so it is a display, never a tap target.
             assert html.count("data-command ") + html.count("data-command\n") >= 1
+            assert re.search(r'<div class="cmdstrip cmdstrip--rack"[^>]*data-command', html)
             assert "data-command-scope" in html
             assert "data-rack-log" in html
 

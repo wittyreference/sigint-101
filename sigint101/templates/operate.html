@@ -113,8 +113,10 @@
     </div>
     {% endif %}
     {% endif %}
-    <button class="cmdstrip cmdstrip--rack" type="button" data-command hidden aria-expanded="false"
-            aria-label="The command this instrument is running; tap to show it whole"><code data-command-text></code></button>
+    {# The command strip: the whole line, wrapped across the bench's width. The panel above gives
+       up the height it takes, so it needs no tap to show the end of a long pipeline. #}
+    <div class="cmdstrip cmdstrip--rack" data-command hidden
+         aria-label="The command this instrument is running"><code data-command-text></code></div>
     {# The newest reception this instrument logged, with its time and frequency; on a sweep view
        (which decodes nothing) the newest from any instrument. operate.js reads /api/receptions. #}
     <div class="rack__log" data-rack-log data-instrument="{{ '' if inst.api == 'spectrum' else inst.key }}">

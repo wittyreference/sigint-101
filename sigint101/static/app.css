@@ -996,6 +996,8 @@ button.rail-pip:disabled {
   border: 3px double var(--border-strong);
   background: var(--surface);
   overflow: hidden;
+  /* The opened command strip covers the panel (.cmdstrip--open). */
+  position: relative;
 }
 .decoder__head {
   flex: none;
@@ -1041,7 +1043,8 @@ button.rail-pip:disabled {
 }
 /* The command strip (R12): the exact command the console is running, read off the live process.
    It rides the panel head between the title and the badge, so the fixed-height panel gives up no
-   height for it. One line with an ellipsis; a tap opens it to the whole line, a second closes it. */
+   height for it: at the body-text floor (18 px) it is no taller than the badge beside it. One line
+   with an ellipsis; a tap anywhere on the panel opens the whole line over it, a second closes it. */
 .decoder__head > .decoder__title,
 .decoder__head > .decoder__status {
   flex: none;
@@ -1052,10 +1055,10 @@ button.rail-pip:disabled {
   flex: 1 1 auto;
   min-width: 0;
   margin: 0;
-  padding: 2px 6px;
+  padding: 1px 6px;
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.35;
+  font-size: 18px;
+  line-height: 1.2;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
@@ -1069,12 +1072,37 @@ button.rail-pip:disabled {
 .cmdstrip[hidden] { display: none; }
 .cmdstrip::before { content: "$ "; color: var(--accent); }
 .cmdstrip code { font: inherit; }
+/* Open, the strip covers its whole panel, head included, with the full line wrapped at the panel's
+   width; the panel keeps its height, so nothing under it moves. A tap anywhere on it closes it. */
 .cmdstrip--open {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  /* Read from the top: a button centres its content, and a line too long for the panel would
+     then overflow above the top as well, out of reach of the scroll. */
+  display: flex;
+  align-items: flex-start;
+  padding: 8px 12px;
   white-space: normal;
   overflow-wrap: anywhere;
+  overflow-y: auto;
+  color: var(--fg);
+  background: var(--surface);
+  border: 0;
 }
-/* On the waterfall instrument the strip is its own row between the waterfall and the tune strip. */
-.cmdstrip--sweep { flex: none; }
+/* The prompt hangs beside the wrapped line; as its own flex item it would lose its space. */
+.cmdstrip--open::before {
+  white-space: pre;
+}
+/* On the waterfall instrument the strip is its own row between the waterfall and the tune strip.
+   It has the instrument's full width, so it shows the whole line, wrapping rather than truncating,
+   and takes no tap. */
+.cmdstrip--sweep {
+  flex: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: default;
+}
 .decoder__list {
   flex: 1 1 auto;
   min-height: 0;
@@ -2498,9 +2526,13 @@ button.rail-pip:disabled {
   font-size: 15px;
   color: var(--accent);
 }
+/* The rack's strip is its own row across the bench: the whole line, wrapped, never truncated, and
+   no tap; the panel above gives up the height it takes. */
 .cmdstrip--rack {
   flex: none;
-  font-size: 13px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: default;
 }
 .rack__log {
   flex: none;
