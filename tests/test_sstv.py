@@ -84,8 +84,10 @@ def _decoder(tmp_path, lines=(), **kw):
 
 # --- the default frequency -------------------------------------------------
 
-def test_default_frequency_is_the_2m_sstv_calling_frequency():
-    assert DEFAULT_SSTV_HZ == 145_800_000
+def test_default_frequency_is_the_current_iss_sstv_downlink():
+    # Every ARISS ISS SSTV event in 2026 used 437.550 MHz FM, Robot36; 145.800 PD120 last ran in
+    # October 2025 (ariss.org; technical audit T-05 ruling).
+    assert DEFAULT_SSTV_HZ == 437_550_000
 
 
 # --- parsing the mode out of sstv's output ---------------------------------

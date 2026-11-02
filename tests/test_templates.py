@@ -627,6 +627,30 @@ def test_a_pocsag_lessons_predict_frame_seals_the_log():
     assert "waterfall-wrap--frozen" not in html
 
 
+def _sstv_intro_lesson():
+    """An intro lesson whose instrument is the SSTV decoder (M25's), on the ISS downlink."""
+    return parse_lesson({
+        "id": 25, "slug": "sstv", "title": "A Picture in the Air", "type": "intro",
+        "concept": "SSTV paints a picture in pitch",
+        "panels": ["sstv"], "hardware": ["rtl-sdr"],
+        "tune": {"center_hz": 437_550_000, "span_hz": 200_000},
+        "stages": {"frame": "f", "demo": "d", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_an_sstv_lesson_names_the_frequency_its_pack_tunes():
+    # The ISS SSTV downlink moved to 437.550 MHz in 2026; the dial and the waiting note read the
+    # pack's band rather than a frequency baked into the template.
+    demo = _console(lesson=_sstv_intro_lesson(), current_stage="demo", tuned_hz=437_550_000)
+    assert "data-sstv-panel" in demo
+    assert "437.550" in demo
+    assert "145.8" not in demo
+    sealed = _console(lesson=_sstv_intro_lesson(), current_stage="predict",
+                      prediction_committed=False, tuned_hz=437_550_000)
+    assert "SSTV on 437.550 MHz" in sealed
+
+
 def _acars_intro_lesson():
     """An intro lesson whose instrument is the ACARS decoder (M16's), on the VHF ACARS channel."""
     return parse_lesson({

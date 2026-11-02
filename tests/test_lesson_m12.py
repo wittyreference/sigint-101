@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
+from sigint101.rds import DEFAULT_RDS_HZ, is_fm_channel
 
 PACK = Path(__file__).resolve().parent.parent / "lesson_packs" / "12-rds.yaml"
 
@@ -38,6 +39,14 @@ def test_m12_tunes_to_an_fm_station():
     lesson = load_lesson_file(PACK)
     assert lesson.tune is not None, "M12 must point redsea at an FM station"
     assert 88_000_000 <= lesson.tune["center_hz"] <= 108_000_000
+
+
+def test_m12_starts_its_dial_on_a_real_channel_the_decoder_defaults_to():
+    # The site's station comes from SIGINT101_RDS_HZ and rds.js moves the dial to it; before the
+    # first answer the dial shows the pack's band, which must be the same real FM channel.
+    center = load_lesson_file(PACK).tune["center_hz"]
+    assert is_fm_channel(center)
+    assert center == DEFAULT_RDS_HZ
 
 
 def test_m12_predict_choices_are_well_formed_string_key_label():

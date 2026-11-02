@@ -15,7 +15,7 @@ requires_tx: false
 hardware: [rtl-sdr]
 panels: [rds]
 tune:
-  center_hz: 96000000
+  center_hz: 106500000
   span_hz: 400000
   step_hz: 100000
 
