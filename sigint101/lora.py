@@ -129,11 +129,19 @@ class LoRaListener:
         self._lock = threading.Lock()
         self._interface = None
         self._subscribed = False
+        self._lost = False
 
     @property
     def running(self) -> bool:
-        """True while connected to meshtasticd."""
-        return self._interface is not None
+        """True while connected to meshtasticd — the connection itself, re-checked every time.
+
+        Holding an interface is not the same as being connected. When meshtasticd restarts, the
+        library reconnects once after a second; if the daemon is not back by then its reader dies,
+        clears isConnected and publishes connection.lost, and the old handle stays behind. The
+        panel must not keep calling that live.
+        """
+        iface = self._interface
+        return iface is not None and not self._lost and iface.isConnected.is_set()
 
     def start(self) -> None:
         """Connect to meshtasticd and start buffering received packets.
@@ -143,6 +151,8 @@ class LoRaListener:
         """
         if self.running:
             return
+        if self._interface is not None:
+            self.stop()               # a link that dropped: let it go before dialling again
         try:
             self._interface = self._connect(self.hostname, self.port)
         except Exception as exc:  # connection refused, timeout, or the lib missing
@@ -150,9 +160,16 @@ class LoRaListener:
             raise LoRaUnavailable(
                 f"no LoRa radio — meshtasticd is not reachable at {self.hostname}:{self.port} "
                 f"({exc})") from exc
+        self._lost = False
         from pubsub import pub
         pub.subscribe(self._on_receive, "meshtastic.receive")
+        pub.subscribe(self._on_lost, "meshtastic.connection.lost")
         self._subscribed = True
+
+    def _on_lost(self, interface=None) -> None:
+        """pubsub callback when meshtastic gives up on the daemon; the next poll reconnects."""
+        if interface is self._interface:
+            self._lost = True
 
     def _on_receive(self, packet=None, interface=None) -> None:
         """pubsub callback for every received packet; buffers the ones that parse as receptions."""
@@ -165,10 +182,12 @@ class LoRaListener:
         """Disconnect from meshtasticd and stop buffering."""
         if self._subscribed:
             from pubsub import pub
-            try:
-                pub.unsubscribe(self._on_receive, "meshtastic.receive")
-            except Exception:
-                pass
+            for listener, topic in ((self._on_receive, "meshtastic.receive"),
+                                    (self._on_lost, "meshtastic.connection.lost")):
+                try:
+                    pub.unsubscribe(listener, topic)
+                except Exception:
+                    pass
             self._subscribed = False
         iface, self._interface = self._interface, None
         if iface is not None:

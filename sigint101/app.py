@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,16 +31,16 @@ from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event
 from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
 from .flock import FlockDetector, FlockUnavailable
-from .hardware import list_rtlsdr_devices, probe_rtlsdr
+from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
 from .lessons import load_lessons
 from .lora import LoRaListener, LoRaUnavailable
 from .pocsag import PocsagDecoder, PocsagUnavailable
-from .ppm import measure_pilot_ppm
+from .ppm import PpmUnavailable, measure_pilot_ppm
 from .progress import Progress
 from .provenance import (
+    BaselineLog,
     compare_to_baseline,
     gather_provenance,
-    read_baseline,
     record_baseline_sample,
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
@@ -178,7 +180,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                acars_factory=None, ais_factory=None, dmr_factory=None,
                apt_factory=None, sstv_factory=None,
                flock_factory=None, rayhunter_factory=None, pool_path=None,
-               ppm_measure=None) -> FastAPI:
+               ppm_measure=None, list_devices=list_rtlsdr_devices) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -360,6 +362,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.lessons = load_lessons(pack_dir)
         app.state.progress = Progress(Path(data_dir) / "progress.db")
         app.state.events_path = Path(data_dir) / "events.jsonl"
+        # The provenance panel asks for the baseline every poll; this follows the log as it grows
+        # rather than re-reading all of it each time.
+        app.state.baseline = BaselineLog(app.state.events_path)
         app.state.sweeper = build_sweeper()
         app.state.decoder = build_decoder()
         app.state.lora = build_lora()
@@ -719,7 +724,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         than guessing a verdict.
         """
         snapshot = _snapshot()
-        verdict = compare_to_baseline(snapshot["ref_db"], read_baseline(app.state.events_path))
+        verdict = compare_to_baseline(snapshot["ref_db"], app.state.baseline.samples())
         return {"provenance": snapshot, "baseline": verdict}
 
     @app.post("/api/provenance/baseline")
@@ -742,16 +747,38 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def ppm_measure_route(hz: int = 98_100_000):
         """Measure the receiver's crystal error against a station's 19 kHz stereo pilot.
 
-        rtl_fm needs the dongle to itself, so the sweep stands down first (the next spectrum poll
-        lazily brings it back). ppm is None with a reason whenever no pilot is there to measure
-        against — a mono station carries none, and a weak one reads the same — never a guessed ppm.
+        rtl_fm needs the dongle to itself, so the measurement claims it like any other tenant and
+        holds the claim until rtl_fm is done: a waterfall poll arriving mid-capture waits rather
+        than taking the radio back (the next spectrum poll after it brings the sweep back). ppm is
+        None with a reason whenever no pilot is there to measure against — a mono station carries
+        none, and a weak one reads the same — never a guessed ppm. A capture that cannot run at
+        all (no rtl_fm, a pinned radio that is not on the bus) is a 503 with the reason.
         """
-        app.state.sweeper.stop()
-        result = app.state.ppm_measure(
-            hz=hz, seconds=PPM_SECONDS, device=os.environ.get(RTLSDR_SERIAL_ENV))
+        def measure():
+            return app.state.ppm_measure(hz=hz, seconds=PPM_SECONDS, device=_pinned_index())
+
+        try:
+            result = _claim_sdr("ppm", measure)
+        except (PpmUnavailable, DeviceSelectionError) as exc:
+            reason = str(exc)
+            log_event(app.state.events_path, "ppm_measure",
+                      {"hz": hz, "ppm": None, "reason": reason})
+            return JSONResponse(status_code=503, content={
+                "available": False, "hz": hz, "ppm": None, "reason": reason})
         log_event(app.state.events_path, "ppm_measure",
                   {"hz": hz, "ppm": result.get("ppm"), "reason": result.get("reason")})
         return result
+
+    def _pinned_index():
+        """The index rtl_fm's -d needs for the pinned radio, or None to take the only one.
+
+        A serial cannot go to -d directly: rtl_fm reads "00000001" as index 1, which on a bus
+        with two radios is the wrong one. It is looked up the way the decoders look it up.
+        """
+        serial = os.environ.get(RTLSDR_SERIAL_ENV)
+        if not serial:
+            return None
+        return select_rtlsdr_index(serial, devices=list_devices())
 
     # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time;
     # each opens the dongle exclusively and would fight the others for it. A route takes the radio
@@ -761,14 +788,46 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
                      "apt", "sstv")
 
-    def _claim_sdr(target: str) -> None:
-        """Hand the one RTL-SDR to `target`, standing every other SDR-exclusive consumer down."""
-        for name in sdr_consumers:
-            consumer = getattr(app.state, name)
-            if name == target:
-                consumer.resume()
-            else:
-                consumer.release()
+    # Handing the radio over and starting its new tenant happen under one lock, so two pollers (two
+    # open panels, or a late poll after navigating away) cannot land a release inside another
+    # route's start — the audit's thrash drill wedged the dongle exactly that way.
+    sdr_lock = threading.RLock()
+
+    def _claim_sdr(target: str, start=None):
+        """Hand the one RTL-SDR to `target`, standing every other SDR-exclusive consumer down.
+
+        With `start`, the new tenant is started under the same lock and its result returned.
+        """
+        with sdr_lock:
+            for name in sdr_consumers:
+                consumer = getattr(app.state, name)
+                if name == target:
+                    consumer.resume()
+                else:
+                    consumer.release()
+            return start() if start is not None else None
+
+    # The last refusal logged per route. A route that cannot start answers every poll, and logging
+    # every identical refusal is how events.jsonl grew by 42 lines a minute behind a dead Flock. A
+    # refusal is logged when it changes, and again after the next successful start.
+    last_refusal = {}
+
+    def _refused(kind: str, exc, empty: dict, watch=None):
+        """A 503 that says why. A tool that died on its own reads as stopped, with its retry."""
+        reason = str(exc)
+        if last_refusal.get(kind) != reason:
+            last_refusal[kind] = reason
+            log_event(app.state.events_path, f"{kind}_blocked", {"reason": reason})
+        body = {"available": False, "reason": reason, "command": None, **empty}
+        if watch is not None and watch.stopped:
+            retry = watch.retry_in()
+            body["state"] = "stopped"
+            body["retry_in"] = round(retry, 1) if retry is not None else 0
+        return JSONResponse(status_code=503, content=body)
+
+    def _started(kind: str, payload: dict) -> None:
+        last_refusal.pop(kind, None)
+        log_event(app.state.events_path, f"{kind}_start", payload)
 
     @app.get("/api/spectrum")
     def spectrum(limit: int | None = None):
@@ -781,13 +840,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             # The decoder, the RDS pipeline and the waterfall share one dongle. Taking it back from
             # the SDR-exclusive tools (release) and clearing any prior release on the sweeper lets
             # the sweep start after an M10/M12 lesson handed the radio to rtl_433 or rtl_fm.
-            _claim_sdr("sweeper")
             try:
-                sweeper.start()
+                _claim_sdr("sweeper", sweeper.start)
             except SpectrumUnavailable as exc:
                 log_event(app.state.events_path, "spectrum_blocked", {"reason": str(exc)})
                 return JSONResponse(status_code=503,
-                                    content={"available": False, "reason": str(exc), "rows": []})
+                                    content={"available": False, "reason": str(exc), "rows": [],
+                                             "command": None})
             log_event(app.state.events_path, "spectrum_start",
                       {"command": " ".join(sweeper.command())})
         # The span rides along with every response because the waterfall cannot label its axis
@@ -800,6 +859,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_high": sweeper.high,
             "bin_size": sweeper.bin_size,
             "gain": sweeper.gain,
+            # The exact rtl_power line running now, for the panel's command strip.
+            "command": shlex.join(sweeper.command()) if sweeper.running else None,
             "rows": [row.as_dict() for row in sweeper.rows(limit)],
         }
 
@@ -813,17 +874,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.decoder
         if not decoder.running:
-            _claim_sdr("decoder")
             try:
-                decoder.start()
+                _claim_sdr("decoder", decoder.start)
             except DecodeUnavailable as exc:
-                log_event(app.state.events_path, "decode_blocked", {"reason": str(exc)})
-                return JSONResponse(status_code=503,
-                                    content={"available": False, "reason": str(exc), "decodes": []})
-            log_event(app.state.events_path, "decode_start",
-                      {"command": " ".join(decoder.command())})
+                return _refused("decode", exc, {"decodes": []}, decoder.watch)
+            _started("decode", {"command": decoder.live_command()})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": decoder.freq_hz,
             "decodes": [d.as_dict() for d in decoder.recent(limit)],
         }
@@ -841,13 +899,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             try:
                 listener.start()
             except LoRaUnavailable as exc:
-                log_event(app.state.events_path, "lora_blocked", {"reason": str(exc)})
-                return JSONResponse(status_code=503,
-                                    content={"available": False, "reason": str(exc), "packets": []})
-            log_event(app.state.events_path, "lora_start",
-                      {"host": listener.hostname, "port": listener.port})
+                return _refused("lora", exc, {"packets": []})
+            _started("lora", {"host": listener.hostname, "port": listener.port})
         return {
             "available": True,
+            # meshtasticd is a daemon the console reads, not a tool it runs: no command line.
+            "command": None,
             "host": listener.hostname,
             "port": listener.port,
             "packets": [p.as_dict() for p in listener.recent(limit)],
@@ -866,13 +923,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             try:
                 detector.start()
             except FlockUnavailable as exc:
-                log_event(app.state.events_path, "flock_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "detections": []})
-            log_event(app.state.events_path, "flock_start", {"interface": detector.interface})
+                return _refused("flock", exc, {"detections": []}, detector.watch)
+            _started("flock", {"interface": detector.interface})
         return {
             "available": True,
+            "command": detector.live_command(),
             "interface": detector.interface,
             "detections": detector.detections(limit),
         }
@@ -889,16 +944,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         try:
             if not monitor.running:
                 monitor.start()
-                log_event(app.state.events_path, "rayhunter_start", {"base_url": monitor.base_url})
+                _started("rayhunter", {"base_url": monitor.base_url})
             status = monitor.status()
             warnings = monitor.warnings(limit)
         except RayhunterUnavailable as exc:
-            log_event(app.state.events_path, "rayhunter_blocked", {"reason": str(exc)})
-            return JSONResponse(
-                status_code=503,
-                content={"available": False, "reason": str(exc), "status": "off", "warnings": []})
+            return _refused("rayhunter", exc, {"status": "off", "warnings": []})
         return {
             "available": True,
+            # The Orbic is polled over HTTP, not run as a tool: no command line.
+            "command": None,
             "host": monitor.host,
             "port": monitor.port,
             "status": status,
@@ -914,17 +968,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.rds
         if not decoder.running:
-            _claim_sdr("rds")
             try:
-                decoder.start()
+                _claim_sdr("rds", decoder.start)
             except RDSUnavailable as exc:
-                log_event(app.state.events_path, "rds_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "station": None})
-            log_event(app.state.events_path, "rds_start", {"freq_hz": decoder.freq_hz})
+                return _refused("rds", exc, {"station": None}, decoder.watch)
+            _started("rds", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": decoder.freq_hz,
             "station": decoder.station().as_dict(),
         }
@@ -940,17 +991,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.adsb
         if not decoder.running:
-            _claim_sdr("adsb")
             try:
-                decoder.start()
+                _claim_sdr("adsb", decoder.start)
             except AdsbUnavailable as exc:
-                log_event(app.state.events_path, "adsb_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "aircraft": []})
-            log_event(app.state.events_path, "adsb_start", {"freq_hz": DEFAULT_ADSB_HZ})
+                return _refused("adsb", exc, {"aircraft": []}, decoder.watch)
+            _started("adsb", {"freq_hz": DEFAULT_ADSB_HZ})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": DEFAULT_ADSB_HZ,
             "receiver_located": decoder.receiver.known,
             "aircraft": decoder.aircraft(),
@@ -967,17 +1015,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.aprs
         if not decoder.running:
-            _claim_sdr("aprs")
             try:
-                decoder.start()
+                _claim_sdr("aprs", decoder.start)
             except AprsUnavailable as exc:
-                log_event(app.state.events_path, "aprs_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "stations": []})
-            log_event(app.state.events_path, "aprs_start", {"freq_hz": decoder.freq_hz})
+                return _refused("aprs", exc, {"stations": []}, decoder.watch)
+            _started("aprs", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": decoder.freq_hz,
             "stations": decoder.stations(),
         }
@@ -993,17 +1038,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.pocsag
         if not decoder.running:
-            _claim_sdr("pocsag")
             try:
-                decoder.start()
+                _claim_sdr("pocsag", decoder.start)
             except PocsagUnavailable as exc:
-                log_event(app.state.events_path, "pocsag_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "pages": []})
-            log_event(app.state.events_path, "pocsag_start", {"freq_hz": decoder.freq_hz})
+                return _refused("pocsag", exc, {"pages": []}, decoder.watch)
+            _started("pocsag", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": decoder.freq_hz,
             "pages": decoder.pages(limit),
         }
@@ -1019,17 +1061,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.acars
         if not decoder.running:
-            _claim_sdr("acars")
             try:
-                decoder.start()
+                _claim_sdr("acars", decoder.start)
             except AcarsUnavailable as exc:
-                log_event(app.state.events_path, "acars_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "messages": []})
-            log_event(app.state.events_path, "acars_start", {"freq_hz": decoder.freq_hz})
+                return _refused("acars", exc, {"messages": []}, decoder.watch)
+            _started("acars", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": decoder.freq_hz,
             "messages": decoder.messages(limit),
         }
@@ -1045,18 +1084,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.ais
         if not decoder.running:
-            _claim_sdr("ais")
             try:
-                decoder.start()
+                _claim_sdr("ais", decoder.start)
             except AisUnavailable as exc:
-                log_event(app.state.events_path, "ais_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "vessels": []})
-            log_event(app.state.events_path, "ais_start",
-                      {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ})
+                return _refused("ais", exc, {"vessels": []}, decoder.watch)
+            _started("ais", {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "channel_a_hz": AIS_CHANNEL_A_HZ,
             "channel_b_hz": AIS_CHANNEL_B_HZ,
             "vessels": decoder.vessels(limit),
@@ -1073,17 +1108,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.dmr
         if not decoder.running:
-            _claim_sdr("dmr")
             try:
-                decoder.start()
+                _claim_sdr("dmr", decoder.start)
             except DmrUnavailable as exc:
-                log_event(app.state.events_path, "dmr_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "calls": []})
-            log_event(app.state.events_path, "dmr_start", {"freq_hz": decoder.freq_hz})
+                return _refused("dmr", exc, {"calls": []}, decoder.watch)
+            _started("dmr", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": decoder.freq_hz,
             "calls": decoder.calls(limit),
         }
@@ -1099,17 +1131,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.apt
         if not decoder.running:
-            _claim_sdr("apt")
             try:
-                decoder.start()
+                _claim_sdr("apt", decoder.start)
             except AptUnavailable as exc:
-                log_event(app.state.events_path, "apt_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "images": []})
-            log_event(app.state.events_path, "apt_start", {"freq_hz": DEFAULT_APT_HZ})
+                return _refused("apt", exc, {"images": []}, decoder.watch)
+            _started("apt", {"freq_hz": DEFAULT_APT_HZ})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": decoder.freq_hz,
             "images": decoder.images(limit),
         }
@@ -1124,17 +1153,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.sstv
         if not decoder.running:
-            _claim_sdr("sstv")
             try:
-                decoder.start()
+                _claim_sdr("sstv", decoder.start)
             except SstvUnavailable as exc:
-                log_event(app.state.events_path, "sstv_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "images": []})
-            log_event(app.state.events_path, "sstv_start", {"freq_hz": DEFAULT_SSTV_HZ})
+                return _refused("sstv", exc, {"images": []}, decoder.watch)
+            _started("sstv", {"freq_hz": DEFAULT_SSTV_HZ})
         return {
             "available": True,
+            "command": decoder.live_command(),
             "freq_hz": decoder.freq_hz,
             "images": decoder.images(limit),
         }
