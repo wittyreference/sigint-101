@@ -7,9 +7,9 @@ title: "The Camera's Fingerprint"
 type: intro
 concept: >-
   Last lesson named the counter-surveillance track's first law; this one builds the detector that
-  obeys it. A Flock ALPR camera phones its plates home over a radio, and that radio leaks a
-  fingerprint — its MAC OUI plus the order of Information Elements in the 802.11 probe requests it
-  sends in the clear. A USB WiFi adapter in monitor mode overhears those management frames and
+  obeys it. A Flock ALPR camera sends its plates home over cellular, but it also carries a WiFi
+  radio that leaks a fingerprint — its MAC OUI plus the order of Information Elements in the 802.11
+  probe requests it sends in the clear. A USB WiFi adapter in monitor mode overhears those management frames and
   matches the shape, strictly receive-only. Recognition is tiered: a bare OUI is a weak hint, OUI
   plus the exact IE fingerprint a strong hit. And the first law still holds — no alert never means
   no camera.
@@ -21,8 +21,9 @@ stages:
   frame: >-
     Last lesson, comrade, you learned the first law: a quiet detector never proves absence. Tonight
     you earn the other half of that bargain — you build the detector itself, and learn exactly what
-    it can and cannot see. The Flock camera on the pole needs a radio to ship its plates home, and
-    that radio, like every radio, must announce itself before it joins any network. You will not
+    it can and cannot see. The Flock camera on the pole ships its plates home over cellular, but it
+    also carries a WiFi radio, and that radio, like every WiFi radio, announces itself as it probes
+    for networks. You will not
     touch the camera. You will not transmit a thing. You will only listen to what it is already
     saying to the air.
   demo: >-
@@ -53,8 +54,8 @@ stages:
     Here's the straight answer, comrade: a weak hint, not a camera. Recognition comes in tiers, and
     the tier is the confidence. A bare OUI match says only that the radio was built by a maker Flock
     also buys from — worth noticing, nothing you would stand behind. The strong hit is the OUI
-    together with the exact order of Information Elements in a probe request, and better still an
-    SSID keyword — a "flock" or a "penguin" — sitting on top. That combination is a fingerprint; the
+    together with the exact order of Information Elements in a probe request; a "Flock-" network
+    name on top is a bonus. That combination is a fingerprint; the
     prefix alone is a family name. So when the prefix matches but the fingerprint does not, you have
     a lead to watch, not a verdict to call. And carry the first law straight through this one,
     because the detector you just built is exactly the thing it warns about. No alert never means no
@@ -70,3 +71,9 @@ choices:
   - {key: "weak-hint", label: "Weak hint only"}
   - {key: "strong-hit", label: "Strong, likely a camera"}
   - {key: "certain", label: "Certain it's a camera"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["weak-hint"]
+verdict: >-
+  A weak hint: the prefix names a maker shared by many gadgets; only the full IE fingerprint is a
+  strong hit.

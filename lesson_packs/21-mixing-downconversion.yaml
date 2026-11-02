@@ -40,6 +40,12 @@ stages:
 # what the learner reads. Keys are quoted so a YAML-boolean word stays text, never True/False. Labels
 # are one short phrase each (hard 800x480 console-fit).
 choices:
-  - {key: "image", label: "Yes — its mirror below the LO"}
-  - {key: "unique", label: "No — only 100.1 lands there"}
-  - {key: "harmonic", label: "Yes — a harmonic higher up"}
+  - {key: "unique", label: "No, only 100.1"}
+  - {key: "harmonic", label: "Yes, 200.1"}
+  - {key: "image", label: "Yes, 99.9"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["image"]
+verdict: >-
+  Yes, 99.9: the mixer keeps only the distance from the LO, so the image a tenth below lands on
+  the same spot.

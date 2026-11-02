@@ -56,10 +56,10 @@ stages:
     on everyone hearing everyone, exactly like the sky. But it splits the story across message types: a
     position report (types 1, 2 and 3) carries the MMSI, the latitude and longitude, the course and
     speed; a static-and-voyage report (type 5) carries the same MMSI plus the ship's name, call sign,
-    dimensions and destination — and because it is long, it arrives in two fragments the decoder
-    stitches back together. Every one of them opens with that nine-digit Maritime Mobile Service
-    Identity, so the console keys its roster by MMSI and folds each message into the matching vessel —
-    the very move the radar made keying aircraft by their ICAO hex address. Nothing is cracked: AIVDM is
+    dimensions and destination — and because it is long, the decoder hands it up as two AIVDM
+    sentences that the console stitches back together. Every one of them opens with that nine-digit
+    Maritime Mobile Service Identity, so the console keys its roster by MMSI and folds each message
+    into the matching vessel — the very move the radar made keying aircraft by their ICAO hex address. Nothing is cracked: AIVDM is
     a published format, the transmission is meant to be received, and listening is as passive and
     ordinary as any ship-tracking website, which is built on exactly this. One honest footnote: AIS
     lives on the coast and the rivers, so an inland receiver shows an empty sea — not a broken decoder,
@@ -67,6 +67,12 @@ stages:
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:
-  - {key: "mmsi", label: "A shared ID (MMSI)"}
   - {key: "timing", label: "Timing — same instant"}
   - {key: "onemsg", label: "One message holds both"}
+  - {key: "mmsi", label: "A shared ID (MMSI)"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["mmsi"]
+verdict: >-
+  A shared ID: every AIS message opens with the ship's MMSI, so the console files position and name
+  under it.

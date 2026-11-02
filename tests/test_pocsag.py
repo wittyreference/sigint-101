@@ -1,5 +1,5 @@
-# ABOUTME: Tests the POCSAG backend — parsing multimon-ng pager lines into addressed messages.
-# ABOUTME: The rtl_fm|multimon-ng pipeline is a fake at the boundary; no radio / no tool is honest.
+# ABOUTME: Tests the POCSAG backend — multimon-ng pager lines parsed into framing, text withheld on
+# ABOUTME: the commercial paging band. The pipeline is a fake at the boundary; no radio is honest.
 
 import pytest
 
@@ -8,6 +8,7 @@ from sigint101.pocsag import (
     PageLog,
     PocsagDecoder,
     PocsagUnavailable,
+    on_commercial_paging_band,
     parse_pocsag_line,
 )
 
@@ -21,7 +22,7 @@ NO_ADDR = "POCSAG1200: Address:       -  Function: -  Alpha:   fragment"
 
 
 def test_parse_an_alphanumeric_page():
-    p = parse_pocsag_line(ALPHA)
+    p = parse_pocsag_line(ALPHA, keep_text=True)
     assert p is not None
     assert p.baud == 1200
     assert p.address == 1234567
@@ -31,7 +32,7 @@ def test_parse_an_alphanumeric_page():
 
 
 def test_parse_a_numeric_page():
-    p = parse_pocsag_line(NUMERIC)
+    p = parse_pocsag_line(NUMERIC, keep_text=True)
     assert p.baud == 1200
     assert p.address == 123456
     assert p.function == 0
@@ -49,7 +50,7 @@ def test_parse_a_tone_only_page_has_no_text():
 
 
 def test_parse_a_page_with_no_decoded_address():
-    p = parse_pocsag_line(NO_ADDR)
+    p = parse_pocsag_line(NO_ADDR, keep_text=True)
     assert p.address is None
     assert p.function is None
     assert p.kind == "alpha"
@@ -68,7 +69,7 @@ def test_pagelog_keeps_recent_pages_newest_first():
     log.add(parse_pocsag_line(ALPHA))
     pages = log.recent()
     assert len(pages) == 2
-    assert pages[0].text == "CALL EXT 2210 URGENT"   # newest first
+    assert pages[0].kind == "alpha"   # newest first
 
 
 def test_pagelog_limit_bounds_the_history():
@@ -172,5 +173,81 @@ def test_a_reader_error_is_recorded_not_swallowed():
     assert dec.error == "pipe died"
 
 
-def test_default_pocsag_frequency_is_in_the_us_pager_band():
-    assert 928_000_000 <= DEFAULT_POCSAG_HZ <= 932_000_000
+def test_default_pocsag_frequency_is_an_assigned_paging_channel():
+    # 47 CFR 90.493(a): 929-930 MHz paging channels run 929.0125 + n x 25 kHz. 929.6000 sat
+    # between two of them (technical audit T-12), so a pager on either landed 12.5 kHz off.
+    assert 929_000_000 < DEFAULT_POCSAG_HZ < 930_000_000
+    assert (DEFAULT_POCSAG_HZ - 929_012_500) % 25_000 == 0
+
+
+# --- framing live, text hidden (M15, MC's call 2026-11-02) --------------------
+# Pages on the commercial paging band are carried by a paging company, so under 18 USC
+# 2510(16)(D) they are not "readily accessible to the general public" and reading the words is
+# interception (2511(1)(a)). The panel shows the framing — cap code, function, kind, baud and
+# message length — and the words are dropped at parse time, so they are never stored, logged or
+# served.
+
+SECRET = "CALL EXT 2210 URGENT"
+
+
+def test_the_commercial_paging_band_is_929_to_932_mhz():
+    assert on_commercial_paging_band(929_012_500)
+    assert on_commercial_paging_band(DEFAULT_POCSAG_HZ)
+    assert on_commercial_paging_band(931_987_500)
+    assert not on_commercial_paging_band(928_999_999)
+    assert not on_commercial_paging_band(932_000_001)
+    assert not on_commercial_paging_band(439_987_500)   # amateur POCSAG (DAPNET)
+
+
+def test_parsing_withholds_the_text_by_default_and_keeps_its_length():
+    p = parse_pocsag_line(ALPHA)
+    assert p.text is None
+    assert p.text_withheld is True
+    assert p.length == len(SECRET)
+    assert (p.baud, p.address, p.function, p.kind) == (1200, 1234567, 3, "alpha")
+
+
+def test_a_withheld_numeric_page_keeps_its_digit_count():
+    p = parse_pocsag_line(NUMERIC)
+    assert p.text is None
+    assert p.length == 10
+
+
+def test_a_tone_only_page_has_nothing_to_withhold():
+    p = parse_pocsag_line(TONE)
+    assert p.text is None
+    assert p.text_withheld is False
+    assert p.length == 0
+
+
+def test_a_withheld_page_dict_never_carries_the_words():
+    page = parse_pocsag_line(ALPHA).as_dict()
+    assert page["text"] is None
+    assert page["text_withheld"] is True
+    assert page["length"] == len(SECRET)
+    assert SECRET not in repr(page)
+
+
+def test_a_kept_page_reports_its_text_and_length():
+    page = parse_pocsag_line(ALPHA, keep_text=True).as_dict()
+    assert page["text"] == SECRET
+    assert page["text_withheld"] is False
+    assert page["length"] == len(SECRET)
+
+
+def test_the_decoder_never_stores_text_on_the_commercial_band():
+    dec = _decoder([ALPHA, NUMERIC])
+    assert dec.freq_hz == DEFAULT_POCSAG_HZ
+    dec.start()
+    dec.drain()
+    pages = dec.pages()
+    assert [p["text"] for p in pages] == [None, None]
+    assert all(p["text_withheld"] for p in pages)
+    assert SECRET not in repr(dec._log.recent())
+
+
+def test_the_decoder_keeps_text_off_the_commercial_band():
+    dec = _decoder([ALPHA], freq_hz=439_987_500)
+    dec.start()
+    dec.drain()
+    assert dec.pages()[0]["text"] == SECRET
