@@ -1106,6 +1106,57 @@ body {
   letter-spacing: 0.14em;
   color: var(--fg-dim);
   text-align: center;
+  white-space: nowrap;
+}
+/* The gain the radio reports, beside its label: AUTO or dB, dimmed while a change is pending. */
+.gain-meter__title b {
+  font-size: 18px;
+  letter-spacing: 0.02em;
+  color: var(--fg);
+  text-shadow: var(--glow);
+}
+.gain-meter__title b.gain-meter__value--pending {
+  color: var(--fg-mute);
+  text-shadow: none;
+}
+/* The real gain stepper (M2): two full touch targets under the meter. */
+.gain-meter__control {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+.gain-meter .gain-meter__btn {
+  width: 72px;
+  height: 72px;
+}
+
+/* A gain lesson gives the meter a full-height column beside both the waterfall and the tune strip,
+   so its stepper gets 72px targets without squashing the meter or the narration below. */
+.instrument--gain {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 172px;
+  grid-template-rows: 120px auto minmax(0, 1fr);
+  gap: 10px;
+}
+.instrument--gain > .instrument__row {
+  display: contents;
+}
+.instrument--gain .waterfall-wrap {
+  grid-column: 1;
+  grid-row: 1;
+}
+.instrument--gain .gain-meter {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+.instrument--gain > .tune {
+  grid-column: 1;
+  grid-row: 2;
+}
+.instrument--gain > .stage-panel__body {
+  grid-column: 1 / -1;
+  grid-row: 3;
 }
 .gain-meter__track {
   position: relative;
@@ -1153,6 +1204,13 @@ body {
   color: var(--accent);
   font-family: var(--font-mono);
   overflow: hidden;
+}
+/* The marks and the gap are flex boxes, which beats the UA [hidden] rule; without this the empty
+   meter shows PEAK, FLOOR and SNR piled on its "no radio" line. */
+.gain-meter__mark[hidden],
+.gain-meter__gap[hidden],
+.gain-meter__empty[hidden] {
+  display: none;
 }
 .gain-meter__gap-label { font-size: 12px; letter-spacing: 0.16em; }
 .gain-meter__gap b { font-size: 17px; text-shadow: var(--glow); }

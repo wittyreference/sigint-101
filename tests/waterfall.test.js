@@ -240,3 +240,82 @@ test("with no confirmed span there is nothing to step from, so nothing is sent",
   t.mock.timers.tick(400);
   assert.equal(h.sent.length, 0);
 });
+
+// --- gain (M2): a stepper over the tuner's real gain settings --------------------------------------
+
+test("the gain ladder runs from automatic up through real R82xx tuner settings", () => {
+  // Every rung is an entry in the tuner's own gain table, so rtl_power applies it as asked.
+  assert.equal(panel.nextGain(null, 1), 0);                   // "from the bottom up"
+  assert.equal(panel.nextGain(0, 1), 7.7);
+  assert.equal(panel.nextGain(44.5, 1), 49.6);
+  assert.equal(panel.nextGain(49.6, 1), 49.6);                // the top holds
+  assert.equal(panel.nextGain(0, -1), null);                  // below the bottom rung is automatic
+  assert.equal(panel.nextGain(null, -1), null);
+});
+
+test("a gain set off the ladder steps to the nearest rung in that direction", () => {
+  assert.equal(panel.nextGain(29.7, 1), 33.8);
+  assert.equal(panel.nextGain(29.7, -1), 28.0);
+});
+
+test("the gain reads as AUTO or in dB", () => {
+  assert.equal(panel.formatGain(null), "AUTO");
+  assert.equal(panel.formatGain(0), "0.0 dB");
+  assert.equal(panel.formatGain(49.6), "49.6 dB");
+});
+
+function gainHarness(t, gain) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sent = [];
+  const pending = [];
+  let resolveSend = null;
+  const state = gain === undefined ? null : { gain };
+  const stepper = panel.makeGainStepper({
+    delayMs: 400,
+    confirmed: () => state,
+    send: (g) => { sent.push(g); return new Promise((res) => { resolveSend = res; }); },
+    onPending: (p) => pending.push(p),
+    onResult: (res) => { if (res.set) state.gain = res.gain; },
+  });
+  const settle = async (res) => { resolveSend(res); await new Promise((r) => setImmediate(r)); };
+  return { stepper, sent, pending, settle, state };
+}
+
+test("quick gain taps become one change, counted up the ladder from the confirmed gain", (t) => {
+  const h = gainHarness(t, null);
+  h.stepper.step(1); h.stepper.step(1); h.stepper.step(1);
+  assert.deepEqual(h.pending.map((p) => p && p.value), [0, 7.7, 14.4]);
+  t.mock.timers.tick(400);
+  assert.deepEqual(h.sent, [14.4]);
+});
+
+test("stepping back down to automatic sends null, a real setting", (t) => {
+  const h = gainHarness(t, 0);
+  h.stepper.step(-1);
+  t.mock.timers.tick(400);
+  assert.deepEqual(h.sent, [null]);
+});
+
+test("a tap that would not change the gain sends nothing", (t) => {
+  const h = gainHarness(t, 49.6);
+  h.stepper.step(1);
+  t.mock.timers.tick(400);
+  assert.deepEqual(h.sent, []);
+});
+
+test("with no radio there is no gain to step from, so nothing is sent", (t) => {
+  const h = gainHarness(t, undefined);
+  h.stepper.step(1);
+  t.mock.timers.tick(400);
+  assert.deepEqual(h.sent, []);
+});
+
+test("the gain meter reads the sweep's median floor and peak, not the row minimum", () => {
+  // A real FM row starts with hop-edge roll-off near -15 dB while the floor is about -9.5 dB; the
+  // minimum would put FLOOR on the roll-off and overstate the SNR gap.
+  const row = { floor_db: -9.5, peak_db: 20.2, dbm: [-15.3, -14.3, -9.5, 20.2, -9.4] };
+  assert.deepEqual(panel.meterReading(null, row), { floor: -9.5, peak: 20.2 });
+  // Eased from the previous reading so the meter does not flicker between sweeps.
+  const next = panel.meterReading({ floor: -10, peak: 20 }, { floor_db: -9, peak_db: 25 });
+  assert.ok(Math.abs(next.floor - -9.8) < 1e-9 && Math.abs(next.peak - 21) < 1e-9);
+});

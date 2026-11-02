@@ -4,6 +4,12 @@
 (function () {
   "use strict";
 
+  // The gain ladder: automatic (null), then a spread of the R82xx tuner's own gain table, so every
+  // rung is a setting the tuner really has and rtl_power applies it as asked. Nine rungs keep
+  // "from the bottom up" to a handful of taps. Assigned up here, before the node export below
+  // returns, because nextGain reads it under test too.
+  var GAIN_STEPS = [0, 7.7, 14.4, 20.7, 28.0, 33.8, 40.2, 44.5, 49.6];
+
   // Under node's test runner the file is loaded for its pure scalers — the dB→colour map and the
   // unit formatters — and there is no document to draw on. Export them and stop before any canvas
   // access. In the browser there is no `module`, so this is skipped and the panel runs. colour,
@@ -15,7 +21,8 @@
       gainMeterGeometry: gainMeterGeometry, parseTuneBand: parseTuneBand,
       rowBounds: rowBounds, binColour: binColour,
       tapToHz: tapToHz, spanAround: spanAround, formatTuneMHz: formatTuneMHz,
-      makeTuner: makeTuner,
+      makeTuner: makeTuner, nextGain: nextGain, formatGain: formatGain,
+      makeGainStepper: makeGainStepper, meterReading: meterReading,
     };
     return;
   }
@@ -42,56 +49,119 @@
     return (hz / 1e6).toFixed(3);
   }
 
-  // Gathers tune taps into one /api/tune request at a time. +/- taps add up steps; a tap on the
-  // waterfall sets an absolute frequency instead. After `delayMs` without a tap the target is sent;
-  // taps that land while a request is in flight go out after it settles. Steps always count from
-  // the span the server last confirmed, so the dial never drifts from what the radio is doing.
-  //   opts.confirmed()   -> {low, high, binSize} the server confirmed, or null (nothing to tune)
-  //   opts.send(request) -> Promise of {ok, low, high, bin_size} or {ok: false, status, reason}
-  //   opts.onPending(hz) -> the target being gathered, or null once it has settled
-  //   opts.onResult(res) -> the server's answer
-  function makeTuner(opts) {
+  // Gathers taps on a control into one request to the console at a time. Taps add up steps, or set
+  // an absolute value instead. After `delayMs` without a tap the plan is sent; taps that land while
+  // a request is in flight go out after it settles. Each retune or gain change restarts rtl_power,
+  // which takes the dongle a second or two to reopen, so a burst of taps must cost one restart.
+  //   opts.plan(steps, absolute) -> {value} to send, or null when there is nothing to send
+  //                                 (absolute is {value} after a set(), else null)
+  //   opts.send(value)           -> Promise of the console's answer
+  //   opts.onPending(plan)       -> the plan being gathered, or null once it has settled
+  //   opts.onResult(answer)      -> the console's answer
+  function makeCoalescer(opts) {
     var steps = 0;
-    var centre = null;
+    var absolute = null;
     var timer = null;
     var busy = false;
-
-    function target() {
-      var span = opts.confirmed();
-      if (!span) return null;
-      var base = centre !== null ? centre : (span.low + span.high) / 2;
-      return Math.round(base + steps * opts.stepHz);
-    }
 
     function arm() {
       if (timer !== null) clearTimeout(timer);
       timer = setTimeout(flush, opts.delayMs);
-      opts.onPending(target());
+      opts.onPending(opts.plan(steps, absolute));
     }
 
     function flush() {
       timer = null;
       if (busy) return;               // sent again once the request in flight settles
-      var span = opts.confirmed();
-      var hz = target();
+      var next = opts.plan(steps, absolute);
       steps = 0;
-      centre = null;
-      if (!span || hz === null) { opts.onPending(null); return; }
-      var request = spanAround(hz, span.high - span.low);
-      if (span.binSize) request.bin_size = span.binSize;
+      absolute = null;
+      if (!next) { opts.onPending(null); return; }
       busy = true;
-      opts.send(request).then(function (res) {
+      opts.send(next.value).then(function (res) {
         busy = false;
         opts.onResult(res);
-        if (steps !== 0 || centre !== null) arm();
+        if (steps !== 0 || absolute !== null) arm();
         else opts.onPending(null);
       });
     }
 
     return {
       step: function (n) { steps += n; arm(); },
-      tapTo: function (hz) { centre = hz; steps = 0; arm(); },
+      set: function (value) { absolute = { value: value }; steps = 0; arm(); },
     };
+  }
+
+  // The tune strip's coalescer. +/- taps add up steps of `stepHz`; a tap on the waterfall sets an
+  // absolute frequency. Steps always count from the span the server last confirmed, so the dial
+  // never drifts from what the radio is doing; a retune keeps the span's width and bin.
+  //   opts.confirmed()   -> {low, high, binSize} the server confirmed, or null (nothing to tune)
+  //   opts.send(request) -> Promise of {ok, low, high, bin_size} or {ok: false, status, reason}
+  //   opts.onPending(hz) -> the target being gathered, or null once it has settled
+  //   opts.onResult(res) -> the server's answer
+  function makeTuner(opts) {
+    var coalescer = makeCoalescer({
+      delayMs: opts.delayMs,
+      plan: function (steps, absolute) {
+        var span = opts.confirmed();
+        if (!span) return null;
+        var base = absolute ? absolute.value : (span.low + span.high) / 2;
+        return { value: Math.round(base + steps * opts.stepHz) };
+      },
+      send: function (hz) {
+        var span = opts.confirmed();
+        var request = spanAround(hz, span.high - span.low);
+        if (span.binSize) request.bin_size = span.binSize;
+        return opts.send(request);
+      },
+      onPending: function (plan) { opts.onPending(plan ? plan.value : null); },
+      onResult: opts.onResult,
+    });
+    return { step: coalescer.step, tapTo: coalescer.set };
+  }
+
+  // The next rung up (dir 1) or down (dir -1) from a gain. Below the bottom rung is automatic; the
+  // top holds. A gain set off the ladder steps to the nearest rung in that direction.
+  function nextGain(gain, dir) {
+    if (gain === null || gain === undefined) return dir > 0 ? GAIN_STEPS[0] : null;
+    if (dir > 0) {
+      for (var i = 0; i < GAIN_STEPS.length; i++) if (GAIN_STEPS[i] > gain) return GAIN_STEPS[i];
+      return GAIN_STEPS[GAIN_STEPS.length - 1];
+    }
+    for (var j = GAIN_STEPS.length - 1; j >= 0; j--) if (GAIN_STEPS[j] < gain) return GAIN_STEPS[j];
+    return null;
+  }
+
+  function formatGain(gain) {
+    return gain === null || gain === undefined ? "AUTO" : gain.toFixed(1) + " dB";
+  }
+
+  // The gain panel's coalescer: taps walk the ladder from the gain the server confirmed.
+  //   opts.confirmed() -> {gain} (null gain is automatic), or null when there is no radio
+  //   opts.send(gain)  -> Promise of {set, gain} or {set: false, reason}
+  function makeGainStepper(opts) {
+    var coalescer = makeCoalescer({
+      delayMs: opts.delayMs,
+      plan: function (steps) {
+        var state = opts.confirmed();
+        if (!state || !steps) return null;
+        var gain = state.gain;
+        for (var i = 0; i < Math.abs(steps); i++) gain = nextGain(gain, steps);
+        return gain === state.gain ? null : { value: gain };
+      },
+      send: opts.send,
+      onPending: opts.onPending,
+      onResult: opts.onResult,
+    });
+    return { step: coalescer.step };
+  }
+
+  // What the gain meter shows: the sweep's own median floor and strongest bin, as the console
+  // computed them, eased from the last reading so it does not flicker. Never the row's minimum,
+  // which is the hop-edge roll-off rather than the floor.
+  function meterReading(prev, row) {
+    if (!prev) return { floor: row.floor_db, peak: row.peak_db };
+    return { floor: prev.floor * 0.8 + row.floor_db * 0.2, peak: prev.peak * 0.8 + row.peak_db * 0.2 };
   }
 
   // The colour-scale bounds of one row: its weakest and strongest measured bins, or null when it
@@ -194,7 +264,7 @@
       axis: wrap.querySelector(".waterfall__axis"),
       reason: wrap.querySelector("[data-wf-reason]"),
       meter: buildMeterRefs(wrap),
-      floorDbm: null, ceilDbm: null, sized: false
+      floorDbm: null, ceilDbm: null, reading: null, sized: false
     });
   });
   if (!panels.length) return;
@@ -212,8 +282,9 @@
   }
 
   // A stage that declares the gain panel (M2) carries a vertical level meter beside its waterfall.
-  // It is driven from the same smoothed floor/ceiling the colour scale already tracks, so the one
-  // live sweep feeds both: the floor and the peak lines, and the SNR gap shaded between them.
+  // It reads the sweep's own median floor and strongest bin (the console's floor_db / peak_db), so
+  // the floor and the peak lines and the SNR gap shaded between them are the numbers the console
+  // computed — not the colour scale's minimum, which sits on the hop-edge roll-off.
   function buildMeterRefs(wrap) {
     var root = wrap.closest(".instrument");
     var meter = root && root.querySelector("[data-gain-meter]");
@@ -231,20 +302,21 @@
 
   function updateGainMeter(p) {
     var m = p.meter;
-    if (!m || p.floorDbm === null || p.ceilDbm === null) return;
-    var g = gainMeterGeometry(p.floorDbm, p.ceilDbm);
+    if (!m || !p.reading) return;
+    var g = gainMeterGeometry(p.reading.floor, p.reading.peak);
     if (m.empty) m.empty.hidden = true;
     [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = false; });
     if (m.peak) m.peak.style.top = g.peakTop + "%";
     if (m.floor) m.floor.style.top = g.floorTop + "%";
     if (m.gap) { m.gap.style.top = g.gapTop + "%"; m.gap.style.height = g.gapHeight + "%"; }
-    if (m.peakV) m.peakV.textContent = formatDb(p.ceilDbm);
-    if (m.floorV) m.floorV.textContent = formatDb(p.floorDbm);
+    if (m.peakV) m.peakV.textContent = formatDb(p.reading.peak);
+    if (m.floorV) m.floorV.textContent = formatDb(p.reading.floor);
     if (m.gapV) m.gapV.textContent = formatDb(g.gapDb);
   }
 
   function clearGainMeter(p) {
     var m = p.meter;
+    p.reading = null;
     if (!m) return;
     if (m.empty) m.empty.hidden = false;
     [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = true; });
@@ -349,6 +421,45 @@
     });
   });
 
+  // ---- Gain: the M2 panel's -/+ really change the sweep's gain through /api/gain -------------
+  var liveGain = null;      // the gain the server last reported: {gain} (null gain = AUTO), or null
+  var gainValues = Array.prototype.slice.call(document.querySelectorAll("[data-gain-value]"));
+
+  function renderGain(pendingPlan, note) {
+    gainValues.forEach(function (el) {
+      if (pendingPlan) el.textContent = formatGain(pendingPlan.value);
+      else el.innerHTML = liveGain ? formatGain(liveGain.gain) : "&mdash;";
+      el.classList.toggle("gain-meter__value--pending", !!pendingPlan);
+      el.title = note || "";
+    });
+  }
+
+  function postGain(gain) {
+    return fetch("/api/gain", {
+      method: "POST", cache: "no-store",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ gain: gain }),
+    }).then(function (res) { return res.json(); })
+      .catch(function (err) { return { set: false, reason: "lost contact with the console: " + err.message }; });
+  }
+
+  var gainStepper = makeGainStepper({
+    delayMs: TUNE_DELAY_MS,
+    confirmed: function () { return liveGain; },
+    send: postGain,
+    onPending: function (plan) { renderGain(plan, null); },
+    onResult: function (res) {
+      if (res.set) liveGain = { gain: res.gain };
+      renderGain(null, res.set ? null : res.reason);
+    },
+  });
+
+  document.querySelectorAll("[data-gain-step]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      gainStepper.step(parseInt(btn.getAttribute("data-gain-step"), 10) || 0);
+    });
+  });
+
   // A tap on the waterfall tunes to the bin under the finger, read off the newest painted row's
   // own geometry (or the span's edges before the first row lands). No confirmed span, no tune.
   panels.forEach(function (p) {
@@ -414,7 +525,10 @@
       p.ctx.fillStyle = binColour(row.dbm[i], p.floorDbm, range, null, empty);
       p.ctx.fillRect(i, 0, 1, ROW_H);
     }
-    updateGainMeter(p);
+    if (p.meter) {
+      p.reading = meterReading(p.reading, row);
+      updateGainMeter(p);
+    }
   }
 
   // The honest empty state: the band is drawn at its empty colour and the reason is shown over it
@@ -436,6 +550,7 @@
     panels.forEach(function (p) {
       p.floorDbm = null;
       p.ceilDbm = null;
+      p.reading = null;
       p.sized = false;
       if (p.axis) p.axis.innerHTML = "";
       p.ctx.fillStyle = emptyColour(p);
@@ -467,9 +582,11 @@
             waiting = true;
             span = null;
             live = null;
+            liveGain = null;
             radioNote = "no radio · not tuned";
             renderDials();
             renderCaptions();
+            renderGain(null, null);
             say("no radio", "na", reason);
             panels.forEach(function (p) { showEmpty(p, reason); });
           }
@@ -481,9 +598,13 @@
         // +/- step counts from it.
         live = { low: result.body.freq_low, high: result.body.freq_high,
                  binSize: result.body.bin_size };
+        liveGain = { gain: result.body.gain === undefined ? null : result.body.gain };
         radioNote = null;
         renderDials();
         renderCaptions();
+        if (gainValues.length && !gainValues[0].classList.contains("gain-meter__value--pending")) {
+          renderGain(null, null);
+        }
         // A retune (from this tab or any other) changes what the x-axis means, so rows drawn for
         // the old span would be lies. Detect it and start clean; redraw the axis for the new span.
         var key = result.body.freq_low + ":" + result.body.freq_high;

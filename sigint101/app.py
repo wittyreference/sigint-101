@@ -43,7 +43,7 @@ from .provenance import (
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
-from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
+from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_gain, validate_span
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
 from .units import UNITS, get_unit
 
@@ -1189,6 +1189,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         tuned = {"low": low, "high": high, "bin_size": bin_size}
         log_event(app.state.events_path, "tune", tuned)
         return {"tuned": True, **tuned}
+
+    @app.post("/api/gain")
+    def gain(payload: dict = Body(default={})):
+        """Set the tuner gain in dB, or null for automatic, failing closed with the reason.
+
+        The gain meets validate_gain first, so a gain this tuner cannot do is refused (400) with
+        the gate's own words. A valid gain with no radio is a 503 and changes nothing, like a tune.
+        The sweep stands down and the next spectrum poll restarts it with `-g` at the new gain.
+        """
+        try:
+            value = validate_gain(payload.get("gain"))
+        except TuneError as exc:
+            log_event(app.state.events_path, "gain_rejected", {"reason": str(exc)})
+            return JSONResponse(status_code=400, content={"set": False, "reason": str(exc)})
+
+        radio = probe()
+        if not radio.present:
+            reason = f"no RTL-SDR to set the gain on — {radio.detail}"
+            log_event(app.state.events_path, "gain_blocked", {"reason": reason})
+            return JSONResponse(status_code=503, content={"set": False, "reason": reason})
+
+        app.state.sweeper.set_gain(value)
+        log_event(app.state.events_path, "gain", {"gain": value})
+        return {"set": True, "gain": value}
 
     return app
 

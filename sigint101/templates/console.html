@@ -589,7 +589,7 @@
             {# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson
                with no hardware (e.g. the legal rules) has no radio, so its instrument-named stages
                fall through to the plain text branch below instead of drawing a waterfall. ---- #}
-            <div class="instrument">
+            <div class="instrument{% if 'gain' in lesson.panels %} instrument--gain{% endif %}">
               <div class="instrument__row">
                 <div class="waterfall-wrap">
                   <canvas class="waterfall" width="760" height="200" data-tune data-sample="1"
@@ -612,9 +612,11 @@
                 {% if 'gain' in lesson.panels %}
                 {# Gain / SNR level meter (M2): the floor and peak as lines on a vertical dB scale,
                    the gap between them — the SNR — shaded and labelled. Driven live by waterfall.js
-                   from the same sweep as the waterfall; no radio shows an honest empty meter. #}
+                   from the same sweep as the waterfall; no radio shows an honest empty meter. The
+                   -/+ stepper under it really changes the sweep's gain through /api/gain, and the
+                   title shows the gain the radio reports (unknown until it does). #}
                 <aside class="gain-meter" data-gain-meter aria-label="Gain and SNR level meter">
-                  <div class="gain-meter__title">GAIN</div>
+                  <div class="gain-meter__title">GAIN <b data-gain-value>&mdash;</b></div>
                   <div class="gain-meter__track">
                     <div class="gain-meter__mark gain-meter__mark--peak" data-gain-peak hidden>
                       <span class="gain-meter__tag">PEAK</span><b data-gain-peak-v>&mdash;</b>
@@ -626,6 +628,10 @@
                       <span class="gain-meter__tag">FLOOR</span><b data-gain-floor-v>&mdash;</b>
                     </div>
                     <div class="gain-meter__empty" data-gain-empty>&mdash; no radio &mdash;</div>
+                  </div>
+                  <div class="gain-meter__control">
+                    <button class="tune-btn gain-meter__btn" type="button" data-gain-step="-1" aria-label="Gain down">&minus;</button>
+                    <button class="tune-btn gain-meter__btn" type="button" data-gain-step="1" aria-label="Gain up">+</button>
                   </div>
                 </aside>
                 {% endif %}

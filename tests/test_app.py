@@ -1725,6 +1725,78 @@ def test_tune_accepts_a_valid_span_when_a_radio_is_present(tmp_path):
     assert body["high"] == 104_000_000
 
 
+# --- gain (M2: "step the gain from the bottom up") ------------------------------------
+
+
+class _IdleProc:
+    """A launched rtl_power at the process boundary: alive, printing nothing yet."""
+
+    def __init__(self):
+        self.stdout = iter(())
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _gain_client(tmp_path, spawned):
+    """A console whose real Sweeper launches recorded rtl_power command lines."""
+    def spawn(cmd):
+        spawned.append(list(cmd))
+        return _IdleProc()
+    return _client(tmp_path, probe=_present,
+                   sweeper_factory=lambda: Sweeper(spawn=spawn, radio_present=lambda: True))
+
+
+def test_a_gain_step_restarts_the_sweep_with_that_gain(tmp_path):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        client.get("/api/spectrum")
+        resp = client.post("/api/gain", json={"gain": 29.7})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.status_code == 200
+    assert resp.json() == {"set": True, "gain": 29.7}
+    # The new gain reaches the rtl_power actually launched, not just the reply.
+    assert spawned[-1][spawned[-1].index("-g") + 1] == "29.7"
+    assert spectrum["gain"] == 29.7
+
+
+def test_a_null_gain_hands_the_tuner_back_to_automatic(tmp_path):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        client.post("/api/gain", json={"gain": 12.5})
+        client.get("/api/spectrum")
+        resp = client.post("/api/gain", json={"gain": None})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.json() == {"set": True, "gain": None}
+    assert "-g" not in spawned[-1]
+    assert spectrum["gain"] is None
+
+
+@pytest.mark.parametrize("bad", [60, -1, "loud"])
+def test_a_gain_the_tuner_cannot_do_is_refused_with_the_reason(tmp_path, bad):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        resp = client.post("/api/gain", json={"gain": bad})
+    assert resp.status_code == 400
+    assert resp.json()["set"] is False
+    assert "gain" in resp.json()["reason"]
+
+
+def test_gain_without_a_radio_is_503_and_changes_nothing(tmp_path):
+    with _client(tmp_path, probe=_absent) as client:
+        resp = client.post("/api/gain", json={"gain": 29.7})
+        spectrum = client.get("/api/spectrum")
+    assert resp.status_code == 503
+    assert resp.json()["set"] is False
+    assert spectrum.status_code == 503
+
+
 # --- exam trainer: one study card, commit-before-reveal (like the predict gate) ---------
 
 # A known-good pool question to drive the answer/review endpoints with, independent of which card

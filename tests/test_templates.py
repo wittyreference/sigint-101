@@ -448,6 +448,22 @@ def test_a_gain_lesson_shows_the_gain_meter_beside_the_waterfall():
     assert "data-gain-gap" in html and "data-gain-floor" in html
 
 
+def test_the_gain_panel_carries_a_real_gain_stepper_and_its_value():
+    # M2's try stage is "step the gain from the bottom up": the panel has - and + that drive
+    # /api/gain, and the gain the radio is on is shown beside them (unknown until it reports).
+    html = _console(lesson=_gain_intro_lesson(), current_stage="demo")
+    demo = re.search(r'data-stage="demo"(.*?)</section>', html, re.S).group(1)
+    assert 'class="instrument instrument--gain"' in demo
+    meter = re.search(r'<aside class="gain-meter"(.*?)</aside>', demo, re.S).group(1)
+    assert 'data-gain-step="-1"' in meter and 'data-gain-step="1"' in meter
+    assert re.search(r"data-gain-value[^>]*>&mdash;<", meter)
+
+
+def test_the_gain_stepper_buttons_are_full_touch_targets():
+    rule = _css_rule(".gain-meter .gain-meter__btn")
+    assert re.search(r"width:\s*72px", rule) and re.search(r"height:\s*72px", rule)
+
+
 def test_a_lesson_without_the_gain_panel_has_no_gain_meter():
     # The intro fixture declares only the ppm panel, so its instrument stage draws no gain meter.
     html = _console(lesson=_intro_lesson(), current_stage="demo")
@@ -767,7 +783,7 @@ def test_an_untuned_lesson_carries_no_band_to_retune_to():
 
 def _live_instrument(html):
     """The live (operate) instrument's markup: its waterfall wrap and tune strip."""
-    return re.search(r'data-stage="operate".*?<div class="instrument">(.*?)'
+    return re.search(r'data-stage="operate".*?<div class="instrument[^"]*">(.*?)'
                      r'<p class="stage-panel__body">', html, re.S).group(1)
 
 
