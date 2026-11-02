@@ -1,5 +1,5 @@
-# ABOUTME: Decodes POCSAG pager traffic via rtl_fm|multimon-ng for M15 — messages not meant for you.
-# ABOUTME: No radio, no multimon-ng, no pages — reports an empty log, never invents a message.
+# ABOUTME: Decodes POCSAG pager framing via rtl_fm|multimon-ng for M15; on the commercial band the
+# ABOUTME: words are dropped at parse time. No radio, no pages: an empty log, never an invented one.
 
 from __future__ import annotations
 
@@ -18,8 +18,16 @@ from .hardware import (
     select_rtlsdr_index,
 )
 
-# Where the POCSAG lesson listens. 929.6 MHz sits in the US paging band; a pack can retune via tune.
-DEFAULT_POCSAG_HZ = 929_600_000
+# Where the POCSAG lesson listens: an assigned 929 MHz paging channel. 47 CFR 90.493(a) puts those
+# channels at 929.0125 MHz plus n x 25 kHz, so 929.6125 is one (929.6000 sat between two).
+DEFAULT_POCSAG_HZ = 929_612_500
+
+# The US commercial paging band (Part 22 and Part 90 paging, 929-932 MHz). Pages here are carried
+# by a paging company, so under 18 USC 2510(16)(D) they are not "readily accessible to the general
+# public": decoding the words is interception (2511(1)(a)); only tone-only pages are excluded from
+# "electronic communication" (2510(12)(B)). On this band the console shows the framing only.
+COMMERCIAL_PAGING_LOW_HZ = 929_000_000
+COMMERCIAL_PAGING_HIGH_HZ = 932_000_000
 
 # multimon-ng expects 16-bit signed mono at 22050 Hz on its raw input; rtl_fm is told to match.
 POCSAG_SAMPLE_RATE = 22050
@@ -39,19 +47,27 @@ _LINE = re.compile(
     r"(?:(?P<label>Alpha|Numeric|Skyper):\s*(?P<text>.*))?$")
 
 
+def on_commercial_paging_band(freq_hz: int) -> bool:
+    """Is this frequency in the US commercial paging band, where a page's words are not ours?"""
+    return COMMERCIAL_PAGING_LOW_HZ <= int(freq_hz) <= COMMERCIAL_PAGING_HIGH_HZ
+
+
 class PocsagUnavailable(RuntimeError):
     """The POCSAG stream cannot be read. Never a reason to invent a page — the log stays empty."""
 
 
 @dataclass(frozen=True)
 class PocsagPage:
-    """One decoded pager message: who it was addressed to, and what it carried."""
+    """One decoded pager message: who it was addressed to, how it was framed, and — only where the
+    words are lawfully ours — what it carried. A withheld page keeps its length, never its text."""
 
     baud: int
     address: int | None
     function: int | None
     kind: str                  # alpha | numeric | skyper | tone
     text: str | None = None
+    length: int = 0            # characters (or digits) in the message; 0 for a tone-only page
+    text_withheld: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -60,6 +76,8 @@ class PocsagPage:
             "function": self.function,
             "kind": self.kind,
             "text": self.text,
+            "length": self.length,
+            "text_withheld": self.text_withheld,
         }
 
 
@@ -67,11 +85,15 @@ def _maybe_int(token: str):
     return None if token == "-" else int(token)
 
 
-def parse_pocsag_line(line: str) -> PocsagPage | None:
+def parse_pocsag_line(line: str, *, keep_text: bool = False) -> PocsagPage | None:
     """Turn one multimon-ng POCSAG line into a PocsagPage, or None if it is not one.
 
     multimon-ng's other demodulators and its status output take other shapes; only a POCSAG line
     carries a pager message. A line whose address or function will not parse is not a page.
+
+    The words are withheld unless the caller says they may be kept (`keep_text`): the page keeps
+    its framing and its length, and the text is dropped here, before anything can store, log or
+    serve it. Withholding is the default so no caller can forget to mask.
     """
     m = _LINE.match((line or "").rstrip("\n"))
     if not m:
@@ -87,8 +109,11 @@ def parse_pocsag_line(line: str) -> PocsagPage | None:
     else:
         kind = label.lower()
         text = (m["text"] or "").rstrip() or None
+    length = len(text) if text else 0
+    withheld = text is not None and not keep_text
     return PocsagPage(baud=int(m["baud"]), address=address, function=function,
-                      kind=kind, text=text)
+                      kind=kind, text=None if withheld else text, length=length,
+                      text_withheld=withheld)
 
 
 class PageLog:
@@ -185,6 +210,11 @@ class PocsagDecoder:
     def released(self) -> bool:
         return self._released
 
+    @property
+    def keeps_text(self) -> bool:
+        """May this decoder keep a page's words? Never on the commercial paging band."""
+        return not on_commercial_paging_band(self.freq_hz)
+
     def _choose_device(self) -> int:
         if self._list_devices is None:
             return self.device
@@ -239,7 +269,7 @@ class PocsagDecoder:
         """Consume multimon-ng's output on a background thread, logging pages until it ends."""
         try:
             for raw in self._proc.stdout:
-                page = parse_pocsag_line(raw)
+                page = parse_pocsag_line(raw, keep_text=self.keeps_text)
                 if page is not None:
                     with self._lock:
                         self._log.add(page)

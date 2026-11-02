@@ -64,8 +64,8 @@ stages:
     radio may not be encrypted, so every callsign and position here is meant to be received — that is
     the point of APRS. Second, notice what the decode unit keeps teaching you: the waterfall sees that
     a signal exists; a decoder that knows the frame sees what it says. Next, another kind of message in
-    the air — one not meant for you at all, yet just as readable.
-# The closing line sets up M15 (POCSAG pagers): readable, but not addressed to you.
+    the air — one not meant for you at all, sent just as openly.
+# The closing line sets up M15 (POCSAG pagers): sent in the clear, but not addressed to you.
 
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
 # (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
@@ -73,3 +73,9 @@ choices:
   - {key: framed, label: "A framed packet"}
   - {key: blip, label: "Just a tone"}
   - {key: scrambled, label: "Scrambled data"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [framed]
+verdict: >-
+  A framed packet: every APRS burst is an AX.25 frame with a callsign, a relay path and a
+  payload, all in the clear.

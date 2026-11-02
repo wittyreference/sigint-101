@@ -5,9 +5,12 @@ import pytest
 
 from sigint101.rds import (
     DEFAULT_RDS_HZ,
+    RDS_HZ_ENV,
     RDSDecoder,
     RDSStation,
     RDSUnavailable,
+    configured_rds_hz,
+    is_fm_channel,
     parse_rds_group,
 )
 
@@ -120,8 +123,41 @@ def test_decoder_refuses_once_released():
     assert dec.station().pi == "0x6201"
 
 
-def test_default_rds_frequency_is_an_fm_station():
-    assert 88_000_000 <= DEFAULT_RDS_HZ <= 108_000_000
+def test_default_rds_frequency_is_a_us_fm_channel():
+    # 47 CFR 73.201: US FM channels sit on odd tenths, 88.1 to 107.9 MHz. 96.0 is not one; it was a
+    # spur comb on the reference box (technical audit T-04), and rtl_fm at 171k never reached the
+    # real stations either side of it.
+    assert is_fm_channel(DEFAULT_RDS_HZ)
+
+
+def test_fm_channels_are_the_odd_tenths_from_88_1_to_107_9():
+    assert is_fm_channel(88_100_000)
+    assert is_fm_channel(96_100_000)
+    assert is_fm_channel(107_900_000)
+    assert not is_fm_channel(96_000_000)
+    assert not is_fm_channel(88_000_000)
+    assert not is_fm_channel(108_100_000)
+    assert not is_fm_channel(96_150_000)
+
+
+def test_the_rds_station_is_set_at_provisioning_by_environment():
+    assert configured_rds_hz({RDS_HZ_ENV: "94700000"}) == 94_700_000
+    assert configured_rds_hz({RDS_HZ_ENV: " 94700000 "}) == 94_700_000
+
+
+def test_an_unset_or_invalid_rds_station_falls_back_to_the_default():
+    assert configured_rds_hz({}) == DEFAULT_RDS_HZ
+    assert configured_rds_hz({RDS_HZ_ENV: ""}) == DEFAULT_RDS_HZ
+    assert configured_rds_hz({RDS_HZ_ENV: "96000000"}) == DEFAULT_RDS_HZ   # not a channel
+    assert configured_rds_hz({RDS_HZ_ENV: "94.7"}) == DEFAULT_RDS_HZ       # Hz, not MHz
+
+
+def test_the_decoder_listens_on_the_provisioned_station(monkeypatch):
+    monkeypatch.setenv(RDS_HZ_ENV, "94700000")
+    assert RDSDecoder(radio_present=lambda: True).freq_hz == 94_700_000
+    assert RDSDecoder(freq_hz=101_100_000, radio_present=lambda: True).freq_hz == 101_100_000
+    monkeypatch.delenv(RDS_HZ_ENV)
+    assert RDSDecoder(radio_present=lambda: True).freq_hz == DEFAULT_RDS_HZ
 
 
 def test_station_ignores_a_none_group():

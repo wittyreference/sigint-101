@@ -37,16 +37,14 @@ stages:
     that keyed up. Those scroll as call activity: who is talking to whom, moment by moment. Second
     the voice, which is not an analog tone but compressed bits; DSD-FME runs them back through a
     vocoder to rebuild speech. DMR packs two of these calls into one channel on alternating time
-    slots; P25 Phase 1 uses one. The panel shows you the IDs as they land, and tells you whether
-    real voice came through with them.
+    slots; P25 Phase 1 uses one. The panel shows you the IDs as they land.
   try: >-
     Your log now, comrade. Digital voice comes in calls, not a steady stream — a source ID keys up on
-    a talkgroup, says its piece, releases. Give it time and watch the IDs arrive. When a call lands,
-    listen: did clear speech come with it? Watch a few. You will notice something — some calls scroll
-    their IDs cleanly and still hand you nothing you can understand. Sit with that before the next
-    screen, because it is the whole question of this lesson.
+    a talkgroup, says its piece, releases. Give it time and watch the IDs arrive: which talkgroup,
+    which radio. This console has no speaker yet, so the voice half stays a question. Sit with it
+    before the next screen, because it is the whole question of this lesson.
   predict: >-
-    You decode a busy DMR channel. Talkgroup IDs keep scrolling past. Will every one of those calls
+    You decode a busy DMR channel; talkgroup IDs keep scrolling past. How many of those calls will
     also give you clear speech? Lock it in.
   observe: >-
     Hold your guess against what the panel showed you. The IDs arrived for every call — the system
@@ -54,7 +52,8 @@ stages:
     separate thing. Ask yourself what stands between a stream of bits and a sentence you understand:
     a vocoder to rebuild it, and sometimes a lock you do not hold.
   explain: >-
-    Here's the straight answer, comrade: the IDs, yes — every call — but clear speech only sometimes.
+    Here's the straight answer, comrade: some of them. The IDs, yes — every call — but clear speech
+    only sometimes.
     The signaling layer is sent plainly because the network must read it to connect the call, so the
     talkgroup and source IDs are yours the moment you decode the frame. The voice payload is its own
     problem twice over. First it is compressed: DMR and P25 Phase 2 use the AMBE+2 vocoder, P25 Phase
@@ -62,14 +61,21 @@ stages:
     patent-touched codec, not a plain demodulation. Second, on many systems the voice is encrypted —
     DMR's privacy modes, P25's DES or AES — while the header is not. Encrypted voice bits run through
     the vocoder as noise: the IDs keep scrolling, the audio comes out silent or garbled. That is why
-    a channel can look busy and tell you nothing. And it closes the unit. An analog FM voice you
-    simply demodulated and heard; a digital voice you demodulate, frame, de-interleave, then
-    synthesize through a vocoder — one more stage on the same path from energy to meaning. Same
-    dongle, same move, a harder signal.
+    a channel can look busy and tell you nothing. The law draws the same line: unencrypted
+    public-safety voice is lawful to hear under federal law (18 USC 2511(2)(g)(ii)(II)), decrypting
+    what was encrypted is not, and some states restrict scanners in cars. And it closes the unit. An
+    analog FM voice you simply demodulated and heard; a digital voice you demodulate, frame,
+    de-interleave, then synthesize through a vocoder — one more stage on the same path from energy to
+    meaning. Same dongle, same move, a harder signal.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text; none of
 # these are booleans, but the quotes keep the whole set consistent and safe to extend.
 choices:
-  - {key: "always-voice", label: "Yes — always clear speech"}
-  - {key: "ids-voice-sometimes", label: "IDs always, voice sometimes"}
-  - {key: "nothing", label: "No — nothing decodes"}
+  - {key: "always-voice", label: "All of them"}
+  - {key: "ids-voice-sometimes", label: "Some of them"}
+  - {key: "nothing", label: "None of them"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["ids-voice-sometimes"]
+verdict: >-
+  Some of them: the IDs ride in the clear on every call, but voice is vocoded and often encrypted.

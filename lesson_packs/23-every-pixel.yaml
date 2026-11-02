@@ -13,7 +13,7 @@ panels: []
 
 stages:
   frame: >-
-    The last lesson, comrade: tonight you turn the radio on itself. All course you trusted the
+    Last of this unit, comrade: tonight you turn the radio on itself. All course you trusted the
     waterfall but never asked what it is. Tonight you find out — what one pixel really is, built from
     three ideas: sampling, Nyquist, and the FFT.
   demo: >-
@@ -42,3 +42,9 @@ choices:
   - {key: "vanishes", label: "Gone — it's out of band"}
   - {key: "true-spot", label: "Shows at its true frequency"}
   - {key: "aliases", label: "A ghost at the wrong spot"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["aliases"]
+verdict: >-
+  A ghost: a signal past the sampled window folds back and paints a false line at the wrong
+  frequency.

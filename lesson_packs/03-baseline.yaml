@@ -14,32 +14,25 @@ panels: [provenance]
 
 stages:
   frame: >-
-    Tonight, comrade, you learn the most unsettling thing a radio can do — fail so quietly that a broken
-    receiver and an empty sky look exactly alike on the screen — and the one plain habit that
-    catches it.
+    Tonight, comrade, you learn the most unsettling way a radio can fail — quietly — and the one
+    plain habit that catches it.
   demo: >-
-    Watch — hands off for now. The boring move here is actually the whole job: write down the
-    state of the instrument itself. Open the provenance panel — it isn't showing a signal, it's
-    showing the radio: which radio this is, its gain, its chip temperature, whether its power is
-    clean, and the reading that matters most, the level of a known reference — the strong local
-    FM station from Lesson 1. It's always on, always in the same place, so you can hold the radio
-    against its level. I capture it all now as tonight's baseline: a dated snapshot of a healthy
-    radio hearing what it should. That snapshot is what will one day tell you the truth.
+    Watch — hands off for now. The boring move is the whole job: write down the state of the
+    instrument itself. The provenance panel shows the radio, not a signal: its gain, its chip
+    temperature, whether its power is clean, and the level of a known reference — a steady FM
+    station the console watches, set for your area. Capture it and you hold tonight's baseline.
   try: >-
-    Now you capture yours, comrade. Aim at that same reference station and tap capture — that
-    stamps tonight's baseline with today's date: the radio, its settings, its temperature, the
-    reference level, one record. The lesson is in the repeat: do it again tomorrow, and the night
-    after. You're not waiting for something to happen — you're building the record that lets you
-    notice when it does.
+    Now you capture yours, comrade. Tap Capture baseline — that stamps tonight's record: the
+    radio, its settings, its temperature, the reference level. The lesson is in the repeat: do
+    it again tomorrow, and the night after.
   predict: >-
-    You've saved a baseline against a known reference. The call: weeks from now this receiver
-    slowly goes deaf — corroded connector, dying front end — and you aim it at empty band. Next
-    to a band merely quiet tonight, would the broken-radio picture look IDENTICAL, a LITTLE
-    different, or OBVIOUSLY different? Lock it in — the rest stays hidden until you do.
+    You've saved a baseline. Weeks from now this receiver slowly goes deaf — a corroded
+    connector, a dying front end (the first amplifier behind the antenna). Next to a band merely
+    quiet tonight, would its picture look IDENTICAL, a LITTLE different, or OBVIOUSLY different?
+    Lock it in.
   observe: >-
-    Put your empty-band waterfall beside your captured baseline and look hard. From the empty
-    waterfall alone — grass, dark, flat floor — can you tell whether the radio is working or
-    stone deaf? If the band can't answer that, what one thing on your screen can?
+    Imagine this radio goes deaf tonight. From the waterfall alone — grass, dark, flat floor —
+    could you tell? Which number on the provenance panel would tell you?
   explain: >-
     Here's the hard truth you just reasoned your way toward. A dead front end and an empty sky draw
     the same waterfall — flat floor, no stripes, nothing at all. "Quiet band" and "deaf radio" are
@@ -63,3 +56,9 @@ choices:
   - {key: identical, label: Identical}
   - {key: little, label: A little different}
   - {key: obvious, label: Obviously different}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [identical]
+verdict: >-
+  Identical: a deaf radio and an empty band draw the same picture; only the reference against
+  your baseline tells them apart.
