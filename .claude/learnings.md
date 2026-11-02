@@ -392,33 +392,28 @@ A third trap only showed up after several minutes:
 - The server now owns port 8008: `systemctl --user stop sigint101` before running a manual
   server there.
 
-## 2026-11-02: fresh headless Chromium on nomad-b hangs on http (cause unknown)
+## 2026-11-02: headless Chromium on nomad-b needs --password-store=basic
 **Finding.**
-- **What broke:** after about 21:20 PST 11-01, every headless Chromium launched fresh on
-  nomad-b hung on any http navigation, in two ways:
-  - `Page.navigate` and every later command on that tab went silent, while the browser
-    endpoint kept answering;
-  - a `data:` URL still rendered.
-- **What kept working:** a headless instance started at 20:55 (the UX auditor's, port 9333)
-  rendered http pages throughout, over 600 loads.
-- **What's the same as before:** the kiosk's wayland Chromium also relaunched after 21:20 and
-  renders fine.
-- **Ruled out:**
-  - my CDP client (the auditor's frame-reassembling client hangs the same way on a fresh
-    instance);
-  - the server branch (origin/main hangs the same);
-  - topology (forwarded to the droplet or run on the box);
-  - flags (`--remote-allow-origins=*`, bare `/usr/lib/chromium/chromium`,
-    `--no-proxy-server`);
-  - `/dev/shm`, disk and memory.
-- **Timeline:** it started right after I `kill -9`'d about 260 storm Chromiums (see the kiosk
-  watchdog entry).
+- **What broke:** once the kiosk session existed (tty1 autologin starts `gnome-keyring-daemon`,
+  and linger keeps a user D-Bus up), every *freshly launched* headless Chromium hung on its
+  first http page:
+  - `Page.navigate` and every later command went silent, while the browser endpoint still
+    answered;
+  - a `data:` URL rendered fine.
+- **Why:** on first use of cookies, Chromium initialises its cookie encryption (OSCrypt) through
+  the desktop keyring, and the keyring waits forever on a "choose a password" prompt nobody
+  can answer. That is the same dialog that covered the kiosk panel. A `data:` page never
+  touches cookies.
+- **Why one instance kept working:** the UX auditor's instance launched at 20:55, before the
+  kiosk session existed, so it never asked the keyring.
+- **What it was not:** the CDP client, the server branch, the topology, `/dev/shm`, the
+  respawn-storm kill, or a reboot (it still hung after one).
 **How to apply.**
-- Keep ONE long-running headless Chromium for render checks and drive it with a single page
-  (focus emulation on). Don't launch a fresh one per check.
-- A nomad-b reboot is the first thing to try when fresh launches hang. Its cold-boot test is
-  pending anyway.
-- Render checks can borrow a working instance's page in the meantime.
+- Every Chromium on a course box, kiosk or headless, launches with `--password-store=basic`.
+- The render recipe is `--headless=new --no-sandbox --disable-gpu --password-store=basic
+  --remote-allow-origins=* --user-data-dir=<fresh> --disk-cache-size=1`.
+- If a tab goes silent while the browser endpoint answers, suspect a blocking OS prompt (keyring,
+  dialog) before suspecting the protocol client.
 
 ## 2026-11-02: provisioning inventory — what nomad-b's hand setup actually was
 **Finding.** `deploy/provision.sh --check` on nomad-b, plus a read-only inventory, showed:

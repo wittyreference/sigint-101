@@ -31,7 +31,9 @@ def connect():
 
     Headless Chromium throttles a tab it thinks is in the background until commands stall, so
     the page is brought to the front with focus emulation on, and a missing page is opened in
-    a new window rather than as a background tab. Launch Chromium with --remote-allow-origins=*.
+    a new window rather than as a background tab. Launch Chromium with --remote-allow-origins=*
+    and --password-store=basic: on a box with a desktop keyring running, Chromium otherwise
+    blocks its first http page on a keyring password prompt nobody can answer.
     """
     version = json.load(urllib.request.urlopen(f"http://{HOST}:{PORT}/json/version"))
     c = CDP(version["webSocketDebuggerUrl"])
