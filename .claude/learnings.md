@@ -491,3 +491,26 @@ after one quiet second while dump1090 ran on: a LIVE panel with a dead reader. U
 end-of-stream at all, and `close()` from another thread does not wake a blocked `recv`.
 **How to apply.** Feed readers catch `TimeoutError` first and keep reading while the process
 lives; stop paths `shutdown(SHUT_RDWR)` before `close()`.
+
+## 2026-11-02: a span centred on a target puts the target on rtl_power's one unmeasured bin
+**Finding.** rtl_power cuts a span into the fewest equal hops <= 2.8 MHz and each hop's centre bin
+is its DC copy (kept as None). Centred on 433.92 MHz, M9's 2 MHz span is one hop, so the carrier
+sat exactly on the gap: measured on nomad-b, the 433.92 bin read None with -17.9/-18.2 dB either
+side. An even hop count (the 20 MHz FM default) puts a tap on a hop edge instead, in the roll-off.
+`spectrum.hop_plan` reproduces the hop/bin arithmetic (checked against the three real captures,
+including the downsampled <1 MHz path: bins = smallest power of two with hop/bins <= bin), and
+`target_span` shifts the span until the target is 4 bins from its hop's centre. Live: offset
+span 432.9825-434.9825, 433.92 bin measured (-18.43 dB), the gap moved to 433.9825.
+**How to apply.** Never build a sweep span by centring it on a frequency you want to see: tune
+by `{center, span}` through /api/tune (or `Sweeper.retune_to`) and read the dial from the
+response's `center`. A pack's default 125 kHz bin makes the 4-bin guard 500 kHz; give a narrow
+pack a fine `bin_hz` (M9 uses 15625) so the offset stays a sliver of the span.
+
+## 2026-11-02: an ssh-launched server outlives the ssh; Acurite sends each reading three times
+**Finding.** A HIL server run as `ssh host 'exec flock … uvicorn …'` (no tty) did not get SIGHUP
+when the local ssh was stopped: uvicorn, its flock and its rtl_433 child kept the dongle until the
+uvicorn PID was killed by hand. Separately, rtl_433 decodes the Acurite-Tower's three repeats of
+each transmission as three decodes, so the reception log gains three events per reading.
+**How to apply.** After a HIL session, `pgrep -af` for your port and the rtl_* tools and kill your
+own uvicorn PID (SIGTERM lets the lifespan stop the radio tool), then `rtl_test -t` in the flock.
+Expect reception counts in threes from that sensor; deduplicating repeats is a follow-up.

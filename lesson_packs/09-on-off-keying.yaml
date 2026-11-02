@@ -17,6 +17,9 @@ tune:
   center_hz: 433920000
   span_hz: 2000000
   step_hz: 20000
+  # 128 bins of 15.6 kHz rather than the default 16 of 125 kHz: the console keeps the carrier a
+  # few bins off the hop's unmeasured centre, and with fine bins that offset is ~60 kHz, not 500.
+  bin_hz: 15625
 
 stages:
   frame: >-

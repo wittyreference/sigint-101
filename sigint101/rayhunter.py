@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -253,6 +254,13 @@ class RayhunterMonitor:
         self.timeout = float(timeout)
         self._running = False
         self.error = None
+        # Called with each warning dict the first time it is parsed from the Orbic's analysis, in
+        # the order the analyser raised them, outside the lock that guards which have been seen.
+        # Polling the same report again reports nothing. The console's hook logs it as a reception
+        # and never raises, so the call is made directly.
+        self.on_reception = None
+        self._lock = threading.Lock()
+        self._seen = set()
 
     @property
     def base_url(self) -> str:
@@ -328,7 +336,23 @@ class RayhunterMonitor:
         status, body = self._get(ANALYSIS_REPORT_PATH.format(name=name))
         if status != 200:
             return []
-        return parse_analysis(body)
+        warnings = parse_analysis(body)
+        self._report_new(name, warnings)
+        return warnings
+
+    def _report_new(self, name: str, warnings: list[RayhunterWarning]) -> None:
+        """Hand each warning not parsed before to on_reception, oldest first, exactly once."""
+        fresh = []
+        with self._lock:
+            for warning in reversed(warnings):     # parse_analysis lists the newest first
+                key = (name, warning)
+                if key not in self._seen:
+                    self._seen.add(key)
+                    fresh.append(warning)
+        report = self.on_reception
+        if report is not None:
+            for warning in fresh:
+                report(warning.as_dict())
 
     def _get(self, path: str) -> tuple[int, bytes]:
         """GET a Rayhunter path, turning any transport failure into RayhunterUnavailable."""

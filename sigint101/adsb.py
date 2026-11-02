@@ -173,14 +173,16 @@ class AircraftTracker:
     def __init__(self):
         self._by_hex: dict[str, Aircraft] = {}
 
-    def absorb(self, msg: SBSMessage | None, now: float) -> None:
+    def absorb(self, msg: SBSMessage | None, now: float) -> Aircraft | None:
+        """Fold one message into its aircraft's entry, and return that aircraft as it now stands."""
         if msg is None:
-            return
+            return None
         plane = self._by_hex.get(msg.hex_ident)
         if plane is None:
             plane = Aircraft(hex_ident=msg.hex_ident)
             self._by_hex[msg.hex_ident] = plane
         plane.absorb(msg, now)
+        return plane
 
     def aircraft(self, now: float, max_age_s: float = DEFAULT_MAX_AGE_S) -> list[Aircraft]:
         """Every aircraft heard within the age window, freshest contact first."""
@@ -308,6 +310,11 @@ class AdsbDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._tracker = AircraftTracker()
+        # Called with an aircraft's dict the first time each ICAO address is heard since the feed
+        # (re)started — a new contact, not every squitter. From the reader thread only and outside
+        # the tracker lock. The console's hook logs it as a reception and never raises, so the
+        # call is made directly: it cannot end the decode.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
@@ -392,12 +399,19 @@ class AdsbDecoder:
 
     def _read(self, proc) -> None:
         """Consume dump1090's SBS lines on a background thread, assembling the sky until it ends."""
+        contacts = set()   # the ICAO addresses this feed has already reported as new contacts
         try:
             for raw in proc.stdout:
                 msg = parse_sbs_message(raw)
                 if msg is not None:
                     with self._lock:
-                        self._tracker.absorb(msg, now=time.time())
+                        plane = self._tracker.absorb(msg, now=time.time())
+                        contact = self._row(plane) if msg.hex_ident not in contacts else None
+                    if contact is not None:
+                        contacts.add(msg.hex_ident)
+                        hook = self.on_reception
+                        if hook is not None:
+                            hook(contact)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
         finally:
@@ -440,25 +454,27 @@ class AdsbDecoder:
         now = time.time()
         with self._lock:
             planes = self._tracker.aircraft(now=now, max_age_s=self.max_age_s)
-        out = []
-        for p in planes:
-            range_nm = bearing_deg = None
-            if self.receiver.known and p.lat is not None and p.lon is not None:
-                range_nm, bearing_deg = great_circle(
-                    self.receiver.lat, self.receiver.lon, p.lat, p.lon)
-            out.append({
-                "hex_ident": p.hex_ident,
-                "callsign": p.callsign,
-                "altitude_ft": p.altitude_ft,
-                "ground_speed_kt": p.ground_speed_kt,
-                "track_deg": p.track_deg,
-                "lat": p.lat,
-                "lon": p.lon,
-                "squawk": p.squawk,
-                "message_count": p.message_count,
-                "range_nm": range_nm,
-                "bearing_deg": bearing_deg,
-            })
+        out = [self._row(p) for p in planes]
         # Closest first when ranges are known; the located aircraft lead the unlocated.
         out.sort(key=lambda a: (a["range_nm"] is None, a["range_nm"] or 0.0))
         return out
+
+    def _row(self, p: Aircraft) -> dict:
+        """One aircraft as the API hands it out, placed by range and bearing when located."""
+        range_nm = bearing_deg = None
+        if self.receiver.known and p.lat is not None and p.lon is not None:
+            range_nm, bearing_deg = great_circle(
+                self.receiver.lat, self.receiver.lon, p.lat, p.lon)
+        return {
+            "hex_ident": p.hex_ident,
+            "callsign": p.callsign,
+            "altitude_ft": p.altitude_ft,
+            "ground_speed_kt": p.ground_speed_kt,
+            "track_deg": p.track_deg,
+            "lat": p.lat,
+            "lon": p.lon,
+            "squawk": p.squawk,
+            "message_count": p.message_count,
+            "range_nm": range_nm,
+            "bearing_deg": bearing_deg,
+        }

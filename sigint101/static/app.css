@@ -2322,3 +2322,176 @@ button.rail-pip:disabled {
   gap: 12px;
   align-items: center;
 }
+
+/* ===== Operator mode: the rack =========================================== */
+/* The lessons' instruments with the script removed. A picker column down the left (touch-sized
+   buttons, scrolling on their own), and the bench: the chosen panel at full size over the tune
+   strip, the command strip and the newest reception. The page never scrolls at 800x480. */
+.rack {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+  padding: 10px var(--gutter) 10px 10px;
+}
+.rack__picker {
+  flex: none;
+  width: 142px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+.rack__picker::-webkit-scrollbar { width: 10px; }
+.rack__picker::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  border-radius: 5px;
+}
+.rack__picker::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg) 45%, transparent);
+  border-radius: 5px;
+}
+.rack__pick {
+  flex: none;
+  min-height: 72px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  text-decoration: none;
+}
+.rack__pick-label {
+  font-size: 17px;
+  line-height: 1.15;
+}
+.rack__pick-tool {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+/* The instrument on the bench: the accent border and glow, the same "you are here" as a rail pip. */
+.rack__pick--on {
+  border: 2px solid var(--accent);
+  color: var(--accent);
+  text-shadow: var(--glow);
+}
+.rack__bench {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 8px;
+}
+/* The panel takes every pixel the strips under it leave; the lesson's fixed band heights do not
+   apply here. */
+.rack__row {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+.rack__panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.rack__panel > .decoder {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+.rack__tune {
+  gap: 8px;
+}
+.rack__tune .tune-btn {
+  width: 72px;
+  height: 72px;
+}
+.rack__tune .tune__dial {
+  min-height: 72px;
+  padding: 4px 6px;
+}
+.rack__tune .tune__freq {
+  font-size: 26px;
+}
+.rack__tune .tune__freq span {
+  font-size: 15px;
+  margin-left: 4px;
+}
+.rack__tune .tune__caption {
+  font-size: 13px;
+}
+.rack__tune.tune--fixed .tune__dial {
+  flex: 1 1 auto;
+}
+/* The step key: STEP over the size each +/- moves the dial. */
+.rack__tune .rack__step {
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  text-shadow: none;
+}
+.rack__step-tag {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--fg-dim);
+}
+.rack__step b {
+  font-size: 13px;
+  white-space: nowrap;
+  color: var(--accent);
+}
+.rack__gain {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.rack__gain-read {
+  min-width: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.rack__gain-tag {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--fg-dim);
+}
+.rack__gain-value {
+  font-size: 15px;
+  color: var(--accent);
+}
+.cmdstrip--rack {
+  flex: none;
+  font-size: 13px;
+}
+.rack__log {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  white-space: nowrap;
+}
+.rack__log-tag {
+  flex: none;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+.rack__log-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-dim);
+}

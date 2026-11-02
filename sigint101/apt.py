@@ -95,6 +95,12 @@ class AptDecoder:
         self._proc = None
         self._released = False
         self.error = None
+        # Called with each image's dict (as images() lists it) that the running pass wrote, once
+        # the console reaps that pass; the PNGs already on disk when it began are never reported.
+        # satdump writes files rather than lines, so the pass's end is where its images are read.
+        # The console's hook logs each as a reception and never raises, so it is called directly.
+        self.on_reception = None
+        self._before_pass = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         # A pass ends by design when satdump's timeout runs out, so a clean exit is not a death.
         self.watch = ChildWatch(SATDUMP, finite=True)
@@ -161,10 +167,12 @@ class AptDecoder:
             raise AptUnavailable(blocked)
         self.device = self._choose_device()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._before_pass = set(self._pngs())
         try:
             self._proc = self._spawn(self.freq_hz, self.device, self.output_dir)
         except (OSError, ValueError) as exc:
             self._proc = None
+            self._before_pass = None
             raise AptUnavailable(f"cannot run satdump: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
@@ -192,6 +200,18 @@ class AptDecoder:
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "satdump survived kill; the dongle may still be held"
+        self._report_pass()
+
+    def _report_pass(self) -> None:
+        """Report the images the pass just ended wrote: each once, and none from before it."""
+        before, self._before_pass = self._before_pass, None
+        report = self.on_reception
+        if before is None or report is None:
+            return
+        written = [png for png in self._pngs() if png not in before]
+        written.sort(key=lambda png: png.stat().st_mtime)
+        for png in written:
+            report(self._row(png))
 
     def drain(self, timeout: float = APT_PASS_TIMEOUT_S) -> None:
         """Wait for the current pass to finish. Unlike a live feed, a satdump capture is finite."""
@@ -204,20 +224,25 @@ class AptDecoder:
 
     def images(self, limit: int | None = None) -> list[dict]:
         """The decoded PNGs as plain dicts for the API, newest first; empty until a pass decodes."""
-        if not self.output_dir.exists():
-            return []
-        pngs = [p for p in self.output_dir.rglob("*.png") if p.is_file()]
+        pngs = self._pngs()
         pngs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         if limit:
             pngs = pngs[:limit]
-        rows = []
-        for png in pngs:
-            stat = png.stat()
-            received_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-            rows.append({
-                "path": png.relative_to(self.data_dir).as_posix(),
-                "received_at": received_at,
-                "satellite": satellite_for(self.freq_hz),
-                "meta": {"filename": png.name, "size_bytes": stat.st_size},
-            })
-        return rows
+        return [self._row(png) for png in pngs]
+
+    def _pngs(self) -> list[Path]:
+        """Every PNG under output_dir, including satdump's per-satellite subdirectories."""
+        if not self.output_dir.exists():
+            return []
+        return [p for p in self.output_dir.rglob("*.png") if p.is_file()]
+
+    def _row(self, png: Path) -> dict:
+        """One decoded image as the API hands it out."""
+        stat = png.stat()
+        received_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        return {
+            "path": png.relative_to(self.data_dir).as_posix(),
+            "received_at": received_at,
+            "satellite": satellite_for(self.freq_hz),
+            "meta": {"filename": png.name, "size_bytes": stat.st_size},
+        }

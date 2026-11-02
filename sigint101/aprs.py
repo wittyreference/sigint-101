@@ -154,9 +154,10 @@ class StationRoster:
     def __init__(self):
         self._by_source: dict[str, Station] = {}
 
-    def absorb(self, packet: AprsPacket | None, now: float) -> None:
+    def absorb(self, packet: AprsPacket | None, now: float) -> Station | None:
+        """Fold one packet into its sender's entry, and return that station as it now stands."""
         if packet is None:
-            return
+            return None
         station = self._by_source.get(packet.source)
         if station is None:
             station = Station(source=packet.source, packet=packet)
@@ -164,10 +165,27 @@ class StationRoster:
         station.packet = packet
         station.packet_count += 1
         station.last_seen = now
+        return station
 
     def stations(self, now: float) -> list:
         """Every station heard, freshest first."""
         return sorted(self._by_source.values(), key=lambda s: s.last_seen, reverse=True)
+
+
+def _station_dict(s: Station) -> dict:
+    """One station as the API hands it out: its latest packet's meaning and how often it spoke."""
+    p = s.packet
+    return {
+        "source": s.source,
+        "dest": p.dest,
+        "path": list(p.path),
+        "kind": p.kind,
+        "lat": p.lat,
+        "lon": p.lon,
+        "text": p.text,
+        "addressee": p.addressee,
+        "packet_count": s.packet_count,
+    }
 
 
 def _popen(freq_hz: int, device: int):
@@ -200,6 +218,8 @@ class AprsDecoder:
     def __init__(self, *, freq_hz=DEFAULT_APRS_HZ, device=0, spawn=_popen,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None):
         self.freq_hz = int(freq_hz)
+        # The frequency this decoder was built for; the console tunes a lesson back to it.
+        self.home_hz = self.freq_hz
         self.device = device
         self.serial = serial or None
         self._list_devices = list_devices
@@ -207,6 +227,10 @@ class AprsDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._roster = StationRoster()
+        # Called with the sender's updated station dict after each decoded packet, from the reader
+        # thread only and outside the roster lock. The console's hook logs it as a reception and
+        # never raises, so the call is made directly: it cannot end the decode.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
@@ -248,6 +272,20 @@ class AprsDecoder:
     def resume(self) -> None:
         with self._life:
             self._released = False
+
+    def retune(self, freq_hz) -> None:
+        """Move to another frequency: the running pipeline stops, and the next start() spawns there.
+
+        The stations heard on the old frequency are cleared as release() clears them, but the
+        dongle is not handed away. Tuning to where the decoder already is changes nothing.
+        """
+        with self._life:
+            if int(freq_hz) == self.freq_hz:
+                return
+            self._stop_locked()
+            self.freq_hz = int(freq_hz)
+            with self._lock:
+                self._roster = StationRoster()
 
     def start(self) -> None:
         """Begin decoding APRS, unless the radio is absent, a tool is missing, or released."""
@@ -293,7 +331,10 @@ class AprsDecoder:
                 packet = parse_aprs_frame(parse_aprs_line(raw))
                 if packet is not None:
                     with self._lock:
-                        self._roster.absorb(packet, now=time.time())
+                        station = _station_dict(self._roster.absorb(packet, now=time.time()))
+                    report = self.on_reception
+                    if report is not None:
+                        report(station)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
         finally:
@@ -336,18 +377,4 @@ class AprsDecoder:
         now = time.time()
         with self._lock:
             rows = self._roster.stations(now=now)
-        out = []
-        for s in rows:
-            p = s.packet
-            out.append({
-                "source": s.source,
-                "dest": p.dest,
-                "path": list(p.path),
-                "kind": p.kind,
-                "lat": p.lat,
-                "lon": p.lon,
-                "text": p.text,
-                "addressee": p.addressee,
-                "packet_count": s.packet_count,
-            })
-        return out
+        return [_station_dict(s) for s in rows]

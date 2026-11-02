@@ -162,6 +162,8 @@ class PocsagDecoder:
     def __init__(self, *, freq_hz=DEFAULT_POCSAG_HZ, device=0, spawn=_popen,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None):
         self.freq_hz = int(freq_hz)
+        # The frequency this decoder was built for; the console tunes a lesson back to it.
+        self.home_hz = self.freq_hz
         self.device = device
         self.serial = serial or None
         self._list_devices = list_devices
@@ -169,6 +171,10 @@ class PocsagDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._log = PageLog()
+        # Called with each page as a plain dict (its words already withheld on the commercial
+        # band), from the reader thread only and outside the log lock. The console's hook logs it
+        # as a reception and never raises, so the call is made directly: it cannot end the decode.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
@@ -216,6 +222,21 @@ class PocsagDecoder:
         with self._life:
             self._released = False
 
+    def retune(self, freq_hz) -> None:
+        """Move to another frequency: the running pipeline stops, and the next start() spawns there.
+
+        The pages heard on the old frequency are cleared as release() clears them, but the dongle
+        is not handed away. Tuning to where the decoder already is changes nothing. Whether the
+        next child may keep a page's words is decided by the band it is spawned on.
+        """
+        with self._life:
+            if int(freq_hz) == self.freq_hz:
+                return
+            self._stop_locked()
+            self.freq_hz = int(freq_hz)
+            with self._lock:
+                self._log = PageLog()
+
     def start(self) -> None:
         """Begin decoding POCSAG, unless the radio is absent, a tool is missing, or released."""
         with self._life:
@@ -243,25 +264,36 @@ class PocsagDecoder:
         if blocked:
             raise PocsagUnavailable(blocked)
         self.device = self._choose_device()
+        spawned_hz = self.freq_hz
         try:
-            self._proc = self._spawn(self.freq_hz, self.device)
+            self._proc = self._spawn(spawned_hz, self.device)
         except (OSError, ValueError) as exc:
             self._proc = None
             raise PocsagUnavailable(f"cannot run the POCSAG pipeline: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+        # The band rule is fixed by the frequency this child was spawned on, never read live: a
+        # retune can then never let a line heard on one band be parsed under another band's rule.
+        keep_text = not on_commercial_paging_band(spawned_hz)
+        self._thread = threading.Thread(target=self._read, args=(self._proc, keep_text),
                                         name="sigint101-pocsag", daemon=True)
         self._thread.start()
 
-    def _read(self, proc) -> None:
-        """Consume multimon-ng's output on a background thread, logging pages until it ends."""
+    def _read(self, proc, keep_text: bool = False) -> None:
+        """Consume multimon-ng's output on a background thread, logging pages until it ends.
+
+        `keep_text` is the band rule of the frequency `proc` was spawned on; withholding is the
+        default, as in parse_pocsag_line, so no caller can forget to mask.
+        """
         try:
             for raw in proc.stdout:
-                page = parse_pocsag_line(raw, keep_text=self.keeps_text)
+                page = parse_pocsag_line(raw, keep_text=keep_text)
                 if page is not None:
                     with self._lock:
                         self._log.add(page)
+                    report = self.on_reception
+                    if report is not None:
+                        report(page.as_dict())
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
         finally:

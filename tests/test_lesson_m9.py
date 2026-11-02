@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
+from sigint101.spectrum import SPAN_GUARD_BINS, hop_plan, target_span
 
 PACK = Path(__file__).resolve().parent.parent / "lesson_packs" / "09-on-off-keying.yaml"
 
@@ -37,6 +38,20 @@ def test_m9_starts_the_instrument_on_the_433_ism_band():
     assert lesson.tune is not None, "M9 must declare its own tune band"
     assert lesson.tune["center_hz"] == 433_920_000
     assert lesson.tune["low_hz"] < 433_920_000 < lesson.tune["high_hz"]
+
+
+def test_m9s_carrier_lands_on_measured_bins_close_to_the_middle_of_the_waterfall():
+    # Centred exactly, the 2 MHz span is one rtl_power hop whose centre bin (433.92 itself) is never
+    # measured, so the carrier vanished for the wrong reason. The console offsets the sweep a few
+    # bins (spectrum.target_span); with bins fine enough, that offset stays a sliver of the span,
+    # so the carrier still reads as the middle of the waterfall.
+    lesson = load_lesson_file(PACK)
+    tune = lesson.tune
+    low, high, bin_size = target_span(tune["center_hz"], tune["span_hz"], tune["bin_hz"])
+    plan = hop_plan(low, high, bin_size)
+    assert all(abs(hop - 433_920_000) >= SPAN_GUARD_BINS * plan.step for hop in plan.centres)
+    offset = abs((low + high) // 2 - 433_920_000)
+    assert offset <= 0.05 * tune["span_hz"], f"the carrier sits {offset} Hz off the middle"
 
 
 def test_m9_predict_choices_are_well_formed_string_key_label():

@@ -8,6 +8,7 @@ import os
 import shlex
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -30,7 +31,7 @@ from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
-from .events import log_event
+from .events import log_event, read_events
 from .exam import (
     EXAM_SIZE,
     PASS_MARK,
@@ -44,7 +45,16 @@ from .flock import FlockDetector, FlockUnavailable
 from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
 from .lessons import COMMIT_STAGE, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
-from .pocsag import PocsagDecoder, PocsagUnavailable
+from .operate import (
+    DEFAULT_INSTRUMENT,
+    INSTRUMENTS,
+    RECEIVERS,
+    reception_record,
+    tunable,
+    validate_decoder_hz,
+)
+from .operate import instrument as rack_instrument
+from .pocsag import PocsagDecoder, PocsagUnavailable, on_commercial_paging_band
 from .ppm import PpmUnavailable, measure_pilot_ppm
 from .progress import PredictionAlreadyCommitted, Progress
 from .provenance import (
@@ -55,7 +65,17 @@ from .provenance import (
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
-from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_gain, validate_span
+from .spectrum import (
+    DEFAULT_BIN,
+    DEFAULT_HIGH,
+    DEFAULT_LOW,
+    SpectrumUnavailable,
+    Sweeper,
+    TuneError,
+    validate_gain,
+    validate_span,
+    validate_target_span,
+)
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
 from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
@@ -93,6 +113,13 @@ def _env_float(name: str):
 # default so the kiosk's "Measure ppm" tap returns promptly; the trade-off is resolution, which the
 # measurement reports so the learner sees how finely it could read.
 PPM_SECONDS = 8.0
+
+# How many recent receptions the console keeps in memory for the rack's log line. The events log
+# keeps every one; this only bounds what a poll looks through.
+RECEPTION_MEMORY = 200
+
+# The progress store's place name for the rack's last instrument.
+RACK_PLACE = "rack"
 
 
 async def _field(request: Request, name: str) -> str:
@@ -235,6 +262,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     """
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
+    # The radios the bus held the last time a tool looked, as each SDR tool enumerates them before
+    # it opens one. A reception names its radio's serial from here, so logging one never has to
+    # run the enumerator again while a tool holds the dongle.
+    radio_census = []
+
+    def enumerate_radios():
+        devices = list_devices()
+        radio_census[:] = list(devices)
+        return devices
+
     # The sweeper trusts the same probe the console does, so a radio-less probe in a test can
     # never reach for the real dongle. The real enumerator is wired here and nowhere else: it is
     # what makes the sweeper check which radio it is about to open, and refuse rather than open
@@ -244,7 +281,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return Sweeper(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_sweeper = sweeper_factory
@@ -256,7 +293,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return Decoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_decoder = decoder_factory
@@ -276,7 +313,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return RDSDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_rds = rds_factory
@@ -289,7 +326,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return AdsbDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
                 receiver_lat=_env_float(RX_LAT_ENV),
                 receiver_lon=_env_float(RX_LON_ENV),
             )
@@ -303,7 +340,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return AprsDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_aprs = aprs_factory
@@ -315,7 +352,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return PocsagDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_pocsag = pocsag_factory
@@ -327,7 +364,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return AcarsDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_acars = acars_factory
@@ -339,7 +376,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return AisDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_ais = ais_factory
@@ -351,7 +388,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return DmrDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_dmr = dmr_factory
@@ -365,7 +402,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 data_dir=Path(data_dir),
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_apt = apt_factory
@@ -379,7 +416,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 data_dir=Path(data_dir),
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_sstv = sstv_factory
@@ -434,6 +471,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # the real pilot measurement, which holds the dongle exclusively (the route stands the
         # sweeper down first, below).
         app.state.ppm_measure = ppm_measure or measure_pilot_ppm
+        # Operator mode: every receiver logs each live reception with its provenance. The
+        # in-memory tail is read in from the log on first ask; the last ppm measured this run is
+        # part of each record's provenance.
+        app.state.receptions = None
+        app.state.reception_error = None
+        app.state.last_ppm = None
+        for attr, inst in RECEIVERS.items():
+            receiver = getattr(app.state, attr)
+            receiver.on_reception = _heard(inst, receiver)
         try:
             yield
         finally:
@@ -511,6 +557,27 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "unit": unit, "tiles": tiles},
         )
 
+    def _restore_lesson_tuning(lesson) -> None:
+        """Put the radios back where a lesson expects them, whatever the rack left them on.
+
+        The rack retunes the single-channel decoders and the sweep; a lesson's copy and panels
+        name its own frequencies. Each decoder goes back to the frequency it was built for, and
+        a lesson with no band of its own gets the FM sweep it was written against (a lesson with
+        a band retunes the sweep itself when it loads). Nothing restarts that is already there.
+        """
+        for inst in INSTRUMENTS:
+            if inst.band:
+                receiver = getattr(app.state, inst.receiver)
+                home = getattr(receiver, "home_hz", None)
+                if home is not None and receiver.freq_hz != home:
+                    receiver.retune(home)
+        sweeper = app.state.sweeper
+        if not lesson.tune and (
+                (sweeper.low, sweeper.high, sweeper.bin_size) != (DEFAULT_LOW, DEFAULT_HIGH,
+                                                                  DEFAULT_BIN)
+                or getattr(sweeper, "target", None) is not None):
+            sweeper.retune(DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_BIN)
+
     @app.get("/lesson/{lesson_id}", response_class=HTMLResponse)
     def lesson_view(request: Request, lesson_id: int):
         """Render one lesson, sealing every post-predict stage until a prediction exists.
@@ -526,6 +593,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
+        _restore_lesson_tuning(lesson)
         app.state.progress.mark_opened(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
         committed = prediction is not None
@@ -905,6 +973,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 "available": False, "hz": hz, "ppm": None, "reason": reason})
         log_event(app.state.events_path, "ppm_measure",
                   {"hz": hz, "ppm": result.get("ppm"), "reason": result.get("reason")})
+        if result.get("ppm") is not None:
+            app.state.last_ppm = result["ppm"]
         return result
 
     def _pinned_index():
@@ -982,23 +1052,25 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             # The decoder, the RDS pipeline and the waterfall share one dongle. Taking it back from
             # the SDR-exclusive tools (release) and clearing any prior release on the sweeper lets
             # the sweep start after an M10/M12 lesson handed the radio to rtl_433 or rtl_fm.
+            # A refusal is logged once per streak, like every decoder's: a sweep that cannot start
+            # answers every poll, and an identical line per poll is how the log fills up.
             try:
                 _claim_sdr("sweeper", sweeper.start)
             except SpectrumUnavailable as exc:
-                log_event(app.state.events_path, "spectrum_blocked", {"reason": str(exc)})
-                return JSONResponse(status_code=503,
-                                    content={"available": False, "reason": str(exc), "rows": [],
-                                             "command": None})
-            log_event(app.state.events_path, "spectrum_start",
-                      {"command": " ".join(sweeper.command())})
+                return _refused("spectrum", exc, {"rows": []})
+            _started("spectrum", {"command": " ".join(sweeper.command())})
         # The span rides along with every response because the waterfall cannot label its axis
         # (or spot a retune) from bare rows of dB values. bin_size is the requested bin — a
         # maximum rtl_power may undercut — while each row's freq_step reports what the hardware
-        # actually delivered. gain is None while the tuner runs automatic.
+        # actually delivered. gain is None while the tuner runs automatic. center is what the dial
+        # reads: the frequency tuned to when the span was built around one (offset off it so the
+        # target is measured), else the span's middle.
+        target = getattr(sweeper, "target", None)
         return {
             "available": True,
             "freq_low": sweeper.low,
             "freq_high": sweeper.high,
+            "center": target if target is not None else (sweeper.low + sweeper.high) // 2,
             "bin_size": sweeper.bin_size,
             "gain": sweeper.gain,
             # The exact rtl_power line running now, for the panel's command strip.
@@ -1350,10 +1422,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         with the gate's own words, whether or not a dongle is attached. A valid span with no radio
         to drive is a 503 — honest about why nothing retuned, rather than reporting a success the
         hardware never performed.
+
+        A request may name its span by its edges (low/high) or by the frequency to tune to
+        (center, with the span's width as `span`). A centred request is offset so the target is
+        measured rather than lost in a hop's unmeasured centre bin (spectrum.target_span), and
+        the answer's `center` is that target: what the dial reads.
         """
+        centred = payload.get("center") is not None
         try:
-            low, high, bin_size = validate_span(
-                payload.get("low"), payload.get("high"), payload.get("bin_size"))
+            if centred:
+                low, high, bin_size = validate_target_span(
+                    payload.get("center"), payload.get("span"), payload.get("bin_size"))
+                center = int(float(payload["center"]))
+            else:
+                low, high, bin_size = validate_span(
+                    payload.get("low"), payload.get("high"), payload.get("bin_size"))
+                center = (low + high) // 2
         except TuneError as exc:
             log_event(app.state.events_path, "tune_rejected", {"reason": str(exc)})
             return JSONResponse(status_code=400, content={"tuned": False, "reason": str(exc)})
@@ -1364,8 +1448,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "tune_blocked", {"reason": reason})
             return JSONResponse(status_code=503, content={"tuned": False, "reason": reason})
 
-        app.state.sweeper.retune(low, high, bin_size)
-        tuned = {"low": low, "high": high, "bin_size": bin_size}
+        if centred:
+            app.state.sweeper.retune(low, high, bin_size, target=center)
+        else:
+            app.state.sweeper.retune(low, high, bin_size)
+        tuned = {"low": low, "high": high, "bin_size": bin_size, "center": center}
         log_event(app.state.events_path, "tune", tuned)
         return {"tuned": True, **tuned}
 
@@ -1392,6 +1479,139 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.sweeper.set_gain(value)
         log_event(app.state.events_path, "gain", {"gain": value})
         return {"set": True, "gain": value}
+
+    # --- operator mode: the rack ---------------------------------------------------------------
+    # The course's instruments with the lesson script removed: a picker down the left, the chosen
+    # panel at full size, free tuning, the command strip, and a reception log. Every receiver's
+    # live receptions are logged to events with their provenance, whichever screen is open — the
+    # substrate later badges cite. A replay or sample has no receiver behind it, so it never logs.
+
+    reception_lock = threading.Lock()
+
+    def _radio(inst, receiver) -> dict:
+        """The radio a reception came in on: an RTL-SDR's serial and index, or the other radio."""
+        if inst.radio == "rtl-sdr":
+            index = getattr(receiver, "device", None)
+            serial = os.environ.get(RTLSDR_SERIAL_ENV) or next(
+                (d.serial for d in radio_census if d.index == index), None)
+            return {"kind": "rtl-sdr", "serial": serial or None, "index": index}
+        if inst.radio == "lora":
+            return {"kind": "meshtasticd", "host": f"{getattr(receiver, 'hostname', None)}:"
+                                                   f"{getattr(receiver, 'port', None)}"}
+        if inst.radio == "wlan1":
+            return {"kind": "wifi", "interface": getattr(receiver, "interface", None)}
+        return {"kind": "orbic", "host": f"{getattr(receiver, 'host', None)}:"
+                                         f"{getattr(receiver, 'port', None)}"}
+
+    def _heard(inst, receiver):
+        """The on_reception hook for one receiver: log each live reception with its provenance.
+
+        Called from the receiver's reader thread. It never raises: a reception that cannot be
+        written is reported through /api/receptions rather than ending the live decode.
+        """
+        def hook(item: dict) -> None:
+            freq = getattr(receiver, "freq_hz", None)
+            if freq is None and inst.fixed_hz:
+                freq = inst.fixed_hz[0] if len(inst.fixed_hz) == 1 else list(inst.fixed_hz)
+            live_command = getattr(receiver, "live_command", None)
+            record = reception_record(
+                inst, item, freq_hz=freq,
+                command=live_command() if live_command else None,
+                # No tool is ever handed a ppm correction, so every reception is uncorrected;
+                # the last measurement this run rides along for whoever reads the record.
+                ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
+                radio=_radio(inst, receiver))
+            with reception_lock:
+                try:
+                    event = log_event(app.state.events_path, "reception", record)
+                except OSError as exc:
+                    app.state.reception_error = f"a reception could not be logged: {exc}"
+                    return
+                if app.state.receptions is not None:
+                    app.state.receptions.append(event)
+
+        return hook
+
+    def _recent_receptions() -> list:
+        """The newest receptions, oldest first, read in from the log the first time asked."""
+        with reception_lock:
+            if app.state.receptions is None:
+                logged = (e for e in read_events(app.state.events_path)
+                          if e.get("kind") == "reception")
+                app.state.receptions = deque(logged, maxlen=RECEPTION_MEMORY)
+            return list(app.state.receptions)
+
+    @app.get("/api/receptions")
+    def receptions(instrument: str | None = None, limit: int = 20):
+        """The receptions logged with provenance, newest first, optionally for one instrument."""
+        rows = [event for event in reversed(_recent_receptions())
+                if instrument is None or event["payload"].get("instrument") == instrument]
+        return {"receptions": rows[:max(limit, 0)], "error": app.state.reception_error}
+
+    @app.get("/operate")
+    def operate_home():
+        """The rack opens on the instrument last used, or the waterfall the first time."""
+        last = app.state.progress.get_place(RACK_PLACE)
+        key = last if rack_instrument(last or "") else DEFAULT_INSTRUMENT
+        return RedirectResponse(f"/operate/{key}", status_code=303)
+
+    @app.get("/operate/{key}", response_class=HTMLResponse)
+    def operate_view(request: Request, key: str):
+        """One instrument in the rack, remembered so /operate reopens on it.
+
+        The panel's own poll claims the dongle through _claim_sdr exactly as a lesson's does, so
+        switching instruments hands the radio over the same way. The page renders the receiver's
+        current frequency; a tunable decoder carries its band for the tune keys.
+        """
+        inst = rack_instrument(key)
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"the rack has no instrument '{key}'")
+        app.state.progress.record_place(RACK_PLACE, inst.key)
+        receiver = getattr(app.state, inst.receiver) if inst.receiver else None
+        freq_hz = None
+        if inst.api == "spectrum":
+            target = getattr(receiver, "target", None)
+            freq_hz = target if target is not None else (receiver.low + receiver.high) // 2
+        elif receiver is not None:
+            freq_hz = getattr(receiver, "freq_hz", None)
+        if freq_hz is None and len(inst.fixed_hz) == 1:
+            freq_hz = inst.fixed_hz[0]
+        return templates.TemplateResponse(
+            request=request,
+            name="operate.html",
+            context={"title": "Operator mode", "back_href": "/", "back_label": "Home",
+                     "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
+                     "text_withheld": (inst.key == "pager" and freq_hz is not None
+                                       and on_commercial_paging_band(freq_hz))},
+        )
+
+    @app.post("/api/{api}/tune")
+    def decoder_tune(api: str, payload: dict = Body(default={})):
+        """Point a single-channel decoder at another frequency inside its band.
+
+        Refused (400) with the reason outside the decoder's band, and (503) with no radio to
+        drive, changing nothing either way — like /api/tune. Otherwise the running child stops
+        and the panel's next poll restarts it on the new frequency. The pager band's text rule
+        stays the decoder's own: tuned into 929-932 MHz it shows framing only.
+        """
+        inst = tunable(api)
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"/api/{api} takes no frequency override")
+        try:
+            hz = validate_decoder_hz(inst, payload.get("freq_hz"))
+        except TuneError as exc:
+            log_event(app.state.events_path, "decoder_tune_rejected",
+                      {"instrument": inst.key, "reason": str(exc)})
+            return JSONResponse(status_code=400, content={"tuned": False, "reason": str(exc)})
+        radio = probe()
+        if not radio.present:
+            reason = f"no RTL-SDR to tune — {radio.detail}"
+            log_event(app.state.events_path, "decoder_tune_blocked",
+                      {"instrument": inst.key, "reason": reason})
+            return JSONResponse(status_code=503, content={"tuned": False, "reason": reason})
+        getattr(app.state, inst.receiver).retune(hz)
+        log_event(app.state.events_path, "decoder_tune", {"instrument": inst.key, "freq_hz": hz})
+        return {"tuned": True, "instrument": inst.key, "freq_hz": hz}
 
     return app
 

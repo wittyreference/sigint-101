@@ -50,6 +50,17 @@ CREATE TABLE IF NOT EXISTS stages (
 );
 """
 
+# Where the learner was left outside a lesson, one row per place: the rack's last instrument, so
+# /operate reopens on it after a reload or a power cut the way a lesson resumes its stage. Its own
+# table, so an earlier build's database gains it on open.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS places (
+    name    TEXT PRIMARY KEY,
+    value   TEXT NOT NULL,
+    updated REAL
+);
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
@@ -212,6 +223,29 @@ class Progress:
                 "SELECT stage, furthest FROM stages WHERE lesson_id=?", (lesson_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def record_place(self, name: str, value: str, *, clock=None) -> None:
+        """Remember where the learner was left in a place outside the lessons (the rack).
+
+        Fails closed on a blank value, which no real visit produces.
+        """
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("a place cannot be blank")
+        updated = clock() if clock else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO places(name, value, updated) VALUES(?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+                (name, value, updated),
+            )
+            self._conn.commit()
+
+    def get_place(self, name: str):
+        """Where the learner was last left in a place, or None if never."""
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM places WHERE name=?", (name,)).fetchone()
+        return row["value"] if row else None
 
     def get(self, lesson_id: int):
         """Everything known about one lesson's progress, prediction included."""

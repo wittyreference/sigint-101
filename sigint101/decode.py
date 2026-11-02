@@ -135,6 +135,8 @@ class Decoder:
                  spawn=_popen, radio_present=None, which=shutil.which,
                  serial=None, list_devices=None):
         self.freq_hz = int(freq_hz)
+        # The frequency this decoder was built for; the console tunes a lesson back to it.
+        self.home_hz = self.freq_hz
         self.device = device
         self.serial = serial or None
         self._list_devices = list_devices
@@ -142,6 +144,10 @@ class Decoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._reads = deque(maxlen=history)
+        # Called with each sensor read as a plain dict, from the reader thread only and outside
+        # the buffer lock. The console's hook logs it as a reception and never raises, so the call
+        # is made directly: it cannot end the decode.
+        self.on_reception = None
         # Two locks, same discipline as the sweeper: _lock guards the buffer the reader writes,
         # _life guards start/stop/release so two request threads cannot race over the dongle.
         self._lock = threading.Lock()
@@ -198,6 +204,20 @@ class Decoder:
         with self._life:
             self._released = False
 
+    def retune(self, freq_hz) -> None:
+        """Move to another frequency: the running child stops, and the next start() spawns there.
+
+        The reads heard on the old frequency are cleared as release() clears them, but the dongle
+        is not handed away. Tuning to where the decoder already is changes nothing.
+        """
+        with self._life:
+            if int(freq_hz) == self.freq_hz:
+                return
+            self._stop_locked()
+            self.freq_hz = int(freq_hz)
+            with self._lock:
+                self._reads.clear()
+
     def start(self) -> None:
         """Begin decoding, unless the radio is absent, rtl_433 is missing, or we were released."""
         with self._life:
@@ -244,6 +264,9 @@ class Decoder:
                 if decode is not None:
                     with self._lock:
                         self._reads.append(decode)
+                    report = self.on_reception
+                    if report is not None:
+                        report(decode.as_dict())
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
         finally:

@@ -344,14 +344,16 @@ class VesselRoster:
     def __init__(self):
         self._by_mmsi: dict[int, Vessel] = {}
 
-    def absorb(self, report: AisReport | None, now: float) -> None:
+    def absorb(self, report: AisReport | None, now: float) -> Vessel | None:
+        """Fold one report into its vessel's entry, and return that vessel as it now stands."""
         if report is None:
-            return
+            return None
         vessel = self._by_mmsi.get(report.mmsi)
         if vessel is None:
             vessel = Vessel(mmsi=report.mmsi)
             self._by_mmsi[report.mmsi] = vessel
         vessel.absorb(report, now)
+        return vessel
 
     def vessels(self, limit: int | None = None) -> list:
         """Every vessel heard, freshest first, optionally capped at `limit`."""
@@ -464,6 +466,11 @@ class AisDecoder:
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._roster = VesselRoster()
         self._assembler = AisAssembler()
+        # Called with a vessel's dict the first time each MMSI is heard since the feed (re)started
+        # — a new contact, not every position report. From the reader thread only and outside the
+        # roster lock. The console's hook logs it as a reception and never raises, so the call is
+        # made directly: it cannot end the decode.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
@@ -550,12 +557,19 @@ class AisDecoder:
 
     def _read(self, proc) -> None:
         """Consume rtl_ais's NMEA sentences on a thread, building the roster until it ends."""
+        contacts = set()   # the MMSIs this feed has already reported as new contacts
         try:
             for raw in proc.stdout:
                 report = self._assembler.push(raw)
                 if report is not None:
                     with self._lock:
-                        self._roster.absorb(report, now=time.time())
+                        vessel = self._roster.absorb(report, now=time.time())
+                        contact = vessel.as_dict() if report.mmsi not in contacts else None
+                    if contact is not None:
+                        contacts.add(report.mmsi)
+                        hook = self.on_reception
+                        if hook is not None:
+                            hook(contact)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
         finally:

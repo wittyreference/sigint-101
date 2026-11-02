@@ -151,6 +151,8 @@ class RDSDecoder:
                  radio_present=None, which=shutil.which, serial=None, list_devices=None):
         # No frequency given means the site's provisioned station (SIGINT101_RDS_HZ).
         self.freq_hz = int(freq_hz) if freq_hz is not None else configured_rds_hz()
+        # The frequency this decoder was built for; the console tunes a lesson back to it.
+        self.home_hz = self.freq_hz
         self.device = device
         self.serial = serial or None
         self._list_devices = list_devices
@@ -158,6 +160,11 @@ class RDSDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._station = RDSStation()
+        # Called with the station dict when its identity is learned or changes (a new PI, or a new
+        # non-empty PS name) — not once per group, which arrive about eleven a second. From the
+        # reader thread only and outside the station lock. The console's hook logs it as a
+        # reception and never raises, so the call is made directly: it cannot end the decode.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
@@ -201,6 +208,20 @@ class RDSDecoder:
         with self._life:
             self._released = False
 
+    def retune(self, freq_hz) -> None:
+        """Move to another station: the running pipeline stops, and the next start() spawns there.
+
+        The station assembled on the old frequency is cleared as release() clears it, but the
+        dongle is not handed away. Tuning to where the decoder already is changes nothing.
+        """
+        with self._life:
+            if int(freq_hz) == self.freq_hz:
+                return
+            self._stop_locked()
+            self.freq_hz = int(freq_hz)
+            with self._lock:
+                self._station = RDSStation()
+
     def start(self) -> None:
         """Begin decoding RDS, unless the radio is absent, a tool is missing, or released."""
         with self._life:
@@ -240,12 +261,27 @@ class RDSDecoder:
 
     def _read(self, proc) -> None:
         """Consume redsea's JSON on a background thread, assembling the station until it ends."""
+        named = False   # whether the station on this PI has had its PS name reported yet
         try:
             for raw in proc.stdout:
                 group = parse_rds_group(raw)
                 if group is not None:
                     with self._lock:
-                        self._station.absorb(group)
+                        station = self._station
+                        known_pi = station.pi
+                        station.absorb(group)
+                        new_pi = station.pi is not None and station.pi != known_pi
+                        if new_pi:
+                            named = False
+                        # Only the first PS name per PI: many stations scroll song titles through
+                        # the PS field, and that is one station, not a new one every few seconds.
+                        first_name = bool(station.ps) and not named
+                        if first_name:
+                            named = True
+                        identity = station.as_dict() if (new_pi or first_name) else None
+                    report = self.on_reception
+                    if identity is not None and report is not None:
+                        report(identity)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
         finally:

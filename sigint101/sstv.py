@@ -147,6 +147,10 @@ class SstvDecoder:
         self._pending = None
         self._released = False
         self.error = None
+        # Called with the picture's dict (as images() lists it) when a capture's own decode leaves
+        # one on disk, from the reader thread only; a picture already there is never reported. The
+        # console's hook logs it as a reception and never raises, so the call is made directly.
+        self.on_reception = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         # A capture ends by design after DEFAULT_CAPTURE_S, so a clean finish is not a death.
         self.watch = ChildWatch(SSTV, finite=True)
@@ -255,6 +259,11 @@ class SstvDecoder:
             self._note_end(proc)
         if mode is not None and output_path is not None:
             self._write_sidecar(output_path, mode, received_at)
+        # The picture this capture decoded, if sstv wrote one. Each capture writes to a name stamped
+        # with its own start time (_name_for), so a file there is this decode's product.
+        report = self.on_reception
+        if report is not None and output_path is not None and output_path.is_file():
+            report(self._describe(output_path).as_dict())
 
     def _note_end(self, proc) -> None:
         """Record why the child ended, if it was not us, so the next poll reports it as stopped."""

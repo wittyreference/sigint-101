@@ -259,15 +259,17 @@ class FlockRoster:
     def __init__(self):
         self._by_mac: dict[str, FlockDetection] = {}
 
-    def absorb(self, hit: FlockHit | None, now: float) -> None:
+    def absorb(self, hit: FlockHit | None, now: float) -> FlockDetection | None:
+        """Fold one hit into its device's entry, and return that device as it now stands."""
         if hit is None:
-            return
+            return None
         entry = self._by_mac.get(hit.mac)
         if entry is None:
             entry = FlockDetection(mac=hit.mac, oui=hit.oui, tier=hit.tier,
                                    rule=hit.rule, ssid=hit.ssid)
             self._by_mac[hit.mac] = entry
         entry.observe(hit, now)
+        return entry
 
     def detections(self, limit: int | None = None) -> list[FlockDetection]:
         """Every detected device, most-recently-heard first, optionally capped at `limit`."""
@@ -351,6 +353,11 @@ class FlockDetector:
         self._which = which
         self._radio_present = radio_present or (lambda: _interface_present(self.interface))
         self._roster = FlockRoster()
+        # Called with a device's detection dict the first time each MAC is detected since the
+        # capture (re)started, not on every frame. From the reader thread only and outside the
+        # roster lock. The console's hook logs it as a reception and never raises, so the call is
+        # made directly: it cannot end the capture.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
@@ -404,6 +411,7 @@ class FlockDetector:
 
     def _read(self, proc) -> None:
         """Consume the pcap stream on a background thread, feeding matched frames to the roster."""
+        detected = set()   # the MACs this capture has already reported as new detections
         try:
             for dot11 in iter_pcap_frames(proc.stdout):
                 frame = parse_management_frame(dot11)
@@ -412,7 +420,13 @@ class FlockDetector:
                 hit = match_signatures(frame, ssid_match_enabled=self.ssid_match_enabled)
                 if hit is not None:
                     with self._lock:
-                        self._roster.absorb(hit, now=time.time())
+                        entry = self._roster.absorb(hit, now=time.time())
+                        first = entry.as_dict() if hit.mac not in detected else None
+                    if first is not None:
+                        detected.add(hit.mac)
+                        hook = self.on_reception
+                        if hook is not None:
+                            hook(first)
         except (OSError, ValueError, struct.error) as exc:  # loud, never silent
             self.error = str(exc)
         finally:
