@@ -102,6 +102,34 @@ def _status(**overrides):
     return data
 
 
+def test_status_bar_shows_a_dash_not_a_number_when_nothing_is_measured():
+    # No battery gauge and no live SNR reach the status bar: it must say "unknown", never invent
+    # a reading (the no-mock rule). A default of 100% read as a full battery on every screen.
+    ctx = _status()
+    del ctx["battery_pct"], ctx["snr_db"]
+    html = _render("base.html", **ctx)
+    batt = re.search(r'readout--batt.*?readout__value">(.*?)</span>', html, re.S).group(1)
+    snr = re.search(r'readout--snr.*?readout__value">(.*?)</span>', html, re.S).group(1)
+    assert "100%" not in html
+    assert batt == "&mdash;"
+    assert snr == "&mdash;"
+
+
+def test_status_bar_shows_a_real_battery_reading_when_one_is_given():
+    html = _render("base.html", **_status(battery_pct=82, snr_db=14))
+    assert "82%" in html
+    assert "14 dB" in html
+
+
+def test_the_waterfall_canvas_is_scaled_without_smoothing():
+    # The canvas holds one pixel per rtl_power bin; the browser stretches it to the panel width.
+    # Smoothed scaling would blend neighbouring bins into colours no bin measured, i.e. invented
+    # signal, so the stretch must be nearest-neighbour.
+    css = (TEMPLATES_DIR.parent / "static" / "app.css").read_text()
+    rule = re.search(r"\n\.waterfall \{(.*?)\}", css, re.S).group(1)
+    assert "image-rendering: pixelated" in rule
+
+
 def _env():
     return Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
