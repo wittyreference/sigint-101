@@ -730,6 +730,42 @@ def test_a_prediction_accepts_json_too(tmp_path):
     assert "OPERATE_SENTINEL" in resp.text
 
 
+def test_a_committed_prediction_is_scored_against_the_pack_answer(tmp_path):
+    with _client(tmp_path) as client:
+        client.post("/api/predict?lesson_id=1", data={"prediction": "c"}, follow_redirects=False)
+        client.post("/api/predict?lesson_id=2", data={"prediction": "a"}, follow_redirects=False)
+        progress = client.app.state.progress
+        assert progress.get_correct(1) is True
+        # Fixture 2 names no answer, so it is stored unscored rather than guessed wrong.
+        assert progress.get_correct(2) is None
+
+
+def test_a_second_commit_is_refused_and_the_first_prediction_stands(tmp_path):
+    with _client(tmp_path) as client:
+        first = client.post("/api/predict?lesson_id=1", data={"prediction": "a"},
+                            follow_redirects=False)
+        assert first.status_code == 303
+        second = client.post("/api/predict?lesson_id=1", data={"prediction": "c"},
+                             follow_redirects=False)
+        assert second.status_code == 409
+        assert second.json()["recorded"] is False
+        assert "already" in second.json()["reason"]
+        progress = client.app.state.progress
+        assert progress.get_prediction(1) == "a"
+        assert progress.get_correct(1) is False
+
+
+def test_the_explain_header_shows_the_scored_call_after_a_commit(tmp_path):
+    with _client(tmp_path) as client:
+        sealed = client.get("/lesson/1").text
+        assert "VERDICT_SENTINEL" not in sealed
+        client.post("/api/predict?lesson_id=1", data={"prediction": "a"}, follow_redirects=False)
+        html = client.get("/lesson/1").text
+    assert "VERDICT_SENTINEL" in html
+    assert "You said <b>The gap grows</b>" in html
+    assert "Answer: <b>The gap shrinks past a point</b>" in html
+
+
 def test_predict_on_an_unknown_lesson_is_404(tmp_path):
     with _client(tmp_path) as client:
         resp = client.post("/api/predict?lesson_id=999", data={"prediction": "a"})

@@ -42,6 +42,26 @@ CREATE TABLE IF NOT EXISTS responses (
 PREDICTION = "prediction"
 
 
+class PredictionAlreadyCommitted(RuntimeError):
+    """A second commit for a lesson whose prediction is already on record.
+
+    A prediction is the learner's word before the reveal. Once the explain has shown the answer,
+    accepting a new one would let the score copy the reveal, so the store refuses it outright.
+    """
+
+
+def _add_correct_column(conn) -> None:
+    """Give an earlier build's responses table the `correct` column, keeping every row it holds.
+
+    CREATE IF NOT EXISTS cannot add a column to a table that already exists, so a database from
+    before scoring is checked on open and altered in place; a fresh one is left as SCHEMA made it.
+    NULL means "not scored" (the pack had no answer key), never a guessed wrong.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(responses)")}
+    if "correct" not in columns:
+        conn.execute("ALTER TABLE responses ADD COLUMN correct INTEGER")
+
+
 class Progress:
     """Where the learner's journey through a lesson is kept.
 
@@ -59,6 +79,7 @@ class Progress:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            _add_correct_column(self._conn)
             self._conn.commit()
 
     def mark_opened(self, lesson_id: int, *, clock=None) -> None:
@@ -88,28 +109,34 @@ class Progress:
             )
             self._conn.commit()
 
-    def record_prediction(self, lesson_id: int, body: str, *, clock=None) -> None:
-        """Store what the learner expects to see, and open the lesson.
+    def record_prediction(self, lesson_id: int, body: str, *, correct=None, clock=None) -> None:
+        """Store what the learner expects to see, whether it was right, and open the lesson.
 
         Fails closed on a blank answer: an empty prediction is not a prediction, and
         accepting one would unlock the explanation without the learner committing first.
+        `correct` is the lesson's own scoring of the chip (None when the pack names no answer).
+        A lesson that already has a prediction refuses a second one (PredictionAlreadyCommitted).
         """
         body = (body or "").strip()
         if not body:
             raise ValueError("a prediction cannot be blank")
 
         updated = clock() if clock else None
+        stored_correct = None if correct is None else int(bool(correct))
         with self._lock:
             # Both writes share one lock and one commit: a prediction that saved without
             # opening the lesson, or the reverse, would leave the console showing a state
-            # the learner never reached. `excluded` is SQLite's name for the row that
-            # collided, so this overwrites an earlier prediction rather than failing.
-            self._conn.execute(
-                "INSERT INTO responses(lesson_id, kind, body, updated) VALUES(?, ?, ?, ?) "
-                "ON CONFLICT(lesson_id, kind) DO UPDATE SET body=excluded.body, "
-                "updated=excluded.updated",
-                (lesson_id, PREDICTION, body, updated),
-            )
+            # the learner never reached. DO NOTHING on a collision, then a zero rowcount, is
+            # how a second commit is caught: the first prediction stands untouched.
+            inserted = self._conn.execute(
+                "INSERT INTO responses(lesson_id, kind, body, updated, correct) "
+                "VALUES(?, ?, ?, ?, ?) ON CONFLICT(lesson_id, kind) DO NOTHING",
+                (lesson_id, PREDICTION, body, updated, stored_correct),
+            ).rowcount
+            if not inserted:
+                self._conn.rollback()
+                raise PredictionAlreadyCommitted(
+                    f"lesson {lesson_id} already has a committed prediction")
             self._conn.execute(
                 "INSERT INTO progress(lesson_id, opened, updated) VALUES(?, 1, ?) "
                 "ON CONFLICT(lesson_id) DO UPDATE SET opened=1, updated=excluded.updated",
@@ -129,6 +156,17 @@ class Progress:
                 (lesson_id, PREDICTION),
             ).fetchone()
         return row["body"] if row else None
+
+    def get_correct(self, lesson_id: int):
+        """Whether the committed prediction was right: True, False, or None (unscored/absent)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT correct FROM responses WHERE lesson_id=? AND kind=?",
+                (lesson_id, PREDICTION),
+            ).fetchone()
+        if row is None or row["correct"] is None:
+            return None
+        return bool(row["correct"])
 
     def get(self, lesson_id: int):
         """Everything known about one lesson's progress, prediction included."""

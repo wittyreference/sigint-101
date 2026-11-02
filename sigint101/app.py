@@ -34,7 +34,7 @@ from .lessons import load_lessons
 from .lora import LoRaListener, LoRaUnavailable
 from .pocsag import PocsagDecoder, PocsagUnavailable
 from .ppm import measure_pilot_ppm
-from .progress import Progress
+from .progress import PredictionAlreadyCommitted, Progress
 from .provenance import (
     compare_to_baseline,
     gather_provenance,
@@ -488,13 +488,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         is redirected back to the now-unsealed lesson, so the gate works with no JavaScript.
         """
         _require_lesson(lesson_id)
+        # The pack scores the chip (None when it names no answer); the score is stored with the
+        # prediction. A second commit is refused (409): once the explain has shown the answer, a
+        # re-answer would only copy it.
+        body = await _field(request, "prediction")
+        correct = app.state.lessons[lesson_id].is_correct((body or "").strip())
         try:
-            app.state.progress.record_prediction(lesson_id, await _field(request, "prediction"))
+            app.state.progress.record_prediction(lesson_id, body, correct=correct)
         except ValueError as exc:
             log_event(app.state.events_path, "prediction_refused",
                       {"lesson": lesson_id, "reason": str(exc)})
             return JSONResponse(status_code=400, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "prediction", {"lesson": lesson_id})
+        except PredictionAlreadyCommitted as exc:
+            log_event(app.state.events_path, "prediction_refused",
+                      {"lesson": lesson_id, "reason": str(exc)})
+            return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
+        log_event(app.state.events_path, "prediction", {"lesson": lesson_id, "correct": correct})
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
 
     @app.post("/api/complete")

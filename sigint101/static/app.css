@@ -765,6 +765,51 @@ body {
   text-shadow: var(--glow);
 }
 
+/* ===== Explain verdict (the scored predict gate) ========================= */
+/* What the learner committed against the answer, then the one-line verdict, above the reading.
+   flex:none so the explain body below keeps the scroll; the tag WORD carries hit/miss, so
+   red-night (one hue) still reads it, with brightness (--ok vs --warn) as the second cue. */
+.verdict {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border: 2px solid var(--warn);
+  background: var(--surface-2);
+  max-width: 62ch;
+}
+.verdict--hit {
+  border-color: var(--ok);
+}
+.verdict__line {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  color: var(--fg);
+}
+.verdict__line b {
+  color: var(--fg);
+  font-weight: 400;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.verdict__tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  font-size: 15px;
+  letter-spacing: 0.12em;
+  color: var(--accent-ink);
+  background: var(--warn);
+}
+.verdict--hit .verdict__tag {
+  background: var(--ok);
+}
+.verdict__why {
+  font-size: 18px;
+  color: var(--fg-dim);
+}
+
 /* ===== Instrument (waterfall + tune) ===================================== */
 .instrument {
   display: flex;

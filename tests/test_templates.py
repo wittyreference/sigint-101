@@ -295,6 +295,58 @@ def test_a_sealed_stage_requested_without_a_commit_stays_sealed():
     assert "OBSERVE_BODY_marker" not in leaked
 
 
+# --- the explain verdict (a scored predict gate) ------------------------------
+
+
+def _scored_lesson():
+    data = {
+        "id": 1, "slug": "gain-snr", "title": "Gain and SNR", "type": "intro",
+        "concept": "the gap over the noise floor is the signal",
+        "hardware": [],
+        "stages": {"frame": "f", "demo": "d", "try": "t",
+                   "predict": "Turn the gain up. What happens to the gap over the floor?",
+                   "observe": "o", "explain": "EXPLAIN_SCORED_marker"},
+        "choices": CHOICES,
+        "answer": ["b", "c"],
+        "verdict": "VERDICT_marker the gap holds, then shrinks at the top.",
+    }
+    return parse_lesson(data)
+
+
+def _verdict_block(html):
+    m = re.search(r'data-stage="explain".*?(<div class="verdict.*?</div>\s*</div>)', html, re.S)
+    return m.group(1) if m else ""
+
+
+def test_explain_header_says_what_you_said_and_the_answer():
+    html = _console(lesson=_scored_lesson(), prediction_committed=True,
+                    current_stage="explain", committed_choice="a")
+    block = _verdict_block(html)
+    assert "You said" in block and CHOICES[0]["label"] in block
+    assert "Answer" in block
+    assert CHOICES[1]["label"] in block and CHOICES[2]["label"] in block
+    assert "VERDICT_marker" in block
+    assert "verdict--miss" in block
+
+
+def test_explain_header_marks_a_right_call():
+    html = _console(lesson=_scored_lesson(), prediction_committed=True,
+                    current_stage="explain", committed_choice="c")
+    assert "verdict--hit" in _verdict_block(html)
+
+
+def test_the_verdict_stays_sealed_until_a_commit():
+    html = _console(lesson=_scored_lesson(), prediction_committed=False)
+    assert "VERDICT_marker" not in html
+    assert 'class="verdict' not in html
+
+
+def test_an_unscored_lesson_renders_no_verdict_header():
+    html = _console(lesson=_intro_lesson(), prediction_committed=True,
+                    current_stage="explain", committed_choice="a")
+    assert 'class="verdict' not in html
+
+
 # --- no-hardware (knowledge) lessons: no radio chrome -------------------------
 
 
