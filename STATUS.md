@@ -1,31 +1,40 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**Phase 1: three-fold audit, in progress (2026-11-02).** Plan of record:
-`docs/plans/2026-11-02-resume-audit-handover.md`, approved by MC 2026-11-02.
-- Three auditor subagents are writing `docs/audit/2026-11-02-{technical,ux,curriculum}.md`:
-  - technical: code vs intent, RF accuracy, Pi 4 performance, measured on nomad-b
-  - UI/UX: render sweep at 800x480 × 3 themes
-  - curriculum: competency map, prerequisites, fidelity, fact-check
-- Next: an adversarial verifier re-checks every S0/S1 finding, then **MC triages** (sets the
-  11-08 cut line), then the fix sprint (Phase 3).
-- **Hand-over is 2026-11-08.** The gift is **the recipient's own Recon** (MC's call 2026-11-02).
-  nomad-b stays our HIL rig, and the provisioning script gets proven on a spare SD card in
-  nomad-b.
+**Phase 3: fix sprint against MC's cut line (2026-11-02).** Plan of record:
+`docs/plans/2026-11-02-resume-audit-handover.md`.
+- Phases 1–2 are done. The audits are in `docs/audit/`; triage page:
+  https://claude.ai/artifact/JnodQLHqNBLjS6U4CcKz55
+- **MC's decisions, verbatim (2026-11-02):**
+  - Gift box: "Their own Recon (Recommended)".
+  - M15 pagers: "Framing live, text hidden (Recommended)". Show cap code, rate and length live
+    on 929–932, mask the text, teach the statute.
+  - Cut line: **"1–19 plus operator mode"**. That is triage items 1–19 (all S0 plus the cheap
+    S1s, item 8 being real tuning and gain) plus `/operate` v1, all before 11-08.
+- **Sprint base:** `ux-polish` with main merged in. Sprint branches stack on it. ux-polish itself
+  merges to main only after MC's panel look (MC's gate).
+- **Hand-over is 2026-11-08.**
 
 **Needed from MC, one at a time when reached:**
-1. The recipient Recon's arrival date, and a spare SD card for nomad-b.
-2. Re-plug the Flipper on nomad-b and update it 1.4.3 → 1.5.1 in the app.
-3. One look at the panel. The kiosk is up now on `ux-polish`; confirming it unblocks that PR.
-4. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
-5. The triage cut line.
+1. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
+   triage item 19.
+2. OK to run `deploy/provision.sh` for real on nomad-b. The `--check` pass predicts 6 changes:
+   wlan1 monitor-mode persistence and the tcpdump-caps apt hook. The auto-mode classifier
+   blocked it.
+3. One look at the panel. The kiosk shows `ux-polish`, and confirming it unblocks that PR.
+4. Re-plug the Flipper on nomad-b and update it 1.4.3 → 1.5.1 in the app.
+5. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
 
 ## Current state (observed 2026-11-02)
-- **main** @ `11defa4`. The 28-lesson curriculum is on main (U1–U9).
-  - Exam diagrams T-1/T-2/T-3 now show (#6).
-  - The render-assert harness is in `tools/render/` (#6).
-  - nomad-b boots the course onto the panel: a server user-service, a tty1 kiosk and a
-    persistent journal via `deploy/install.sh` (#7).
+- **main**: the 28-lesson curriculum (U1–U9), plus today's merges:
+  - #6: exam diagrams, render harness
+  - #7, #9: kiosk autostart with the browser watchdog
+  - #10, #11: `provision.sh` and the quick-start
+  - #12: status bar never invents readings; waterfall pixelated
+  - #13: audit reports
+- **Kiosk cold boot PASSED (observed 2026-11-02 22:18 PST).** After a reboot, nomad-b came
+  up with the server service and labwc, ran one kiosk browser, and showed the course home on
+  the panel (grim screenshot). The persistent journal kept the previous boot.
 - **Open branches:**
   - `ux-polish` (@345fbfb, no PR yet) makes lessons completable and makes the reading stages
     and home grid scroll. **On main a learner still cannot complete a lesson.** It merges once
@@ -46,7 +55,7 @@ again. Sources: `/home/mc/.claude/plans/eager-spinning-frost.md`, CLAUDE.md, the
 | Item | Where promised | State | Disposition |
 |---|---|---|---|
 | Lesson completion | plan core | only on unmerged `ux-polish` | land (S0) |
-| Kiosk autostart | P0 DoD | **done** `11defa4` (cold reboot not yet run) | — |
+| Kiosk autostart | P0 DoD | **done** (#7, #9); cold boot passed 2026-11-02 | — |
 | Provisioning + scrub of MC's data + recipient quick-start | P5/P6 | nothing exists | build (hand-over) |
 | Updater (atomic apply, rollback, migrations) | P5 | nothing exists | triage |
 | Safe-shutdown + real battery readout | plan arch | status bar shows a hardcoded **100%** (invented) | triage (S0: no-mock) |
@@ -128,7 +137,10 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
   1. Run the server from the worktree with the harness background runner (a `nohup` from a
      tool call dies when the call returns): `--host 100.92.112.54 --port 80xx`.
   2. On nomad-b, start a separate headless Chromium:
-     `--headless=new --remote-debugging-port=93xx --user-data-dir=/tmp/<you>-prof --disk-cache-size=1`.
+     `--headless=new --no-sandbox --disable-gpu --password-store=basic --remote-allow-origins=*
+     --remote-debugging-port=93xx --user-data-dir=/tmp/<you>-prof --disk-cache-size=1`.
+     **`--password-store=basic` is mandatory.** Without it the kiosk session's GNOME keyring
+     blocks the first http page forever (see learnings).
   3. scp the scripts over and run them there against `http://100.92.112.54:80xx/...`.
   4. Kill your Chromium by PID. Never `pkill chromium`: that kills the kiosk.
 - **Always force the viewport** (`Emulation.setDeviceMetricsOverride` 800x480): a plain
