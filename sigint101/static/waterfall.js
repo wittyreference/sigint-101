@@ -96,7 +96,7 @@
   var wraps = Array.prototype.slice.call(document.querySelectorAll(".waterfall-wrap"));
   if (!wraps.length) return;
 
-  var WF_BG = "#05080b";   // matches --wf-bg; the empty-band colour
+  var WF_BG = "#05080b";   // the empty-band colour if the theme's --wf-bg cannot be read
   var POLL_MS = 900;       // rtl_power reports ~once a second
   var RETRY_MS = 5000;     // when the radio is away, poll gently until it returns
   var ROW_H = 4;           // one sweep gets a 4px band, so 1 px/s motion stays legible
@@ -112,11 +112,24 @@
       ctx: canvas.getContext("2d", { willReadFrequently: true }),
       badge: wrap.querySelector(".badge"),
       axis: wrap.querySelector(".waterfall__axis"),
+      reason: wrap.querySelector("[data-wf-reason]"),
       meter: buildMeterRefs(wrap),
       floorDbm: null, ceilDbm: null, sized: false
     });
   });
   if (!panels.length) return;
+
+  // The theme's empty-band colour, read live so a theme switch repaints in the new palette.
+  function emptyColour(p) {
+    return getComputedStyle(p.canvas).getPropertyValue("--wf-bg").trim() || WF_BG;
+  }
+
+  // The reason the band is empty, as page text over the canvas (null hides it).
+  function showReason(p, message) {
+    if (!p.reason) return;
+    p.reason.firstElementChild.textContent = message || "";
+    p.reason.hidden = !message;
+  }
 
   // A stage that declares the gain panel (M2) carries a vertical level meter beside its waterfall.
   // It is driven from the same smoothed floor/ceiling the colour scale already tracks, so the one
@@ -195,10 +208,11 @@
 
     // One canvas pixel per rtl_power bin, so no interpolation can invent signal that was never
     // measured. Resizing wipes the canvas — that is the browser, not us.
+    var empty = emptyColour(p);
     if (!p.sized || p.canvas.width !== bins) {
       p.canvas.width = bins;
       p.sized = true;
-      p.ctx.fillStyle = WF_BG;
+      p.ctx.fillStyle = empty;
       p.ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
     }
 
@@ -212,25 +226,19 @@
     // Scroll down by one band, then paint the newest sweep across the top.
     p.ctx.drawImage(p.canvas, 0, ROW_H);
     for (var i = 0; i < bins; i++) {
-      p.ctx.fillStyle = binColour(row.dbm[i], p.floorDbm, range, null, WF_BG);
+      p.ctx.fillStyle = binColour(row.dbm[i], p.floorDbm, range, null, empty);
       p.ctx.fillRect(i, 0, 1, ROW_H);
     }
     updateGainMeter(p);
   }
 
-  // The honest empty state: the band is drawn at its noise colour and the reason is written over
-  // it. No carriers, no invented signal — just why there is nothing to show.
+  // The honest empty state: the band is drawn at its empty colour and the reason is shown over it
+  // as page text. No carriers, no invented signal — just why there is nothing to show.
   function showEmpty(p, message) {
     p.sized = false;
-    p.ctx.fillStyle = WF_BG;
+    p.ctx.fillStyle = emptyColour(p);
     p.ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
-    if (message) {
-      p.ctx.fillStyle = "#9fb0bf";
-      p.ctx.font = "13px ui-monospace, monospace";
-      p.ctx.textAlign = "center";
-      p.ctx.fillText(message, p.canvas.width / 2, p.canvas.height / 2);
-      p.ctx.textAlign = "left";
-    }
+    showReason(p, message);
     clearGainMeter(p);
   }
 
@@ -244,7 +252,7 @@
       p.ceilDbm = null;
       p.sized = false;
       if (p.axis) p.axis.innerHTML = "";
-      p.ctx.fillStyle = WF_BG;
+      p.ctx.fillStyle = emptyColour(p);
       p.ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
     });
   }
@@ -278,6 +286,7 @@
           return;
         }
         waiting = false;
+        panels.forEach(function (p) { showReason(p, null); });
         // A retune (from this tab or any other) changes what the x-axis means, so rows drawn for
         // the old span would be lies. Detect it and start clean; redraw the axis for the new span.
         var key = result.body.freq_low + ":" + result.body.freq_high;

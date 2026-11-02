@@ -58,6 +58,7 @@
   --crit: #ff5b5b;
   --wf-bg: #040806;
   --wf-grid: #0f3a20;
+  --wf-ink: #2ee66a;
   --glow: 0 0 6px rgba(46, 230, 106, 0.5);
   --glow-strong: 0 0 11px rgba(46, 230, 106, 0.6);
   --sel-bg: #2ee66a;
@@ -91,6 +92,8 @@
   --crit: #b3261e;
   --wf-bg: #0a1016;
   --wf-grid: #223742;
+  /* The waterfall stays dark in sunlight, so text over it is light, not the page's dark ink. */
+  --wf-ink: #e5ebd7;
   --glow: none;
   --glow-strong: none;
   --sel-bg: #0b3d1f;
@@ -113,7 +116,8 @@
   --border: #8f2a2a;
   --border-strong: #ff4b4b;
   --fg: #ff4b4b;
-  --fg-dim: #bc3838;
+  /* The dimmest red that still reads at 4.5:1 on every red-night surface. */
+  --fg-dim: #de4242;
   --fg-mute: #7e2525;
   --accent: #ff4b4b;
   --accent-dim: #8f2a2a;
@@ -123,6 +127,7 @@
   --crit: #ff2020;
   --wf-bg: #050000;
   --wf-grid: #2a0707;
+  --wf-ink: #ff4b4b;
   --glow: 0 0 6px rgba(255, 75, 75, 0.5);
   --glow-strong: 0 0 11px rgba(255, 75, 75, 0.6);
   --sel-bg: #ff4b4b;
@@ -795,6 +800,27 @@ body {
   image-rendering: pixelated;
 }
 
+/* Why the band is empty, as page text over the canvas — never drawn into it, where the stretched
+   bitmap squashed it to ~7 px. Clear of the badge above and the axis below; a long reason scrolls
+   (the auto margin centres it without clipping its first line when it overflows). */
+.waterfall__reason {
+  position: absolute;
+  inset: 34px 10px 26px;
+  display: flex;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--wf-ink);
+}
+.waterfall__reason > span {
+  margin: auto;
+}
+.waterfall__reason[hidden] {
+  display: none;
+}
+
 /* The instrument's main row: the waterfall fills it; a declared panel (the gain meter) rides
    alongside at a fixed width so both share the one 800x480 instrument band. A stage with no
    panel has a single child here, so the waterfall still spans the full width. */
@@ -981,9 +1007,9 @@ body {
   flex: none;
   padding: 10px;
   text-align: center;
-  color: var(--fg-mute);
+  color: var(--fg-dim);
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 18px;
 }
 /* The image gallery (M24 APT, M25 SSTV): a decoded picture shown where the decoder list sits.
    The frame fills the panel band and the image scales to fit it (contain), so a tall weather
@@ -1136,9 +1162,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--fg-mute);
+  color: var(--fg-dim);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 18px;
   text-align: center;
 }
 

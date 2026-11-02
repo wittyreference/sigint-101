@@ -130,6 +130,69 @@ def test_the_waterfall_canvas_is_scaled_without_smoothing():
     assert "image-rendering: pixelated" in rule
 
 
+APP_CSS = TEMPLATES_DIR.parent / "static" / "app.css"
+THEMES = ("dark", "sunlight", "red-night")
+
+
+def _css_rule(selector):
+    """The body of the first top-level rule for exactly this selector in app.css."""
+    css = APP_CSS.read_text()
+    match = re.search(r"\n" + re.escape(selector) + r" \{(.*?)\}", css, re.S)
+    assert match, f"no {selector} rule in app.css"
+    return match.group(1)
+
+
+def _theme_tokens(theme):
+    """Every custom property a theme defines, merged across its .app[data-theme] blocks."""
+    css = APP_CSS.read_text()
+    tokens = {}
+    for block in re.findall(r'\.app\[data-theme="' + re.escape(theme) + r'"\] \{(.*?)\}', css, re.S):
+        tokens.update(dict(re.findall(r"(--[\w-]+):\s*([^;]+);", block)))
+    return tokens
+
+
+def _contrast(fg, bg):
+    """WCAG 2 contrast ratio between two #rrggbb colours."""
+    def luminance(hex_colour):
+        channels = [int(hex_colour.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    hi, lo = sorted((luminance(fg), luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _font_px(rule):
+    return int(re.search(r"font-size:\s*(\d+)px", rule).group(1))
+
+
+def test_the_no_radio_reason_is_page_text_over_the_canvas_not_canvas_pixels():
+    # Text drawn into the canvas is squashed with the bitmap (~7 px tall on the panel), so the
+    # reason rides in a DOM slot over the canvas instead; the canvas holds only real bins.
+    html = _console(prediction_committed=True, current_stage="operate")
+    wrap = re.search(r'class="waterfall-wrap">(.*?)</div>\s*</div>', html, re.S).group(1)
+    assert "data-wf-reason" in wrap
+
+
+def test_the_no_radio_reason_is_large_and_readable_in_every_theme():
+    rule = _css_rule(".waterfall__reason")
+    assert _font_px(rule) >= 18
+    assert "var(--wf-ink)" in rule
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        assert _contrast(tokens["--wf-ink"], tokens["--wf-bg"]) >= 4.5, theme
+
+
+def test_honest_empty_states_are_large_and_readable_in_every_theme():
+    # "listening…" / "no radio" is the honest state a learner sees most; it must be read at a glance.
+    for selector in (".decoder__empty", ".gain-meter__empty"):
+        rule = _css_rule(selector)
+        assert _font_px(rule) >= 18, selector
+        assert "var(--fg-dim)" in rule, selector
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        assert _contrast(tokens["--fg-dim"], tokens["--surface"]) >= 4.5, theme
+
+
 def _env():
     return Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
