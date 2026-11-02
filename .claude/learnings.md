@@ -440,3 +440,25 @@ A third trap only showed up after several minutes:
   its requirements.
 - `git --no-optional-locks status` reads status without rewriting the index.
 - `fc-list ':charset=262d' family` lists the fonts that carry a glyph.
+
+## 2026-11-02: a scrolling CSS grid never grows `minmax(N, auto)` rows
+**Finding.** The home tiles used `grid-auto-rows: minmax(124px, auto)` to let a two-line tile
+grow, yet every tile measured exactly 124px: the glyph was squashed to 38x13 (U7's to 0) and U7
+clipped by 10px. In track sizing an `auto` maximum only grows into *free space*, and a grid that
+overflows its scroll container has none, so rows stay at the 124px base. `max-content` rows with
+`min-height` on the item fix it, and a flex-column child that must keep its size needs
+`flex: none` or it absorbs the squeeze silently.
+**How to apply.** In any grid that can overflow (home, unit pages, exam lists), size rows with
+`max-content` or a fixed height, never `minmax(..., auto)`. Measure the item boxes (not the
+screenshot) after any tile change.
+
+## 2026-11-02: the lesson shell's vertical budget at 800x480 (where the pixels go)
+**Finding.** Content below the 66px bar and 40px rail is 374px, and the stage panel pads 12px top
+and bottom. On an instrument stage a separate eyebrow line plus the 30px title cost about 69px.
+Moving the eyebrow onto the title's row (`.stage-panel--instrument` grid) and a 124px decoder
+gave the narration about 90px (3 lines) instead of 35. A square instrument (the ADS-B radar)
+can't shrink usefully; it goes beside the narration instead. Prev rides the existing Next row,
+because a 72px-tall rail would eat the narration band.
+**How to apply.** Before adding anything to a lesson stage, take its height from this budget.
+Re-measure with `.instrument > .stage-panel__body` clientHeight at a forced 800x480; a band under
+about 58px (2 lines) is a regression.
