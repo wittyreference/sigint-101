@@ -29,10 +29,18 @@ from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event
-from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
+from .exam import (
+    EXAM_SIZE,
+    PASS_MARK,
+    ExamStore,
+    build_exam,
+    load_pool,
+    next_sim_question,
+    score_exam,
+)
 from .flock import FlockDetector, FlockUnavailable
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
-from .lessons import load_lessons
+from .lessons import COMMIT_STAGE, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
 from .pocsag import PocsagDecoder, PocsagUnavailable
 from .ppm import measure_pilot_ppm
@@ -47,7 +55,7 @@ from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_gain, validate_span
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
-from .units import UNITS, get_unit
+from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
@@ -163,15 +171,51 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
             status = ""
         tiles.append({
             "id": lesson.id,
-            "code": f"L{lesson.id}",
+            # The code a learner reads is the lesson's place in the teaching order, not its id:
+            # ids were handed out as lessons were built and stay the storage keys and URLs.
+            "code": f"L{teaching_position(lesson.id)}",
             "name": lesson.title,
             "glyph": DEFAULT_TILE_GLYPH,
             "status": status,
             "href": f"/lesson/{lesson.id}",
             "lessons_total": 1,
             "lessons_done": 1 if done else 0,
+            "needs": lesson.hardware_badges,
         })
     return tiles
+
+
+def _after_complete_href(lesson_id: int, lessons: dict) -> str:
+    """Where finishing a lesson leads: the next built lesson in its unit, else the unit's page.
+
+    Teaching order within the unit, skipping ids whose packs have not loaded, so the learner goes
+    straight on to what they can actually open. The end of a unit returns to it, where its tiles
+    show the unit finished.
+    """
+    unit = unit_for_lesson(lesson_id)
+    if unit is None:
+        return "/"
+    for next_id in unit.lesson_ids[unit.lesson_ids.index(lesson_id) + 1:]:
+        if next_id in lessons:
+            return f"/lesson/{next_id}"
+    return f"/unit/{unit.id}"
+
+
+def _resume_stage(lesson, saved, committed: bool) -> tuple:
+    """The stage a lesson opens on and the furthest position reached, from the saved place.
+
+    Opens where the learner left it, provided that stage is one this visit renders: a sealed stage
+    never opens before a commit (commit-before-reveal), and an unknown name falls back to the
+    start. With nothing saved it opens on the first stage, or the first sealed one once committed.
+    The furthest position never passes predict before a commit, and always covers the open stage.
+    """
+    order = lesson.stage_order
+    open_now = order if committed else order[:order.index(COMMIT_STAGE) + 1]
+    current = lesson.sealed_stages[0] if committed else order[0]
+    if saved and saved["stage"] in open_now:
+        current = saved["stage"]
+    reached = max(saved["furthest"] if saved else 0, order.index(current))
+    return current, min(reached, len(open_now) - 1)
 
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
@@ -471,7 +515,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         is what the template uses to decide which stages it emits, so the sealed bodies are never
         put into the HTML before the commit. Lesson.reveal() is asked for the sealed material only
         once committed — it refuses otherwise — as the code-level backstop behind the template.
-        Opening a lesson counts as progress but never as completion.
+        Opening a lesson counts as progress but never as completion. It opens on the stage the
+        learner last reached (a reload or a power cut resumes in place), and Back leads to the
+        lesson's unit rather than skipping it.
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
@@ -479,12 +525,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         prediction = app.state.progress.get_prediction(lesson_id)
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
+        current, reached = _resume_stage(lesson, app.state.progress.get_stage(lesson_id),
+                                         committed)
+        unit = unit_for_lesson(lesson_id)
         context = {
             "title": lesson.title,
-            "back_href": "/",
-            "back_label": "Home",
+            "back_href": f"/unit/{unit.id}" if unit else "/",
+            "back_label": f"Unit {unit.id}" if unit else "Home",
             "lesson": lesson,
-            "current_stage": lesson.sealed_stages[0] if committed else lesson.stage_order[0],
+            "current_stage": current,
+            "reached": reached,
+            "complete_href": _after_complete_href(lesson_id, app.state.lessons),
             "prediction_committed": committed,
             "committed_choice": prediction,
             "predict_choices": lesson.choices,
@@ -517,7 +568,34 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"lesson": lesson_id, "reason": str(exc)})
             return JSONResponse(status_code=400, content={"recorded": False, "reason": str(exc)})
         log_event(app.state.events_path, "prediction", {"lesson": lesson_id})
+        # Committing walks the learner past the gate, so the lesson reopens on the first sealed
+        # stage rather than resuming on the predict screen they just left.
+        lesson = app.state.lessons[lesson_id]
+        first_sealed = lesson.sealed_stages[0]
+        app.state.progress.record_stage(lesson_id, first_sealed,
+                                        lesson.stage_order.index(first_sealed))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    @app.post("/api/stage")
+    async def stage(lesson_id: int, request: Request):
+        """Remember the stage the learner is on, so a reload or a power cut resumes there.
+
+        The lesson screen posts this on every step, forward or back. A stage the lesson does not
+        have is refused, and so is any sealed stage before a prediction exists: commit-before-reveal
+        covers where a learner can be, not only what the page shows.
+        """
+        _require_lesson(lesson_id)
+        lesson = app.state.lessons[lesson_id]
+        name = (await _field(request, "stage")).strip()
+        if name not in lesson.stage_order:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"lesson {lesson_id} has no stage '{name}'"})
+        if name in lesson.sealed_stages and app.state.progress.get_prediction(lesson_id) is None:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": "predict before going past the gate"})
+        app.state.progress.record_stage(lesson_id, name, lesson.stage_order.index(name))
+        furthest = app.state.progress.get_stage(lesson_id)["furthest"]
+        return {"recorded": True, "stage": name, "furthest": furthest}
 
     @app.post("/api/complete")
     def complete(lesson_id: int):
@@ -593,15 +671,20 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # --- scored 35-question practice exam (answer-then-advance) ---------------------------
 
     def _sim_progress(sim):
-        """From a sim dict: (first-unanswered id or None, that question's 1-based position,
-        correct-so-far). The current question is always the first the learner has not answered."""
+        """From a sim dict: (the question to serve now or None, its 1-based sheet position,
+        correct-so-far). The question to serve is the first unanswered, passing over skipped
+        ones until only they are left (next_sim_question)."""
         pool = app.state.exam_pool
         ids, answers = sim["question_ids"], sim["answers"]
         correct = sum(1 for qid, c in answers.items()
                       if pool.get(qid) is not None and c == pool.get(qid).answer)
-        current = next((qid for qid in ids if qid not in answers), None)
+        current = next_sim_question(ids, answers, sim["skipped"])
         pos = (ids.index(current) + 1) if current is not None else len(ids)
         return current, pos, correct
+
+    def _sim_skipped(sim):
+        """How many skipped questions are still waiting for an answer."""
+        return sum(1 for qid in sim["skipped"] if qid not in sim["answers"])
 
     def _sim_breakdown(questions, answers):
         """Per-subelement correct/total for the results screen, in exam order (T1..T9, T0 last)."""
@@ -619,9 +702,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def exam_sim(request: Request):
         """Serve the current question of a scored practice exam, starting one if none is active.
 
-        The current question is the first unanswered on the drawn sheet; once all 35 are in, this
-        hands off to the results screen. The correct answer is never in the question HTML —
-        commit-before-reveal, exactly like the study card and the lesson predict gate.
+        The current question is the first unanswered on the drawn sheet, passing over skipped
+        ones until only they remain; once all 35 are in, this hands off to the results screen.
+        Skip is offered while another question is still waiting. The correct answer is never in
+        the question HTML — commit-before-reveal, like the study card and the lesson predict gate.
         """
         store = app.state.exam_store
         sim = store.sim()
@@ -631,44 +715,66 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         current, pos, correct = _sim_progress(sim)
         if current is None:
             return RedirectResponse("/exam/sim/results", status_code=303)
+        waiting = len(sim["question_ids"]) - len(sim["answers"])
         return templates.TemplateResponse(
             request=request,
             name="exam_sim.html",
             context={"title": "Practice Exam", "back_href": "/exam", "back_label": "Exam",
                      "question": app.state.exam_pool.get(current), "reviewed": False,
                      "position": pos, "total": len(sim["question_ids"]),
-                     "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK},
+                     "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK,
+                     "skipped": _sim_skipped(sim), "can_skip": waiting > 1},
         )
 
     @app.post("/api/exam/sim/answer")
     async def exam_sim_answer(question_id: str, request: Request):
-        """Record one sim answer and redirect to its review — no JS, like the study card."""
+        """Record one sim answer and redirect to its review — no JS, like the study card.
+
+        An answer is final: a second POST for a question already answered (browser history, a
+        resubmit) changes nothing and is not credited again; it just lands on the review. So a
+        choice that is not one of the question's options is never stored — it goes back to the
+        question rather than locking it in as wrong.
+        """
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
         choice = (await _field(request, "choice")).strip().upper()
+        if choice not in question.options:
+            return RedirectResponse("/exam/sim", status_code=303)
         correct = choice == question.answer
-        app.state.exam_store.record_sim_answer(question_id, choice)
-        # Also credit the Leitner history so the sim feeds the study card's weak-first order.
-        app.state.exam_store.record(question_id, correct)
-        log_event(app.state.events_path, "exam_sim_answer",
-                  {"question": question_id, "choice": choice, "correct": correct})
-        return RedirectResponse(f"/exam/sim/review/{question_id}?choice={choice}", status_code=303)
+        if app.state.exam_store.record_sim_answer(question_id, choice):
+            # Also credit the Leitner history so the sim feeds the study card's weak-first order.
+            app.state.exam_store.record(question_id, correct)
+            log_event(app.state.events_path, "exam_sim_answer",
+                      {"question": question_id, "choice": choice, "correct": correct})
+        return RedirectResponse(f"/exam/sim/review/{question_id}", status_code=303)
+
+    @app.post("/api/exam/sim/skip")
+    def exam_sim_skip(question_id: str):
+        """Defer a sim question until the others are done; it stays answerable, and the results
+        wait for it (a skip never leaves a question blank)."""
+        if app.state.exam_pool.get(question_id) is None:
+            raise HTTPException(status_code=404, detail=f"question {question_id} not found")
+        app.state.exam_store.skip_sim_question(question_id)
+        return RedirectResponse("/exam/sim", status_code=303)
 
     @app.get("/exam/sim/review/{question_id}", response_class=HTMLResponse)
-    def exam_sim_review(request: Request, question_id: str, choice: str = ""):
-        """Show the answered sim question revealed, with Next pointing at the next question or,
-        once the sheet is done, the results screen."""
+    def exam_sim_review(request: Request, question_id: str):
+        """Show an answered sim question revealed, with Next pointing at the next question or,
+        once the sheet is done, the results screen.
+
+        Only an answered question is revealed, and the choice shown is the stored one: a question
+        not yet answered goes back to the sim, so the review can never leak an answer early.
+        """
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
         sim = app.state.exam_store.sim()
-        if sim is None or question_id not in sim["question_ids"]:
+        if sim is None or question_id not in sim["answers"]:
             return RedirectResponse("/exam/sim", status_code=303)
         ids = sim["question_ids"]
-        _, _, correct = _sim_progress(sim)
-        nxt = next((qid for qid in ids if qid not in sim["answers"]), None)
-        chosen = choice.strip().upper()
+        nxt, _, correct = _sim_progress(sim)
+        chosen = sim["answers"][question_id]
         return templates.TemplateResponse(
             request=request,
             name="exam_sim.html",
@@ -677,6 +783,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "chosen": chosen, "correct": chosen == question.answer,
                      "position": ids.index(question_id) + 1, "total": len(ids),
                      "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK,
+                     "skipped": _sim_skipped(sim),
                      "next_href": "/exam/sim" if nxt is not None else "/exam/sim/results",
                      "last": nxt is None},
         )
