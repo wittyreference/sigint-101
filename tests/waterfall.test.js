@@ -80,6 +80,44 @@ test("a floor below the window clamps to the track instead of overflowing it", (
   assert.ok(g.gapHeight <= 100);
 });
 
+// The meter's three readings — PEAK over its line, the SNR on the band, FLOOR under its line — must
+// never overlap or leave the track, whatever the SNR. Near 3 dB the band is ~4 px tall and the SNR
+// reading used to cover the top of the FLOOR value. The lines stay at their true dB positions; only
+// the labels give way. Sizes are the ones measured on M2 at 800x480: a 77 px track, 18.8 px
+// PEAK/FLOOR rows and a 17 px SNR reading.
+const TRACK = 77;
+const LABELS = { peak: 18.8, snr: 17, floor: 18.8 };
+
+function placed(snrDb) {
+  const g = panel.gainMeterGeometry(-30 - snrDb, -30, 60, 14);
+  const peakY = g.peakTop / 100 * TRACK;
+  const floorY = g.floorTop / 100 * TRACK;
+  return { peakY, floorY, tops: panel.meterLabelTops(TRACK, peakY, floorY, LABELS) };
+}
+
+test("the meter's labels never overlap and stay on the track from 0 to 60 dB SNR", () => {
+  for (let snr = 0; snr <= 60; snr += 0.25) {
+    const t = placed(snr).tops;
+    const at = `at ${snr} dB`;
+    assert.ok(t.peak >= 0, `PEAK leaves the top ${at}`);
+    assert.ok(t.peak + LABELS.peak <= t.snr + 1e-9, `PEAK overlaps SNR ${at}`);
+    assert.ok(t.snr + LABELS.snr <= t.floor + 1e-9, `SNR overlaps FLOOR ${at}`);
+    assert.ok(t.floor + LABELS.floor <= TRACK + 1e-9, `FLOOR leaves the bottom ${at}`);
+  }
+});
+
+test("with room to spare, SNR sits centred on its band and FLOOR right under its line", () => {
+  const { peakY, floorY, tops } = placed(30);
+  close(tops.snr, (peakY + floorY) / 2 - LABELS.snr / 2);
+  close(tops.floor, floorY);
+});
+
+test("a thin band keeps the SNR reading on it and moves PEAK and FLOOR aside", () => {
+  const { peakY, floorY, tops } = placed(3);
+  assert.ok(tops.snr <= floorY && tops.snr + LABELS.snr >= peakY);   // the reading covers the band
+  assert.ok(tops.floor >= floorY);                                    // FLOOR only ever moves down
+});
+
 // A lesson can name its own band (data-tune-low/high on the canvas). Before polling, the panel
 // turns that attribute pair into a /api/tune request; this is the one pure decision in that path
 // — a complete pair becomes integer edges, anything partial or malformed yields null so no tune

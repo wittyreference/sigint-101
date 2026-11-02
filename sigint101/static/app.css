@@ -1384,12 +1384,19 @@ button.rail-pip:disabled {
 }
 .gain-meter__mark--peak { color: var(--fg); text-shadow: var(--glow); }
 .gain-meter__mark--floor { color: var(--fg-dim); }
-/* Each label sits outside the band it bounds — PEAK above its line, FLOOR below — so neither
-   lands on the SNR reading inside the band, however narrow the real gap is. */
+/* Each label sits outside the band it bounds — PEAK above its line, FLOOR below — clear of the SNR
+   reading inside the band; a band too narrow for the reading moves them further out (below). */
 .gain-meter__mark--peak { transform: translateY(-100%); }
 .gain-meter__mark--peak::before { top: 100%; }
 .gain-meter__mark--floor { transform: none; }
 .gain-meter__mark--floor::before { top: 0; }
+/* Where the real gap is too thin for all three readings, they give way to each other: waterfall.js
+   sets each one's --label-shift (meterLabelTops). It moves the label only, so each line stays at
+   its true dB. */
+.gain-meter__mark > *,
+.gain-meter__gap > * {
+  transform: translateY(var(--label-shift, 0px));
+}
 .gain-meter__tag { font-size: 11px; letter-spacing: 0.1em; }
 .gain-meter__gap {
   position: absolute;
@@ -1406,10 +1413,11 @@ button.rail-pip:disabled {
   font-family: var(--font-mono);
   line-height: 1;
   /* Not clipped: a real low SNR makes the band only a few px tall, and the reading must still show.
-     PEAK and FLOOR sit outside the band, so the overflow lands on nothing but the lines, and the
-     band paints above the marks so neither line strikes through the reading. */
+     PEAK and FLOOR give way outside it (meterLabelTops), so the overflow lands on nothing but the
+     lines, and the reading itself paints above the marks so neither line strikes through it. The
+     band's own fill stays below the FLOOR mark, which a floor past the bottom of the window puts
+     inside the band. */
   overflow: visible;
-  z-index: 1;
 }
 /* The marks and the gap are flex boxes, which beats the UA [hidden] rule; without this the empty
    meter shows PEAK, FLOOR and SNR piled on its "no radio" line. */
@@ -1423,6 +1431,8 @@ button.rail-pip:disabled {
 /* Over a band thinner than the text, the reading paints over the band's dashed edges. */
 .gain-meter__gap-label,
 .gain-meter__gap b {
+  position: relative;
+  z-index: 1;
   padding: 1px 2px;
   background: var(--surface-3);
 }

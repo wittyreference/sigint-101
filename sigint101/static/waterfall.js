@@ -23,6 +23,7 @@
       tapToHz: tapToHz, bandRequest: bandRequest, formatTuneMHz: formatTuneMHz,
       makeTuner: makeTuner, nextGain: nextGain, formatGain: formatGain,
       makeGainStepper: makeGainStepper, meterReading: meterReading,
+      meterLabelTops: meterLabelTops,
     };
     return;
   }
@@ -282,6 +283,29 @@
     };
   }
 
+  // Where the meter's three readings sit on its track, as px from the track's top, so they never
+  // overlap and never leave it at any SNR. The lines stay at their true dB positions (peakY,
+  // floorY); only the labels give way. PEAK sits over its line, FLOOR under its line, the SNR
+  // reading centred on the band; a band too thin for the reading pushes PEAK up and FLOOR down,
+  // and a stack that runs off either end of the track is slid back onto it.
+  //   heights: {peak, snr, floor}, each label's height in px
+  function meterLabelTops(trackH, peakY, floorY, heights) {
+    var snr = (peakY + floorY) / 2 - heights.snr / 2;
+    var peak = Math.min(peakY, snr) - heights.peak;
+    var floor = Math.max(floorY, snr + heights.snr);
+    if (peak < 0) {
+      peak = 0;
+      snr = Math.max(snr, peak + heights.peak);
+      floor = Math.max(floor, snr + heights.snr);
+    }
+    if (floor + heights.floor > trackH) {
+      floor = trackH - heights.floor;
+      snr = Math.min(snr, floor - heights.snr);
+      peak = Math.min(peak, snr - heights.peak);
+    }
+    return { peak: peak, snr: snr, floor: floor };
+  }
+
   // Every instrument stage has its own waterfall; they all show the same live spectrum (there is
   // one radio). Finding them all — rather than a single #id — is what lets a hidden stage keep its
   // history and be already drawn when the learner steps to it. No wraps means no console on this
@@ -307,10 +331,20 @@
       axis: wrap.querySelector(".waterfall__axis"),
       reason: wrap.querySelector("[data-wf-reason]"),
       meter: buildMeterRefs(wrap),
-      floorDbm: null, ceilDbm: null, reading: null, sized: false
+      floorDbm: null, ceilDbm: null, reading: null, geometry: null, sized: false
     });
   });
   if (!panels.length) return;
+
+  // A meter on a hidden stage has no size to lay its labels out against; once its stage is shown
+  // the track takes its height, and the labels are laid out then rather than at the next sweep.
+  if (window.ResizeObserver) {
+    panels.forEach(function (p) {
+      if (p.meter && p.meter.track) {
+        new ResizeObserver(function () { placeMeterLabels(p); }).observe(p.meter.track);
+      }
+    });
+  }
 
   // The theme's empty-band colour, read live so a theme switch repaints in the new palette.
   function emptyColour(p) {
@@ -355,6 +389,7 @@
       peakV: meter.querySelector("[data-gain-peak-v]"),
       floorV: meter.querySelector("[data-gain-floor-v]"),
       gapV: meter.querySelector("[data-gain-gap-v]"),
+      track: meter.querySelector(".gain-meter__track"),
     };
   }
 
@@ -363,6 +398,7 @@
     if (!m || !p.reading) return;
     // 14 dB of headroom above the peak leaves room for the PEAK label, which sits above its line.
     var g = gainMeterGeometry(p.reading.floor, p.reading.peak, 60, 14);
+    p.geometry = g;
     if (m.empty) m.empty.hidden = true;
     [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = false; });
     if (m.peak) m.peak.style.top = g.peakTop + "%";
@@ -371,11 +407,41 @@
     if (m.peakV) m.peakV.textContent = formatDb(p.reading.peak);
     if (m.floorV) m.floorV.textContent = formatDb(p.reading.floor);
     if (m.gapV) m.gapV.textContent = formatDb(g.gapDb);
+    placeMeterLabels(p);
+  }
+
+  // Slide the three readings clear of each other (meterLabelTops). Each label moves off its
+  // natural spot through --label-shift, which app.css applies to the label alone, so the peak and
+  // floor lines stay at their true dB. A meter with no size yet (a hidden stage) is left for its
+  // ResizeObserver.
+  function placeMeterLabels(p) {
+    var m = p.meter, g = p.geometry;
+    if (!m || !g || !m.track || !m.peak || !m.floor || !m.gap) return;
+    var trackH = m.track.clientHeight;
+    if (!trackH) return;
+    var height = function (el) { return el.getBoundingClientRect().height; };
+    var h = {
+      peak: height(m.peak),
+      snr: Math.max.apply(null, Array.prototype.map.call(m.gap.children, height)),
+      floor: height(m.floor),
+    };
+    var tops = meterLabelTops(trackH, g.peakTop / 100 * trackH, g.floorTop / 100 * trackH, h);
+    // Each shift is measured from where the label sits unshifted, read off the page: a mark's
+    // own box never moves (only its label does), and the SNR reading's spot is where it is now
+    // less the shift it already has.
+    var trackTop = m.track.getBoundingClientRect().top;
+    var topOf = function (el) { return el.getBoundingClientRect().top - trackTop; };
+    var snrShift = parseFloat(m.gap.style.getPropertyValue("--label-shift")) || 0;
+    var snrNow = Math.min.apply(null, Array.prototype.map.call(m.gap.children, topOf)) - snrShift;
+    m.peak.style.setProperty("--label-shift", (tops.peak - topOf(m.peak)) + "px");
+    m.gap.style.setProperty("--label-shift", (tops.snr - snrNow) + "px");
+    m.floor.style.setProperty("--label-shift", (tops.floor - topOf(m.floor)) + "px");
   }
 
   function clearGainMeter(p) {
     var m = p.meter;
     p.reading = null;
+    p.geometry = null;
     if (!m) return;
     if (m.empty) m.empty.hidden = false;
     [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = true; });
