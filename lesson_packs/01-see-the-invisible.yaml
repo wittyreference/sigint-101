@@ -18,29 +18,26 @@ stages:
     is seeing a real signal as a shape on the screen, and every lesson after this one is just
     learning to read more shapes.
   demo: >-
-    Watch — hands off for now. I sweep the FM band, 88 to 108 MHz, and tune the strongest
-    station near you. There — that bright vertical stripe, about 200 kHz wide, is a radio
-    station arriving right now. You are seeing radio. This picture is a waterfall, and it has
-    three directions: left-to-right is frequency; top-to-bottom is time, the newest sliver at
-    the top, scrolling down; brightness is power. That's the whole alphabet — frequency across,
-    time down, brightness is power.
+    Watch — hands off for now. The screen sweeps the whole FM band, 88 to 108 MHz. That bright
+    vertical stripe, about 200 kHz wide, is a radio station arriving right now. You are seeing
+    radio. This picture is a waterfall: left-to-right is frequency; top-to-bottom is time, the
+    newest sliver at the top; brightness is power. That's the whole alphabet.
   try: >-
-    Now it's your turn, comrade. From the stations I just scanned, tap a different strong one —
-    any other bright stripe on the list. Watch the screen jump to it and a fresh stripe bloom
-    where that station lives. That's it — you just tuned a radio. The only goal: make a station
-    appear and put your finger on its stripe.
+    Now it's your turn, comrade. Tap a different bright stripe and the dial jumps to it, or step
+    there with − and +. Read its frequency off the dial. That's it — you just tuned a radio.
   predict: >-
-    Next you'll tune two notches up the dial, to the station above the one you're on. First,
-    commit to a guess: will that station's bright stripe be WIDER, NARROWER, or the SAME
-    width as this one? Lock it in — the rest of the lesson stays hidden until you do.
+    Next you'll tune to the next bright stripe to the right. First, commit to a guess: will that
+    station's stripe be WIDER, NARROWER, or the SAME width as this one? Lock it in — the rest of
+    the lesson stays hidden until you do.
   observe: >-
-    Now tune two notches up the dial and hold the two stations side by side. Tell me what you
-    actually see, not what you expected: which stripe is BRIGHTER — the stronger signal — and
-    which is WIDER, or do the two look the same?
+    Now tune to the next bright stripe to the right and hold the two stations side by side. Tell
+    me what you actually see, not what you expected: which stripe is BRIGHTER — the stronger
+    signal — and which is WIDER, or do the two look the same?
   explain: >-
     Here's what you were looking at. Every broadcast FM station is handed the same slice of
     the dial — about 200 kHz wide — so from one station to the next the stripe is the same
-    width. That width is fidelity: a fat 200 kHz channel is what gives FM the room for full,
+    width. A few look twice as wide: their HD Radio digital sidebands sit either side of the
+    analog block. That width is fidelity: a fat 200 kHz channel is what gives FM the room for full,
     stereo music, where a skinny voice channel would sound like a phone call. So width tells
     you the kind of signal, not which station it is. Brightness was still power — a closer or
     stronger transmitter paints a brighter stripe — and the vertical axis was still time, the
@@ -58,3 +55,9 @@ choices:
     key: narrower
   - label: Same
     key: same
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [same]
+verdict: >-
+  Same: every FM station gets the same ~200 kHz slice, so width names the kind of signal, not
+  the station.

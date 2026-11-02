@@ -8,8 +8,8 @@ type: intro
 concept: >-
   On-off keying is the simplest modulation there is — the carrier is switched all the way off and
   on, like a flashlight blinked in the dark, and the message is the pattern of the bursts and the
-  gaps, not the height or the pitch. It is what the cheapest radios speak: remotes, doorbells,
-  weather sensors, all crowding the 433 MHz band.
+  gaps, not the height or the pitch. It is what the cheapest radios speak: doorbells, weather
+  sensors and some remotes, crowding 433.92 MHz.
 requires_tx: false
 hardware: [rtl-sdr]
 panels: []
@@ -22,19 +22,20 @@ stages:
   frame: >-
     Tonight, comrade, you meet the simplest code on the air. Last lesson both carriers stayed lit
     through the quiet; this one does the opposite — it blinks all the way out and back, a flashlight
-    signalling in the dark. Garage remotes, doorbells, cheap sensors: half the 433 MHz band speaks it.
+    signalling in the dark. Doorbells, cheap sensors, some remotes: much of 433 MHz speaks it.
   demo: >-
-    Watch — hands off for now. We are parked at 433.92 MHz, the little ISM band where keyfobs and
-    sensors chatter. When something keys up, a bright column stabs straight up out of the noise —
-    then it is gone, flat to the floor — then back, then gone. Look closely: it is not dimming the
+    Watch — hands off for now. We are parked at 433.92 MHz, where cheap sensors and some remotes
+    chatter (in the US most car and garage remotes sit at 315 or 390 MHz). When something keys up,
+    a bright column stabs straight up out of the noise — then it is gone, flat to the floor — then back, then gone. Look closely: it is not dimming the
     way an AM voice did, it is switching clean off between pulses, no carrier left behind at all. The
     rhythm of those on-flashes and off-gaps is the whole message, exactly like Morse. One more view:
     on your Flipper, Sub-GHz then Read RAW catches the same event as a pulse train in time — bars and
     spaces marching left to right. The waterfall draws it in frequency, the Flipper draws it in time;
     one code, two windows.
   try: >-
-    Now it's your turn, comrade — eyes on 433.92. Key a 433 MHz remote near the radio, or let the
-    Flipper replay a capture, and watch the column blink. Each press: does the line drop all the way
+    Now it's your turn, comrade — eyes on 433.92. Key a 433 MHz remote you own, held a metre from
+    the antenna, or watch for a neighbour's sensor (on the Flipper, Sub-GHz → Frequency Analyzer
+    finds a remote's frequency first), and watch the column blink. Each press: does the line drop all the way
     to the noise floor in the gaps, or does a ghost of it hang on? Then glance at the Flipper's Read
     RAW and match the blinks to its bars and spaces — the same on and off, drawn two ways. Count a
     few; get a feel for the rhythm before you call it.
@@ -68,3 +69,8 @@ choices:
   - {key: lit, label: "A lit carrier"}
   - {key: floor, label: "Down to the noise floor"}
   - {key: dim, label: "A dim half-carrier"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [floor]
+verdict: >-
+  Down to the floor: on-off keying switches the carrier fully off, so the gaps are bare noise.

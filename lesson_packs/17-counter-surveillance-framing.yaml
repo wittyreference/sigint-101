@@ -14,7 +14,7 @@ panels: []
 
 stages:
   frame: >-
-    Every lesson so far, comrade, you turned the radio outward to hear what the world broadcasts.
+    Until now, comrade, you mostly turned the radio outward to hear what the world broadcasts.
     Tonight you turn it around and ask the harder question: who is listening to you? Two machines
     work your street. One reads every licence plate that rolls past and files where your car has
     been. The other pretends to be a phone tower so your phone will step up and say its name. You
@@ -22,10 +22,10 @@ stages:
   demo: >-
     Start with the camera. An automated licence-plate reader — Flock is the common brand —
     photographs every plate, stamps it with time and place, and ships it to a searchable map of who
-    went where. Wire dozens together and the map covers everyone, not just the wanted. To phone home
-    it needs a radio, and that radio chatters in the clear: a WiFi fingerprint you can recognise
-    without ever touching the camera. The second machine is the cell-site simulator — a Stingray, an
-    IMSI-catcher. It stands up a fake tower stronger than the real ones; your phone trusts it, hands
+    went where. Wire dozens together and the map covers everyone, not just the wanted. It sends
+    plates home over cellular, but it also carries a WiFi radio that chatters in the clear: a
+    fingerprint you can recognise without ever touching the camera. The second machine is the
+    cell-site simulator — a Stingray, an IMSI-catcher. It stands up a fake tower stronger than the real ones; your phone trusts it, hands
     over its permanent ID, and can be shoved down to flimsy old 2G where it is easy to track. You
     never agreed; it just happened. The counter-move for both is the move you already know: listen.
     Recognise the signature, do not transmit, do not interfere. But hold one hard truth close —
@@ -50,11 +50,16 @@ stages:
     you — and your silence is not its absence. So no alert never means no camera. What detection buys
     you is real but narrow: when a signature you DO know is in the air, you get to know it is there.
     Awareness, not safety; a reading, not a verdict. Carry that and the rest of the track pays off —
-    next you will rebuild a real Flock-camera detector on your own radio, then one for the fake
-    towers. Both receive-only. You watch the watchers; you never touch them.
+    next you will rebuild a real Flock-camera detector on your own radio, then catch fake towers
+    with a borrowed one. Both receive-only. You watch the watchers; you never touch them.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:
-  - {key: "proves-none", label: "Yes — a clean hour means none"}
-  - {key: "proves-nothing", label: "No — silence proves nothing"}
-  - {key: "good-evidence", label: "Mostly — it's strong evidence"}
+  - {key: "proves-none", label: "Yes"}
+  - {key: "proves-nothing", label: "No"}
+  - {key: "good-evidence", label: "Mostly"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["proves-nothing"]
+verdict: >-
+  No: a quiet detector proves only that none of its known signatures was heard while it listened.

@@ -1,61 +1,57 @@
 # ABOUTME: Lesson pack M4 "The Number on the Dial" — the ppm-error intro; the built-in radio has a
-# ABOUTME: large known frequency error, and the kit's 1 ppm RTL-SDR V3 is the control that proves it.
+# ABOUTME: large known frequency error, measured off a station's pilot, and cured by telling each tool.
 
 id: 4
 slug: ppm-error
 title: "The Number on the Dial"
 type: intro
 concept: >-
-  The built-in radio has a large, known frequency error (~+164 ppm) that even drifts as the Pi
-  warms; the kit's RTL-SDR V3 (1 ppm TCXO) is the control that proves it's the radio, not you.
+  The built-in radio has a large, known frequency error (well over a hundred ppm) that drifts as
+  the Pi warms; you measure it against a broadcaster's 19 kHz pilot, and the cure is telling each
+  tool its error with -p or --ppm.
 requires_tx: false
 hardware: [rtl-sdr]
 panels: [ppm]
 
 stages:
   frame: >-
-    Tonight, comrade, you meet the lie your built-in radio tells on every frequency — a big, known error
-    baked into its cheap clock — and you prove it's the radio and not you by standing a second
-    radio right next to it.
+    Tonight, comrade, you meet the lie your built-in radio tells on every frequency — a big, known
+    error baked into its cheap clock — and you measure it against a landmark the broadcaster keeps
+    honest for you.
   demo: >-
-    Watch — hands off for now. Tune the strong FM station from Lesson 1. Every FM station carries
-    a steady tone — the stereo pilot — at exactly 19 kHz above its center, a landmark you can
-    trust. Watch where the built-in radio puts that pilot: off, by the same amount every time. I
-    measure the offset two ways — off the pilot, and with `make ppm-reference` against the Pi's
-    clock — and both land near +164 ppm: 164 Hz of error for every million Hz you tune. Then I
-    plug in the kit's RTL-SDR V3, whose TCXO clock is good to about one part per million, and
-    measure the same station: essentially zero. Same sky, same signal, two
-    radios — one off by +164 ppm, the other dead on. The error lives in the radio, not the air.
+    Watch — hands off for now. Every stereo FM station hides a steady 19 kHz tone, the pilot,
+    inside its audio, held to within 2 Hz by FCC rule. The ppm panel times that tone against this
+    radio's clock. The radio this course was built on read about +164 ppm: 164 Hz of error for
+    every MHz you tune.
   try: >-
-    Now see it yourself, comrade. Keep the station on the built-in radio and read where its
-    center lands: about +17 kHz high of the book. Switch to the V3 — the same station drops
-    straight onto the published frequency, dead center. You didn't move the dial; only which
-    radio was listening changed. Seventeen kHz is nothing inside a 200 kHz FM channel — which is
-    why you never noticed.
+    Your turn. Step the dial to your strongest station with − and +, then tap Measure ppm. Expect
+    a number in the low hundreds. At +164, 100 MHz lands about 16 kHz high — nothing inside a
+    200 kHz FM channel, which is why you never noticed. "No pilot" means mono or too weak: pick a
+    stronger station.
   predict: >-
-    You've seen the built-in radio sit about +17 kHz high at 100 MHz. The call: that error is per
-    MHz, so it scales with frequency. Up at 1090 MHz — where aircraft report their positions —
-    will the radio's error in kHz be BIGGER, about the SAME, or SMALLER than at 100 MHz? Lock it
-    in — the rest stays hidden until you do.
+    Say your radio sits about 16 kHz high at 100 MHz. Up at 1090 MHz — where aircraft report their
+    positions — will its error in kHz be BIGGER, about the SAME, or SMALLER? Lock it in — the rest
+    stays hidden until you do.
   observe: >-
     Reason from the one number you have, then say what you expect: at 1090 MHz — about eleven
     times higher than that FM station — how far off would the built-in radio land, and would that
     error still tuck inside a channel or throw you clean off the signal?
   explain: >-
-    Here's why. A single cheap crystal clocks both the part that tunes the radio and the part that
-    samples it, so if that crystal runs a millionth fast, every frequency the radio prints comes out
-    a millionth wrong — the same +164 ppm everywhere. But because the error is per MHz, the kHz grow
-    right along with the frequency: +17 kHz at 100 MHz becomes about +179 kHz at 1090 MHz — more
-    than ten times bigger, because 1090 is more than ten times higher. So the honest answer is
-    BIGGER. That much offset is invisible inside a 200 kHz FM channel and absolutely fatal in a 12.5
-    kHz one: at 1090 MHz you'd tune to the published frequency and the planes simply wouldn't be
-    there. This is the trap that convinces beginners they did something wrong or that the device is
-    broken. They didn't, and it isn't — when a signal isn't where the book says, suspect the radio's
-    own known error first. You proved where the error lives by standing the V3 beside it: same
-    signal, +164 ppm on the built-in, near zero on the V3's TCXO clock. Carry two things out of
-    tonight: your built-in radio runs about +164 ppm, and there is a one-tap correction that tells
-    the radio about its own error so every frequency downstream lands where it belongs. Turn it on,
-    and the number on the dial finally tells the truth.
+    Here's why. The radio's cheap crystal sets every frequency it tunes, so if that crystal runs
+    a millionth fast, every frequency the radio prints comes out a millionth wrong — the same ppm
+    everywhere. But because the error is per MHz, the kHz grow right along with the frequency:
+    +16 kHz at 100 MHz becomes about +179 kHz at 1090 MHz — more than ten times bigger, because
+    1090 is more than ten times higher. So the honest answer is BIGGER. How much that matters
+    depends on how wide the signal is. It is harmless for ADS-B, whose pulses fill about 2 MHz and
+    whose transmitters may themselves sit 1 to 3 MHz off, so dump1090, sampling 2.4 MHz wide,
+    shrugs it off. But at 162 MHz the same error is 27 kHz, more than a whole AIS channel, and at
+    450 MHz it is 74 kHz, several DMR channels. This is the trap that convinces beginners they did
+    something wrong or that the device is broken. They didn't, and it isn't — when a narrow signal
+    isn't where the book says, suspect the radio's own known error first. Carry two things out:
+    this radio runs well over a hundred ppm, and the cure is to tell each tool its error —
+    `rtl_fm -p 164`, `rtl_433 -p 164`, `dump1090-fa --ppm 164`, with your own measured number. This
+    console doesn't apply it yet; the PPM RAW chip says so. The kit's V3, with its 1 ppm clock,
+    would read near zero.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
@@ -65,3 +61,8 @@ choices:
   - {key: bigger, label: Bigger}
   - {key: same, label: About the same}
   - {key: smaller, label: Smaller}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [bigger]
+verdict: >-
+  Bigger: ppm scales with frequency, so +16 kHz at 100 MHz is about +179 kHz at 1090 MHz.
