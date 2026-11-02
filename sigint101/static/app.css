@@ -316,9 +316,21 @@ body {
 }
 
 .btn-theme {
-  min-width: 56px;     /* icon only — keeps the right edge from padding out */
+  min-width: var(--touch);   /* icon only, but the only way to red-night: a full touch width */
+  align-self: stretch;       /* the bar's full height, like Back, not the glyph's */
   justify-content: center;
   border-left: 3px double var(--border);
+  position: relative;
+}
+/* The 66px bar leaves the toggle's own box 63px tall, so its tap area runs on into the right end
+   of the rail below, where nothing else is tappable, to make a full touch-sized target. */
+.btn-theme::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--touch);
 }
 
 .btn-back__label {
@@ -497,6 +509,23 @@ body {
   text-transform: uppercase;
 }
 
+/* A pip for a stage this visit renders is a button that jumps back to it once reached. The rail is
+   only 40px tall (a taller one would cost the instrument stages their narration), so the pips are
+   the quick route and the Prev key beside Next is the full touch-sized one. */
+button.rail-pip {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  height: 34px;
+  min-width: 76px;
+  justify-content: center;
+  cursor: pointer;
+}
+button.rail-pip:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .rail-pip__dot {
   width: 8px;
   height: 8px;
@@ -600,8 +629,10 @@ body {
    screen's own spacing so the question, the frozen context frame, the tap chips and the
    Commit button all fit the fixed 800x480. Spacing overrides are scoped to predict so the
    other, roomier stages keep their larger display titles and padding. */
+/* The 2px gaps (4px between chips and Commit) keep Commit on screen under a five-line prompt; at
+   4px and 6px it lands a pixel past 480. */
 .stage-panel[data-stage="predict"] {
-  gap: 4px;
+  gap: 2px;
   padding-top: 6px;
   padding-bottom: 6px;
 }
@@ -610,7 +641,7 @@ body {
   line-height: 1.2;
 }
 .stage-panel[data-stage="predict"] .predict {
-  gap: 6px;
+  gap: 4px;
 }
 
 .stage-panel__body {
@@ -629,6 +660,57 @@ body {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 16px;          /* room beside the scrollbar so text never hides under it */
+}
+/* The explain body holds the explanation and then the concept, as paragraphs. */
+.stage-panel__body > p {
+  margin: 0 0 14px;
+}
+/* The lesson's takeaway, closing the reveal: set off by a rule and a label, at body size. */
+.stage-panel__concept {
+  color: var(--fg);
+  border-left: 3px solid var(--accent);
+  padding-left: 12px;
+}
+.stage-panel__concept::before {
+  content: "Key idea \00B7  ";
+  font-size: 15px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+/* An instrument stage (the radio on screen) puts its eyebrow on the title's row: the radio, the
+   tune strip and the narration share the fixed 800x480, and a line of eyebrow above the title
+   cost the narration band about 30px of its height. */
+.stage-panel--instrument {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 10px;
+}
+.stage-panel--instrument > .stage-panel__eyebrow {
+  grid-row: 1;
+  grid-column: 2;
+}
+.stage-panel--instrument > .stage-panel__title {
+  grid-row: 1;
+  grid-column: 1;
+}
+.stage-panel--instrument > .instrument {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  align-self: stretch;
+}
+
+/* Previous step: a quieter key than Next (no accent, no cursor) at the same touch size, in the
+   row that already holds Next, so going back costs no height. */
+.btn--prev {
+  flex: none;
+  min-width: var(--touch);
+  padding: 0 14px;
+  white-space: nowrap;
 }
 
 /* A scrollbar you can actually hit (MC: the old one was "pitifully small"). Tinted off --fg so it
@@ -749,6 +831,12 @@ body {
   color: var(--fg-dim);
 }
 
+/* The keys keep their one-line labels; the hint or committed note beside them wraps instead. */
+.predict__actions > .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 .btn-commit {
   min-width: 240px;
 }
@@ -822,7 +910,8 @@ body {
    live by decode.js; an honest empty / no-radio line when nothing decodes. */
 .decoder {
   flex: 0 0 auto;
-  height: 150px;
+  /* Leaves the narration under it a band of three lines at 800x480; any taller and it gets one. */
+  height: 124px;
   display: flex;
   flex-direction: column;
   border: 3px double var(--border-strong);
@@ -923,9 +1012,29 @@ body {
   color: var(--fg);
 }
 /* ADS-B radar scope (M13): the receiver at the centre, aircraft placed by range (ring) and bearing
-   (angle). Taller than the list panels because the scope is the whole instrument, with no overlay
-   beside it; it stays within the fixed 800x480 budget (scope + count + tune + body). */
-.radar { height: 200px; }
+   (angle). The scope is square, so a full-width band too short for the narration left it a postage
+   stamp; instead the radar stands beside the narration at the instrument's full height, with the
+   tune strip under both. */
+.instrument--decode:has(> .radar) {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+.radar {
+  grid-row: 1;
+  grid-column: 1;
+  height: auto;
+  min-height: 0;
+}
+.instrument--decode:has(> .radar) > .stage-panel__body {
+  grid-row: 1;
+  grid-column: 2;
+}
+.instrument--decode:has(> .radar) > .tune {
+  grid-row: 2;
+  grid-column: 1 / -1;
+}
 .radar__scope {
   flex: 1 1 auto;
   min-height: 0;
@@ -1037,7 +1146,7 @@ body {
   font-weight: 600;
 }
 /* The frozen predict frame on a decode lesson seals the decoder, mirroring the waterfall's seal.
-   Compact (not the live panel's 150px) so the predict prompt, chips and Commit all stay on the
+   Compact (not the live panel's height) so the predict prompt, chips and Commit all stay on the
    fixed 800x480 screen — predict is the tightest stage. */
 .decoder--frozen {
   height: auto;
@@ -1145,11 +1254,15 @@ body {
 /* ===== Provenance panel (M3) ============================================= */
 /* Compact so it fits the fixed instrument band: the verdict leads, the reference comparison and a
    small instrument readout sit under it, and a capture button records the baseline. */
+/* The capture key stands beside the readout, not under it: the 120px instrument row has no room
+   for a touch-sized key below four lines of readout. */
 .prov-panel {
-  flex: 0 0 182px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex: 0 0 300px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  align-content: center;
+  column-gap: 8px;
+  row-gap: 4px;
   border: 3px double var(--border-strong);
   background: var(--surface);
   padding: 5px 8px;
@@ -1185,22 +1298,31 @@ body {
   white-space: nowrap;
 }
 .prov__meta b { color: var(--fg); }
+.prov-panel > :not(.prov__capture) {
+  grid-column: 1;
+}
 .prov__capture {
-  margin-top: auto;
-  min-height: 38px;
+  grid-column: 2;
+  grid-row: 1 / span 4;
+  align-self: center;
+  min-height: var(--touch);
   padding: 0 6px;
-  font-size: 13px;
-  white-space: nowrap;
+  font-size: 15px;
+  line-height: 1.2;
+  white-space: normal;
 }
 
 /* ===== PPM panel (M4) ==================================================== */
 /* Measure-on-demand: the measured crystal error leads, the correction state and a hint sit around
    it, and the button captures the pilot. State by word + glyph, never colour alone. */
+/* The measure key stands beside the readout, as on the provenance panel, at full touch size. */
 .ppm-panel {
-  flex: 0 0 170px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex: 0 0 290px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  align-content: center;
+  column-gap: 8px;
+  row-gap: 4px;
   border: 3px double var(--border-strong);
   background: var(--surface);
   padding: 5px 8px;
@@ -1232,12 +1354,18 @@ body {
   color: var(--fg-dim);
   text-align: center;
 }
+.ppm-panel > :not(.ppm__measure) {
+  grid-column: 1;
+}
 .ppm__measure {
-  margin-top: auto;
-  min-height: 38px;
+  grid-column: 2;
+  grid-row: 1 / span 4;
+  align-self: center;
+  min-height: var(--touch);
   padding: 0 6px;
-  font-size: 13px;
-  white-space: nowrap;
+  font-size: 15px;
+  line-height: 1.2;
+  white-space: normal;
 }
 
 /* Frozen predict instrument — dimmed chrome, NO signal drawn (orient, don't reveal). */
@@ -1433,6 +1561,9 @@ body {
   display: flex;
   justify-content: flex-end;
 }
+.stage-foot .btn--prev {
+  margin-right: auto;            /* back on the left, onward on the right */
+}
 
 /* ===== Home / tiles (boot-menu grid) ===================================== */
 .tiles {
@@ -1440,9 +1571,11 @@ body {
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  /* A readable minimum per row that grows for a two-line name (U7), so a tile is never shorter
-     than its content and the progress bar at its foot is never clipped. 1fr squished 9+ units. */
-  grid-auto-rows: minmax(124px, auto);
+  /* A tile is never shorter than its content, so a two-line name (U7) or a hardware badge never
+     clips the glyph or the progress bar at its foot. 1fr squished 9+ units, and minmax(124px, auto)
+     froze every row at 124px once the grid overflowed (auto only grows into free space, and a
+     scrolling grid has none), so rows size to their content and .tile carries the minimum. */
+  grid-auto-rows: max-content;
   align-content: start;          /* rows stack from the top rather than stretching to fill */
   gap: 12px;
   padding: 14px var(--gutter);
@@ -1475,6 +1608,7 @@ body {
   cursor: pointer;
   /* No min-height:0 here: it would let the grid keep an auto row at its 116px minimum and clip a
      two-line tile (U7) instead of growing the row to fit. Without it the row grows to the content. */
+  min-height: 124px;
   overflow: hidden;
 }
 
@@ -1493,6 +1627,7 @@ body {
 }
 
 .tile__glyph {
+  flex: none;          /* the tile is a flex column: a shrinkable glyph squashed to 38x13 */
   width: 38px;
   height: 38px;
   stroke: var(--accent);
@@ -1510,6 +1645,27 @@ body {
   letter-spacing: 0.02em;
   text-shadow: var(--glow);
   margin-top: auto;
+}
+
+/* Hardware a lesson needs beyond the built-in radio (Wi-Fi adapter, Orbic, 2nd node, Flipper):
+   read by the word and a warn border, so it shows before the learner opens the lesson. */
+.tile__needs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tile__need {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 8px;
+  color: var(--warn);
+  border: 2px solid var(--warn);
+}
+.tile--active .tile__need {
+  color: var(--sel-ink);
+  border-color: var(--sel-ink);
 }
 
 .tile__meta {

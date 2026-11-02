@@ -38,7 +38,7 @@ from .exam import (
 )
 from .flock import FlockDetector, FlockUnavailable
 from .hardware import list_rtlsdr_devices, probe_rtlsdr
-from .lessons import load_lessons
+from .lessons import COMMIT_STAGE, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
 from .pocsag import PocsagDecoder, PocsagUnavailable
 from .ppm import measure_pilot_ppm
@@ -53,7 +53,7 @@ from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
-from .units import UNITS, get_unit
+from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
@@ -169,15 +169,51 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
             status = ""
         tiles.append({
             "id": lesson.id,
-            "code": f"L{lesson.id}",
+            # The code a learner reads is the lesson's place in the teaching order, not its id:
+            # ids were handed out as lessons were built and stay the storage keys and URLs.
+            "code": f"L{teaching_position(lesson.id)}",
             "name": lesson.title,
             "glyph": DEFAULT_TILE_GLYPH,
             "status": status,
             "href": f"/lesson/{lesson.id}",
             "lessons_total": 1,
             "lessons_done": 1 if done else 0,
+            "needs": lesson.hardware_badges,
         })
     return tiles
+
+
+def _after_complete_href(lesson_id: int, lessons: dict) -> str:
+    """Where finishing a lesson leads: the next built lesson in its unit, else the unit's page.
+
+    Teaching order within the unit, skipping ids whose packs have not loaded, so the learner goes
+    straight on to what they can actually open. The end of a unit returns to it, where its tiles
+    show the unit finished.
+    """
+    unit = unit_for_lesson(lesson_id)
+    if unit is None:
+        return "/"
+    for next_id in unit.lesson_ids[unit.lesson_ids.index(lesson_id) + 1:]:
+        if next_id in lessons:
+            return f"/lesson/{next_id}"
+    return f"/unit/{unit.id}"
+
+
+def _resume_stage(lesson, saved, committed: bool) -> tuple:
+    """The stage a lesson opens on and the furthest position reached, from the saved place.
+
+    Opens where the learner left it, provided that stage is one this visit renders: a sealed stage
+    never opens before a commit (commit-before-reveal), and an unknown name falls back to the
+    start. With nothing saved it opens on the first stage, or the first sealed one once committed.
+    The furthest position never passes predict before a commit, and always covers the open stage.
+    """
+    order = lesson.stage_order
+    open_now = order if committed else order[:order.index(COMMIT_STAGE) + 1]
+    current = lesson.sealed_stages[0] if committed else order[0]
+    if saved and saved["stage"] in open_now:
+        current = saved["stage"]
+    reached = max(saved["furthest"] if saved else 0, order.index(current))
+    return current, min(reached, len(open_now) - 1)
 
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
@@ -457,7 +493,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         is what the template uses to decide which stages it emits, so the sealed bodies are never
         put into the HTML before the commit. Lesson.reveal() is asked for the sealed material only
         once committed — it refuses otherwise — as the code-level backstop behind the template.
-        Opening a lesson counts as progress but never as completion.
+        Opening a lesson counts as progress but never as completion. It opens on the stage the
+        learner last reached (a reload or a power cut resumes in place), and Back leads to the
+        lesson's unit rather than skipping it.
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
@@ -465,12 +503,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         prediction = app.state.progress.get_prediction(lesson_id)
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
+        current, reached = _resume_stage(lesson, app.state.progress.get_stage(lesson_id),
+                                         committed)
+        unit = unit_for_lesson(lesson_id)
         context = {
             "title": lesson.title,
-            "back_href": "/",
-            "back_label": "Home",
+            "back_href": f"/unit/{unit.id}" if unit else "/",
+            "back_label": f"Unit {unit.id}" if unit else "Home",
             "lesson": lesson,
-            "current_stage": lesson.sealed_stages[0] if committed else lesson.stage_order[0],
+            "current_stage": current,
+            "reached": reached,
+            "complete_href": _after_complete_href(lesson_id, app.state.lessons),
             "prediction_committed": committed,
             "committed_choice": prediction,
             "predict_choices": lesson.choices,
@@ -503,7 +546,34 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"lesson": lesson_id, "reason": str(exc)})
             return JSONResponse(status_code=400, content={"recorded": False, "reason": str(exc)})
         log_event(app.state.events_path, "prediction", {"lesson": lesson_id})
+        # Committing walks the learner past the gate, so the lesson reopens on the first sealed
+        # stage rather than resuming on the predict screen they just left.
+        lesson = app.state.lessons[lesson_id]
+        first_sealed = lesson.sealed_stages[0]
+        app.state.progress.record_stage(lesson_id, first_sealed,
+                                        lesson.stage_order.index(first_sealed))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    @app.post("/api/stage")
+    async def stage(lesson_id: int, request: Request):
+        """Remember the stage the learner is on, so a reload or a power cut resumes there.
+
+        The lesson screen posts this on every step, forward or back. A stage the lesson does not
+        have is refused, and so is any sealed stage before a prediction exists: commit-before-reveal
+        covers where a learner can be, not only what the page shows.
+        """
+        _require_lesson(lesson_id)
+        lesson = app.state.lessons[lesson_id]
+        name = (await _field(request, "stage")).strip()
+        if name not in lesson.stage_order:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"lesson {lesson_id} has no stage '{name}'"})
+        if name in lesson.sealed_stages and app.state.progress.get_prediction(lesson_id) is None:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": "predict before going past the gate"})
+        app.state.progress.record_stage(lesson_id, name, lesson.stage_order.index(name))
+        furthest = app.state.progress.get_stage(lesson_id)["furthest"]
+        return {"recorded": True, "stage": name, "furthest": furthest}
 
     @app.post("/api/complete")
     def complete(lesson_id: int):

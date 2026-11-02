@@ -59,6 +59,17 @@ KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 # lesson on a narrow signal can ask for a finer step; 100 kHz is the FM-band default.
 DEFAULT_TUNE_STEP_HZ = 100_000
 
+# What a lesson tile says the learner must bring, keyed by the pack's `hardware:` names. The
+# RTL-SDR is built into the Recon, so it earns no badge. LoRa's radio is built in too, but its
+# lessons need a second node to talk to, so that is the badge.
+BUILT_IN_HARDWARE = ("rtl-sdr",)
+HARDWARE_BADGES = {
+    "wifi-monitor": "Wi-Fi adapter",
+    "orbic-rayhunter": "Orbic",
+    "lora": "2nd node",
+    "flipper": "Flipper",
+}
+
 
 class LessonError(ValueError):
     """Raised when a lesson pack is missing required fields or is malformed."""
@@ -101,6 +112,16 @@ class Lesson:
     def needs_hardware(self) -> bool:
         """Does this lesson require a radio to be attached before it can be worked?"""
         return bool(self.hardware)
+
+    @property
+    def hardware_badges(self) -> list:
+        """The kit this lesson needs beyond the built-in radio, as the learner should read it.
+
+        Shown on the lesson tile so a need is known before the lesson starts, not mid-demo. A name
+        with no label is shown as written rather than dropped: an unlabelled need is still a need.
+        """
+        return [HARDWARE_BADGES.get(name, name)
+                for name in self.hardware if name not in BUILT_IN_HARDWARE]
 
     @property
     def uses_decoder(self) -> bool:
