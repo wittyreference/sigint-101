@@ -37,7 +37,7 @@
     var empty = panel.querySelector("[data-apt-empty]");
     var badge = panel.querySelector("[data-apt-badge]");
     var images = body.images || [];
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
     DecoderPanel.showCommand(panel, body.command);
     if (images.length) {
       if (img) { img.src = src(images[0]); img.hidden = false; }

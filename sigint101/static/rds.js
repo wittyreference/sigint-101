@@ -38,7 +38,7 @@
     var card = panel.querySelector("[data-rds-card]");
     var empty = panel.querySelector("[data-rds-empty]");
     var badge = panel.querySelector("[data-rds-badge]");
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
     DecoderPanel.showCommand(panel, body.command);
     if (hasData(station)) {
       set(panel, "[data-rds-ps]", psOrDash(station));

@@ -98,6 +98,19 @@ def test_a_running_route_names_the_exact_command(tmp_path, path, factory, build,
 
 
 @pytest.mark.parametrize("path,factory,build,key,kind", ROUTES, ids=ROUTE_IDS)
+def test_a_fresh_tool_reads_starting_until_it_settles(tmp_path, path, factory, build, key, kind):
+    # A retry on a busy dongle spawns a tool that dies a moment later; the poll in between must
+    # not call it live.
+    now = [1000.0]
+    dec = build(lambda *_: Child(["rtl_433", "-f", "433920000"]), tmp_path)
+    dec.watch.clock = lambda: now[0]
+    with _client(tmp_path, probe=_present, **{factory: lambda: dec}) as client:
+        assert client.get(path).json()["state"] == "starting"
+        now[0] += childproc.SETTLE_S
+        assert client.get(path).json()["state"] == "running"
+
+
+@pytest.mark.parametrize("path,factory,build,key,kind", ROUTES, ids=ROUTE_IDS)
 def test_a_refused_route_names_no_command(tmp_path, path, factory, build, key, kind):
     def missing(name):
         return None

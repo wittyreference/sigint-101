@@ -451,6 +451,24 @@ def test_a_child_that_ran_a_good_while_starts_its_back_off_afresh():
     assert watch.retry_in() == pytest.approx(childproc.FIRST_RETRY_S)
 
 
+def test_a_fresh_child_is_settling_until_it_has_held_on_a_moment():
+    # rtl_fm can take a few hundred ms to fail on a busy dongle; until a child has lived a moment
+    # it has not shown it is working, so it must not read LIVE yet.
+    watch, clock = _watch()
+    assert watch.settling() is False                # nothing spawned
+    watch.spawned(_Ended(["rtl_433"], None))
+    assert watch.settling() is True
+    clock.now += childproc.SETTLE_S
+    assert watch.settling() is False
+
+
+def test_a_stopped_child_is_not_settling():
+    watch, _ = _watch()
+    watch.spawned(_Ended(["rtl_433"], None))
+    watch.stopping()
+    assert watch.settling() is False
+
+
 def test_a_spawn_clears_the_stopped_state():
     watch, clock = _watch()
     proc = _Ended(["rtl_433"], 1)

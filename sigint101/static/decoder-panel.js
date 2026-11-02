@@ -19,6 +19,15 @@
     return { badge: fallbackBadge, cls: "decoder__status decoder__status--empty", reason: reason };
   }
 
+  // The badge for an answering tool. A fresh one reads STARTING until it has held on a moment —
+  // a tool retried on a busy dongle dies a few hundred ms in, and must not flash LIVE first.
+  function liveBadge(body) {
+    if (body && body.state === "starting") {
+      return { text: "STARTING", cls: "decoder__status" };
+    }
+    return { text: "LIVE", cls: "decoder__status decoder__status--live" };
+  }
+
   // The command line as the API sent it — a string read off the running process — or nothing.
   // Never rebuilt here: the strip shows only what the console reports it is running.
   function commandText(command) {
@@ -27,8 +36,15 @@
 
   // Under node's test runner the file is loaded for its pure helpers and there is no document.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { downState: downState, commandText: commandText };
+    module.exports = { downState: downState, liveBadge: liveBadge, commandText: commandText };
     return;
+  }
+
+  function showLive(badge, body) {
+    if (!badge) return;
+    var live = liveBadge(body);
+    badge.textContent = live.text;
+    badge.className = live.cls;
   }
 
   // Fill a panel's command strip, or hide it when nothing runs. The full line also rides in the
@@ -64,5 +80,6 @@
 
   Array.prototype.forEach.call(document.querySelectorAll("[data-command]"), wire);
 
-  root.DecoderPanel = { showCommand: showCommand, showDown: showDown, downState: downState };
+  root.DecoderPanel = { showCommand: showCommand, showDown: showDown, showLive: showLive,
+                        downState: downState };
 })(this);

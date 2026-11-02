@@ -87,7 +87,7 @@
     var badge = panel.querySelector("[data-adsb-badge]");
     var count = panel.querySelector("[data-adsb-count]");
     var ring = panel.querySelector("[data-adsb-ring]");
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
     DecoderPanel.showCommand(panel, body.command);
     if (count) count.textContent = String(aircraft.length);
     clear(group);

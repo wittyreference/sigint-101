@@ -36,6 +36,15 @@ test("a refusal with no body falls back to the panel's own reason", () => {
   assert.equal(down.reason, "no radio to decode APRS");
 });
 
+test("a running tool reads LIVE only once it has settled", () => {
+  assert.deepEqual(panel.liveBadge({ available: true, state: "starting" }),
+    { text: "STARTING", cls: "decoder__status" });
+  assert.deepEqual(panel.liveBadge({ available: true, state: "running" }),
+    { text: "LIVE", cls: "decoder__status decoder__status--live" });
+  assert.deepEqual(panel.liveBadge({ available: true }),
+    { text: "LIVE", cls: "decoder__status decoder__status--live" });
+});
+
 test("the command text is exactly what the console sent, or nothing", () => {
   assert.equal(panel.commandText("rtl_fm -f 144390000 | multimon-ng -a AFSK1200"),
     "rtl_fm -f 144390000 | multimon-ng -a AFSK1200");

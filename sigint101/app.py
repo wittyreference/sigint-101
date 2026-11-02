@@ -936,6 +936,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         last_refusal.pop(kind, None)
         log_event(app.state.events_path, f"{kind}_start", payload)
 
+    def _live_state(watch) -> str:
+        """"starting" until a fresh tool has held on a moment, then "running"."""
+        return "starting" if watch.settling() else "running"
+
     @app.get("/api/spectrum")
     def spectrum(limit: int | None = None):
         """Recent real sweeps. No radio is an answer (503 with the reason), never a fake row."""
@@ -989,6 +993,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "decodes": [d.as_dict() for d in decoder.recent(limit)],
         }
@@ -1035,6 +1040,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": detector.live_command(),
+            "state": _live_state(detector.watch),
             "interface": detector.interface,
             "detections": detector.detections(limit),
         }
@@ -1083,6 +1089,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "station": decoder.station().as_dict(),
         }
@@ -1106,6 +1113,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": DEFAULT_ADSB_HZ,
             "receiver_located": decoder.receiver.known,
             "aircraft": decoder.aircraft(),
@@ -1130,6 +1138,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "stations": decoder.stations(),
         }
@@ -1153,6 +1162,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "pages": decoder.pages(limit),
         }
@@ -1176,6 +1186,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "messages": decoder.messages(limit),
         }
@@ -1199,6 +1210,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "channel_a_hz": AIS_CHANNEL_A_HZ,
             "channel_b_hz": AIS_CHANNEL_B_HZ,
             "vessels": decoder.vessels(limit),
@@ -1223,6 +1235,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "calls": decoder.calls(limit),
         }
@@ -1246,6 +1259,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "images": decoder.images(limit),
         }
@@ -1268,6 +1282,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {
             "available": True,
             "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "images": decoder.images(limit),
         }

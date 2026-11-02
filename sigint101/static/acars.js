@@ -59,7 +59,7 @@
         '<span class="decoder__tone">' + esc(freq(m)) + "</span>";
       list.appendChild(li);
     });
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
     DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = messages.length > 0;

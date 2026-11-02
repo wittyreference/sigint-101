@@ -29,6 +29,10 @@ FIRST_RETRY_S = 2.0
 MAX_RETRY_S = 30.0
 STABLE_AFTER_S = 30.0
 
+# How long a fresh child is "starting" rather than live. rtl_fm takes a few hundred ms to fail on
+# a dongle another process holds, so a tool has not shown it works until it has lived this long.
+SETTLE_S = 2.0
+
 # How much of a tool's stderr goes into the reason the panel shows: its last few lines, and no
 # more than this many characters, so a chatty tool cannot bury the line that says why.
 TAIL_LINES = 3
@@ -407,6 +411,12 @@ class ChildWatch:
     def stopped(self) -> bool:
         """True from a child's own death until the next spawn."""
         return self.reason is not None
+
+    def settling(self) -> bool:
+        """True for a child's first moments, before it has shown it can hold the radio."""
+        with self._lock:
+            return (self._current is not None and self._started_at is not None
+                    and self.clock() - self._started_at < SETTLE_S)
 
     def retry_in(self) -> float | None:
         """Seconds until the console may try the tool again, or None if it may now."""
