@@ -219,6 +219,22 @@ def test_a_signal_death_names_the_signal():
     assert exit_reason(proc) == "multimon-ng stopped (killed by SIGKILL)"
 
 
+def test_a_signal_death_leaves_out_the_startup_chatter():
+    # Killed from outside, a tool's last stderr lines are its start-up banner (multimon-ng lists
+    # every demodulator it has), which explains nothing and crowded the reason off the panel.
+    banner = ("multimon-ng 1.2.0\n  (C) 1996/1997 by Tom Sailer HB9JNX/AE4WA\n"
+              "Available demodulators: POCSAG512 POCSAG1200 POCSAG2400 FLEX AFSK1200 X10\n")
+    proc = _Ended(["multimon-ng", "-a", "AFSK1200"], -signal.SIGKILL, banner)
+    assert exit_reason(proc) == "multimon-ng stopped (killed by SIGKILL)"
+
+
+def test_the_reason_keeps_only_the_last_two_lines_it_said():
+    said = "Found 1 device(s):\nUsing device 0\nusb_claim_interface error -6\nFailed to open #0.\n"
+    reason = exit_reason(_Ended(["rtl_fm"], 1, said))
+    assert reason == ("rtl_fm stopped (exit status 1): usb_claim_interface error -6 | "
+                      "Failed to open #0.")
+
+
 def test_a_streaming_tool_that_exits_cleanly_is_still_stopped():
     proc = _Ended(["rtl_433"], 0)
     assert exit_reason(proc) == "rtl_433 stopped (exited on its own, status 0)"

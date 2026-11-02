@@ -33,10 +33,11 @@ STABLE_AFTER_S = 30.0
 # a dongle another process holds, so a tool has not shown it works until it has lived this long.
 SETTLE_S = 2.0
 
-# How much of a tool's stderr goes into the reason the panel shows: its last few lines, and no
-# more than this many characters, so a chatty tool cannot bury the line that says why.
-TAIL_LINES = 3
-TAIL_CHARS = 300
+# How much of a tool's stderr goes into the reason the panel shows: its last two lines, and no
+# more than this many characters, so a chatty tool cannot bury the line that says why or push the
+# retry countdown out of the 124 px panel. rtl_fm's busy-dongle failure fits whole.
+TAIL_LINES = 2
+TAIL_CHARS = 160
 TAIL_READ_BYTES = 4096
 
 _PR_SET_PDEATHSIG = 1
@@ -329,7 +330,12 @@ def exit_reason(proc, *, finite=False, tail=None, tool="the decoder") -> str | N
         causes = ended[:1]
     parts = []
     for stage, code in causes:
-        lines = list(tail) if tail is not None else stderr_tail(stage)
+        # A tool killed by a signal did not get to say why; its last lines are start-up
+        # narration, so only a tool that exited on its own has its words quoted.
+        if code < 0:
+            lines = []
+        else:
+            lines = list(tail) if tail is not None else stderr_tail(stage)
         parts.append(_describe(_name(stage, tool), code, lines[-TAIL_LINES:]))
     return "; ".join(parts)
 
