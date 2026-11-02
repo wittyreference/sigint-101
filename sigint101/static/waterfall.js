@@ -307,6 +307,16 @@
     return parseRamp(getComputedStyle(p.canvas).getPropertyValue("--wf-ramp"));
   }
 
+  // The sweep's own command line on each stage's command strip (decoder-panel.js), or hidden when
+  // no rtl_power runs: the learner sees exactly what the waterfall is drawing from.
+  function showCommand(command) {
+    if (!window.DecoderPanel) return;
+    panels.forEach(function (p) {
+      var instrument = p.canvas.closest(".instrument");
+      if (instrument) window.DecoderPanel.showCommand(instrument, command);
+    });
+  }
+
   // The reason the band is empty, as page text over the canvas (null hides it).
   function showReason(p, message) {
     if (!p.reason) return;
@@ -644,9 +654,11 @@
             renderGain(null, null);
             say("no radio", "na", reason);
             panels.forEach(function (p) { showEmpty(p, reason); });
+            showCommand(null);
           }
           return;
         }
+        showCommand(result.body.command);
         waiting = false;
         panels.forEach(function (p) { showReason(p, null); });
         // The span the sweep is really on, as the server reports it: the dial reads this, and a

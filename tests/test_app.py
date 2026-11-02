@@ -14,6 +14,7 @@ from sigint101.ais import AisDecoder
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.apt import AptDecoder
+from sigint101.childproc import ChildWatch
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.dmr import DmrDecoder
 from sigint101.flock import FlockDetector
@@ -38,6 +39,20 @@ def _present(detail="RTL2832U 0bda:2838 on USB bus"):
 def _absent(detail="no RTL2832U on USB bus"):
     """A probe result standing for an empty bus — the no-mock honest answer."""
     return RadioProbe(False, "lsusb", detail)
+
+
+class _ChildStub:
+    """What every decoder stand-in shares with the real decoders the routes read.
+
+    A real ChildWatch that never sees a death, and no live command: the stand-ins run no process.
+    """
+
+    @property
+    def watch(self):
+        return self.__dict__.setdefault("_watch", ChildWatch("stub"))
+
+    def live_command(self):
+        return None
 
 
 class _StubSweeper:
@@ -89,7 +104,7 @@ def _rows():
     ]
 
 
-class _StubDecoder:
+class _StubDecoder(_ChildStub):
     """An app-boundary stand-in for the real rtl_433 Decoder.
 
     Holds real Decode objects and reports them as a running decoder would, so the decode route
@@ -175,7 +190,7 @@ def _packets():
     return [below, above]
 
 
-class _StubRDS:
+class _StubRDS(_ChildStub):
     """An app-boundary stand-in for the rtl_fm|redsea RDSDecoder (no real radio)."""
 
     def __init__(self, station):
@@ -214,7 +229,7 @@ def _station():
     return s
 
 
-class _StubAdsb:
+class _StubAdsb(_ChildStub):
     """An app-boundary stand-in for the dump1090 AdsbDecoder (no real radio)."""
 
     def __init__(self, aircraft, *, located=True):
@@ -253,7 +268,7 @@ def _aircraft():
     }]
 
 
-class _StubAprs:
+class _StubAprs(_ChildStub):
     """An app-boundary stand-in for the rtl_fm|multimon-ng AprsDecoder (no real radio)."""
 
     def __init__(self, stations):
@@ -292,7 +307,7 @@ def _aprs_stations():
     }]
 
 
-class _StubPocsag:
+class _StubPocsag(_ChildStub):
     """An app-boundary stand-in for the rtl_fm|multimon-ng PocsagDecoder (no real radio)."""
 
     def __init__(self, pages):
@@ -331,7 +346,7 @@ def _pocsag_pages():
     }]
 
 
-class _StubAcars:
+class _StubAcars(_ChildStub):
     """An app-boundary stand-in for the acarsdec AcarsDecoder (no real radio)."""
 
     def __init__(self, messages):
@@ -370,7 +385,7 @@ def _acars_messages():
     }]
 
 
-class _StubAis:
+class _StubAis(_ChildStub):
     """An app-boundary stand-in for the rtl_ais AisDecoder (no real radio)."""
 
     def __init__(self, vessels):
@@ -408,7 +423,7 @@ def _ais_vessels():
     }]
 
 
-class _StubDmr:
+class _StubDmr(_ChildStub):
     """An app-boundary stand-in for the dsd-fme DmrDecoder (no real radio)."""
 
     def __init__(self, calls):
@@ -446,7 +461,7 @@ def _dmr_calls():
     }]
 
 
-class _StubApt:
+class _StubApt(_ChildStub):
     """An app-boundary stand-in for the satdump AptDecoder (no real radio, no pass)."""
 
     def __init__(self, images):
@@ -484,7 +499,7 @@ def _apt_images():
     }]
 
 
-class _StubSstv:
+class _StubSstv(_ChildStub):
     """An app-boundary stand-in for the rtl_fm|sox|sstv SstvDecoder (no real radio, no picture)."""
 
     def __init__(self, images):
@@ -522,7 +537,7 @@ def _sstv_images():
     }]
 
 
-class _StubFlock:
+class _StubFlock(_ChildStub):
     """An app-boundary stand-in for the FlockDetector (no real wlan1 monitor radio)."""
 
     def __init__(self, detections):
@@ -2447,6 +2462,11 @@ def test_ppm_measure_releases_the_radio_before_measuring(tmp_path):
         def stop(self):
             client_sweeper["running"] = False
             super().stop()
+
+        def release(self):
+            # The real Sweeper's release() stops the sweep and keeps it down until resumed.
+            self.stop()
+            super().release()
 
     with _client(tmp_path, ppm_measure=fake_measure,
                  sweeper_factory=lambda: _RecordingSweeper(_rows())) as client:

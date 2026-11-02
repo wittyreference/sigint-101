@@ -55,12 +55,11 @@ def _drop_png(directory, name, *, mtime=None):
 def test_popen_builds_the_satdump_apt_live_command(tmp_path, monkeypatch):
     captured = {}
 
-    class Rec:
-        def __init__(self, argv, **kw):
-            captured["argv"] = argv
-            captured["kw"] = kw
+    def rec(argv, **kw):
+        captured["argv"] = argv
+        captured["kw"] = kw
 
-    monkeypatch.setattr(apt.subprocess, "Popen", Rec)
+    monkeypatch.setattr(apt, "spawn", rec)
     apt._popen(DEFAULT_APT_HZ, device=2, output_dir=tmp_path)
     argv = captured["argv"]
     assert argv[0] == SATDUMP

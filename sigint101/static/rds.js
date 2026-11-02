@@ -45,7 +45,8 @@
     var card = panel.querySelector("[data-rds-card]");
     var empty = panel.querySelector("[data-rds-empty]");
     var badge = panel.querySelector("[data-rds-badge]");
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
+    DecoderPanel.showCommand(panel, body.command);
     var instrument = panel.closest(".instrument");
     var dial = instrument && instrument.querySelector("[data-rds-freq]");
     var mhz = mhzLabel(body.freq_hz);
@@ -68,13 +69,12 @@
     }
   }
 
-  function showEmpty(panel, reason) {
+  function showEmpty(panel, body) {
     var card = panel.querySelector("[data-rds-card]");
     var empty = panel.querySelector("[data-rds-empty]");
     var badge = panel.querySelector("[data-rds-badge]");
     if (card) card.hidden = true;
-    if (badge) { badge.textContent = "NO RADIO"; badge.className = "decoder__status decoder__status--empty"; }
-    if (empty) { empty.hidden = false; empty.textContent = reason || "no radio to decode RDS"; }
+    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode RDS");
   }
 
   function tick() {
@@ -83,8 +83,7 @@
       .then(function (res) {
         var waiting = false;
         if (!res.ok || res.body.available === false) {
-          var reason = (res.body && res.body.reason) || "no radio to decode RDS";
-          panels.forEach(function (p) { showEmpty(p, reason); });
+          panels.forEach(function (p) { showEmpty(p, res.body); });
           waiting = true;
         } else {
           panels.forEach(function (p) { render(p, res.body); });

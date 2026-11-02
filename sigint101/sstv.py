@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .childproc import ChildWatch, Pipeline, running_command, spawn, stop_process
 from .hardware import (
     RTL_FM,
     DeviceSelectionError,
@@ -101,48 +102,20 @@ def pipeline_commands(freq_hz: int, device: int, output_path,
     return [rtl_fm, sox, sstv]
 
 
-class _Pipeline:
-    """The rtl_fm|sox|sstv trio as one object: sstv's stdout to read, all three to reap."""
-
-    def __init__(self, rtl_fm, sox, sstv):
-        self._procs = (rtl_fm, sox, sstv)
-        self._sstv = sstv
-        self.stdout = sstv.stdout
-
-    def poll(self):
-        return self._sstv.poll()
-
-    def terminate(self):
-        for proc in reversed(self._procs):
-            try:
-                proc.terminate()
-            except (OSError, subprocess.SubprocessError):
-                pass
-
-    def wait(self, timeout=None):
-        for proc in self._procs:
-            try:
-                proc.wait(timeout=timeout)
-            except (OSError, subprocess.SubprocessError):
-                pass
-        return 0
-
-
 def _popen(freq_hz: int, device: int, output_path):
     """Launch rtl_fm|sox|sstv so sstv decodes a picture into output_path, printing its mode."""
     rtl_cmd, sox_cmd, sstv_cmd = pipeline_commands(freq_hz, device, output_path)
-    rtl_fm = subprocess.Popen(
-        rtl_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    sox = subprocess.Popen(
-        sox_cmd, stdin=rtl_fm.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    rtl_fm = spawn(rtl_cmd, stdout=subprocess.PIPE)
+    sox = spawn(sox_cmd, stdin=rtl_fm.stdout, stdout=subprocess.PIPE)
     # sstv narrates the detected mode to stdout; stderr carries its progress bar, which we drop.
-    sstv = subprocess.Popen(
-        sstv_cmd, stdin=sox.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    sstv = spawn(sstv_cmd, stdin=sox.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                 text=True)
     # Let each upstream stage see SIGPIPE if the next dies, rather than fill a pipe nobody reads.
     for upstream in (rtl_fm.stdout, sox.stdout):
         if upstream is not None:
             upstream.close()
-    return _Pipeline(rtl_fm, sox, sstv)
+    # One capture ends by design when sstv has decoded it, so it runs until that last stage ends.
+    return Pipeline(rtl_fm, sox, sstv, finite=True)
 
 
 class SstvDecoder:
@@ -174,11 +147,18 @@ class SstvDecoder:
         self._pending = None
         self._released = False
         self.error = None
+        # Who ended the child, and when the console may launch it again after it died on its own.
+        # A capture ends by design after DEFAULT_CAPTURE_S, so a clean finish is not a death.
+        self.watch = ChildWatch(SSTV, finite=True)
 
     @property
     def running(self) -> bool:
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the live process; None when nothing runs."""
+        return running_command(self._proc)
 
     @property
     def released(self) -> bool:
@@ -214,6 +194,7 @@ class SstvDecoder:
     def _start_locked(self) -> None:
         if self.running:
             return
+        self._settle()
         if self._released:
             raise SstvUnavailable(
                 "the radio was released to another program; resume SSTV to take it back")
@@ -225,6 +206,11 @@ class SstvDecoder:
         if self.error:
             reason, self.error = self.error, None
             raise SstvUnavailable(reason)
+        # A child that died on its own is not relaunched on every poll: the reason stands, and the
+        # console waits out a back-off that grows while the deaths keep coming.
+        blocked = self.watch.blocked()
+        if blocked:
+            raise SstvUnavailable(blocked)
         self.device = self._choose_device()
         received_at = self._clock()
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -234,9 +220,11 @@ class SstvDecoder:
         except (OSError, ValueError) as exc:
             self._proc = None
             raise SstvUnavailable(f"cannot run the SSTV pipeline: {exc}") from exc
+        self.watch.spawned(self._proc)
         self.error = None
         self._pending = (output_path, received_at)
-        self._thread = threading.Thread(target=self._read, name="sigint101-sstv", daemon=True)
+        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+                                        name="sigint101-sstv", daemon=True)
         self._thread.start()
 
     @staticmethod
@@ -246,7 +234,7 @@ class SstvDecoder:
         millis = int((received_at % 1) * 1000)
         return f"{stamp}-{millis:03d}.png"
 
-    def _read(self) -> None:
+    def _read(self, proc) -> None:
         """Watch sstv's output for the mode it detects, then record a sidecar for the picture.
 
         The PNG is sstv's to write; the mode it prints is ours to keep, so when the decode ends we
@@ -256,15 +244,29 @@ class SstvDecoder:
         output_path, received_at = self._pending or (None, None)
         mode = None
         try:
-            for raw in self._proc.stdout:
+            for raw in proc.stdout:
                 found = parse_mode(raw)
                 if found is not None:
                     mode = found
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
             return
+        finally:
+            self._note_end(proc)
         if mode is not None and output_path is not None:
             self._write_sidecar(output_path, mode, received_at)
+
+    def _note_end(self, proc) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+        reason = self.watch.ended(proc)
+        if reason and self.error is None:
+            self.error = reason
+
+    def _settle(self) -> None:
+        """Account for a child that ended since the last poll, then clear away what it left."""
+        if self._proc is not None:
+            self._note_end(self._proc)
+            self._stop_locked()
 
     def _write_sidecar(self, output_path: Path, mode: str, received_at: float) -> None:
         sidecar = output_path.with_suffix(".json")
@@ -284,15 +286,11 @@ class SstvDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        # Marked first, so the reader seeing the output end never reports our stop as a death.
+        self.watch.stopping()
         proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.error = "the SSTV pipeline did not stop; the dongle may still be held"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        if proc is not None and not stop_process(proc):
+            self.error = "the SSTV pipeline survived kill; the dongle may still be held"
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None

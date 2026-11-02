@@ -270,11 +270,18 @@
                said. FSK's two tones do not resolve on a 125 kHz-bin waterfall, so the honest
                instrument here is the decoder, not the eye. decode.js polls /api/decode and fills the
                list; no radio / no rtl_433 shows an honest empty state, never a fabricated read. ---- #}
+            {# Every process-backed panel's head carries a command strip between its title and badge:
+               the exact command the console is running, read off the live process by the route
+               (`command` in its JSON) and filled by decoder-panel.js. It starts empty and hidden,
+               truncates to one line, and opens on a tap. Sitting in the head row, it costs the
+               fixed-height panel no height. #}
             <div class="instrument instrument--decode">
               <div class="decoder" data-decode-panel
                    aria-label="Live rtl_433 sensor decodes on the ISM band">
                 <div class="decoder__head">
                   <span class="decoder__title">rtl_433 &middot; DECODE</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-decode-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <ul class="decoder__list" data-decode-list></ul>
@@ -324,6 +331,8 @@
               <div class="decoder" data-rds-panel aria-label="Live RDS station data">
                 <div class="decoder__head">
                   <span class="decoder__title">redsea &middot; RDS</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-rds-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <div class="rds" hidden data-rds-card>
@@ -357,6 +366,8 @@
               <div class="decoder radar" data-adsb-panel aria-label="Live ADS-B radar scope">
                 <div class="decoder__head">
                   <span class="decoder__title">dump1090 &middot; ADS-B</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-adsb-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <div class="radar__scope">
@@ -399,6 +410,8 @@
               <div class="decoder" data-aprs-panel aria-label="Live APRS station roster">
                 <div class="decoder__head">
                   <span class="decoder__title">multimon-ng &middot; APRS</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-aprs-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <ul class="decoder__list" data-aprs-list></ul>
@@ -424,6 +437,8 @@
               <div class="decoder" data-pocsag-panel aria-label="Live POCSAG page framing">
                 <div class="decoder__head">
                   <span class="decoder__title">multimon-ng &middot; POCSAG</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-pocsag-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <ul class="decoder__list" data-pocsag-list></ul>
@@ -448,6 +463,8 @@
               <div class="decoder" data-acars-panel aria-label="Live ACARS message log">
                 <div class="decoder__head">
                   <span class="decoder__title">acarsdec &middot; ACARS</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-acars-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <ul class="decoder__list" data-acars-list></ul>
@@ -472,6 +489,8 @@
               <div class="decoder" data-ais-panel aria-label="Live AIS vessel roster">
                 <div class="decoder__head">
                   <span class="decoder__title">rtl_ais &middot; AIS</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-ais-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <ul class="decoder__list" data-ais-list></ul>
@@ -496,6 +515,8 @@
               <div class="decoder" data-dmr-panel aria-label="Live DMR/P25 call log">
                 <div class="decoder__head">
                   <span class="decoder__title">dsd-fme &middot; DMR / P25</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-dmr-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <ul class="decoder__list" data-dmr-list></ul>
@@ -520,6 +541,8 @@
               <div class="decoder gallery" data-apt-panel aria-label="Live NOAA APT weather image">
                 <div class="decoder__head">
                   <span class="decoder__title">satdump &middot; NOAA APT</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-apt-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <figure class="gallery__frame">
@@ -547,6 +570,8 @@
               <div class="decoder gallery" data-sstv-panel aria-label="Live SSTV picture">
                 <div class="decoder__head">
                   <span class="decoder__title">sstv &middot; SSTV</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-sstv-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <figure class="gallery__frame">
@@ -575,6 +600,8 @@
               <div class="decoder" data-flock-panel aria-label="Live Flock camera detections">
                 <div class="decoder__head">
                   <span class="decoder__title">wlan1 &middot; Flock detector</span>
+                  <button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap to show it whole"><code data-command-text></code></button>
                   <span class="decoder__status" data-flock-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
                 <ul class="decoder__list" data-flock-list></ul>
@@ -700,6 +727,12 @@
                 </aside>
                 {% endif %}
               </div>
+              {# The sweep's command strip: /api/spectrum carries the live rtl_power line as
+                 `command`; waterfall.js fills this hook with DecoderPanel.showCommand. Empty and
+                 hidden until it does, so it takes no room. #}
+              <button class="cmdstrip cmdstrip--sweep" type="button" data-command hidden
+                      aria-expanded="false"
+                      aria-label="The command the waterfall is running; tap to show it whole"><code data-command-text></code></button>
               {# +/- and a tap on the waterfall retune the live sweep through /api/tune (waterfall.js).
                  The dial starts on the lesson's target, marked pending, and reads as tuned only once
                  the radio confirms the span. #}
@@ -778,6 +811,8 @@
 {% block scripts %}
 <!-- The live waterfall: polls /api/spectrum and draws one pixel per rtl_power bin, replacing the
      SAMPLE badge with the live (or clearly-labelled no-radio) state. It never invents a signal. -->
+<!-- Shared by the panels below: the STOPPED state of a tool that died, and the command strip. -->
+<script src="/static/decoder-panel.js"></script>
 <script src="/static/waterfall.js"></script>
 <script src="/static/prov.js"></script>
 <script src="/static/ppm.js"></script>

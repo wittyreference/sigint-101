@@ -310,3 +310,21 @@ def test_a_dropped_orbic_mid_poll_raises_and_is_recorded():
     with pytest.raises(RayhunterUnavailable):
         mon.status()
     assert mon.error
+
+
+def test_an_orbic_that_goes_away_is_no_longer_running():
+    # Staleness: "running" must not outlive the Orbic it was reached on.
+    state = {"fail": False}
+    ok = _fetch()
+
+    def fetch(url, timeout):
+        if state["fail"]:
+            raise OSError("no route to host")
+        return ok(url, timeout)
+
+    mon = RayhunterMonitor(fetch=fetch)
+    mon.start()
+    state["fail"] = True
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+    assert mon.running is False

@@ -10,6 +10,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 
+from .childproc import ChildWatch, running_command, spawn, stop_process
 from .hardware import (
     ACARSDEC,
     DeviceSelectionError,
@@ -112,9 +113,9 @@ class AcarsLog:
 def _popen(freq_hz: int, device: int):
     """Launch acarsdec on the VHF ACARS channel, printing decoded messages as JSON to stdout."""
     freq_mhz = f"{freq_hz / 1e6:.3f}"
-    return subprocess.Popen(
+    return spawn(
         [ACARSDEC, "-o", "4", "-g", "49.6", "-r", str(device), freq_mhz],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        stdout=subprocess.PIPE, text=True)
 
 
 class AcarsDecoder:
@@ -141,11 +142,17 @@ class AcarsDecoder:
         self._thread = None
         self._released = False
         self.error = None
+        # Who ended the child, and when the console may launch it again after it died on its own.
+        self.watch = ChildWatch(ACARSDEC)
 
     @property
     def running(self) -> bool:
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the live process; None when nothing runs."""
+        return running_command(self._proc)
 
     @property
     def released(self) -> bool:
@@ -179,6 +186,7 @@ class AcarsDecoder:
     def _start_locked(self) -> None:
         if self.running:
             return
+        self._settle()
         if self._released:
             raise AcarsUnavailable(
                 "the radio was released to another program; resume ACARS to take it back")
@@ -190,26 +198,47 @@ class AcarsDecoder:
         if self.error:
             reason, self.error = self.error, None
             raise AcarsUnavailable(reason)
+        # A child that died on its own is not relaunched on every poll: the reason stands, and the
+        # console waits out a back-off that grows while the deaths keep coming.
+        blocked = self.watch.blocked()
+        if blocked:
+            raise AcarsUnavailable(blocked)
         self.device = self._choose_device()
         try:
             self._proc = self._spawn(self.freq_hz, self.device)
         except (OSError, ValueError) as exc:
             self._proc = None
             raise AcarsUnavailable(f"cannot run acarsdec: {exc}") from exc
+        self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, name="sigint101-acars", daemon=True)
+        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+                                        name="sigint101-acars", daemon=True)
         self._thread.start()
 
-    def _read(self) -> None:
+    def _read(self, proc) -> None:
         """Consume acarsdec's JSON on a background thread, logging messages until it ends."""
         try:
-            for raw in self._proc.stdout:
+            for raw in proc.stdout:
                 msg = parse_acars_message(raw)
                 if msg is not None:
                     with self._lock:
                         self._log.add(msg)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
+        finally:
+            self._note_end(proc)
+
+    def _note_end(self, proc) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+        reason = self.watch.ended(proc)
+        if reason and self.error is None:
+            self.error = reason
+
+    def _settle(self) -> None:
+        """Account for a child that ended since the last poll, then clear away what it left."""
+        if self._proc is not None:
+            self._note_end(self._proc)
+            self._stop_locked()
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -217,15 +246,11 @@ class AcarsDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        # Marked first, so the reader seeing the output end never reports our stop as a death.
+        self.watch.stopping()
         proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.error = "acarsdec did not stop; the dongle may still be held"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        if proc is not None and not stop_process(proc):
+            self.error = "acarsdec survived kill; the dongle may still be held"
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None

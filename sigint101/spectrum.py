@@ -10,6 +10,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 
+from .childproc import spawn
 from .hardware import (
     RTL_POWER,
     DeviceSelectionError,
@@ -322,7 +323,9 @@ def _popen(cmd):
     a pipe would very likely survive; a file removes the question, and costs nothing.
     """
     scratch = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=scratch, text=True)
+    # spawn() gives rtl_power its own session and ties it to the console's life, so a console
+    # killed outright does not leave it holding the dongle.
+    proc = spawn(cmd, stdout=subprocess.PIPE, stderr=scratch, text=True)
     # Popen leaves .stderr as None when handed a file, so the handle is reattached
     # here: it gives the reader one place to look, real process or injected fake.
     proc.stderr = scratch
