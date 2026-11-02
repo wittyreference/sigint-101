@@ -749,6 +749,27 @@ def test_exam_sim_review_reveals_the_answer_and_points_to_results_on_the_last():
     assert "See results" in html
 
 
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_a_figure_question_shows_its_diagram_behind_a_tap(template):
+    # T6C02 refers to Figure T-1: the card offers a tap that opens the real diagram full-screen
+    # (no JavaScript: a :target overlay), and never the old "not shown here yet" apology.
+    q = exam.load_pool().get("T6C02")
+    html = _render(template, **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False,
+        position=1, total=35, score=0, answered=0, pass_mark=26))
+    assert 'href="#figure-T-1"' in html
+    assert 'id="figure-T-1"' in html
+    assert 'src="/static/exam/T-1.jpg"' in html
+    assert "not shown here yet" not in html
+
+
+def test_a_question_without_a_figure_offers_no_diagram():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam.html", **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False))
+    assert "exam-figure" not in html
+
+
 def test_exam_results_shows_verdict_passline_and_subelement_breakdown():
     result = exam.ExamResult(total=35, correct=30, passed=True, detail=())
     breakdown = [{"subelement": "T1", "correct": 6, "total": 6},
