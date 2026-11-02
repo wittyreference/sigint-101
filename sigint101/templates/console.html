@@ -673,14 +673,21 @@
             <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
             {# The scored predict gate: the explain opens on what the learner committed against the
                pack's answer and its one-line verdict. Explain only renders after a commit, so the
-               answer never reaches the page early; an unscored pack shows no header. #}
-            {% if stage == 'explain' and prediction_committed %}{% set scored = lesson.score(committed_choice) %}{% if scored %}
-            <div class="verdict verdict--{{ 'hit' if scored.correct else 'miss' }}">
-              <div class="verdict__line"><span class="verdict__tag">{{ 'RIGHT' if scored.correct else 'MISSED' }}</span> You said <b>{{ scored.said }}</b> &middot; Answer: <b>{{ scored.answer|join(' or ') }}</b></div>
-              <div class="verdict__why">{{ scored.verdict }}</div>
+               answer never reaches the page early; an unscored pack shows no header. The verdict
+               rides at the top of the scrolling reading, not above it, so a long concept eyebrow can
+               never squeeze the reading to nothing at 800x480. #}
+            {% set scored = lesson.score(committed_choice) if (stage == 'explain' and prediction_committed) else none %}
+            {% if scored %}
+            <div class="stage-panel__body">
+              <div class="verdict verdict--{{ 'hit' if scored.correct else 'miss' }}">
+                <div class="verdict__line"><span class="verdict__tag">{{ 'RIGHT' if scored.correct else 'MISSED' }}</span> You said <b>{{ scored.said }}</b> &middot; Answer: <b>{{ scored.answer|join(' or ') }}</b></div>
+                <div class="verdict__why">{{ scored.verdict }}</div>
+              </div>
+              <p class="stage-panel__reading">{{ lesson.stages[stage] }}</p>
             </div>
-            {% endif %}{% endif %}
+            {% else %}
             <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            {% endif %}
           {% endif %}
 
           {# A real instrument stage carries Next on its tune strip; every other stage (the text

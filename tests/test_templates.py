@@ -327,6 +327,10 @@ def test_explain_header_says_what_you_said_and_the_answer():
     assert CHOICES[1]["label"] in block and CHOICES[2]["label"] in block
     assert "VERDICT_marker" in block
     assert "verdict--miss" in block
+    # The header rides at the top of the explain's scrolling body, so a long eyebrow can never
+    # squeeze the reading itself to nothing on the fixed 800x480 panel.
+    assert re.search(r'<div class="stage-panel__body">\s*<div class="verdict', html)
+    assert "EXPLAIN_SCORED_marker" in html
 
 
 def test_explain_header_marks_a_right_call():

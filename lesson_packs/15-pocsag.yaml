@@ -6,11 +6,9 @@ slug: pocsag
 title: "Not Meant for You"
 type: intro
 concept: >-
-  Pagers still carry real traffic — hospitals, plant operators, emergency crews — and POCSAG (in
-  the US often its cousin FLEX) sends each page unencrypted: a cap code addressing one pager, then
-  text or digits. On the commercial paging band the words are not yours: federal law treats a
-  carrier's pages as private, so this console decodes the framing live and withholds the text.
-  Can versus may, in one lesson.
+  POCSAG (in the US often its cousin FLEX) sends each page unencrypted: a cap code, then text or
+  digits. On the commercial paging band federal law puts the words out of reach, so this console
+  shows the framing live and withholds the text. Can versus may.
 requires_tx: false
 hardware: [rtl-sdr]
 panels: [pocsag]

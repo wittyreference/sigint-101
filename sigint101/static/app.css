@@ -766,18 +766,21 @@ body {
 }
 
 /* ===== Explain verdict (the scored predict gate) ========================= */
-/* What the learner committed against the answer, then the one-line verdict, above the reading.
-   flex:none so the explain body below keeps the scroll; the tag WORD carries hit/miss, so
-   red-night (one hue) still reads it, with brightness (--ok vs --warn) as the second cue. */
+/* What the learner committed against the answer, then the one-line verdict, at the top of the
+   explain's scrolling body (so it is the first thing read, and never squeezes the reading). The
+   tag WORD carries hit/miss, so red-night (one hue) still reads it, with brightness (--ok vs
+   --warn) as the second cue. */
 .verdict {
-  flex: none;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  margin-bottom: 12px;
   padding: 8px 12px;
   border: 2px solid var(--warn);
   background: var(--surface-2);
-  max-width: 62ch;
+}
+.stage-panel__reading {
+  margin: 0;
 }
 .verdict--hit {
   border-color: var(--ok);
