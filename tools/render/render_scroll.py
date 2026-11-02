@@ -26,10 +26,34 @@ def page_ws():
     ]
 
 
+def connect():
+    """A CDP client on the browser's one page, attached through the browser endpoint, focused.
+
+    Headless Chromium throttles a tab it thinks is in the background until commands stall, so
+    the page is brought to the front with focus emulation on, and a missing page is opened in
+    a new window rather than as a background tab. Launch Chromium with --remote-allow-origins=*.
+    """
+    version = json.load(urllib.request.urlopen(f"http://{HOST}:{PORT}/json/version"))
+    c = CDP(version["webSocketDebuggerUrl"])
+    targets = c.call("Target.getTargets")["targetInfos"]
+    page = next((t for t in targets if t["type"] == "page"), None)
+    if page:
+        target = page["targetId"]
+    else:
+        opened = c.call("Target.createTarget", {"url": "about:blank", "newWindow": True})
+        target = opened["targetId"]
+    attached = c.call("Target.attachToTarget", {"targetId": target, "flatten": True})
+    c.session = attached["sessionId"]
+    c.call("Page.bringToFront")
+    c.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+    return c
+
+
 class CDP:
     def __init__(self, ws):
         path = ws.split(f"{HOST}:{PORT}", 1)[1]
-        self.s = socket.create_connection((HOST, PORT))
+        # A silent DevTools socket must fail the check, not hang it forever.
+        self.s = socket.create_connection((HOST, PORT), timeout=30)
         k = base64.b64encode(os.urandom(16)).decode()
         self.s.sendall(
             (
@@ -43,10 +67,14 @@ class CDP:
             b += self.s.recv(4096)
         self.buf = b.split(b"\r\n\r\n", 1)[1]
         self.id = 0
+        self.session = None
 
     def send(self, m, p=None):
         self.id += 1
-        pl = json.dumps({"id": self.id, "method": m, "params": p or {}}).encode()
+        msg = {"id": self.id, "method": m, "params": p or {}}
+        if self.session:
+            msg["sessionId"] = self.session
+        pl = json.dumps(msg).encode()
         h = bytearray([0x81])
         n = len(pl)
         mask = os.urandom(4)
@@ -133,7 +161,7 @@ HOME = r"""(function(){
 
 
 def main():
-    c = CDP(page_ws())
+    c = connect()
     c.call("Page.enable")
     c.call("Network.enable")
     c.call("Network.setCacheDisabled", {"cacheDisabled": True})

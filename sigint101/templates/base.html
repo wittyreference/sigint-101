@@ -29,15 +29,17 @@
 
         <span class="readout readout--snr" title="Signal-to-noise ratio">
           <span class="readout__label">SNR</span>
-          <span class="readout__value">{% if snr_db is none %}&mdash;{% else %}{{ snr_db }} dB{% endif %}</span>
+          <span class="readout__value">{% if snr_db is not defined or snr_db is none %}&mdash;{% else %}{{ snr_db }} dB{% endif %}</span>
         </span>
 
+        {# A reading the console does not have is shown as unknown, never as a made-up number. #}
+        {% set batt_known = battery_pct is defined and battery_pct is not none %}
         <span class="readout readout--batt batt" title="Battery">
           <span class="batt__glyph">
-            <span class="batt__fill" style="width: {{ battery_pct|default(100) }}%"></span>
+            <span class="batt__fill" style="width: {{ battery_pct if batt_known else 0 }}%"></span>
           </span>
           {% if battery_charging %}<span class="batt__bolt" aria-hidden="true">&#9889;</span>{% endif %}
-          <span class="readout__value">{{ battery_pct|default(100) }}%</span>
+          <span class="readout__value">{% if batt_known %}{{ battery_pct }}%{% else %}&mdash;{% endif %}</span>
         </span>
 
         <button class="btn-theme" type="button" data-theme-toggle

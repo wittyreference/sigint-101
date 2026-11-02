@@ -7,7 +7,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_scroll import CDP, page_ws  # noqa: E402
+from render_scroll import connect  # noqa: E402
 
 URL = sys.argv[1]
 THEME = sys.argv[2] if len(sys.argv) > 2 else "dark"
@@ -37,7 +37,7 @@ def shot(c, path):
 
 
 def main():
-    c = CDP(page_ws())
+    c = connect()
     c.call("Page.enable")
     c.call("Network.enable")
     c.call("Network.setCacheDisabled", {"cacheDisabled": True})

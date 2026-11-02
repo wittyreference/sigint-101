@@ -758,6 +758,9 @@ body {
   height: 100%;
   /* CSS fallback so an empty canvas still reads as a spectrogram frame */
   background: var(--wf-bg);
+  /* One canvas pixel per measured bin, stretched nearest-neighbour: smoothing would blend
+     neighbouring bins into values no bin measured (the never-invent-signal invariant). */
+  image-rendering: pixelated;
 }
 
 /* The instrument's main row: the waterfall fills it; a declared panel (the gain meter) rides
