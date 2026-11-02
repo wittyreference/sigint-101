@@ -58,9 +58,9 @@ stages:
 # learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
-  - {key: bigger, label: Bigger}
-  - {key: same, label: About the same}
   - {key: smaller, label: Smaller}
+  - {key: same, label: About the same}
+  - {key: bigger, label: Bigger}
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: [bigger]

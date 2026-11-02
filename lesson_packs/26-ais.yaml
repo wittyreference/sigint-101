@@ -67,9 +67,9 @@ stages:
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:
-  - {key: "mmsi", label: "A shared ID (MMSI)"}
   - {key: "timing", label: "Timing — same instant"}
   - {key: "onemsg", label: "One message holds both"}
+  - {key: "mmsi", label: "A shared ID (MMSI)"}
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: ["mmsi"]

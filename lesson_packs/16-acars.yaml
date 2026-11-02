@@ -69,9 +69,9 @@ stages:
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
 # (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
 choices:
-  - {key: text, label: "Readable airline text"}
   - {key: encrypted, label: "Encrypted ops data"}
   - {key: telemetry, label: "Only raw numbers"}
+  - {key: text, label: "Readable airline text"}
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: [text]

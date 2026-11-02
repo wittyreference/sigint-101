@@ -40,9 +40,9 @@ stages:
 # what the learner reads. Keys are quoted so a YAML-boolean word stays text, never True/False. Labels
 # are one short phrase each (hard 800x480 console-fit).
 choices:
-  - {key: "image", label: "Yes, 99.9"}
   - {key: "unique", label: "No, only 100.1"}
   - {key: "harmonic", label: "Yes, 200.1"}
+  - {key: "image", label: "Yes, 99.9"}
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: ["image"]
