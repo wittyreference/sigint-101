@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
+from sigint101.pocsag import DEFAULT_POCSAG_HZ
 
 PACK = Path(__file__).resolve().parent.parent / "lesson_packs" / "15-pocsag.yaml"
 
@@ -38,6 +39,11 @@ def test_m15_tunes_to_the_pager_band():
     lesson = load_lesson_file(PACK)
     assert lesson.tune is not None, "M15 must name the pager band"
     assert 928_000_000 <= lesson.tune["center_hz"] <= 932_000_000
+
+
+def test_m15_dial_reads_the_channel_the_decoder_listens_on():
+    # The dial shows the pack's band; the decoder runs DEFAULT_POCSAG_HZ. They must agree.
+    assert load_lesson_file(PACK).tune["center_hz"] == DEFAULT_POCSAG_HZ
 
 
 def test_m15_predict_choices_are_well_formed_string_key_label():

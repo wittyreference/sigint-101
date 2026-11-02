@@ -15,7 +15,7 @@ requires_tx: false
 hardware: [rtl-sdr]
 panels: [pocsag]
 tune:
-  center_hz: 929600000
+  center_hz: 929612500
   span_hz: 200000
   step_hz: 100000
 

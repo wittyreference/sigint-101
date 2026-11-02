@@ -601,26 +601,29 @@ def _pocsag_intro_lesson():
         "id": 15, "slug": "pocsag", "title": "Not Meant for You", "type": "intro",
         "concept": "POCSAG sends pager messages in the clear, addressed to one cap code",
         "panels": ["pocsag"], "hardware": ["rtl-sdr"],
-        "tune": {"center_hz": 929_600_000, "span_hz": 200_000},
+        "tune": {"center_hz": 929_612_500, "span_hz": 200_000},
         "stages": {"frame": "f", "demo": "DEMO watch the pages arrive", "try": "t",
                    "predict": "p", "observe": "o", "explain": "e"},
     })
 
 
 def test_a_pocsag_lesson_shows_the_page_log_not_a_waterfall():
-    html = _console(lesson=_pocsag_intro_lesson(), current_stage="demo", tuned_hz=929_600_000)
+    html = _console(lesson=_pocsag_intro_lesson(), current_stage="demo", tuned_hz=929_612_500)
     assert "data-pocsag-panel" in html
     assert "data-pocsag-list" in html
     assert "multimon-ng" in html
-    assert "929.6" in html
+    assert "929.6125" in html
+    # MC's call for M15: framing live, text hidden; the instrument says so on its dial.
+    assert "text withheld" in html
     assert "canvas class=\"waterfall\"" not in html
     assert "data-aprs-panel" not in html
 
 
 def test_a_pocsag_lessons_predict_frame_seals_the_log():
     html = _console(lesson=_pocsag_intro_lesson(), current_stage="predict",
-                    prediction_committed=False, tuned_hz=929_600_000)
+                    prediction_committed=False, tuned_hz=929_612_500)
     assert "PAGES HIDDEN" in html
+    assert "POCSAG on 929.6125 MHz" in html
     assert "waterfall-wrap--frozen" not in html
 
 
