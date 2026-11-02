@@ -12,11 +12,10 @@
     Score so far: {{ score }} right of {{ answered }} answered &middot; pass at {{ pass_mark }}/{{ total }}
   </div>
 
-  <h1 class="exam__question">{{ question.question }}</h1>
-
-  {% if question.figure %}
-    <p class="exam__figure-note">Refers to diagram {{ question.figure }} &mdash; not shown here yet.</p>
-  {% endif %}
+  <div class="exam__ask">
+    <h1 class="exam__question">{{ question.question }}</h1>
+    {% include "_exam_figure.html" %}
+  </div>
 
   {% if not reviewed %}
     {# ---- Answer: tap a choice, then commit. No typing (keyboard-free gate). ---- #}

@@ -117,3 +117,16 @@ capable instrument, not a locked toy.
   "proceeding next" between sub-steps. MC resumes from STATUS, not from mid-session checkpoints, so a
   milestone report belongs at the END of the build or on a real blocker, never at every phase
   boundary. This sharpens the autonomy rule above. (Session 2026-10-30: "Quit stopping bro".)
+- **Render-verify a UI change at 800x480 before calling it fixed.** Logic is TDD'd (pytest/node),
+  but layout/scroll/fit is proven only by actually rendering it — a backend-only check (the route
+  works, the button is in the HTML) is NOT verification of a UI fix. Use the headless-chromium
+  render-assert (scratchpad `flipper/render_scroll.py`; wire it into the repo) to measure
+  scrollability, clipping and button position. (Session 2026-11-01: shipped an "Explain scroll fix"
+  verified only on the backend; it was still broken on the panel.)
+- **Reading/reveal stages and the home grid SCROLL; interactive controls still fit without
+  scrolling — refines the trim-to-fit rule above.** Instrument/predict stages keep trim-to-fit (the
+  Next/Commit button rides the fixed tune strip and must show without scrolling). But a long reading
+  stage (frame/explain) and the home tile grid now scroll their own body with the action button
+  pinned (`.stage-foot`) and keyboard scroll (`static/scroll-keys.js`) — do NOT trim a reveal to
+  nothing or rip that scroll out. And lessons must be COMPLETABLE: the last stage carries a
+  "Complete lesson" button wired to `POST /api/complete`. (Session 2026-11-01, MC.)

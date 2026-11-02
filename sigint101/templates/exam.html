@@ -10,11 +10,10 @@
 
   <a class="exam__sim-link" href="/exam/sim">Take the 35-question practice exam &rarr;</a>
 
-  <h1 class="exam__question">{{ question.question }}</h1>
-
-  {% if question.figure %}
-    <p class="exam__figure-note">Refers to diagram {{ question.figure }} &mdash; not shown here yet.</p>
-  {% endif %}
+  <div class="exam__ask">
+    <h1 class="exam__question">{{ question.question }}</h1>
+    {% include "_exam_figure.html" %}
+  </div>
 
   {% if not reviewed %}
     {# ---- Answer card: tap a choice, then commit. No typing (keyboard-free gate). ---- #}

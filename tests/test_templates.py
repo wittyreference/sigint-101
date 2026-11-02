@@ -102,6 +102,34 @@ def _status(**overrides):
     return data
 
 
+def test_status_bar_shows_a_dash_not_a_number_when_nothing_is_measured():
+    # No battery gauge and no live SNR reach the status bar: it must say "unknown", never invent
+    # a reading (the no-mock rule). A default of 100% read as a full battery on every screen.
+    ctx = _status()
+    del ctx["battery_pct"], ctx["snr_db"]
+    html = _render("base.html", **ctx)
+    batt = re.search(r'readout--batt.*?readout__value">(.*?)</span>', html, re.S).group(1)
+    snr = re.search(r'readout--snr.*?readout__value">(.*?)</span>', html, re.S).group(1)
+    assert "100%" not in html
+    assert batt == "&mdash;"
+    assert snr == "&mdash;"
+
+
+def test_status_bar_shows_a_real_battery_reading_when_one_is_given():
+    html = _render("base.html", **_status(battery_pct=82, snr_db=14))
+    assert "82%" in html
+    assert "14 dB" in html
+
+
+def test_the_waterfall_canvas_is_scaled_without_smoothing():
+    # The canvas holds one pixel per rtl_power bin; the browser stretches it to the panel width.
+    # Smoothed scaling would blend neighbouring bins into colours no bin measured, i.e. invented
+    # signal, so the stretch must be nearest-neighbour.
+    css = (TEMPLATES_DIR.parent / "static" / "app.css").read_text()
+    rule = re.search(r"\n\.waterfall \{(.*?)\}", css, re.S).group(1)
+    assert "image-rendering: pixelated" in rule
+
+
 def _env():
     return Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
@@ -747,6 +775,27 @@ def test_exam_sim_review_reveals_the_answer_and_points_to_results_on_the_last():
     assert "exam-chip--correct" in html
     assert 'href="/exam/sim/results"' in html
     assert "See results" in html
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_a_figure_question_shows_its_diagram_behind_a_tap(template):
+    # T6C02 refers to Figure T-1: the card offers a tap that opens the real diagram full-screen
+    # (no JavaScript: a :target overlay), and never the old "not shown here yet" apology.
+    q = exam.load_pool().get("T6C02")
+    html = _render(template, **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False,
+        position=1, total=35, score=0, answered=0, pass_mark=26))
+    assert 'href="#figure-T-1"' in html
+    assert 'id="figure-T-1"' in html
+    assert 'src="/static/exam/T-1.jpg"' in html
+    assert "not shown here yet" not in html
+
+
+def test_a_question_without_a_figure_offers_no_diagram():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam.html", **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False))
+    assert "exam-figure" not in html
 
 
 def test_exam_results_shows_verdict_passline_and_subelement_breakdown():
