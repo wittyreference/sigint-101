@@ -330,6 +330,16 @@ def test_ais_launches_rtl_ais_through_spawn(monkeypatch):
         feed.terminate()
 
 
+def test_the_sweep_launches_rtl_power_through_spawn(monkeypatch):
+    # rtl_power holds the dongle like any decoder: own session, and gone if the console is.
+    from sigint101 import spectrum
+    seen = _record_spawns(monkeypatch, spectrum)
+    cmd = ["rtl_power", "-f", "88000000:108000000:125000", "-i", "1", "-d", "0"]
+    proc = spectrum._popen(cmd)
+    assert seen[0].args == cmd
+    assert proc.stderr is not None          # its stderr still lands where the sweeper reads it
+
+
 def test_adsb_launch_failure_stops_dump1090_and_says_so(monkeypatch):
     # dump1090 exits before opening its SBS port: the launcher stops it and refuses, and the
     # argv it tried is the real one.
