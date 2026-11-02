@@ -2244,6 +2244,19 @@ button.rail-pip:disabled {
   color: var(--accent);
   text-shadow: var(--glow);
 }
+/* The exam and operator bars share one row under the grid, half the width each, so the grid
+   keeps the height for two full rows of unit tiles. Each bar keeps its 76px touch height. */
+.home-tracks {
+  flex: none;
+  display: flex;
+  gap: 12px;
+  margin: 0 var(--gutter) 14px;
+}
+.home-tracks > .exam-cta {
+  flex: 1 1 0;
+  min-width: 0;
+  margin: 0;
+}
 
 .exam__sim-link {
   text-decoration: none;

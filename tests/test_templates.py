@@ -1036,6 +1036,16 @@ def test_home_offers_the_licence_exam_trainer_apart_from_the_units():
     assert 'class="tile exam-cta"' not in html
 
 
+def test_home_puts_the_exam_and_operator_bars_side_by_side_in_one_row():
+    # MC's call 2026-11-02 ("Bars side by side"): the two cross-cutting tracks share one row under
+    # the grid, so the unit tiles keep two full rows on the 800x480 screen instead of one.
+    html = _render("home.html", **_status(), tiles=UNITS)
+    row = re.search(r'<div class="home-tracks">(.*?</a>.*?</a>)\s*</div>', html, re.S)
+    assert row, "the two track bars sit in one .home-tracks row"
+    inside = row.group(1)
+    assert 'href="/exam"' in inside and 'href="/operate"' in inside
+
+
 def test_every_screen_has_no_horizontal_overflow_affordance():
     # Guard against a stray inline width that would break the 800x480 no-scroll rule;
     # this is a smoke check that the templates render without raising.
