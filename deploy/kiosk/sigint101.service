@@ -1,0 +1,14 @@
+# ABOUTME: systemd user unit that keeps the SIGINT 101 lesson server up on 127.0.0.1:8008.
+# ABOUTME: Lingering lets it start at boot without a login; the kiosk browser only ever connects.
+[Unit]
+Description=SIGINT 101 lesson server
+After=network.target
+
+[Service]
+WorkingDirectory=%h/sigint-101
+ExecStart=%h/sigint-101/.venv/bin/uvicorn sigint101.app:app --host 127.0.0.1 --port 8008
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

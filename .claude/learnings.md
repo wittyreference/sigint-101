@@ -361,3 +361,23 @@ render. **Unit 5 Decode (M13-M16) is complete; 7 SDR-exclusive consumers now sha
 `claim()` helper refactor (flagged M14) is overdue, still gated on MC.**
 **How to apply.** Prefer a decoder's own test asset + its file-input mode for real fixtures and a real
 populated render; inject it through the existing `*_factory` seam rather than changing production code.
+
+## 2026-11-02: kiosk autostart on nomad-b — two traps a reboot test would have hidden
+**Finding.** `deploy/install.sh` makes the panel self-starting. The server is a systemd *user*
+unit with linger, and tty1 autologin runs `~/.profile`, which execs `~/.local/bin/sigint101-kiosk`
+(labwc plus a looping kiosk Chromium). Two traps turned up on the first real run:
+- **Chromium asks the GNOME keyring for a password store.** On a fresh profile that puts a
+  "Choose password for new keyring" dialog over the whole panel, and nobody can dismiss it
+  without a keyboard. `--password-store=basic` stops it. Only a `grim` screenshot of the real
+  panel showed this; the process list said "chromium running".
+- **`systemctl restart getty@tty1` does not end the old session.** logind leaves session
+  processes alive, so you get two labwc instances fighting over DRM, a dead `wayland-0`, and a
+  `grim` that hangs.
+**How to apply.**
+- To restart the kiosk, kill the running `labwc` by PID. The login shell exits and autologin
+  respawns a single fresh kiosk on its own. Never also restart getty.
+- Screenshot the real panel with
+  `XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-N grim` (the live socket's number
+  climbs after restarts).
+- The server now owns port 8008: `systemctl --user stop sigint101` before running a manual
+  server there.
