@@ -336,7 +336,8 @@
   function updateGainMeter(p) {
     var m = p.meter;
     if (!m || !p.reading) return;
-    var g = gainMeterGeometry(p.reading.floor, p.reading.peak);
+    // 14 dB of headroom above the peak leaves room for the PEAK label, which sits above its line.
+    var g = gainMeterGeometry(p.reading.floor, p.reading.peak, 60, 14);
     if (m.empty) m.empty.hidden = true;
     [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = false; });
     if (m.peak) m.peak.style.top = g.peakTop + "%";

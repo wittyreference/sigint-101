@@ -1296,6 +1296,12 @@ button.rail-pip:disabled {
 }
 .gain-meter__mark--peak { color: var(--fg); text-shadow: var(--glow); }
 .gain-meter__mark--floor { color: var(--fg-dim); }
+/* Each label sits outside the band it bounds — PEAK above its line, FLOOR below — so neither
+   lands on the SNR reading inside the band, however narrow the real gap is. */
+.gain-meter__mark--peak { transform: translateY(-100%); }
+.gain-meter__mark--peak::before { top: 100%; }
+.gain-meter__mark--floor { transform: none; }
+.gain-meter__mark--floor::before { top: 0; }
 .gain-meter__tag { font-size: 11px; letter-spacing: 0.1em; }
 .gain-meter__gap {
   position: absolute;
@@ -1305,7 +1311,7 @@ button.rail-pip:disabled {
   border-top: 1px dashed var(--accent);
   border-bottom: 1px dashed var(--accent);
   display: flex;
-  flex-direction: column;
+  gap: 6px;
   align-items: center;
   justify-content: center;
   color: var(--accent);
