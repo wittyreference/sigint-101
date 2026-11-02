@@ -11,6 +11,13 @@ concept: >-
 requires_tx: false
 hardware: [rtl-sdr]
 panels: []
+# The instrument sits on the aircraft band the demo and try stages work on. ADS-B replies are about
+# 2 MHz wide, so 31.25 kHz bins (64 across the span) show that hump at its real width.
+tune:
+  center_hz: 1090000000
+  span_hz: 2000000
+  step_hz: 1000000
+  bin_hz: 31250
 
 stages:
   frame: >-

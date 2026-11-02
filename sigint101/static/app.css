@@ -1435,7 +1435,16 @@ body {
   margin-left: 6px;
 }
 
+/* The dial before the radio has confirmed a frequency: the lesson's target, visibly not yet tuned. */
+.tune__freq--pending {
+  color: var(--fg-mute);
+  text-shadow: none;
+}
+
 .tune__caption {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 15px;
   letter-spacing: 0.02em;
   text-transform: uppercase;

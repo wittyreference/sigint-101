@@ -1686,6 +1686,27 @@ def test_tune_refuses_an_out_of_range_span_with_the_reason(tmp_path):
     assert "tunes" in resp.json()["reason"]  # "this radio tunes 24-1766 MHz ..."
 
 
+def test_tune_refuses_a_span_that_asks_for_more_bins_than_a_row_holds(tmp_path):
+    # 2 MHz at 100 Hz asks rtl_power for 20,000 bins every row; refused before any radio is touched.
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.post("/api/tune",
+                           json={"low": 95_000_000, "high": 97_000_000, "bin_size": 100})
+    assert resp.status_code == 400
+    assert "bins" in resp.json()["reason"]
+
+
+def test_tune_reports_the_bin_size_it_applied(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.post("/api/tune", json={"low": 1_089_000_000, "high": 1_091_000_000,
+                                              "bin_size": 31_250})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.json()["bin_size"] == 31_250
+    assert (spectrum["freq_low"], spectrum["freq_high"], spectrum["bin_size"]) == (
+        1_089_000_000, 1_091_000_000, 31_250)
+
+
 def test_tune_without_a_radio_is_503(tmp_path):
     with _client(tmp_path, probe=_absent) as client:
         resp = client.post("/api/tune", json={"low": 100_000_000, "high": 104_000_000})

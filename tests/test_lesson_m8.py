@@ -45,3 +45,15 @@ def test_m8_predict_choices_are_well_formed_string_key_label():
         label = choice.get("label")
         assert isinstance(key, str) and key, f"choice {choice!r} needs a non-empty string key"
         assert isinstance(label, str) and label, f"choice {choice!r} needs a non-empty string label"
+
+
+def test_m8_puts_the_instrument_on_the_airband():
+    # The AM half of the lesson is a controller's carrier somewhere in 118-137 MHz; without a tune
+    # band the sweep stays on FM broadcast and there is no AM line to find.
+    tune = load_lesson_file(PACK).tune
+    assert tune is not None
+    assert tune["low_hz"] <= 118_000_000 and tune["high_hz"] >= 137_000_000
+    # An AM voice channel is under 10 kHz wide: a bin of at most 50 kHz keeps it one thin line,
+    # and the row stays within what the waterfall can show one bin per pixel.
+    assert tune["bin_hz"] and tune["bin_hz"] <= 50_000
+    assert tune["span_hz"] // tune["bin_hz"] <= 760

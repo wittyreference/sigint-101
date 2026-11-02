@@ -146,7 +146,8 @@ def _theme_tokens(theme):
     """Every custom property a theme defines, merged across its .app[data-theme] blocks."""
     css = APP_CSS.read_text()
     tokens = {}
-    for block in re.findall(r'\.app\[data-theme="' + re.escape(theme) + r'"\] \{(.*?)\}', css, re.S):
+    block_re = r'\.app\[data-theme="' + re.escape(theme) + r'"\] \{(.*?)\}'
+    for block in re.findall(block_re, css, re.S):
         tokens.update(dict(re.findall(r"(--[\w-]+):\s*([^;]+);", block)))
     return tokens
 
@@ -183,7 +184,7 @@ def test_the_no_radio_reason_is_large_and_readable_in_every_theme():
 
 
 def test_honest_empty_states_are_large_and_readable_in_every_theme():
-    # "listening…" / "no radio" is the honest state a learner sees most; it must be read at a glance.
+    # "listening…" / "no radio" is the honest state a learner sees most: read it at a glance.
     for selector in (".decoder__empty", ".gain-meter__empty"):
         rule = _css_rule(selector)
         assert _font_px(rule) >= 18, selector
@@ -762,6 +763,60 @@ def test_an_untuned_lesson_carries_no_band_to_retune_to():
     html = _console(lesson=_consolidation_lesson(), current_stage="operate",
                     prediction_committed=True)
     assert "data-tune-low" not in html
+
+
+def _live_instrument(html):
+    """The live (operate) instrument's markup: its waterfall wrap and tune strip."""
+    return re.search(r'data-stage="operate".*?<div class="instrument">(.*?)'
+                     r'<p class="stage-panel__body">', html, re.S).group(1)
+
+
+def test_a_tuned_lesson_names_its_bin_size_and_step_for_the_live_tune():
+    lesson = parse_lesson({
+        "id": 6, "slug": "res", "title": "Res", "concept": "c", "hardware": ["rtlsdr"],
+        "tune": {"center_hz": 1_090_000_000, "span_hz": 2_000_000, "step_hz": 1_000_000,
+                 "bin_hz": 31_250},
+        "stages": {"predict": "p", "operate": "o", "observe": "ob", "explain": "e"},
+    })
+    html = _live_instrument(_console(
+        lesson=lesson, current_stage="operate", prediction_committed=True,
+        tuned_hz=lesson.tune["center_hz"], step_hz=lesson.tune["step_hz"],
+        tune_band=lesson.tune))
+    assert 'data-tune-bin="31250"' in html
+    assert 'data-step-hz="1000000"' in html
+
+
+def test_the_tune_strip_steps_by_the_default_when_a_lesson_names_none():
+    html = _live_instrument(_console(lesson=_consolidation_lesson(), current_stage="operate",
+                                     prediction_committed=True))
+    assert 'data-step-hz="100000"' in html
+    assert "data-tune-bin" not in html
+
+
+def test_the_dial_is_not_shown_as_tuned_until_the_radio_confirms_it():
+    # The readout only reads as tuned once the server has confirmed a span; until then it is the
+    # lesson's target, marked pending, so a dead radio never looks tuned.
+    html = _live_instrument(_console(current_stage="operate", prediction_committed=True))
+    assert "tune__freq--pending" in html
+
+
+def test_the_instrument_axis_never_labels_a_span_nobody_tuned():
+    # The default sweep is 88-108 MHz; an axis drawn as dial +/- 1.3 MHz labelled a span that was
+    # never swept. Until the radio reports its span the axis carries no numbers.
+    html = _live_instrument(_console(lesson=_consolidation_lesson(), current_stage="operate",
+                                     prediction_committed=True))
+    axis = re.search(r'class="waterfall__axis"[^>]*>(.*?)</div>', html, re.S).group(1)
+    assert not re.search(r"\d", axis)
+
+
+def test_a_tuned_lesson_axis_starts_on_its_own_band_edges():
+    lesson = _tuned_lesson()
+    html = _live_instrument(_console(
+        lesson=lesson, current_stage="operate", prediction_committed=True,
+        tuned_hz=lesson.tune["center_hz"], step_hz=lesson.tune["step_hz"],
+        tune_band=lesson.tune))
+    axis = re.search(r'class="waterfall__axis"[^>]*>(.*?)</div>', html, re.S).group(1)
+    assert "432.9" in axis and "434.9" in axis
 
 
 # --- the home / tile screen ---------------------------------------------------

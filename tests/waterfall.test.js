@@ -113,3 +113,130 @@ test("a missing or partial band pair yields null (no tune is sent)", () => {
   assert.equal(panel.parseTuneBand("", ""), null);
   assert.equal(panel.parseTuneBand("notanumber", "434920000"), null);
 });
+
+test("a band that names its bin size asks the sweep for that bin", () => {
+  assert.deepEqual(panel.parseTuneBand("1089000000", "1091000000", "31250"),
+                   { low: 1089000000, high: 1091000000, bin_size: 31250 });
+  // No bin (or a malformed one) leaves the request to the sweep's default bin.
+  assert.deepEqual(panel.parseTuneBand("1089000000", "1091000000", null),
+                   { low: 1089000000, high: 1091000000 });
+  assert.deepEqual(panel.parseTuneBand("1089000000", "1091000000", "wide"),
+                   { low: 1089000000, high: 1091000000 });
+});
+
+// --- real tuning: a tap maps to the frequency of the bin under the finger ------------------------
+
+test("a tap maps to the true frequency of the bin under it, across the live span", () => {
+  // 256 FM bins of 78125 Hz from 88 MHz: the middle of the canvas is bin 128, at 98.0 MHz.
+  assert.equal(panel.tapToHz(0.5, 88e6, 108e6, 256), 98e6);
+  // The left edge is the first bin; the far right is the last bin, a step short of the high edge.
+  assert.equal(panel.tapToHz(0, 88e6, 108e6, 256), 88e6);
+  assert.equal(panel.tapToHz(0.9999, 88e6, 108e6, 256), 108e6 - 78125);
+  // Anywhere inside a bin's pixel column is that bin.
+  assert.equal(panel.tapToHz(10.6 / 256, 88e6, 108e6, 256), 88e6 + 10 * 78125);
+});
+
+test("a tap maps the span itself, not the dial +/- a fixed width", () => {
+  // The old tap mapped onto dial +/- 1.3 MHz whatever the span. A 2 MHz span has its own edges.
+  assert.equal(panel.tapToHz(0.25, 1089e6, 1091e6, 64), 1089.5e6);
+});
+
+test("before any row is drawn a tap falls back to the span's own edges", () => {
+  assert.equal(panel.tapToHz(0.5, 88e6, 108e6, 0), 98e6);
+});
+
+test("a tap off the canvas edge is held to the span", () => {
+  assert.equal(panel.tapToHz(-0.2, 88e6, 108e6, 256), 88e6);
+  assert.equal(panel.tapToHz(1.3, 88e6, 108e6, 256), 108e6 - 78125);
+});
+
+test("a retune keeps the span's width and centres it on the target", () => {
+  assert.deepEqual(panel.spanAround(98.3e6, 20e6), { low: 88.3e6, high: 108.3e6 });
+  assert.deepEqual(panel.spanAround(91515625, 20e6), { low: 81515625, high: 101515625 });
+});
+
+test("the dial reads MHz to the kHz", () => {
+  assert.equal(panel.formatTuneMHz(98e6), "98.000");
+  assert.equal(panel.formatTuneMHz(91515625), "91.516");
+});
+
+// --- the tuner coalesces taps into one /api/tune request at a time ------------------------------
+
+function harness(t, confirmed) {
+  // Drives makeTuner with node's fake clock. `send` records each request and hands back a promise
+  // the test settles, standing in for the POST at the console boundary.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sent = [];
+  const results = [];
+  const pending = [];
+  let resolveSend = null;
+  const state = { span: confirmed };
+  const tuner = panel.makeTuner({
+    stepHz: 100000,
+    delayMs: 400,
+    confirmed: () => state.span,
+    send: (req) => { sent.push(req); return new Promise((res) => { resolveSend = res; }); },
+    onPending: (hz) => pending.push(hz),
+    onResult: (res) => {
+      results.push(res);
+      if (res.ok) state.span = { low: res.low, high: res.high, binSize: res.bin_size };
+    },
+  });
+  const settle = async (res) => { resolveSend(res); await new Promise((r) => setImmediate(r)); };
+  return { tuner, sent, results, pending, settle, state };
+}
+
+const FM = { low: 88e6, high: 108e6, binSize: 125000 };
+
+test("three quick + taps become one retune three steps up", (t) => {
+  const h = harness(t, FM);
+  h.tuner.step(1); h.tuner.step(1); h.tuner.step(1);
+  t.mock.timers.tick(399);
+  assert.equal(h.sent.length, 0, "sent before the taps went quiet");
+  t.mock.timers.tick(1);
+  assert.deepEqual(h.sent, [{ low: 88.3e6, high: 108.3e6, bin_size: 125000 }]);
+});
+
+test("the pending target is shown while the taps are being gathered", (t) => {
+  const h = harness(t, FM);
+  h.tuner.step(1); h.tuner.step(-1); h.tuner.step(-1);
+  assert.deepEqual(h.pending, [98.1e6, 98e6, 97.9e6]);
+});
+
+test("a tap on the waterfall replaces any pending steps with its own frequency", (t) => {
+  const h = harness(t, FM);
+  h.tuner.step(1);
+  h.tuner.tapTo(91515625);
+  t.mock.timers.tick(400);
+  assert.deepEqual(h.sent, [{ low: 81515625, high: 101515625, bin_size: 125000 }]);
+});
+
+test("taps during a request are sent after it, counted from the span it confirmed", async (t) => {
+  const h = harness(t, FM);
+  h.tuner.step(1);
+  t.mock.timers.tick(400);
+  assert.equal(h.sent.length, 1);
+  h.tuner.step(1);                           // lands while the first request is in flight
+  t.mock.timers.tick(400);
+  assert.equal(h.sent.length, 1, "two requests in flight at once");
+  await h.settle({ ok: true, low: 88.1e6, high: 108.1e6, bin_size: 125000 });
+  t.mock.timers.tick(400);
+  assert.deepEqual(h.sent[1], { low: 88.2e6, high: 108.2e6, bin_size: 125000 });
+});
+
+test("a refused tune is reported and the confirmed span stays put", async (t) => {
+  const h = harness(t, FM);
+  h.tuner.step(1);
+  t.mock.timers.tick(400);
+  await h.settle({ ok: false, status: 400, reason: "outside it" });
+  assert.equal(h.results[0].ok, false);
+  assert.deepEqual(h.state.span, FM);
+  assert.equal(h.pending[h.pending.length - 1], null, "the refused target is still shown as pending");
+});
+
+test("with no confirmed span there is nothing to step from, so nothing is sent", (t) => {
+  const h = harness(t, null);
+  h.tuner.step(1);
+  t.mock.timers.tick(400);
+  assert.equal(h.sent.length, 0);
+});
