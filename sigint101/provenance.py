@@ -7,7 +7,7 @@ import shutil
 import statistics
 import subprocess
 
-from .events import log_event, read_events
+from .events import EventFollower, log_event, read_events
 from .rds import configured_fm_hz
 
 # The reference station. 106.5 MHz is the one broadcast signal that reproduces across sessions
@@ -156,6 +156,17 @@ def read_baseline(events_path) -> list:
     """Every baseline sample recorded so far, oldest first."""
     return [event["payload"] for event in read_events(events_path)
             if event.get("kind") == "baseline_sample"]
+
+
+class BaselineLog:
+    """The baseline samples, followed as the event log grows instead of re-read on every poll."""
+
+    def __init__(self, events_path):
+        self._follower = EventFollower(events_path, kind="baseline_sample")
+
+    def samples(self) -> list:
+        """Every baseline sample recorded so far, oldest first."""
+        return [event["payload"] for event in self._follower.events()]
 
 
 def compare_to_baseline(current_ref_db, samples, *, drop_threshold_db: float = 6.0) -> dict:

@@ -1,7 +1,10 @@
 # ABOUTME: Tests the LoRa backend — parsing meshtasticd packets and the listener lifecycle.
 # ABOUTME: The meshtastic interface is a fake at the boundary; no radio is an honest refusal.
 
+import threading
+
 import pytest
+from pubsub import pub
 
 from sigint101.lora import (
     DEFAULT_LORA_PORT,
@@ -89,6 +92,9 @@ class FakeInterface:
 
     def __init__(self, *args, **kwargs):
         self.closed = False
+        # The real interface's flag: set once connected, cleared when its reader gives up.
+        self.isConnected = threading.Event()
+        self.isConnected.set()
 
     def close(self):
         self.closed = True
@@ -140,3 +146,59 @@ def test_listener_running_and_stop():
 
 def test_default_port_is_the_meshtasticd_api():
     assert DEFAULT_LORA_PORT == 4403
+
+
+# --- T-13: "running" is the connection, re-checked, not a handle we happen to hold -------------
+
+
+class LiveInterface(FakeInterface):
+    """A meshtastic interface that, like the real one, says whether it is still connected."""
+
+
+def test_listener_is_not_running_once_the_link_drops():
+    # meshtastic reconnects once after meshtasticd drops the socket; if the daemon is not back,
+    # its reader dies and clears isConnected. The panel must not keep calling that live.
+    iface = LiveInterface()
+    lis = _listener(connect=lambda host, port: iface)
+    lis.start()
+    assert lis.running is True
+    iface.isConnected.clear()
+    assert lis.running is False
+
+
+def test_listener_is_not_running_after_meshtastic_reports_the_connection_lost():
+    iface = LiveInterface()
+    lis = _listener(connect=lambda host, port: iface)
+    lis.start()
+    try:
+        pub.sendMessage("meshtastic.connection.lost", interface=iface)
+        assert lis.running is False
+    finally:
+        lis.stop()
+
+
+def test_a_lost_connection_from_another_interface_is_not_ours():
+    lis = _listener(connect=lambda host, port: LiveInterface())
+    lis.start()
+    try:
+        pub.sendMessage("meshtastic.connection.lost", interface=LiveInterface())
+        assert lis.running is True
+    finally:
+        lis.stop()
+
+
+def test_listener_reconnects_after_a_lost_connection():
+    made = []
+
+    def connect(host, port):
+        made.append(LiveInterface())
+        return made[-1]
+
+    lis = _listener(connect=connect)
+    lis.start()
+    made[0].isConnected.clear()
+    lis.start()                                   # the next poll reconnects
+    assert lis.running is True
+    assert len(made) == 2
+    assert made[0].closed is True                 # the dead link was let go
+    lis.stop()

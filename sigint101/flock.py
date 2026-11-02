@@ -11,6 +11,8 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .childproc import ChildWatch, running_command, spawn, stop_process
+
 # The monitor interface the detector listens on. wlan1 (RTL8821CU) is a separate radio from the
 # SDR dongle, so there is no release/resume arbitration — this owns wlan1 the way meshtasticd owns
 # LoRa. A deployment with a different adapter name passes interface= to the detector.
@@ -328,9 +330,9 @@ def _interface_present(interface: str) -> bool:
 
 def _popen(interface: str):
     """Launch tcpdump streaming a live pcap of management frames off the monitor interface."""
-    return subprocess.Popen(
+    return spawn(
         [TCPDUMP, "-i", interface, "-U", "-s", "512", "-w", "-", "type mgt"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        stdout=subprocess.PIPE)
 
 
 class FlockDetector:
@@ -354,11 +356,17 @@ class FlockDetector:
         self._proc = None
         self._thread = None
         self.error = None
+        # Who ended the child, and when the console may launch it again after it died on its own.
+        self.watch = ChildWatch(TCPDUMP)
 
     @property
     def running(self) -> bool:
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the live process; None when nothing runs."""
+        return running_command(self._proc)
 
     def start(self) -> None:
         """Begin capturing, unless the monitor interface is absent or tcpdump is missing."""
@@ -368,6 +376,7 @@ class FlockDetector:
     def _start_locked(self) -> None:
         if self.running:
             return
+        self._settle()
         if not self._which(TCPDUMP):
             raise FlockUnavailable(
                 f"{TCPDUMP} is not installed, so SIGINT 101 cannot watch for Flock cameras")
@@ -377,19 +386,26 @@ class FlockDetector:
         if self.error:
             reason, self.error = self.error, None
             raise FlockUnavailable(reason)
+        # A child that died on its own is not relaunched on every poll: the reason stands, and the
+        # console waits out a back-off that grows while the deaths keep coming.
+        blocked = self.watch.blocked()
+        if blocked:
+            raise FlockUnavailable(blocked)
         try:
             self._proc = self._spawn(self.interface)
         except (OSError, ValueError) as exc:
             self._proc = None
             raise FlockUnavailable(f"cannot run tcpdump: {exc}") from exc
+        self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, name="sigint101-flock", daemon=True)
+        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+                                        name="sigint101-flock", daemon=True)
         self._thread.start()
 
-    def _read(self) -> None:
+    def _read(self, proc) -> None:
         """Consume the pcap stream on a background thread, feeding matched frames to the roster."""
         try:
-            for dot11 in iter_pcap_frames(self._proc.stdout):
+            for dot11 in iter_pcap_frames(proc.stdout):
                 frame = parse_management_frame(dot11)
                 if frame is None:
                     continue
@@ -399,6 +415,20 @@ class FlockDetector:
                         self._roster.absorb(hit, now=time.time())
         except (OSError, ValueError, struct.error) as exc:  # loud, never silent
             self.error = str(exc)
+        finally:
+            self._note_end(proc)
+
+    def _note_end(self, proc) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+        reason = self.watch.ended(proc)
+        if reason and self.error is None:
+            self.error = reason
+
+    def _settle(self) -> None:
+        """Account for a child that ended since the last poll, then clear away what it left."""
+        if self._proc is not None:
+            self._note_end(self._proc)
+            self._stop_locked()
 
     def stop(self) -> None:
         """End the capture and release the monitor interface."""
@@ -406,15 +436,11 @@ class FlockDetector:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        # Marked first, so the reader seeing the output end never reports our stop as a death.
+        self.watch.stopping()
         proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.error = "tcpdump did not stop; the monitor interface may still be held"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        if proc is not None and not stop_process(proc):
+            self.error = "tcpdump survived kill; the monitor interface may still be held"
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None

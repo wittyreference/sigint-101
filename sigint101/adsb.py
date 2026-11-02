@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .childproc import ChildWatch, running_command, spawn, stop_process
 from .hardware import (
     DUMP1090,
     DeviceSelectionError,
@@ -33,6 +34,10 @@ _EARTH_RADIUS_NM = 180.0 * 60.0 / math.pi
 # How long an aircraft stays on the scope after its last message. Mode S squitters arrive every
 # second or two; a minute of silence means it flew out of range or landed.
 DEFAULT_MAX_AGE_S = 60.0
+
+# How often the feed's reader wakes from a quiet socket to check whether it was stopped or
+# dump1090 has died. A quiet sky sends nothing for seconds at a time; that is not an ended feed.
+FEED_POLL_S = 1.0
 
 
 class AdsbUnavailable(RuntimeError):
@@ -194,14 +199,25 @@ class _Feed:
     def __init__(self, proc: subprocess.Popen, sock: socket.socket):
         self._proc = proc
         self._sock = sock
+        self._closed = threading.Event()
+        # The one process, and its argv, for the exit reason and the command strip.
+        self.procs = (proc,)
+        self.argvs = [proc.args]
         self.stdout = self._lines()
 
     def _lines(self):
         buffer = ""
         with self._sock:
-            while True:
+            while not self._closed.is_set():
                 try:
                     chunk = self._sock.recv(4096)
+                except TimeoutError:
+                    # No aircraft for a moment is an empty sky, not an ended feed: keep listening
+                    # while dump1090 lives. Taking the timeout as the end once left a running
+                    # dump1090 behind a reader that had quietly stopped.
+                    if self._proc.poll() is not None:
+                        return
+                    continue
                 except OSError:
                     return
                 if not chunk:
@@ -214,29 +230,37 @@ class _Feed:
     def poll(self):
         return self._proc.poll()
 
-    def terminate(self):
+    def _close_socket(self):
+        """Let go of the SBS connection and wake a reader blocked in recv."""
+        self._closed.set()
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self._sock.close()
         except OSError:
             pass
-        try:
-            self._proc.terminate()
-        except (OSError, subprocess.SubprocessError):
-            pass
+
+    def terminate(self):
+        self._close_socket()
+        self._proc.terminate()
+
+    def kill(self):
+        self._close_socket()
+        self._proc.kill()
 
     def wait(self, timeout=None):
-        try:
-            return self._proc.wait(timeout=timeout)
-        except (OSError, subprocess.SubprocessError):
-            return 0
+        # A timeout is passed on, not swallowed: it is what tells stop() to escalate to kill.
+        return self._proc.wait(timeout=timeout)
 
 
 def _popen(device: int) -> _Feed:
     """Launch dump1090 on 1090 MHz serving SBS, and connect to its BaseStation port."""
-    proc = subprocess.Popen(
+    proc = spawn(
         [DUMP1090, "--device-index", str(device), "--net",
          "--net-sbs-port", str(SBS_PORT), "--quiet"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stdout=subprocess.DEVNULL)
     # dump1090 needs a moment to grab the dongle and open its listener.
     deadline = time.time() + 5.0
     while True:
@@ -245,13 +269,11 @@ def _popen(device: int) -> _Feed:
             break
         except OSError:
             if time.time() > deadline or proc.poll() is not None:
-                try:
-                    proc.terminate()
-                except (OSError, subprocess.SubprocessError):
-                    pass
+                stop_process(proc)
                 raise AdsbUnavailable(
                     "dump1090 did not open its SBS port — cannot read the ADS-B feed")
             time.sleep(0.2)
+    sock.settimeout(FEED_POLL_S)
     return _Feed(proc, sock)
 
 
@@ -292,11 +314,17 @@ class AdsbDecoder:
         self._thread = None
         self._released = False
         self.error = None
+        # Who ended the child, and when the console may launch it again after it died on its own.
+        self.watch = ChildWatch(DUMP1090)
 
     @property
     def running(self) -> bool:
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the live process; None when nothing runs."""
+        return running_command(self._proc)
 
     @property
     def released(self) -> bool:
@@ -330,6 +358,7 @@ class AdsbDecoder:
     def _start_locked(self) -> None:
         if self.running:
             return
+        self._settle()
         if self._released:
             raise AdsbUnavailable(
                 "the radio was released to another program; resume ADS-B to take it back")
@@ -341,6 +370,11 @@ class AdsbDecoder:
         if self.error:
             reason, self.error = self.error, None
             raise AdsbUnavailable(reason)
+        # A child that died on its own is not relaunched on every poll: the reason stands, and the
+        # console waits out a back-off that grows while the deaths keep coming.
+        blocked = self.watch.blocked()
+        if blocked:
+            raise AdsbUnavailable(blocked)
         self.device = self._choose_device()
         try:
             self._proc = self._spawn(self.device)
@@ -350,20 +384,36 @@ class AdsbDecoder:
         except (OSError, ValueError) as exc:
             self._proc = None
             raise AdsbUnavailable(f"cannot run dump1090: {exc}") from exc
+        self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, name="sigint101-adsb", daemon=True)
+        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+                                        name="sigint101-adsb", daemon=True)
         self._thread.start()
 
-    def _read(self) -> None:
+    def _read(self, proc) -> None:
         """Consume dump1090's SBS lines on a background thread, assembling the sky until it ends."""
         try:
-            for raw in self._proc.stdout:
+            for raw in proc.stdout:
                 msg = parse_sbs_message(raw)
                 if msg is not None:
                     with self._lock:
                         self._tracker.absorb(msg, now=time.time())
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
+        finally:
+            self._note_end(proc)
+
+    def _note_end(self, proc) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+        reason = self.watch.ended(proc)
+        if reason and self.error is None:
+            self.error = reason
+
+    def _settle(self) -> None:
+        """Account for a child that ended since the last poll, then clear away what it left."""
+        if self._proc is not None:
+            self._note_end(self._proc)
+            self._stop_locked()
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -371,15 +421,11 @@ class AdsbDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        # Marked first, so the reader seeing the output end never reports our stop as a death.
+        self.watch.stopping()
         proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.error = "dump1090 did not stop; the dongle may still be held"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        if proc is not None and not stop_process(proc):
+            self.error = "dump1090 survived kill; the dongle may still be held"
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None

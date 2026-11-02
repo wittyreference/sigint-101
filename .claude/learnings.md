@@ -474,3 +474,20 @@ RIGHT, because authors put the right answer first.
 it. Measure the body's clientHeight, not only the button bottom. Keep answer positions spread
 (`test_lesson_answers` caps any one chip at 40%). The YAML reloads only on a server restart, so
 restart before re-rendering a pack change.
+
+## 2026-11-02: PR_SET_PDEATHSIG fires when the forking *thread* exits, not the process
+**Finding.** The parent-death signal is tied to the thread that called fork. FastAPI runs sync
+routes on a pooled anyio worker that expires after ~10 s idle, so a tool forked from a request
+thread with `preexec_fn=prctl(PR_SET_PDEATHSIG)` would be SIGKILLed seconds into a lesson.
+`sigint101/childproc.py` forks every tool from one long-lived spawner thread instead;
+`test_a_child_outlives_the_request_thread_that_started_it` fails if that is undone.
+**How to apply.** Never Popen a radio tool directly: use `childproc.spawn` (own session,
+parent-death SIGKILL) and `childproc.stop_process` (terminate, wait, kill the session, wait).
+
+## 2026-11-02: a socket timeout is not end-of-stream
+**Finding.** `socket.create_connection(..., timeout=1.0)` leaves that timeout on the socket, and
+`TimeoutError` is an `OSError`, so the ADS-B reader's `except OSError: return` ended the feed
+after one quiet second while dump1090 ran on: a LIVE panel with a dead reader. UDP (AIS) has no
+end-of-stream at all, and `close()` from another thread does not wake a blocked `recv`.
+**How to apply.** Feed readers catch `TimeoutError` first and keep reading while the process
+lives; stop paths `shutdown(SHUT_RDWR)` before `close()`.

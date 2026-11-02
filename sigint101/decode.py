@@ -6,11 +6,11 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import tempfile
 import threading
 from collections import deque
 from dataclasses import dataclass
 
+from .childproc import ChildWatch, running_command, spawn, stop_process
 from .hardware import (
     RTL_433,
     DeviceSelectionError,
@@ -118,11 +118,9 @@ def _popen(cmd):
     stderr goes to a temporary file, not a pipe: nothing drains it while the decoder runs, and
     a pipe whose buffer fills would wedge rtl_433 rather than the diagnostic. The reason a dead
     rtl_433 gives ("No supported devices found.") is there to read when a start fails.
+    spawn() runs it in its own session, tied to the console's life.
     """
-    scratch = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=scratch, text=True)
-    proc.stderr = scratch
-    return proc
+    return spawn(cmd, stdout=subprocess.PIPE, text=True)
 
 
 class Decoder:
@@ -152,12 +150,18 @@ class Decoder:
         self._thread = None
         self._released = False
         self.error = None
+        # Who ended the child, and when the console may launch it again after it died on its own.
+        self.watch = ChildWatch(RTL_433)
 
     @property
     def running(self) -> bool:
         """True while an rtl_433 process is alive and holding the dongle."""
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the live process; None when nothing runs."""
+        return running_command(self._proc)
 
     @property
     def released(self) -> bool:
@@ -202,6 +206,7 @@ class Decoder:
     def _start_locked(self) -> None:
         if self.running:
             return
+        self._settle()
         if self._released:
             raise DecodeUnavailable(
                 "the radio was released to another program; resume decoding to take it back")
@@ -214,26 +219,47 @@ class Decoder:
         if self.error:
             reason, self.error = self.error, None
             raise DecodeUnavailable(reason)
+        # A child that died on its own is not relaunched on every poll: the reason stands, and the
+        # console waits out a back-off that grows while the deaths keep coming.
+        blocked = self.watch.blocked()
+        if blocked:
+            raise DecodeUnavailable(blocked)
         self.device = self._choose_device()
         try:
             self._proc = self._spawn(self.command())
         except (OSError, ValueError) as exc:
             self._proc = None
             raise DecodeUnavailable(f"cannot run {RTL_433}: {exc}") from exc
+        self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, name="sigint101-decoder", daemon=True)
+        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+                                        name="sigint101-decoder", daemon=True)
         self._thread.start()
 
-    def _read(self) -> None:
+    def _read(self, proc) -> None:
         """Consume rtl_433's JSON on a background thread until the process ends."""
         try:
-            for raw in self._proc.stdout:
+            for raw in proc.stdout:
                 decode = parse_decode_line(raw)
                 if decode is not None:
                     with self._lock:
                         self._reads.append(decode)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
+        finally:
+            self._note_end(proc)
+
+    def _note_end(self, proc) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+        reason = self.watch.ended(proc)
+        if reason and self.error is None:
+            self.error = reason
+
+    def _settle(self) -> None:
+        """Account for a child that ended since the last poll, then clear away what it left."""
+        if self._proc is not None:
+            self._note_end(self._proc)
+            self._stop_locked()
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -241,19 +267,11 @@ class Decoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        # Marked first, so the reader seeing the output end never reports our stop as a death.
+        self.watch.stopping()
         proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    self.error = "rtl_433 survived kill; the dongle may still be held"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        if proc is not None and not stop_process(proc):
+            self.error = "rtl_433 survived kill; the dongle may still be held"
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None

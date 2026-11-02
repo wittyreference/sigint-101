@@ -337,6 +337,8 @@ class RayhunterMonitor:
             status, body = self._fetch(url, self.timeout)
         except Exception as exc:  # connection refused, timeout, the Orbic off the WiFi
             self.error = f"Rayhunter is not reachable at {self.base_url} ({exc})"
+            # Not running any more: "running" must not outlive the Orbic it was reached on.
+            self._running = False
             raise RayhunterUnavailable(self.error) from exc
         self.error = None
         return status, body
