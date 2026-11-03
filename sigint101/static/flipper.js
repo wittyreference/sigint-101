@@ -1,5 +1,5 @@
 // ABOUTME: Shows the attached Flipper's identity on the console by polling /api/flipper (M29).
-// ABOUTME: On 503 it shows "plug the Flipper in" and never invents a device — absence is honest.
+// ABOUTME: On 503 it shows the reason (no Flipper on USB) and never invents a device — absence is honest.
 
 (function () {
   "use strict";
@@ -35,25 +35,37 @@
   var RETRY_MS = 4000;     // while no Flipper is attached, poll gently until one appears
   var stopped = false;
 
-  function showEmpty(panel, reason) {
+  // The device card's text, all of it from the device; cleared when the device goes, so a Flipper
+  // that was unplugged never lingers on the panel.
+  function fillCard(panel, info) {
     var name = panel.querySelector("[data-flipper-name]");
     var line = panel.querySelector("[data-flipper-line]");
     var radio = panel.querySelector("[data-flipper-radio]");
-    if (name) name.textContent = "No Flipper";
-    if (line) line.textContent = reason || "plug the Flipper into the nomad";
-    if (radio) radio.textContent = "";
-    panel.classList.add("flipper--empty");
+    if (name) name.textContent = info ? (info.name || "Flipper") : "";
+    if (line) line.textContent = info ? deviceLine(info) : "";
+    if (radio) radio.textContent = info ? radioLine(info) : "";
+  }
+
+  // No read: the card hides and the empty line carries the reason (no Flipper on USB, two on the
+  // bus, an app open on it). The badge says only that nothing was read, which is true of all three.
+  function showEmpty(panel, body) {
+    var card = panel.querySelector("[data-flipper-card]");
+    var empty = panel.querySelector("[data-flipper-empty]");
+    var badge = panel.querySelector("[data-flipper-badge]");
+    fillCard(panel, null);
+    if (card) card.hidden = true;
+    DecoderPanel.showDown(panel, badge, empty, body, "NO READ", "no Flipper on USB");
   }
 
   function render(panel, body) {
-    var info = body.device || {};
-    var name = panel.querySelector("[data-flipper-name]");
-    var line = panel.querySelector("[data-flipper-line]");
-    var radio = panel.querySelector("[data-flipper-radio]");
-    if (name) name.textContent = info.name || "Flipper";
-    if (line) line.textContent = deviceLine(info);
-    if (radio) radio.textContent = radioLine(info);
-    panel.classList.remove("flipper--empty");
+    var card = panel.querySelector("[data-flipper-card]");
+    var empty = panel.querySelector("[data-flipper-empty]");
+    var badge = panel.querySelector("[data-flipper-badge]");
+    fillCard(panel, body.device || {});
+    if (card) card.hidden = false;
+    if (empty) empty.hidden = true;
+    DecoderPanel.showLive(badge, body);
+    DecoderPanel.showCommand(panel, body.command);
   }
 
   function tick() {
@@ -62,8 +74,7 @@
       .then(function (res) {
         var waiting = false;
         if (!res.ok || res.body.available === false) {
-          var reason = (res.body && res.body.reason) || "plug the Flipper into the nomad";
-          panels.forEach(function (p) { showEmpty(p, reason); });
+          panels.forEach(function (p) { showEmpty(p, res.body); });
           waiting = true;
         } else {
           panels.forEach(function (p) { render(p, res.body); });

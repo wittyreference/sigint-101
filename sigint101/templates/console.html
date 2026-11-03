@@ -462,23 +462,16 @@
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
             {% elif lesson.uses_flipper %}
-            {# ---- Flipper (M29+): the attached Flipper, read over its USB serial CLI. flipper.js
-               polls /api/flipper and shows the device identity (model / firmware / region) and the
-               radio state in words. No Flipper attached shows an honest "plug it in", never a
-               fabricated device line — it is a separate USB device, so this never touches the SDR. ---- #}
+            {# Flipper (M29): the attached device's own account of itself (panels.flipper), read
+               over its USB serial CLI, over a fixed dial. #}
             <div class="instrument instrument--decode">
-              <div class="decoder flipper" data-flipper-panel aria-label="Attached Flipper Zero">
-                <div class="decoder__head">
-                  <span class="decoder__title" data-flipper-name>Flipper</span>
-                  <span class="decoder__status" data-flipper-radio></span>
-                </div>
-                <div class="flipper__line" data-flipper-line>reading /dev/ttyACM0&hellip;</div>
-              </div>
+              {{ panels.flipper() }}
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">USB<span>&middot;CLI</span></div>
                   <div class="tune__caption">Flipper Zero &middot; serial, receive-only</div>
                 </div>
+                {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
@@ -617,7 +610,7 @@
      findings from the Orbic. No Orbic reachable shows honestly; a quiet line never proves no catcher. -->
 <script src="/static/rayhunter.js"></script>
 <!-- The attached Flipper (M29+): polls /api/flipper and shows the device identity + radio state
-     over the USB serial CLI. No Flipper attached shows "plug it in", never a fabricated device. -->
+     over the USB serial CLI. No Flipper on USB shows the reason, never a fabricated device. -->
 <script src="/static/flipper.js"></script>
 <!-- Shell behaviour that is NOT the waterfall lives in its own files: stepping between the
      lesson's rendered stage panels in /static/lesson-nav.js (below), and the tune strip (+/- and

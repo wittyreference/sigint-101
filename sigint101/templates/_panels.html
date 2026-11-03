@@ -360,3 +360,25 @@
                 <div class="decoder__empty" data-rayhunter-empty>polling 192.168.1.1:8080&hellip;</div>
               </div>
 {% endmacro %}
+
+{# ---- Flipper (M29): the attached Flipper Zero, read over its USB serial CLI one short session at
+   a time. flipper.js polls /api/flipper and fills the device card with the device's own account
+   of itself: its name, model, firmware and region, and its sub-GHz radio state in words. No
+   Flipper on USB, two on the bus, or an app open on it hides the card and shows the reason, never
+   a fabricated device. It is its own USB device, so reading it never touches the SDR. ---- #}
+{% macro flipper() %}
+              <div class="decoder" data-flipper-panel aria-label="The attached Flipper Zero, read over USB">
+                <div class="decoder__head">
+                  <span class="decoder__title">Flipper &middot; USB CLI</span>
+                  <span class="decoder__status" data-flipper-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <div class="flipper" data-flipper-card hidden>
+                  <div class="flipper__head">
+                    <span class="flipper__name" data-flipper-name></span>
+                    <span class="flipper__radio" data-flipper-radio></span>
+                  </div>
+                  <div class="flipper__line" data-flipper-line></div>
+                </div>
+                <div class="decoder__empty" data-flipper-empty>reading the Flipper over USB&hellip;</div>
+              </div>
+{% endmacro %}

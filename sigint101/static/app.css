@@ -1325,18 +1325,43 @@ button.rail-pip:disabled {
   background: color-mix(in srgb, var(--warn) 18%, var(--surface));
   font-weight: 600;
 }
-/* The Flipper device line: model / firmware / region read off the attached device. When nothing
-   is attached the panel carries flipper--empty, which dims the line and reads as "plug it in" —
-   state by brightness + words, never colour alone, so it holds in red-night. */
-.flipper__line {
-  flex: none;
-  padding: 10px;
+/* The Flipper device card (M29): the attached device's own account of itself. Its name leads large,
+   the radio state beside it in words (never colour alone, so it holds in red-night), and model /
+   firmware / region beneath. It shows only once a real device answered; until then the card is
+   hidden and the panel's honest empty line says why. */
+.flipper {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+/* A flex display would otherwise beat the UA [hidden] rule and show an empty card. */
+.flipper[hidden] { display: none; }
+.flipper__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.flipper__name {
+  font-family: var(--font-display, var(--font-mono));
+  font-size: 26px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+.flipper__radio {
   font-family: var(--font-mono);
-  font-size: 15px;
+  font-size: 18px;
   color: var(--fg);
 }
-.flipper--empty .flipper__line { color: var(--fg-mute); }
-.flipper--empty .decoder__title { color: var(--fg-mute); }
+.flipper__line {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  color: var(--fg);
+}
 /* The frozen predict frame on a decode lesson seals the decoder, mirroring the waterfall's seal.
    Compact (not the live panel's height) so the predict prompt, chips and Commit all stay on the
    fixed 800x480 screen — predict is the tightest stage. */
