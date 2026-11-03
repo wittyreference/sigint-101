@@ -1,7 +1,7 @@
 device_info_major             : 2
 device_info_minor             : 4
 hardware_model                : Flipper Zero
-hardware_uid                  : 0E7C010127E18000
+hardware_uid                  : 0000000000000000
 hardware_otp_ver              : 2
 hardware_timestamp            : 1690342231
 hardware_ver                  : 12
@@ -42,7 +42,7 @@ radio_stack_sram2b            : 19K
 radio_stack_sram2a            : 14K
 radio_stack_sram1             : 0K
 radio_stack_flash             : 116K
-radio_ble_mac                 : 0E7C0127E180
+radio_ble_mac                 : 000000000000
 enclave_valid_keys            : 10
 enclave_valid                 : true
 system_debug                  : 0
