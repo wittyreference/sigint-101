@@ -245,6 +245,14 @@ def test_a_finite_capture_that_exits_cleanly_is_not_a_death():
     assert exit_reason(proc, finite=True) is None
 
 
+def test_a_stage_that_is_no_process_gives_its_own_reason():
+    # A serial link (Flock's Marauder devboard) has no exit status to report. It ends with its
+    # own words, and an invented "exit status" would put a false detail on the panel.
+    link = _Ended(["sniffprobe", "-serial"], 1)
+    link.end_reason = "no answer from Marauder on /dev/ttyACM1 within 5 s"
+    assert exit_reason(link) == "no answer from Marauder on /dev/ttyACM1 within 5 s"
+
+
 def test_a_child_still_running_has_no_exit_reason(monkeypatch):
     monkeypatch.setattr(childproc, "EXIT_GRACE_S", 0.01)
     assert exit_reason(_Ended(["rtl_433"], None)) is None

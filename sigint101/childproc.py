@@ -330,6 +330,12 @@ def exit_reason(proc, *, finite=False, tail=None, tool="the decoder") -> str | N
         causes = ended[:1]
     parts = []
     for stage, code in causes:
+        # A stage that is no process (Flock's serial link to the Marauder devboard) has no exit
+        # status, so it ends in its own words rather than with an invented one.
+        own = getattr(stage, "end_reason", None)
+        if own:
+            parts.append(own)
+            continue
         # A tool killed by a signal did not get to say why; its last lines are start-up
         # narration, so only a tool that exited on its own has its words quoted.
         if code < 0:
