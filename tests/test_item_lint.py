@@ -38,8 +38,23 @@ def content_words(text: str) -> set:
     return {word for word in _TOKEN.findall(text.lower()) if word not in STOPWORDS}
 
 
+def _stem_too_long(text: str):
+    """A detail line when a stem runs past the word cap, else None."""
+    words = len(text.split())
+    return f"{words} words; keep it to {STEM_MAX_WORDS}" if words > STEM_MAX_WORDS else None
+
+
+def _chips_uneven(choices: list):
+    """A detail line when the longest chip label runs past twice the shortest, else None."""
+    labels = [choice["label"] for choice in choices]
+    if labels and max(map(len, labels)) > CHIP_LENGTH_RATIO * min(map(len, labels)):
+        return f"chip lengths {[len(label) for label in labels]} spread past " \
+               f"{CHIP_LENGTH_RATIO}x: {labels}"
+    return None
+
+
 def lint_pack(raw: dict) -> list:
-    """Every (rule, detail) the predict of one raw pack trips; empty when it is clean.
+    """Every (rule, detail) the predict, and any check, of one raw pack trips; empty when clean.
 
     The raw YAML is read for `multi_key_reason`, which the loader does not carry; everything else
     comes off the loaded Lesson, so the lint sees exactly what the console renders.
@@ -51,15 +66,12 @@ def lint_pack(raw: dict) -> list:
         findings.append(("single-key", f"answer {list(lesson.answer)} names "
                                        f"{len(lesson.answer)} keys and no multi_key_reason"))
 
-    stem_words = len(lesson.stages["predict"].split())
-    if stem_words > STEM_MAX_WORDS:
-        findings.append(("stem-length", f"predict is {stem_words} words; "
-                                        f"keep it to {STEM_MAX_WORDS}"))
-
-    labels = [choice["label"] for choice in lesson.choices]
-    if labels and max(map(len, labels)) > CHIP_LENGTH_RATIO * min(map(len, labels)):
-        findings.append(("chip-length", f"chip lengths {[len(label) for label in labels]} "
-                                        f"spread past {CHIP_LENGTH_RATIO}x: {labels}"))
+    measures = [("stem-length", _stem_too_long(lesson.stages["predict"])),
+                ("chip-length", _chips_uneven(lesson.choices))]
+    if lesson.check:
+        measures += [("check-stem-length", _stem_too_long(lesson.check["prompt"])),
+                     ("check-chip-length", _chips_uneven(lesson.check["choices"]))]
+    findings += [(rule, detail) for rule, detail in measures if detail]
 
     shown = set().union(*(content_words(lesson.stages[stage])
                           for stage in GIVEAWAY_STAGES if stage in lesson.stages))
@@ -183,6 +195,34 @@ def test_stopwords_in_the_key_never_count_as_a_giveaway():
     pack = _pack(choices=chips)
     pack["stages"] = {**pack["stages"], "demo": "It is what it is, all the way up."}
     assert lint_pack(pack) == []
+
+
+# --- the post-lesson check, held to the same stem and chip rules ------------------------------
+# A check is scored, so its prompt and chips meet the predict's bar. Its single key is the loader's
+# rule, and the giveaway rule does not apply: the explain is meant to teach what the check asks.
+
+_CHECK = {
+    "prompt": "Your floor sits at -30 dB with gain at maximum. What lowers it?",
+    "choices": [{"key": "less", "label": "Less gain", "why": "w"},
+                {"key": "more", "label": "More gain", "why": "w"},
+                {"key": "wide", "label": "A wider span", "why": "w"}],
+    "answer": "less",
+}
+
+
+def test_a_clean_check_trips_nothing():
+    assert lint_pack(_pack(check=_CHECK)) == []
+
+
+def test_a_check_prompt_over_45_words_trips_check_stem_length():
+    check = {**_CHECK, "prompt": " ".join(["word"] * (STEM_MAX_WORDS + 1))}
+    assert _rules(lint_pack(_pack(check=check))) == ["check-stem-length"]
+
+
+def test_check_chips_more_than_twice_apart_trip_check_chip_length():
+    chips = [*_CHECK["choices"][:2],
+             {"key": "wide", "label": "A much wider span on the screen", "why": "w"}]
+    assert _rules(lint_pack(_pack(check={**_CHECK, "choices": chips}))) == ["check-chip-length"]
 
 
 # --- the shipped packs ------------------------------------------------------------------------

@@ -615,6 +615,13 @@ button.rail-pip:disabled {
   border: 2px solid var(--warn);
   padding: 4px 9px;
 }
+/* Seven pips (an intro lesson with a check) leave the gate label room only to wrap onto two lines;
+   tighten them so both sit inside the 40px rail instead of clipping at its edges. */
+.rail--long .rail__gate {
+  line-height: 1.1;
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
 
 /* ===== Stage view ========================================================= */
 .stage {
@@ -940,6 +947,30 @@ button.rail-pip:disabled {
 .verdict__why {
   font-size: 18px;
   color: var(--fg-dim);
+}
+
+/* ===== Post-lesson check ================================================= */
+/* Interactive like the predict, so it takes the predict's tight spacing: the prompt doubles as the
+   title at the 18px floor, and the chips, the result and Commit/Complete all fit the fixed 800x480
+   with no scroll. The result sits in the form's flow, so it carries no bottom margin of its own. */
+.stage-panel[data-stage="check"] {
+  gap: 2px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.stage-panel[data-stage="check"] .stage-panel__title {
+  font-size: 18px;
+  line-height: 1.2;
+}
+.stage-panel[data-stage="check"] .predict {
+  gap: 4px;
+}
+.check__result {
+  margin-bottom: 0;
+  padding: 6px 12px;
+}
+.check__result b {
+  color: var(--fg);
 }
 
 /* ===== Instrument (waterfall + tune) ===================================== */

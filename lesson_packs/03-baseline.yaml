@@ -57,3 +57,22 @@ answer: [identical]
 verdict: >-
   Identical: a deaf radio and an empty band draw the same picture; only the reference against
   your baseline tells them apart.
+
+# The post-lesson check: one new situation on this lesson's idea (only the reference against your
+# baseline tells a deaf radio from a quiet band), scored after the explain. Each chip's `why` is the
+# feedback for choosing it.
+check:
+  prompt: >-
+    Your target band looks empty tonight. Your FM reference sits 15 dB under its baseline, same
+    gain, same temperature. Likeliest verdict?
+  choices:
+    - key: deaf
+      label: Your radio went deaf
+      why: A steady station 15 dB down, with gain and temperature unchanged, puts the loss in your radio.
+    - key: quiet
+      label: The band is just quiet
+      why: A quiet band leaves your reference at baseline; yours dropped 15 dB.
+    - key: unknown
+      label: Can't tell from this
+      why: The picture alone can't, but your reference can; 15 dB under baseline is the tell.
+  answer: deaf

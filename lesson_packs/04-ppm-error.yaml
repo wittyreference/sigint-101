@@ -59,3 +59,21 @@ choices:
 answer: [bigger]
 verdict: >-
   Bigger: ppm scales with frequency, so +16 kHz at 100 MHz is about +179 kHz at 1090 MHz.
+
+# The post-lesson check: one new situation on this lesson's idea (the ppm holds, so the error in kHz
+# grows with frequency), scored after the explain. Each chip's `why` is the feedback for choosing it.
+check:
+  prompt: >-
+    Your radio reads +164 ppm. You tune to 315 MHz, where car key fobs talk. About how far off
+    frequency does it land?
+  choices:
+    - key: five
+      label: About 5 kHz
+      why: That's a tenth of it; 164 Hz for every MHz, times 315 MHz, is about 52,000 Hz.
+    - key: sixteen
+      label: About 16 kHz
+      why: 16 kHz was the error at 100 MHz; the ppm holds, so the kHz grow with the frequency.
+    - key: fiftytwo
+      label: About 52 kHz
+      why: 164 Hz for every MHz, times 315 MHz, is about 52 kHz, three times the FM error.
+  answer: fiftytwo

@@ -57,3 +57,21 @@ answer: [same, narrower]
 verdict: >-
   About the same, or narrower: gain lifts signal and noise together, and at the top overload can
   close the gap.
+
+# The post-lesson check: one new situation on this lesson's idea (gain is not signal; the gap is),
+# scored after the explain. Each chip's `why` is the feedback for choosing it.
+check:
+  prompt: >-
+    A weak station sits 6 dB over the floor, and your gain is already where the gap was widest.
+    Which change is most likely to widen the gap?
+  choices:
+    - key: gain
+      label: Turning the gain up
+      why: Gain lifts the floor with the station, so the gap barely moves; at the top it can shrink.
+    - key: contrast
+      label: More screen contrast
+      why: Contrast changes how the gap is painted, not its size; the meter's dB stay the same.
+    - key: antenna
+      label: A better antenna spot
+      why: More signal at the antenna, from a better spot or getting closer, widens the gap; gain can't.
+  answer: antenna

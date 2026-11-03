@@ -36,6 +36,13 @@ REQUIRED_STAGES = {
 # than a fixed list, which is why it is derived from each lesson's own order below.
 COMMIT_STAGE = "predict"
 
+# The post-lesson check: an optional, scored stage a pack adds with a `check:` block. It walks
+# after explain, so it is past the predict gate and sealed with the rest of the reveal. It poses one
+# new situation on the lesson's concept (near transfer), never the predict re-asked; unlike the
+# predict, which is a guess before the teaching, the check is scored, because it measures whether
+# the teaching landed.
+CHECK_STAGE = "check"
+
 # Panels the console can actually render. The waterfall and tune panel are the baseline
 # every lesson gets; a pack turns extras on by name. Anything else refuses to load,
 # because a panel that silently rendered nothing would fail mid-lesson, in front of
@@ -117,6 +124,21 @@ class Lesson:
     tune: dict | None
     answer: tuple = ()
     verdict: str = ""
+    check: dict | None = None
+
+    def check_feedback(self, key: str) -> dict:
+        """Whether a check answer was the key, with the chosen chip's and the key's label and why.
+
+        The screen shows the chosen why, and the key's why too when they differ, so a miss is
+        answered with the reason, not just the right letter.
+        """
+        by_key = {choice["key"]: choice for choice in self.check["choices"]}
+
+        def _side(k):
+            return {"label": by_key[k]["label"], "why": by_key[k]["why"]}
+
+        answer = self.check["answer"]
+        return {"correct": key == answer, "chosen": _side(key), "key": _side(answer)}
 
     def is_correct(self, key: str):
         """Was this committed chip key right? None when the pack names no answer to score."""
@@ -284,8 +306,8 @@ class Lesson:
 
     @property
     def stage_order(self) -> tuple:
-        """The stages this lesson walks, in order, fixed by its type."""
-        return REQUIRED_STAGES[self.type]
+        """The stages this lesson walks, in order: fixed by its type, then its check if any."""
+        return REQUIRED_STAGES[self.type] + ((CHECK_STAGE,) if self.check else ())
 
     @property
     def sealed_stages(self) -> tuple:
@@ -315,12 +337,14 @@ class Lesson:
                 f"lesson {self.id}: the reveal stays sealed until a prediction is committed"
             )
         return {
-            "stages": {stage: self.stages[stage] for stage in self.sealed_stages},
+            "stages": {stage: self.stages[stage] for stage in self.sealed_stages
+                       if stage != CHECK_STAGE},
             "hints": list(self.hints),
             "quiz": list(self.quiz),
             "artifact": self.artifact,
             "answer": list(self.answer),
             "verdict": self.verdict,
+            "check": self.check,
         }
 
 
@@ -427,6 +451,56 @@ def _parse_answer(data: dict, choices: list, ctx: str) -> tuple:
     return tuple(answer), verdict
 
 
+def _parse_check(data: dict, ctx: str) -> dict | None:
+    """Validate an optional `check:` block: a prompt, tappable choices with a why each, one answer.
+
+    The check is scored in front of the learner, so a half-authored one fails here: every chip needs
+    a label to read and a one-line `why` to teach with, and the answer is a single key among the
+    chips (a check has one defensible answer; a list would hedge it). Returns None without one.
+    """
+    raw = data.get("check")
+    if raw in (None, {}):
+        return None
+    if not isinstance(raw, dict):
+        raise LessonError(f"{ctx}: 'check' must be a mapping of prompt/choices/answer")
+    prompt = str(raw.get("prompt") or "").strip()
+    if not prompt:
+        raise LessonError(f"{ctx}: a 'check' needs a non-empty 'prompt'")
+    choices_in = raw.get("choices")
+    if not isinstance(choices_in, list) or len(choices_in) < 2:
+        raise LessonError(f"{ctx}: a 'check' needs at least two 'choices'")
+    choices = []
+    for choice in choices_in:
+        choice = choice if isinstance(choice, dict) else {}
+        fields = {}
+        for field in ("key", "label", "why"):
+            value = choice.get(field)
+            # The same YAML 1.1 trap as the predict chips: a bare `no` arrives as False.
+            if isinstance(value, bool):
+                raise LessonError(f"{ctx}: check choice {field} {value!r} is a YAML boolean — "
+                                  "quote it in the pack")
+            fields[field] = str(value).strip() if value is not None else ""
+            if not fields[field]:
+                raise LessonError(f"{ctx}: each check choice needs a non-empty '{field}'")
+        if "\n" in fields["why"]:
+            raise LessonError(f"{ctx}: check choice '{fields['key']}' 'why' must be one line")
+        choices.append(fields)
+    answer = raw.get("answer")
+    if isinstance(answer, list):
+        raise LessonError(f"{ctx}: a check 'answer' is a single key, not a list")
+    if isinstance(answer, bool):
+        raise LessonError(f"{ctx}: check answer {answer!r} is a YAML boolean — "
+                          "quote it in the pack")
+    answer = str(answer).strip() if answer is not None else ""
+    if not answer:
+        raise LessonError(f"{ctx}: a 'check' needs an 'answer'")
+    known = [choice["key"] for choice in choices]
+    if answer not in known:
+        raise LessonError(
+            f"{ctx}: check answer '{answer}' is not one of its choice keys ({', '.join(known)})")
+    return {"prompt": prompt, "choices": choices, "answer": answer}
+
+
 def parse_lesson(data: dict) -> Lesson:
     """Turn parsed YAML into a Lesson, refusing anything half-defined.
 
@@ -524,6 +598,7 @@ def parse_lesson(data: dict) -> Lesson:
         tune=_parse_tune(data, ctx),
         answer=answer,
         verdict=verdict,
+        check=_parse_check(data, ctx),
     )
 
 

@@ -32,7 +32,8 @@
      reached is a disabled button until the walk gets there. A sealed stage before the commit is
      not a button at all — commit-before-reveal leaves nothing to tap. #}
   {% set reached_at = reached|default(0) %}
-  <nav class="rail" aria-label="Lesson progress">
+  {# Seven stages (an intro lesson with a check) leave the gate label room only to wrap. #}
+  <nav class="rail{% if lesson.stage_order|length > 6 %} rail--long{% endif %}" aria-label="Lesson progress">
     {% for stage in lesson.stage_order %}
       {% set sealed = stage in lesson.sealed_stages %}
       {% if sealed and not prediction_committed %}
@@ -273,6 +274,49 @@
                 {% else %}
                   <span class="predict__hint">Tap a choice, comrade. Nothing unlocks until you commit.</span>
                   <button class="btn btn--primary btn-commit" type="submit">Commit prediction</button>
+                {% endif %}
+              </div>
+            </form>
+
+          {% elif stage == 'check' %}
+            {# ---- The post-lesson check: one new situation on the lesson's concept, and scored,
+                 unlike the predict. Tap a chip and commit, keyboard-free, as a plain form post.
+                 Once answered the chips keep the choice, the result reads Right or Not yet with
+                 the chosen chip's why (and the key's when they differ), and Complete finishes the
+                 lesson. Interactive, so it fits the fixed 800x480 with no scroll. ---- #}
+            {% set fb = check_feedback|default(none) %}
+            <h1 class="stage-panel__title">&#9773; {{ lesson.check.prompt }}</h1>
+            <form class="predict{% if fb %} predict--committed{% endif %}"
+                  method="post" action="{{ check_url|default('#') }}">
+              <fieldset class="predict-chips">
+                <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
+                {% for c in lesson.check.choices %}
+                  <label class="predict-chip">
+                    <input type="radio" name="choice" value="{{ c.key }}"
+                           {% if check_answer|default(none) == c.key %}checked{% endif %}
+                           {% if fb %}disabled{% endif %}
+                           {% if loop.first %}required{% endif %}>
+                    <span class="predict-chip__key" aria-hidden="true">{{ "ABCDEFGH"[loop.index0] }}</span>
+                    <span class="predict-chip__label">{{ c.label }}</span>
+                  </label>
+                {% endfor %}
+              </fieldset>
+              {% if fb %}
+              <div class="verdict verdict--{{ 'hit' if fb.correct else 'miss' }} check__result">
+                <div class="verdict__why"><span class="verdict__tag">{{ 'Right' if fb.correct else 'Not yet' }}</span> <b>{{ fb.chosen.label }}:</b> {{ fb.chosen.why }}</div>
+                {% if not fb.correct %}
+                <div class="verdict__why"><b>{{ fb.key.label }}:</b> {{ fb.key.why }}</div>
+                {% endif %}
+              </div>
+              {% endif %}
+              <div class="predict__actions">
+                {{ prev_step(loop.first) }}
+                {% if fb %}
+                  <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}"
+                          data-next-href="{{ complete_href|default('/') }}">Complete lesson</button>
+                {% else %}
+                  <span class="predict__hint">Tap a choice, comrade, then commit.</span>
+                  <button class="btn btn--primary btn-commit" type="submit">Commit answer</button>
                 {% endif %}
               </div>
             </form>
@@ -541,9 +585,10 @@
             {% endif %}
           {% endif %}
 
-          {# A real instrument stage carries Next on its tune strip; every other stage (the text
-             stages, and the no-hardware instrument stages that render as text) keeps the footer. #}
-          {% if stage != 'predict' and not (stage in INSTRUMENT and lesson.needs_hardware) %}
+          {# A real instrument stage carries Next on its tune strip, and the predict and check carry
+             theirs in their own action row; every other stage (the text stages, and the no-hardware
+             instrument stages that render as text) keeps the footer. #}
+          {% if stage not in ('predict', 'check') and not (stage in INSTRUMENT and lesson.needs_hardware) %}
             <footer class="stage-foot">
               {{ prev_step(loop.first) }}
               {% if loop.last %}
