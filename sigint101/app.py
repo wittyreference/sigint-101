@@ -43,6 +43,7 @@ from .exam import (
 )
 from .flock import FlockDetector, FlockUnavailable
 from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
+from .kiosk import request_exit
 from .lessons import COMMIT_STAGE, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
 from .operate import (
@@ -253,7 +254,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                acars_factory=None, ais_factory=None, dmr_factory=None,
                apt_factory=None, sstv_factory=None,
                flock_factory=None, rayhunter_factory=None, pool_path=None,
-               ppm_measure=None, list_devices=list_rtlsdr_devices) -> FastAPI:
+               ppm_measure=None, list_devices=list_rtlsdr_devices,
+               kiosk_exit=request_exit) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -536,8 +538,34 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             request=request,
             name="home.html",
             context={"title": "SIGINT 101", "back_href": "/", "back_label": "Home",
-                     "tiles": tiles},
+                     "exit_to_desktop": True, "tiles": tiles},
         )
+
+    @app.post("/api/kiosk/exit")
+    def kiosk_exit_route(request: Request):
+        """Exit SIGINT 101: close the full-screen course window, leaving the learner on the desktop.
+
+        The kiosk browser is usually gone before it reads the answer. Any other browser that asked
+        lands home once the kiosk is closed, or gets a themed page saying there was nothing to close
+        (the dev server has no kiosk at all), never a raw JSON sheet.
+        """
+        result = kiosk_exit()
+        log_event(app.state.events_path, "kiosk_exit",
+                  {"closed": list(result.closed), "reason": result.reason})
+        wants_page = "text/html" in request.headers.get("accept", "")
+        if result.exited:
+            if wants_page:
+                return RedirectResponse("/", status_code=303)
+            return {"exited": True, "closed": list(result.closed)}
+        if wants_page:
+            heading = "Nothing to close"
+            return templates.TemplateResponse(
+                request=request, name="error.html", status_code=409,
+                context={"title": heading, "back_href": "/", "back_label": "Home",
+                         "status": 409, "heading": heading, "detail": result.reason},
+            )
+        return JSONResponse(status_code=409, content={"exited": False, "closed": [],
+                                                      "reason": result.reason})
 
     @app.get("/unit/{unit_id}", response_class=HTMLResponse)
     def unit_view(request: Request, unit_id: int):
