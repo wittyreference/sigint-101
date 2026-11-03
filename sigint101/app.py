@@ -42,6 +42,8 @@ from .exam import (
     next_sim_question,
     score_exam,
 )
+from .flipper import FlipperError, FlipperSelectionError
+from .flipperconsole import FlipperConsole
 from .flock import FlockDetector, FlockUnavailable
 from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
 from .kiosk import request_exit
@@ -254,7 +256,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
                apt_factory=None, sstv_factory=None,
-               flock_factory=None, rayhunter_factory=None, pool_path=None,
+               flock_factory=None, rayhunter_factory=None, flipper_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None) -> FastAPI:
     """Build the console with its collaborators injectable.
@@ -450,6 +452,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_rayhunter = rayhunter_factory
 
+    # The Flipper is a USB CDC device the console reads over its serial CLI — its own device, like
+    # the Flock detector and the Rayhunter monitor, so it never arbitrates with the SDR. Each read
+    # opens and releases its own short session, so there is no long-lived handle to stop.
+    if flipper_factory is None:
+        build_flipper = FlipperConsole
+    else:
+        build_flipper = flipper_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -477,6 +487,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.sstv = build_sstv()
         app.state.flock = build_flock()
         app.state.rayhunter = build_rayhunter()
+        app.state.flipper = build_flipper()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way.
@@ -1215,6 +1226,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "status": status,
             "warnings": warnings,
         }
+
+    @app.get("/api/flipper")
+    def flipper():
+        """The attached Flipper's identity, read over its USB serial CLI for the M29 panel.
+
+        The Flipper is its own USB device, so this never disturbs a sweep or a decode. No Flipper
+        attached, two on the bus, or an app open on the device is a 503 with the reason — never a
+        fabricated device line pretending one is plugged into the nomad.
+        """
+        console = app.state.flipper
+        try:
+            device = console.device()
+        except (FlipperError, FlipperSelectionError) as exc:
+            return _refused("flipper", exc, {"device": None})
+        # A good read ends the refusal episode, so losing the device again is logged as news.
+        last_refusal.pop("flipper", None)
+        # Each read is one short CLI session, not a tool left running: no command line.
+        return {"available": True, "command": None, "device": device}
 
     @app.get("/api/rds")
     def rds():

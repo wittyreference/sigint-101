@@ -49,6 +49,7 @@
   - `flipper-module` (PR #5) is U10 Phase 1 (M29 + the `/api/flipper` live mirror). It is
     parked behind the S0 fixes and needs a rebase after ux-polish lands (both touch `app.css`
     and `console.html`).
+  - `flipper-module-refresh` (PR against ux-polish) merges ux-polish into #5 and supersedes it; HIL waits on the Flipper.
 - **nomad-b health:**
   - No crash since the 11-01 reboot. Configs intact: meshtasticd `config.yaml`, `config.txt`
     (gpio4, pps-gpio 17, miniuart-bt), root fs clean.

@@ -80,6 +80,9 @@ INSTRUMENTS = (
     Instrument("lora", "LoRa", "meshtasticd", "lora", "lora", "lora"),
     Instrument("flock", "Flock", "tcpdump", "flock", "flock", "wlan1"),
     Instrument("rayhunter", "Rayhunter", "Orbic", "rayhunter", "rayhunter", "orbic"),
+    # The Flipper reads the device's identity over its USB CLI; it decodes nothing, so it has no
+    # receiver to log receptions from (and so no on_reception hook).
+    Instrument("flipper", "Flipper", "USB CLI", None, "flipper", "flipper"),
     # The clock and health views read the sweep: the dial picks the station a ppm measurement
     # captures, and the provenance reference level is read off the live sweep.
     Instrument("clock", "Clock", "ppm", "sweeper", "spectrum", "rtl-sdr", steps=_WATERFALL_STEPS),
