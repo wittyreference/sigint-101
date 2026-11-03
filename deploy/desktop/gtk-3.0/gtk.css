@@ -33,6 +33,13 @@
   color: #2ee66a;
   font-family: "PT Mono", monospace;
 }
+/* The stock theme paints every bar button in the bar colour, and the buttons reach the bottom
+   edge, so they cover the green rule. Clear, they let it run the full width; hover and checked
+   keep their stock colours (their selectors are more specific). */
+#PanelToplevel button,
+#PanelToplevel:backdrop button > box > label {
+  background-color: transparent;
+}
 
 /* The bar's pop-ups and every menu: a black panel in a green frame, inverted on hover. */
 #panelpopup, #panelpopup scrolledwindow,
