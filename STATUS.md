@@ -13,6 +13,13 @@
     S1s, item 8 being real tuning and gain) plus `/operate` v1, all before 11-08.
 - **Sprint base:** `ux-polish` with main merged in. Sprint branches stack on it. ux-polish itself
   merges to main only after MC's panel look (MC's gate).
+- **MC's decision, verbatim (2026-11-03): "Desktop + course on top (Recommended)".** The box boots
+  to the Pi desktop (raspi-config B4) with the course auto-opened full-screen. Home's **Exit
+  SIGINT 101** closes it, leaving the desktop: Wi-Fi menu, terminal, files, on-screen keyboard.
+  A **SIGINT 101** desktop icon and menu entry reopen it. The watchdog reopens only after a crash,
+  never after Exit. Built on `desktop-exit` (PR against ux-polish). **Pending: the coordinator's
+  switch on nomad-b, with MC's OK**: pull, `deploy/install.sh`,
+  `sudo raspi-config nonint do_boot_behaviour B4`, reboot.
 - **Hand-over is 2026-11-08.**
 
 **Needed from MC, one at a time when reached:**
@@ -114,7 +121,9 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
   `deploy/`).
   - The lesson server is the user unit `sigint101.service` on 127.0.0.1:8008, with linger.
   - The kiosk is tty1 autologin → `~/.profile` hook → `~/.local/bin/sigint101-kiosk` (labwc +
-    a looping Chromium).
+    a looping Chromium). **After the desktop switch** it is lightdm desktop autologin → XDG
+    autostart `~/.config/autostart/sigint101.desktop` → `/usr/local/bin/sigint101-course watch`
+    (no labwc of its own). Exit flag: `/run/user/1000/sigint101-kiosk-exited`.
   - **Restart the kiosk:** kill the `labwc` PID and autologin respawns it. Never also restart
     `getty@tty1`: you get duplicate sessions (see learnings).
   - **Restart the server:** `systemctl --user restart sigint101`, which also reloads lesson

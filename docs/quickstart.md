@@ -1,9 +1,25 @@
 # SIGINT 101: quick start
 
 ## Turn it on
-Power on the Recon. In a minute or two the course comes up full-screen on the panel by itself.
-Everything is driven by touch. **Back** is always in the status bar at the top, and the home
-screen lists the units in order.
+Power on the Recon. In a minute or two the Raspberry Pi desktop starts and the course opens
+full-screen on top of it, by itself. Everything is driven by touch. **Back** is in the status bar at
+the top of every screen except home, and the home screen lists the units in order.
+
+## Leaving the course, and coming back
+- **Exit.** On the home screen, the top-left control is **Exit SIGINT 101**. Tap it to close the
+  course window. You are left on the Pi desktop, and your progress is kept.
+- **The desktop.** Everything a Pi desktop has is there:
+  - the menu (top left), with a terminal, the file manager and **Shutdown**;
+  - the network menu (top right, the Wi-Fi icon).
+- **Joining Wi-Fi.**
+  1. Tap the Wi-Fi icon at the top right and pick your network.
+  2. The on-screen keyboard comes up for the password. If it doesn't, tap the keyboard icon in the
+     top panel.
+  3. Type the password and connect.
+- **Back to the course.** Double-tap the **SIGINT 101** icon on the desktop, or pick **SIGINT 101**
+  from the menu (under Education). It opens full-screen again.
+- **If the course crashes,** it reopens by itself within about ten seconds. After you Exit, it stays
+  closed until you open it again or restart the box. A restart always comes back into the course.
 
 **Before the box is powered, put an antenna on the LoRa jack, and leave it on.** The LoRa radio
 runs Meshtastic and can transmit by itself, and transmitting into an open jack can damage it.
@@ -75,8 +91,8 @@ Environment=SIGINT101_RX_LON=-74.0060
 Save it, then run `systemctl --user restart sigint101`.
 
 ## Getting a terminal
-SSH in. Or plug in a keyboard and press **Ctrl+Alt+F2** to log in on a text console;
-**Ctrl+Alt+F1** goes back to the panel. The course lives in `~/sigint-101`.
+Exit the course and open **Terminal** from the desktop menu, or SSH in. The course lives in
+`~/sigint-101`.
 
 ## Updating
 Connect the box to a network first, then run:
@@ -98,5 +114,5 @@ Three decoders are not installed by default: digital voice (M27), NOAA APT (M24)
 - **The panel is blank or shows an error:** run `systemctl --user restart sigint101`. The panel
   reconnects on its own.
 - **Logs:** run `journalctl --user -u sigint101 -b`. The journal is kept across reboots.
-- **Powering off:** run `sudo poweroff` before cutting power. The course has no shutdown button
-  yet.
+- **Powering off:** exit the course and use **Shutdown** in the desktop menu (or run
+  `sudo poweroff`) before cutting power.
