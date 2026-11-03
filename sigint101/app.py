@@ -1226,11 +1226,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         try:
             device = console.device()
         except (FlipperError, FlipperSelectionError) as exc:
-            log_event(app.state.events_path, "flipper_blocked", {"reason": str(exc)})
-            return JSONResponse(
-                status_code=503,
-                content={"available": False, "reason": str(exc), "device": None})
-        return {"available": True, "device": device}
+            return _refused("flipper", exc, {"device": None})
+        # A good read ends the refusal episode, so losing the device again is logged as news.
+        last_refusal.pop("flipper", None)
+        # Each read is one short CLI session, not a tool left running: no command line.
+        return {"available": True, "command": None, "device": device}
 
     @app.get("/api/rds")
     def rds():

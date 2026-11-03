@@ -35,7 +35,7 @@ class FlipperConsole:
         the probe itself (never a guess). An open app is a `FlipperError` rather than parsed data.
         """
         if not self._probe(glob=self._glob).present:
-            raise FlipperError("no Flipper attached")
+            raise FlipperError("no Flipper on USB")
         with self._cli_factory() as cli:
             reply = cli.command("device_info")
         if APP_OPEN_MARKER in reply:

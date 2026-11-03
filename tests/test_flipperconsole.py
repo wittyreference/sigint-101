@@ -52,6 +52,12 @@ def test_device_absent_raises_flippererror():
         _console(present=()).device()
 
 
+def test_device_absent_says_no_flipper_on_usb():
+    # The reason is the panel's empty line, so it names where the console looked.
+    with pytest.raises(FlipperError, match="no Flipper on USB"):
+        _console(present=()).device()
+
+
 def test_device_two_attached_raises_selection_error():
     with pytest.raises(FlipperSelectionError):
         _console(present=(BY_ID, SECOND)).device()

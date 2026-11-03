@@ -1922,6 +1922,37 @@ def test_flipper_reports_503_and_a_reason_when_absent(tmp_path):
     assert body["available"] is False
     assert body["device"] is None          # never a fabricated device line
     assert "no Flipper" in body["reason"]
+    assert body["command"] is None         # read over its CLI, not run as a tool: no command line
+
+
+def _flipper_blocked_count(tmp_path):
+    from sigint101.events import read_events
+    return [e["kind"] for e in read_events(tmp_path / "events.jsonl")].count("flipper_blocked")
+
+
+def test_a_missing_flipper_is_logged_once_not_every_poll(tmp_path):
+    # The panel polls every few seconds, and a console with no Flipper plugged in is the usual
+    # case: one flipper_blocked line for the episode, never one per poll (the T-15 log growth).
+    from sigint101.flipper import FlipperError
+    with _client(tmp_path, flipper_factory=lambda: _StubFlipper(
+            error=FlipperError("no Flipper on USB"))) as client:
+        for _ in range(10):
+            assert client.get("/api/flipper").status_code == 503
+    assert _flipper_blocked_count(tmp_path) == 1
+
+
+def test_a_flipper_refusal_is_logged_again_after_a_good_read(tmp_path):
+    # The dedupe is per episode: once the device has answered, losing it again is news.
+    from sigint101.flipper import FlipperError
+    stub = _StubFlipper(error=FlipperError("no Flipper on USB"))
+    with _client(tmp_path, flipper_factory=lambda: stub) as client:
+        client.get("/api/flipper")
+        stub._error, stub._device = None, _flipper_device()
+        live = client.get("/api/flipper").json()
+        stub._error = FlipperError("no Flipper on USB")
+        client.get("/api/flipper")
+    assert live["available"] is True and live["command"] is None
+    assert _flipper_blocked_count(tmp_path) == 2
 
 
 def test_flipper_is_a_separate_device_and_leaves_the_sweeper_alone(tmp_path):
