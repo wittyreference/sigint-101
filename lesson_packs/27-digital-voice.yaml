@@ -31,42 +31,33 @@ stages:
     P25 runs public safety. Both turn speech into a bitstream before it ever leaves the antenna. You
     cannot just listen to it. You have to decode it.
   demo: >-
-    Watch — hands off. rtl_fm feeds the channel to DSD-FME, and DSD-FME does the work: it locks to
-    the four-level FSK, finds the frame, and reads the two halves inside. First the signaling, in the
-    clear — the talkgroup ID, naming which conversation this is, and the source ID, naming the radio
-    that keyed up. Those scroll as call activity: who is talking to whom, moment by moment. Second
-    the voice, which is not an analog tone but compressed bits; DSD-FME runs them back through a
-    vocoder to rebuild speech. DMR packs two of these calls into one channel on alternating time
-    slots; P25 Phase 1 uses one. The panel shows you the IDs as they land.
+    Watch — hands off. rtl_fm feeds DSD-FME, which locks to the four-level FSK, finds the frame,
+    splits it in two. The signaling, in the clear: talkgroup ID (which conversation), source ID
+    (which radio), scrolling as call activity. The voice: compressed bits a vocoder rebuilds. DMR
+    fits two calls per channel in alternating time slots; P25 Phase 1, one.
   try: >-
-    Your log now, comrade. Digital voice comes in calls, not a steady stream — a source ID keys up on
-    a talkgroup, says its piece, releases. Give it time and watch the IDs arrive: which talkgroup,
-    which radio. This console has no speaker yet, so the voice half stays a question. Sit with it
-    before the next screen, because it is the whole question of this lesson.
+    Your log now, comrade. Digital voice comes in calls, not a steady stream — a source ID keys up
+    on a talkgroup, says its piece, releases. Give it time and watch the IDs arrive: which
+    talkgroup, which radio. This console has no speaker yet, so the voice half stays a question —
+    the whole question of this lesson.
   predict: >-
     You decode a busy DMR channel; talkgroup IDs keep scrolling past. How many of those calls will
     also give you clear speech? Lock it in.
   observe: >-
-    Hold your guess against what the panel showed you. The IDs arrived for every call — the system
-    needed them in the clear to route the traffic, so the decoder read them too. The voice is a
-    separate thing. Ask yourself what stands between a stream of bits and a sentence you understand:
-    a vocoder to rebuild it, and sometimes a lock you do not hold.
+    Hold your guess against the panel. The IDs arrived for every call — the system needed them in
+    the clear to route the traffic, so the decoder read them too. The voice is separate. What stands
+    between a stream of bits and a sentence you understand? A vocoder to rebuild it, and sometimes a
+    lock you do not hold.
   explain: >-
-    Here's the straight answer, comrade: some of them. The IDs, yes — every call — but clear speech
-    only sometimes.
-    The signaling layer is sent plainly because the network must read it to connect the call, so the
-    talkgroup and source IDs are yours the moment you decode the frame. The voice payload is its own
-    problem twice over. First it is compressed: DMR and P25 Phase 2 use the AMBE+2 vocoder, P25 Phase
-    1 the older IMBE, and DSD-FME leans on mbelib to rebuild speech from those bits — a proprietary,
-    patent-touched codec, not a plain demodulation. Second, on many systems the voice is encrypted —
-    DMR's privacy modes, P25's DES or AES — while the header is not. Encrypted voice bits run through
-    the vocoder as noise: the IDs keep scrolling, the audio comes out silent or garbled. That is why
-    a channel can look busy and tell you nothing. The law draws the same line: unencrypted
-    public-safety voice is lawful to hear under federal law (18 USC 2511(2)(g)(ii)(II)), decrypting
-    what was encrypted is not, and some states restrict scanners in cars. And it closes the unit. An
-    analog FM voice you simply demodulated and heard; a digital voice you demodulate, frame,
-    de-interleave, then synthesize through a vocoder — one more stage on the same path from energy to
-    meaning. Same dongle, same move, a harder signal.
+    Every call gave up its IDs, which the network reads to connect it; only some, speech. Voice
+    is compressed: AMBE+2 on DMR and P25 Phase 2, older IMBE on P25 Phase 1 — proprietary,
+    patent-touched codecs DSD-FME rebuilds through mbelib, not a plain demodulation. Many systems
+    encrypt it too (DMR privacy modes, P25 DES or AES), header still clear: IDs scroll on, the
+    vocoder gives silence or garble, and a busy channel tells you nothing. The law draws the same
+    line: unencrypted public-safety voice is lawful to hear under federal law (18 USC
+    2511(2)(g)(ii)(II)), decrypting what was encrypted is not, and some states restrict scanners in
+    cars. Carry this out the door: digital voice adds stages: demodulate, frame, de-interleave,
+    vocoder.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text; none of
 # these are booleans, but the quotes keep the whole set consistent and safe to extend.

@@ -27,21 +27,15 @@ stages:
     where it sits, which way it is steaming, several times a minute, in the clear, to anyone listening.
     No permit, no key, no secret. Tonight you build the radar again, this time for the sea.
   demo: >-
-    Watch — hands off. No waterfall tonight; like the aircraft, the meaning is in the data, not the
-    picture. rtl_ais is listening on BOTH channels at once — 161.975 and 162.025 megahertz, the two AIS
-    frequencies — because ships split their traffic across the pair and a 2 MHz dongle hears both. It
-    demodulates the GMSK bursts into AIVDM sentences and hands them up; the console sorts them into a
-    roster, one row per vessel. Here is the catch worth watching: a ship does not say everything in one
-    breath. One short message carries its position and course; a separate, longer one carries its name,
-    its call sign, its size. The console files both under the same vessel — and inland, where no ship is
-    in range, the roster stays honestly empty rather than inventing one.
+    Watch — hands off. No waterfall; the meaning is in the data. rtl_ais hears both channels,
+    161.975 and 162.025 MHz — ships split traffic across the pair; a 2 MHz dongle spans both — and
+    turns GMSK bursts into AIVDM sentences. The catch: position rides one message, the name a
+    longer one, yet both land on one row.
   try: >-
-    Your roster now, comrade. Give it time — AIS is a broadcast on a schedule, so you wait for each
-    vessel to check in before it can appear. Read a row: the nine-digit MMSI that names the ship, its
-    latitude and longitude, the course it is making. Some rows fill in a name once the slower static
-    message arrives; some sit as a bare number and a position until it does. And if this receiver sits
-    inland, far from any water, expect an empty roster — that is the honest answer, not a fault. Sit
-    with what is the same as the sky, and what is new.
+    Your roster now, comrade. AIS broadcasts on a schedule: a vessel appears only when it checks
+    in. Read a row — the nine-digit MMSI naming the ship, its position, its course; the name fills
+    in when the slower static message arrives. Inland, an empty roster is the honest answer, not a
+    fault. What matches the sky, and what is new?
   predict: >-
     A ship's position and its name ride in two different AIS messages. What stitches them into one
     vessel? Lock it in.
@@ -50,20 +44,14 @@ stages:
     another, maybe seconds apart — yet they land on a single line. Ask what the console had to match to
     know they are the same ship, and whether the sky's radar did anything different.
   explain: >-
-    Here's the straight answer, comrade: a shared identity number, the MMSI. AIS — the Automatic
-    Identification System, set by ITU recommendation M.1371 — has every equipped vessel broadcast on
-    161.975 and 162.025 MHz, GMSK at 9600 bits a second, in the clear, because safety at sea is built
-    on everyone hearing everyone, exactly like the sky. But it splits the story across message types: a
-    position report (types 1, 2 and 3) carries the MMSI, the latitude and longitude, the course and
-    speed; a static-and-voyage report (type 5) carries the same MMSI plus the ship's name, call sign,
-    dimensions and destination — and because it is long, the decoder hands it up as two AIVDM
-    sentences that the console stitches back together. Every one of them opens with that nine-digit
-    Maritime Mobile Service Identity, so the console keys its roster by MMSI and folds each message
-    into the matching vessel — the very move the radar made keying aircraft by their ICAO hex address. Nothing is cracked: AIVDM is
-    a published format, the transmission is meant to be received, and listening is as passive and
-    ordinary as any ship-tracking website, which is built on exactly this. One honest footnote: AIS
-    lives on the coast and the rivers, so an inland receiver shows an empty sea — not a broken decoder,
-    just no ships in earshot. Same instrument, new water.
+    The MMSI, comrade. AIS — the Automatic Identification System, ITU recommendation M.1371 —
+    splits a ship's story across message types. A position report (types 1, 2 and 3) carries the
+    MMSI, position, course and speed; a static-and-voyage report (type 5) carries the same MMSI
+    plus name, call sign, dimensions and destination, long enough to arrive as two AIVDM sentences
+    the console rejoins. Every message opens with that nine-digit Maritime Mobile Service Identity,
+    so the roster keys on it. Nothing is cracked: safety at sea means everyone hears everyone,
+    AIVDM is a published format, and ship-tracking websites run on exactly this. Carry this out the
+    door: same instrument, new water; an empty inland sea means no ships, not a broken decoder.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:

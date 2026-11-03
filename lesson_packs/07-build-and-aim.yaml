@@ -25,11 +25,10 @@ stages:
     the right length, the right aim, and shoving a too-loud neighbour out of the radio's ear — and you learn
     that a missing signal sometimes means too much of the wrong thing, not too little antenna.
   demo: >-
-    Watch — hands off for now. The waterfall sits on 1090 MHz, dipole legs near 6.9 cm. Three
-    things decide what reaches the radio. Length, which you set. Aim: aircraft antennas hang
-    vertically, so a vertical dipole drinks their signal in while a flat one barely hears. And
-    overload: strong FM can swamp the front end — the first amplifier behind the antenna — and
-    blind the whole radio. An FM-notch filter throws 88 to 108 MHz away before it gets in.
+    Watch — hands off for now. On 1090 MHz, legs near 6.9 cm, three things decide what gets in.
+    Length, which you set. Aim: aircraft antennas hang vertical, so a flat dipole barely hears.
+    Overload: strong FM can swamp the front end, the first amplifier behind the antenna, blinding
+    the radio; an FM-notch filter throws 88–108 MHz away first.
   try: >-
     Now you run all three, comrade, one change at a time, eye on the floor at 1090: legs at
     6.9 cm; the dipole stood vertical; the FM-notch filter slid into the cable. Say what each move
@@ -44,21 +43,13 @@ stages:
     stretch, 88 to 108 MHz, and nothing else. Is 915 MHz anywhere inside it? And when 915 is weak,
     is the likelier culprit the far-off FM you removed, or the antenna length and aim from earlier?
   explain: >-
-    Here's the straight answer: no — not on its own. The FM-notch filter does exactly one thing,
-    remove the 88-to-108 MHz broadcast band, and 915 is nowhere near it, so the notch doesn't touch
-    your 915 signal at all. It is a targeted tool, not a general cleanup: the only time it rescues
-    1090 is when strong FM is overloading the radio's front end and smearing the whole picture, and
-    pulling that one loud band out lets everything else recover. So the single case where it helps at
-    915 is the very same disease — if that same FM broadcast were overloading you there too — but it
-    can never conjure a 915 signal your antenna is missing, because it adds nothing and it doesn't
-    filter 915. If your 915 reception is weak, the fix is last lesson's: is the dipole the right
-    length for 915 — the legs want to grow to about 8.2 centimetres — and is it aimed right for how
-    that gadget is polarized? That's the real lesson tonight, and it cuts both ways. "Signal is
-    missing" does not always mean "antenna too small." Sometimes it means too much of the wrong
-    thing — a neighbour so loud it blinds the front end — and the cure is to take away, not to add. A
-    good operator asks which disease they have before reaching for a tool: wrong length and wrong aim
-    are fixed at the antenna; an overloading neighbour is fixed with a notch; and more gain, as you
-    learned early on, fixes neither.
+    Not on its own. The notch is a targeted tool, not a cleanup: it removes the FM broadcast
+    band, 88 to 108 MHz, nowhere near 915. It rescues 1090 only when strong FM overloads the front
+    end, smearing the picture. Adding nothing, it can't conjure a 915 signal your antenna misses.
+    Weak 915 wants last lesson's fix: legs grown to about 8.2 cm, aimed for how the gadget is
+    polarized. A missing signal can mean too much of the wrong thing, cured by taking away. Carry
+    this out the door: name the disease first — length and aim are fixed at the antenna, an
+    overloading neighbour with a notch, and more gain, as you learned, fixes neither.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the

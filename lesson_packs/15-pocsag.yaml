@@ -41,20 +41,18 @@ stages:
     decoder says "pager such-and-such was sent twenty characters." Was anything cryptographic in the
     way? If not, what is?
   explain: >-
-    Here's the straight answer: the law, not a cipher. POCSAG is a 1980s paging standard built for
-    simplicity: each frame carries a cap code, a function code, and a numeric or alphanumeric
-    payload, with no encryption at all — multimon-ng recovers every character, which is how the row
-    knows the length. What keeps the words from you is federal law. In the US a page is an
-    "electronic communication" (18 USC 2510(12)); only tone-only pages are carved out
-    (2510(12)(B)). A page carried by a paging company does not count as "readily accessible to the
-    general public" (2510(16)(D)), so the exception for listening to open radio does not reach it,
-    and intentionally intercepting it — decoding the words — is itself the federal offence, up to
-    five years in prison (2511(1)(a), 2511(4)(a)). Passing on or using what you heard is a separate
-    offence under the Communications Act (47 USC 605). That is why this console decodes the framing
-    live and drops the text before it is stored, logged or shown. Study the cap code and the timing;
-    the words are not yours. That line — can versus may — is the real lesson of decoding in the
-    open: a signal being easy to decode says nothing about whether you may read what it carried.
-    Next, back to the sky, and a message the aircraft themselves send in words: ACARS.
+    What keeps the words from you is federal law. POCSAG, from the 1980s, has no cipher:
+    multimon-ng recovers the cap code, function code and every payload character, which is how
+    the row knows the length. In the US a page is an "electronic communication" (18 USC
+    2510(12)); only tone-only pages are carved out (2510(12)(B)). A page carried by a paging
+    company does not count as "readily accessible to the general public" (2510(16)(D)), so the
+    exception for listening to open radio does not reach it, and intentionally intercepting it —
+    decoding the words — is itself the federal offence, up to five years in prison (2511(1)(a),
+    2511(4)(a)). Passing on or using what you heard is a separate offence under the Communications
+    Act (47 USC 605). That is why this console decodes the framing live and drops the text before
+    it is stored, logged or shown. Carry this out the door: can versus may. Easy to decode says
+    nothing about whether you may read; study the cap code and timing, the words are not yours.
+    Next, back to the sky: ACARS, aircraft that send words.
 # The closing line sets up M16 (ACARS aircraft text).
 
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans

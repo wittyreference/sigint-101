@@ -17,10 +17,10 @@ stages:
     Tonight, comrade, you learn the most unsettling way a radio can fail — quietly — and the one
     plain habit that catches it.
   demo: >-
-    Watch — hands off for now. The boring move is the whole job: write down the state of the
-    instrument itself. The provenance panel shows the radio, not a signal: its gain, its chip
-    temperature, whether its power is clean, and the level of a known reference — a steady FM
-    station the console watches, set for your area. Capture it and you hold tonight's baseline.
+    Watch — hands off for now. The boring move is the whole job: record the instrument itself.
+    The provenance panel shows the radio, not a signal: its gain, chip temperature, whether its
+    power is clean, and the level of a known reference — a steady FM station the console watches,
+    set for your area. Capture it: that's tonight's baseline.
   try: >-
     Now you capture yours, comrade. Tap Capture baseline — that stamps tonight's record: the
     radio, its settings, its temperature, the reference level. The lesson is in the repeat: do
@@ -34,19 +34,14 @@ stages:
     Imagine this radio goes deaf tonight. From the waterfall alone — grass, dark, flat floor —
     could you tell? Which number on the provenance panel would tell you?
   explain: >-
-    Here's the hard truth you just reasoned your way toward. A dead front end and an empty sky draw
-    the same waterfall — flat floor, no stripes, nothing at all. "Quiet band" and "deaf radio" are
-    indistinguishable from the picture alone, which means a blank waterfall never, on its own,
-    proves that nothing is on the air; it can just as easily mean this radio has stopped hearing.
-    The only thing that resolves it is the reading you captured tonight: the reference. If your
-    known station still sits at the level your baseline recorded, the radio is healthy and the band
-    is genuinely quiet. If that reference has dropped or vanished while nothing else changed, the
-    radio has gone deaf — and you would never have known without the baseline to compare against.
-    That is why you logged the radio, the gain, the temperature, the power: that context is
-    provenance, and provenance is what makes one reading comparable to the next. A number on the
-    screen is not ground truth; a number sitting beside the known-good baseline that produced it is.
-    Keep the baseline, trust the reference, and the instrument cannot go deaf on you without getting
-    caught.
+    No difference at all: a dead front end and an empty sky both draw a flat floor with no
+    stripes, so a blank waterfall never, on its own, proves nothing is on the air. Your reference
+    settles it. If your known station holds its baseline level, the radio is healthy and the band
+    is quiet; if it has dropped or vanished while nothing else changed, the radio has gone deaf.
+    That's why you logged radio, gain, temperature and power: that context is provenance, and
+    it makes one reading comparable to the next. Carry this out the door: a number on the screen is
+    not ground truth; a number beside its known-good baseline is — keep the baseline, trust the
+    reference.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the

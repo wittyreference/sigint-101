@@ -31,48 +31,32 @@ stages:
     megahertz. A wire antenna and your dongle could catch it until 2025, and when the lines stacked
     up you held a picture of your own sky, taken from space. That is the prize.
   demo: >-
-    Watch — hands off. The panel is parked on the 137 megahertz weather-satellite band, where the
-    polar birds come down. APT — Automatic Picture Transmission — is not packets, comrade; it is a
-    facsimile, the oldest trick in the book. A 2400-hertz tone carries the image, and the only thing
-    that changes is how loud it is: loud for bright cloud, quiet for dark sea, two lines every second,
-    a hundred and twenty lines a minute, all of it amplitude riding an FM carrier. A decoder — satdump
-    listening live, or aptdec and noaa-apt chewing a recorded pass — turns that rising and falling
-    loudness back into brightness, stacks the lines, and hands you two pictures side by side: one from
-    the satellite's visible camera, one from its infrared. Sync stripes march down each edge to keep
-    it straight. Nothing is encrypted, nothing is addressed to anyone — the satellite simply shouts
-    its picture at the whole hemisphere, and you read it. The panel sits empty now, and honestly:
-    it needs a 137 megahertz antenna aimed at a pass that is actually happening, and — the harder
-    truth you will meet at the end — the NOAA birds that made this band famous have gone quiet.
+    Watch — hands off. The panel sits on the 137 megahertz polar weather-satellite band. APT is a
+    facsimile, not packets: a 2400-hertz tone on an FM carrier whose loudness is brightness, two
+    lines a second. The decoder stacks lines into two pictures, visible and infrared, sync stripes
+    down each edge. The panel is empty, honestly; the end says why.
   try: >-
-    Think it through before the next screen, comrade. Every decoder this far has been digital — the
-    aircraft's position, the ham's packet, the pager's page, the airliner's message — each one a frame
-    that either passes its checksum and appears whole, or fails it and vanishes. APT is the odd one
-    out: no packets, no checksum, just a tone whose loudness is a pixel. So sit with the question that
-    sets it apart — when the satellite is low and faint and the tone comes in buried in hiss, what
-    does a picture painted that way do?
+    Think it through, comrade. Every decoder so far was digital — aircraft position, ham packet,
+    pager page, airliner message — each frame passing its checksum whole or vanishing. APT has no
+    packets, no checksum: a tone whose loudness is a pixel. So when a low, faint satellite's tone
+    comes in buried in hiss, what does that picture do?
   predict: >-
     A weak, noisy pass, the tone buried in hiss. Does that leave you no image, or a grainy but real
     one? Lock it in.
   observe: >-
-    Hold your guess against how a facsimile differs from a packet, comrade. A packet with one flipped
-    bit fails its checksum and is thrown away whole — all or nothing. A picture has no checksum; every
-    moment of that tone is just a brightness, landing in the image wherever the line has reached. Ask
-    yourself what hiss does to a brightness, and whether a half-spoiled line is a lost line.
+    Hold your guess against how a facsimile differs from a packet, comrade. A packet with one
+    flipped bit fails its checksum and is thrown away whole. A picture has no checksum; every
+    moment of tone is a brightness, landing wherever the line has reached. Ask what hiss does to a
+    brightness, and whether a half-spoiled line is a lost line.
   explain: >-
-    Here is the straight answer, comrade: a grainy but real image. APT is analog, so it fails the way
-    analog always does — gracefully. There is no checksum to throw a line away; noise just rides along
-    as brightness it should not be, so a weak pass comes down as a faded, streaky, speckled picture
-    with bands of static where the signal dropped — and through all of it, real clouds over real
-    coastline, recognisably your sky. That is the deep contrast with the whole decode unit behind you:
-    every digital decoder was all-or-nothing per frame, a packet either whole or gone; a facsimile
-    only ever gets noisier. Now the honest coda, because this course does not pretend. The NOAA
-    satellites that made 137 megahertz famous — NOAA-15 on 137.620, NOAA-18 on 137.9125, NOAA-19 on
-    137.100 — were all decommissioned through 2025, the last of them that August. There is no live
-    NOAA APT to catch today; the panel stays honestly empty until you aim a 137 megahertz antenna
-    — a V-dipole or a quadrifilar helix — at a predicted pass of a bird that is actually transmitting.
-    The living successor rides the same band: Russia's Meteor-M N2-3 and N2-4, near 137.9 MHz, which
-    send a digital picture (LRPT) rather than this analog APT. Same wire, same patch of sky, same
-    quiet wonder — a photograph from orbit, shouted in the clear, yours to read.
+    A grainy but real image, comrade. APT is analog, so it fails gracefully: noise rides along as
+    false brightness, and a weak pass comes down faded and speckled, banded with static where the
+    signal dropped — yet real clouds over real coastline. Honest coda: NOAA-15 (137.620), NOAA-18
+    (137.9125) and NOAA-19 (137.100) were decommissioned through 2025, the last that August. The
+    panel stays empty until you aim a 137 megahertz V-dipole or quadrifilar helix at a predicted
+    pass of a live bird: Russia's Meteor-M N2-3 or N2-4, near 137.9 MHz, sending digital LRPT.
+    Carry this out the door: every digital decoder behind you was all-or-nothing; analog only gets
+    noisier — and a picture shouted in the clear is yours to read.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:

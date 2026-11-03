@@ -25,18 +25,15 @@ stages:
     fork — loud at one length, deaf everywhere else — and you are going to feel it happen under
     your own thumbs.
   demo: >-
-    Watch — hands off for now. The stock whip caught your first FM station loud and bright. This
-    waterfall sits at 1090 MHz, where aircraft report their positions: almost nothing — same
-    antenna, same sky, nearly deaf. An antenna is a tuning fork: it rings only near the frequency
-    whose wavelength matches its length. A wavelength in metres is 300 over the frequency in MHz:
-    three metres at 100 MHz, about 0.28 at 1090. A leg a quarter of that — just under seven
-    centimetres — is what 1090 wants.
+    Watch — hands off for now. The stock whip caught FM loud; at 1090 MHz, where aircraft report
+    positions, it's nearly deaf. An antenna is a tuning fork, ringing only where wavelength
+    matches length. Wavelength in metres is 300 over MHz: three at 100, about 0.28 at 1090. A
+    quarter-length leg, just under 7 cm, is what 1090 wants.
   try: >-
-    Now your hands, comrade. Swap the whip for the kit's telescopic dipole, legs stretched long:
-    still almost nothing. Now slide each leg in to just under seven centimetres, a thumb's length,
-    eye on the floor around 1090. Aircraft replies are microsecond bursts, so a busy sky lifts a
-    faint hump, never a stripe. Still flat? A quiet sky or a deaf spot reads the same; Lesson 13's
-    radar is the sharper test.
+    Your hands, comrade. Swap in the kit's telescopic dipole, legs long: still almost nothing.
+    Slide each leg to just under 7 cm, a thumb's length, watching 1090's floor. Aircraft replies
+    are microsecond bursts: a busy sky lifts a faint hump, never a stripe. Still flat? A quiet sky
+    reads like a deaf spot; Lesson 13's radar is the sharper test.
   predict: >-
     You set the legs for 1090 MHz with 300 over the frequency. Now picture 915 MHz, where small
     wireless gadgets chatter — lower than 1090. To ring there, do the legs get LONGER, SHORTER, or
@@ -46,20 +43,13 @@ stages:
     against 300 divided by 1090 — is the wavelength at 915 bigger or smaller? And so, to match it,
     should the legs grow or shrink from the thumb-length that just worked for aircraft?
   explain: >-
-    Here's what you were feeling for with your thumbs. Frequency and wavelength sit on a seesaw: the
-    number on top, 300, never moves, so when the frequency goes down the wavelength goes up, and when
-    the frequency goes up the wavelength comes down. 915 is lower than 1090, so its wavelength is
-    longer — 300 over 915 is about 0.33 metres against 0.28 at 1090 — and the quarter-wave legs that
-    match it are longer too: roughly 8.2 centimetres instead of 6.9. So the honest answer is LONGER:
-    to drop to a lower frequency you pull the legs out, not in. That is the whole trap inside "bigger
-    is better." An antenna is not a bucket that catches more the larger it gets; it is a tuning fork
-    that rings at one length and goes deaf off it, so the right antenna is simply the one cut to the
-    frequency you want — the wrong length hears poorly, too long or too short. You met it both
-    ways tonight: the FM whip is deaf at 1090 because it is far too long, and the dipole is cut to
-    the length the number gives. Carry two things out the door: a quarter-wave in metres is 300
-    over the frequency in MHz, then quartered; and when a band
-    sounds dead, ask whether your antenna is even the right length for it before you blame the sky or
-    blame yourself.
+    Pull the legs out, comrade. Frequency and wavelength sit on a seesaw with 300 fixed on top: a
+    lower frequency means a longer wave, and 300 over 915 is about 0.33 metres against 0.28 at
+    1090. Bigger isn't better, though: an antenna isn't a bucket; it's a tuning fork, ringing at
+    one length and hearing poorly off it, too long or too short. The FM whip is deaf at 1090
+    because it's far too long; the dipole is cut to the number. Carry this out the door: a
+    quarter-wave in metres is 300 over the frequency in MHz, then quartered — and when a band
+    sounds dead, check your antenna's length before you blame the sky or yourself.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
