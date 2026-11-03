@@ -1,0 +1,8 @@
+<!-- ABOUTME: Placeholder icon for the SIGINT 101 desktop icon and menu entry (terminal green on black).
+     ABOUTME: install.sh copies it to /usr/local/share/icons/hicolor/scalable/apps/sigint101.svg. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="8" fill="#040806"/>
+  <path d="M10 40h6l4-14 6 24 6-30 6 26 4-10 6 4h6" fill="none" stroke="#2ee66a" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="32" y="58" fill="#2ee66a" font-family="monospace" font-size="9" text-anchor="middle">SIGINT 101</text>
+</svg>

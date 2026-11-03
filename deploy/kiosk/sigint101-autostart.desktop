@@ -1,0 +1,9 @@
+# ABOUTME: XDG autostart entry (~/.config/autostart/sigint101.desktop) for the Pi desktop session:
+# ABOUTME: opens the course full-screen at login and reopens it after a crash, never after Exit.
+[Desktop Entry]
+Type=Application
+Name=SIGINT 101 course watchdog
+Comment=Keeps SIGINT 101 full-screen until the learner exits it
+Exec=/usr/local/bin/sigint101-course watch
+Terminal=false
+NoDisplay=true
