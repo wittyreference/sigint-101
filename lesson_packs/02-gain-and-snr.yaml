@@ -33,20 +33,14 @@ stages:
     happened: did the floor and the peak move together or apart — and did the gap grow, hold, or
     close as you reached the top?
   explain: >-
-    Here's what you were looking at. Gain is just an amplifier, and an amplifier cannot tell
-    signal from noise — it multiplies both at once. So when you turned it up, the station's peak
-    and the noise floor rose together, and past the middle the gap barely moved; at the very top
-    it often shrinks, because strong signals start to overload the receiver and smear false
-    copies across the band. That gap is SNR, and the
-    gap — not the height of the peak — is what decides whether you can actually hear something.
-    Picture one friend talking in a loud restaurant: what matters isn't how loudly they talk,
-    it's how far their voice rises above the room. Turning up a hearing aid lifts your friend and
-    the whole room together, so past a point it stops helping — that is gain. The way to a bigger
-    gap is a better or better-placed antenna, or getting closer to the signal, not more gain. One
-    last handle: these numbers are in decibels, which measure a ratio — every 10 dB is ten times
-    the power — so SNR is simply a subtraction, the gap you read straight off the screen. The
-    best gain setting is the one where that gap is widest, which is almost always somewhere in the
-    middle, not pinned at the top.
+    The peak and the floor rose together. Gain is an amplifier — a hearing aid in a loud
+    restaurant that lifts your friend and the room alike — and it can't tell signal from noise.
+    Past the middle the gap barely moved; at the very top it often shrinks, as strong signals
+    overload the receiver and smear false copies across the band. That gap is SNR: it decides what
+    you can hear, not the peak's height, and because decibels are a ratio it is a plain
+    subtraction off the screen. Carry this out the door: set gain where the gap is widest, usually
+    mid-scale; a bigger gap comes from a better or better-placed antenna, or getting closer, never
+    more gain.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the

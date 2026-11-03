@@ -22,37 +22,28 @@ stages:
     in your wallet, the TV across the room. Over this unit you will drive each of those yourself. But
     first, meet the device — and see what changes the moment you set it next to the nomad.
   demo: >-
-    Watch — hands off. The Flipper is plugged into the console by USB, and it speaks a plain text
-    command line over that cable. The nomad opens the port, asks the device to describe itself, and
-    reads the answer onto the panel: the model, the firmware it is running, the region it was
-    provisioned for, and whether its sub-GHz radio is alive. That is the whole trick of this unit —
-    the Flipper is its own device, not one of your SDR tools, so reading it never disturbs a sweep or
-    a decode. The panel simply shows you what is on the other end of the cable. When no Flipper is
-    attached it says so plainly and invents nothing; a device line only ever appears when a real
-    device answered.
+    Watch, hands off. The Flipper is plugged in by USB and speaks a plain-text command line. The
+    nomad asks it to describe itself and shows the answer: model, firmware, region, and whether
+    its sub-GHz radio is alive. Reading it never disturbs a sweep or a decode. No Flipper
+    attached? The panel says so and invents nothing.
   try: >-
-    Your turn to look, comrade. The panel names the device and shows its radio state in words, not just
-    a colour, so it reads the same in bright sun or red-night. Sit with the question this unit is built
-    around. You already know what the Flipper can do in your hand, out in the field, with nobody
-    watching. So what does setting it next to the nomad — plugging it into the console you have built
-    all course — actually buy you that the Flipper alone cannot?
+    Your turn, comrade. The panel names the device and its radio state in words, so it reads the
+    same in sun or red-night. Now the question this unit is built around: you know what the Flipper
+    does alone in the field. What does plugging it into the nomad buy you that it can't do alone?
   predict: >-
     Plugged into the nomad like this, what does the Flipper gain? Lock it in.
   observe: >-
-    Hold your guess against the device in front of you. The Flipper's own screen is tiny — a few lines
-    of pixels — and its storage is a microSD you cannot read at a glance. The nomad has an 800-by-480
-    panel, a disk, and every lesson in this course. The cable between them carries the Flipper's
-    command line and its saved files both ways.
+    Hold your guess against the device. The Flipper's screen is a few lines of pixels; its storage
+    is a microSD you can't read at a glance. The nomad has an 800-by-480 panel, a disk, and every
+    lesson in this course. The cable carries the Flipper's command line and saved files both ways.
   explain: >-
-    Here is the honest shape of it, comrade. The Flipper does not gain radios or range by being plugged
-    in — it has exactly the same antennas on the bench as in your pocket. What it gains is a bench. On
-    its own it is the field tool: you carry it, you capture with it, you read a cramped line on a
-    postage-stamp screen. Next to the nomad it becomes half of a pair — the field tool plus the
-    analyst's desk. The console reads the device over the cable, pulls the capture you just saved off
-    its card, and draws it large enough to actually study, beside the lesson that explains what you are
-    looking at. Standalone, the Flipper is what you take into the world. Plugged into the nomad, it is
-    where you take apart what you found. The rest of this unit is you doing exactly that, one capability
-    at a time.
+    A bench, not radios: the Flipper has the same antennas plugged in as in your pocket, so no
+    range or speed is gained. On its own it is the field tool: you carry it, capture with it, and
+    squint at a postage-stamp screen. Next to the nomad it becomes half of a pair, the field tool
+    plus the analyst's desk: the console reads the device over the cable, pulls the capture off its
+    card, and draws it large enough to study beside the lesson that explains it. Carry this out the
+    door: take the Flipper into the world, and bring what it caught back to the bench. The rest of
+    this unit does exactly that, one capability at a time.
 
 # Keyboard-free predict chips: {key, label}. Three like-for-like gains, so no label argues its own
 # case (the 11-02 curriculum audit's §8d R8 wording).

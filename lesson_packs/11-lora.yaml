@@ -22,20 +22,15 @@ stages:
     chirp can be dug out of noise so deep your SDR could not even see it. No waterfall tonight: the
     Nomad's own mesh radio listens, and you will watch it read a packet from below the noise floor.
   demo: >-
-    Watch — hands off for now. The Nomad's LoRa radio is listening through meshtastic; when a node
-    transmits, a line appears: who sent it, the message, and — the part that matters — the SNR it
-    decoded at. Keep your eye on that number. It is often NEGATIVE: the signal was weaker than the
-    noise around it, and yet the packet decoded, clean and whole. That is LoRa's whole trick. The
-    chirp spreads the signal wide and thin across the band; the receiver multiplies it by a matching
-    down-chirp, which collapses the whole symbol back into a single narrow tone — concentrating its
-    energy up out of the noise, while the noise, which does not match the chirp, stays spread and low.
-    A plain data signal ten dB under the noise is gone; a LoRa chirp there is a packet. You are
-    about to read a signal your eyes could never find.
+    Watch — hands off for now. When a node transmits, the Nomad's LoRa radio (meshtastic) prints a
+    line: sender, message, and the SNR it decoded at. Watch that number: often NEGATIVE, weaker
+    than the noise, yet the packet decoded whole. Ten dB under the noise a plain data signal is
+    gone; a LoRa chirp is a packet.
   try: >-
     Your turn, comrade. If a second Meshtastic node is in reach, send from it, at least 50 cm from
-    the Nomad, and read the SNR on the line that lands. Send a few: notice how far below zero that
-    number can sit while the message still arrives whole. No second node? Neighbours' nodes may land
-    here too, and an empty list is the honest answer.
+    the Nomad, and read the SNR on the line that lands. Send a few: how far below zero can it go yet
+    arrive whole? No second node? Neighbours' nodes may land here too, and an empty list is the
+    honest answer.
   predict: >-
     A LoRa packet arrives twelve dB below the noise floor — weaker than the very noise around it. Does
     it decode cleanly, arrive garbled, or fail outright? Lock it in.
@@ -44,21 +39,15 @@ stages:
     And sit with the puzzle: if the signal is genuinely weaker than the noise, how can the radio read
     it at all — what is the chirp doing that a steady carrier never could?
   explain: >-
-    Here's the straight answer: it decodes, cleanly. LoRa — Long Range — is chirp spread spectrum.
-    Each symbol is a chirp, the carrier sweeping linearly across the whole band, and the receiver
-    multiplies the incoming chirp by a reference down-chirp. That step, de-chirping, collapses the
-    spread-out symbol into a single narrow tone — gathering all its scattered energy into one spike —
-    while the noise, which never matched the chirp, stays spread thin and low. The spike stands up
-    out of the noise even when the raw signal sat beneath it. That gathering is processing gain, and
-    it is what lets a packet decode at minus ten, even down to about minus seventeen dB SNR on
-    LongFast — well below the noise floor, where your eyes on a waterfall would swear the band was
-    empty. It is the whole reason LoRa reaches kilometres on a small battery: it trades raw speed
-    for the power to dig signal out of noise. The number on each line is the proof — a negative
-    SNR that still decoded is a message recovered from beneath the noise itself. One honest footnote: you could read these
-    because the sending node shares your channel's key; a packet from another channel still shows up,
-    its SNR just as real, but as "encrypted" — received, not readable. Hearing a signal and reading it
-    are two different things, and keeping them straight is the craft. Next: the data hiding inside a
-    signal you can see plainly and still cannot read.
+    Clean, from below zero. LoRa — Long Range — is chirp spread spectrum: each symbol a chirp
+    sweeping linearly across the band, multiplied at the receiver by a reference down-chirp.
+    De-chirping collapses the symbol into one tone; the unmatched noise stays spread thin. That
+    gathering is processing gain: packets decode at minus ten, even about minus seventeen dB SNR on
+    LongFast, where a waterfall shows an empty band. So LoRa reaches kilometres on a small
+    battery, trading raw speed for reach. You read these because the sender shares your
+    channel's key; another channel's packet lands as "encrypted", its SNR just as real: received,
+    not readable. Carry this out the door: hearing a signal and reading it are two different
+    things.
 
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
 # (yes/no/on/off/true/false), so they load as plain strings without needing quotes.

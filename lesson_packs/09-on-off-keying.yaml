@@ -27,21 +27,15 @@ stages:
     through the quiet; this one does the opposite — it blinks all the way out and back, a flashlight
     signalling in the dark. Doorbells, cheap sensors, some remotes: much of 433 MHz speaks it.
   demo: >-
-    Watch — hands off for now. We are parked at 433.92 MHz, where cheap sensors and some remotes
-    chatter (in the US most car and garage remotes sit at 315 or 390 MHz). When something keys up,
-    a bright column stabs straight up out of the noise — then it is gone, flat to the floor — then back, then gone. Look closely: it is not dimming the
-    way an AM voice did, it is switching clean off between pulses, no carrier left behind at all. The
-    rhythm of those on-flashes and off-gaps is the whole message, exactly like Morse. One more view:
-    on your Flipper, Sub-GHz then Read RAW catches the same event as a pulse train in time — bars and
-    spaces marching left to right. The waterfall draws it in frequency, the Flipper draws it in time;
-    one code, two windows.
+    Watch — hands off for now. We're on 433.92 MHz, where cheap sensors and some remotes chatter
+    (most US car and garage remotes sit at 315 or 390 MHz). Keyed, a bright column stabs out of
+    the noise, drops flat to the floor, then returns. Not dimming like AM: switching clean off.
+    That rhythm is the whole message, like Morse.
   try: >-
-    Now it's your turn, comrade — eyes on 433.92. Key a 433 MHz remote you own, held a metre from
-    the antenna, or watch for a neighbour's sensor (on the Flipper, Sub-GHz → Frequency Analyzer
-    finds a remote's frequency first), and watch the column blink. Each press: does the line drop all the way
-    to the noise floor in the gaps, or does a ghost of it hang on? Then glance at the Flipper's Read
-    RAW and match the blinks to its bars and spaces — the same on and off, drawn two ways. Count a
-    few; get a feel for the rhythm before you call it.
+    Your turn, comrade. Key a 433 MHz remote you own, a metre from the antenna, or wait for a
+    neighbour's sensor (Flipper: Sub-GHz → Frequency Analyzer finds its frequency). Each press:
+    does the line drop to the noise floor in the gaps, or does a ghost linger? Match the blinks to
+    the bars and spaces in Sub-GHz → Read RAW.
   predict: >-
     The call is about the quiet between presses. When nothing is keyed at 433.92, what sits where the
     column was — a carrier still lit like AM's, the signal dropped to the noise floor, or a dim
@@ -51,20 +45,14 @@ stages:
     the gap, is anything holding that spot, or is it just bare noise floor again? And ask yourself why
     that has to be so: if the carrier itself comes and goes, what is left to carry the message?
   explain: >-
-    Here's the straight answer: it drops all the way to the floor. On-off keying does exactly what the
-    name says — it switches the carrier fully off, so in the gaps there is no carrier at all, just the
-    noise floor you started with. That is the vanishing the last lesson promised you. And notice what
-    that means: the message cannot be written on the carrier's height or its pitch, because half the
-    time there is no carrier to write on. The message *is* the pattern — the lengths of the bursts and
-    the gaps — Morse with a flashlight. That is why the cheapest hardware on earth uses it: a remote
-    only has to flick a transmitter on and off on cue, no fine modulation to get right. You saw it two
-    ways tonight and they are the same event: the waterfall shows the blink in frequency, a column that
-    comes and goes; the Flipper's Read RAW shows it in time, a pulse train of bars and spaces. Learn to
-    read one against the other and you can spot OOK anywhere on the dial. One honest footnote: seeing
-    the blinks is not the same as reading them. Turning a particular on-off pattern into "unlock" or
-    "ring the bell" is decoding, and that is the next climb — with the one rule from Unit 2 still
-    standing over whose remote you may lawfully decode. Tonight you learned to watch a carrier vanish;
-    next you learn to read what its blinking says.
+    All the way down, as the last lesson promised. With no carrier half the time, the message
+    can't ride height or pitch: it *is* the pattern of burst and gap lengths, Morse with a
+    flashlight. So the cheapest hardware uses it: a remote just flicks a transmitter on and off, no
+    fine modulation needed. The waterfall drew the blink in frequency, Read RAW as a pulse train in
+    time: one event, two windows. Seeing blinks isn't reading them: turning a pattern into "unlock"
+    or "ring the bell" is decoding, the next climb — under Unit 2's rule on whose remote you may
+    lawfully decode. Carry this out the door: a column blinking clean off is OOK, anywhere on the
+    dial.
 
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
 # (yes/no/on/off/true/false), so they load as plain strings without needing quotes.

@@ -562,6 +562,18 @@ Expect reception counts in threes from that sensor; deduplicating repeats is a f
 - Exit order matters: write the flag, then SIGTERM. The watchdog checks the browser first and the
   flag second, so it can never see "no browser" from an Exit without also seeing the flag.
 
+## 2026-11-03: the instrument narration band shows ~30 words; a 120-word explain is ~3-4 screens
+**Finding.** A render sweep of every lesson's demo/try/observe/explain at a forced 800x480 (dark
+and red-night) measured the reading space. Under a live instrument the narration is a 90-94 px band
+(224 px beside the M13 radar): three lines, about 30 words. A 60-word narration still scrolls
+84-113 px in it. The explain body is 195 px tall; at 120 words its scrollHeight runs 550-980 px,
+because the verdict box and the concept paragraph ride in the same scroll.
+**How to apply.**
+- Narration stays at 60 words or fewer and the explain at 120 or fewer.
+  `tests/test_lesson_reading_load.py` enforces both, with a named allowance for M5/M15's law.
+- Put the one thing the learner must do in a narration's first ~30 words, where it shows without
+  scrolling.
+
 ## 2026-11-03: theming the Pi desktop — where each setting actually lives
 **Finding.**
 - **`/usr/bin/labwc-pi` runs `rm ~/.config/gtk-3.0/gtk.css` at every login.** A user gtk.css
