@@ -850,7 +850,8 @@ def test_the_explain_header_shows_the_scored_call_after_a_commit(tmp_path):
         html = client.get("/lesson/1").text
     assert "VERDICT_SENTINEL" in html
     assert "Your call: <b>The gap grows</b>" in html
-    assert "What the radio does: <b>The gap shrinks past a point</b>" in html
+    # The fixture lesson needs no radio, so its answer reads as a fact.
+    assert "In fact: <b>The gap shrinks past a point</b>" in html
     assert "MISSED" not in html
 
 

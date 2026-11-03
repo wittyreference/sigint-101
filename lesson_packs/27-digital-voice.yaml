@@ -66,6 +66,9 @@ choices:
   - {key: "ids-voice-sometimes", label: "Some of them"}
   - {key: "nothing", label: "None of them"}
 
+# The predict asks what is true, not what the radio will show, so the reveal reads "In fact".
+predict_kind: knowledge
+
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: ["ids-voice-sometimes"]
 verdict: >-

@@ -43,6 +43,13 @@ COMMIT_STAGE = "predict"
 # the teaching landed.
 CHECK_STAGE = "check"
 
+# What a predict asks about, which sets how the explain names its answer. An instrument predict
+# asks what the radio will show or do, so the reveal reads "What the radio does"; a knowledge
+# predict asks what is true (the law, what a detection proves, what you need), so it reads "In
+# fact". A lesson that needs a radio is an instrument predict unless its pack says
+# `predict_kind: knowledge`; a lesson with no radio is a knowledge predict.
+REVEAL_LABELS = {"instrument": "What the radio does", "knowledge": "In fact"}
+
 # Panels the console can actually render. The waterfall and tune panel are the baseline
 # every lesson gets; a pack turns extras on by name. Anything else refuses to load,
 # because a panel that silently rendered nothing would fail mid-lesson, in front of
@@ -125,6 +132,12 @@ class Lesson:
     answer: tuple = ()
     verdict: str = ""
     check: dict | None = None
+    predict_kind: str = "instrument"
+
+    @property
+    def reveal_label(self) -> str:
+        """How the explain header names the answer: what the radio does, or a plain fact."""
+        return REVEAL_LABELS[self.predict_kind]
 
     def check_feedback(self, key: str) -> dict:
         """Whether a check answer was the key, with the chosen chip's and the key's label and why.
@@ -578,6 +591,12 @@ def parse_lesson(data: dict) -> Lesson:
 
     answer, verdict = _parse_answer(data, choices, ctx)
 
+    hardware = list(data.get("hardware", []))
+    predict_kind = data.get("predict_kind") or ("instrument" if hardware else "knowledge")
+    if predict_kind not in REVEAL_LABELS:
+        known = ", ".join(sorted(REVEAL_LABELS))
+        raise LessonError(f"{ctx}: unknown predict_kind '{predict_kind}' (known: {known})")
+
     # Optional fields default to empty rather than None so the templates can iterate them
     # without guarding every one, and a pack can omit what it does not use. Only the stages
     # this type requires are carried onto the Lesson; any extra keys in the pack are dropped.
@@ -588,7 +607,7 @@ def parse_lesson(data: dict) -> Lesson:
         concept=str(_require(data, "concept", ctx)),
         type=lesson_type,
         requires_tx=bool(data.get("requires_tx", False)),
-        hardware=list(data.get("hardware", [])),
+        hardware=hardware,
         stages={stage: str(stages_in[stage]).strip() for stage in required},
         hints=list(hints),
         quiz=list(data.get("quiz", [])),
@@ -599,6 +618,7 @@ def parse_lesson(data: dict) -> Lesson:
         answer=answer,
         verdict=verdict,
         check=_parse_check(data, ctx),
+        predict_kind=predict_kind,
     )
 
 

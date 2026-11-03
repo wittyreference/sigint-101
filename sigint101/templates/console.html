@@ -563,8 +563,9 @@
             {# The reveal leads; the concept closes it as the lesson's takeaway. It runs 80-140 words
                on the later lessons, so it rides inside the scrolling body after the explanation
                rather than ahead of it, where it would push the answer below the fold. #}
-            {# The predict reveal: the explain opens on the learner's committed call beside what the
-               radio does (the pack's answer) and its one-line verdict, at the top of the scrolling
+            {# The predict reveal: the explain opens on the learner's committed call beside the pack's
+               answer, named as what the radio does or, for a knowledge predict, as what is in fact
+               true (lesson.reveal_label), and its one-line verdict, at the top of the scrolling
                body. A predict is a guess made before the teaching, so it is never scored here: no
                RIGHT/MISSED and no hit/miss styling (the stored `correct` is item-analysis data, not
                learner feedback). Explain only renders after a commit, so the answer never reaches
@@ -573,7 +574,7 @@
             <div class="stage-panel__body">
               {% if scored %}
               <div class="verdict">
-                <div class="verdict__line">Your call: <b>{{ scored.said }}</b> &middot; What the radio does: <b>{{ scored.answer|join(' or ') }}</b></div>
+                <div class="verdict__line">Your call: <b>{{ scored.said }}</b> &middot; {{ lesson.reveal_label }}: <b>{{ scored.answer|join(' or ') }}</b></div>
                 <div class="verdict__why">{{ scored.verdict }}</div>
               </div>
               {% endif %}
