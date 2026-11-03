@@ -65,12 +65,22 @@ CREATE TABLE IF NOT EXISTS places (
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
 
+# The `kind` key for the learner's answer to a lesson's post-explain check: the chip key chosen.
+CHECK = "check"
+
 
 class PredictionAlreadyCommitted(RuntimeError):
     """A second commit for a lesson whose prediction is already on record.
 
     A prediction is the learner's word before the reveal. Once the explain has shown the answer,
     accepting a new one would let the score copy the reveal, so the store refuses it outright.
+    """
+
+
+class CheckAlreadyAnswered(RuntimeError):
+    """A second answer to a lesson's check.
+
+    The feedback after the first answer names the key, so a re-answer would only copy it.
     """
 
 
@@ -146,17 +156,12 @@ class Progress:
             raise ValueError("a prediction cannot be blank")
 
         updated = clock() if clock else None
-        stored_correct = None if correct is None else int(bool(correct))
         with self._lock:
             # Both writes share one lock and one commit: a prediction that saved without
             # opening the lesson, or the reverse, would leave the console showing a state
             # the learner never reached. DO NOTHING on a collision, then a zero rowcount, is
             # how a second commit is caught: the first prediction stands untouched.
-            inserted = self._conn.execute(
-                "INSERT INTO responses(lesson_id, kind, body, updated, correct) "
-                "VALUES(?, ?, ?, ?, ?) ON CONFLICT(lesson_id, kind) DO NOTHING",
-                (lesson_id, PREDICTION, body, updated, stored_correct),
-            ).rowcount
+            inserted = self._insert_response(lesson_id, PREDICTION, body, updated, correct)
             if not inserted:
                 self._conn.rollback()
                 raise PredictionAlreadyCommitted(
@@ -167,6 +172,45 @@ class Progress:
                 (lesson_id, updated),
             )
             self._conn.commit()
+
+    def _insert_response(self, lesson_id: int, kind: str, body: str, updated, correct) -> bool:
+        """Write one response row unless one of this kind is already there; True when written.
+
+        The caller holds the lock and commits. `correct` is stored as 1/0, or NULL when unscored.
+        """
+        stored_correct = None if correct is None else int(bool(correct))
+        return bool(self._conn.execute(
+            "INSERT INTO responses(lesson_id, kind, body, updated, correct) "
+            "VALUES(?, ?, ?, ?, ?) ON CONFLICT(lesson_id, kind) DO NOTHING",
+            (lesson_id, kind, body, updated, stored_correct),
+        ).rowcount)
+
+    def record_check(self, lesson_id: int, body: str, *, correct: bool, clock=None) -> None:
+        """Store the chip the learner chose on a lesson's check, and whether it was the key.
+
+        Fails closed on a blank answer, and refuses a second one (CheckAlreadyAnswered): the
+        feedback after the first names the key, so a later answer would only copy it.
+        """
+        body = (body or "").strip()
+        if not body:
+            raise ValueError("a check answer cannot be blank")
+        updated = clock() if clock else None
+        with self._lock:
+            if not self._insert_response(lesson_id, CHECK, body, updated, correct):
+                self._conn.rollback()
+                raise CheckAlreadyAnswered(f"lesson {lesson_id} already has a check answer")
+            self._conn.commit()
+
+    def get_check(self, lesson_id: int):
+        """The check answer as {"choice", "correct"}, or None if the check is unanswered."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT body, correct FROM responses WHERE lesson_id=? AND kind=?",
+                (lesson_id, CHECK),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"choice": row["body"], "correct": bool(row["correct"])}
 
     def get_prediction(self, lesson_id: int):
         """What the learner said they expected to see, or None if they have not said.

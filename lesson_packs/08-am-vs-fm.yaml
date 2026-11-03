@@ -43,7 +43,7 @@ stages:
     Watch one transmission from key-up to release. Between words, does the line stay lit? And at
     release? Why call it a carrier — what must it do in the quiet to earn the name?
   explain: >-
-    They let go of push-to-talk. While the key is held, the AM center line stays lit through
+    They released push-to-talk. While the key is held, the AM center line stays lit through
     every pause; only the brightness on it comes and goes. That's amplitude modulation: a steady
     carrier, with the voice written on it as height. Stop talking and you've only stopped writing
     on it; that's why it's called a carrier. Release the key and the carrier goes too, until the
@@ -57,12 +57,12 @@ stages:
 # learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
-  - {key: ptt, label: They let go of push-to-talk}
+  - {key: ptt, label: They released push-to-talk}
   - {key: words, label: They paused between words}
   - {key: faded, label: The signal faded out}
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: [ptt]
 verdict: >-
-  Let go of push-to-talk: an AM carrier holds through the pauses between words, so the column goes
+  Released push-to-talk: an AM carrier holds through the pauses between words, so the column goes
   dark only when the transmitter stops.

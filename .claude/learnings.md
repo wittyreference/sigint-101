@@ -610,3 +610,16 @@ command, not a stub that prints one line.
 - Budget one physical RESET press after any devboard flash.
 - Take a devboard backup on a powered hub, or rely on the official image as the rollback.
 - Prove the bridge's second CDC port (`ls /dev/ttyACM*` shows two) before building on it.
+
+## 2026-11-03: the post-lesson check stage, and what fits beside it
+**Finding.**
+- A seventh rail pip (an intro lesson with a `check:`) squeezes "Locked until you predict" to two
+  lines, 47px tall in the 37px rail, clipped top and bottom. `.rail--long` tightens its line height
+  so both lines sit inside (measured 68–101px in the 66–103px rail).
+- The check fits 800x480 with no scroll only if the prompt is 2 title lines, every chip label is
+  2 lines or fewer, and the "Not yet" result (the chosen why plus the key's) is 4 lines or fewer.
+  One 3-line chip pushed Complete to 481px; a 3-line prompt pushed it to 528px.
+- A `why:` written as a plain YAML scalar must not contain ": " — the pack fails to parse and the
+  whole server refuses to start.
+**How to apply.** Keep check labels near 20 characters, each why near 90 with its label, and
+re-run the 800x480 render (before and after commit, wrong answer) on any check copy change.

@@ -57,3 +57,17 @@ def test_the_right_chip_is_not_always_in_the_same_place():
 def test_no_pack_offers_a_label_that_gives_the_answer_away():
     labels = {choice["label"] for lesson in LESSONS.values() for choice in lesson.choices}
     assert not labels & set(LEAKY_LABELS)
+
+
+# The reveal label fits the item: an instrument predict reads "What the radio does", a knowledge
+# predict (the law, what a detection proves, what you need) reads "In fact".
+@pytest.mark.parametrize("lesson_id", [1, 2, 3, 4, 8, 11, 14])
+def test_an_instrument_predict_reveals_what_the_radio_does(lesson_id):
+    assert LESSONS[lesson_id].reveal_label == "What the radio does"
+
+
+# L7 reasons from a stipulated 915 MHz case (no tower near, legs cut for 1090) that the panel never
+# shows, so its reveal is a fact about the notch, not a reading.
+@pytest.mark.parametrize("lesson_id", [5, 6, 7, 13, 15, 17, 18, 19, 20, 26, 27, 29])
+def test_a_knowledge_predict_reveals_in_fact(lesson_id):
+    assert LESSONS[lesson_id].reveal_label == "In fact"

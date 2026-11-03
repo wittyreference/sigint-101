@@ -58,3 +58,21 @@ answer: [narrower]
 verdict: >-
   Narrower: every FM station gets the same 200 kHz slice, but this screen paints only what clears
   the noise floor, so a weak one shows just its core.
+
+# The post-lesson check: one new situation on this lesson's idea (a signal's shape names what it
+# is), scored after the explain. Each chip's `why` is the feedback for choosing it.
+check:
+  prompt: >-
+    One FM stripe is twice as wide as its neighbours: a bright core with a dimmer band hugging each
+    side. What is it most likely?
+  choices:
+    - key: power
+      label: A stronger station
+      why: More power paints a brighter, slightly fuller stripe, never a dim band on each side.
+    - key: hd
+      label: An HD Radio station
+      why: HD Radio adds digital sidebands either side of the analog core, doubling its width.
+    - key: two
+      label: Two stations side by side
+      why: Two stations would show two bright cores, not one core with dim edges.
+  answer: hd

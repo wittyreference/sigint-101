@@ -575,6 +575,32 @@ def test_score_names_what_the_learner_said_and_the_answer_by_label():
     assert lesson.score("same")["correct"] is True
 
 
+# The reveal names the answer as what the radio does when the predict is about the instrument, and
+# as a plain fact when it is about what is true (the law, what a detection proves). A radio lesson
+# is about the instrument unless its pack says `predict_kind: knowledge`.
+
+def test_a_radio_lesson_reveals_what_the_radio_does():
+    lesson = parse_lesson(_consolidation(hardware=["rtl-sdr"]))
+    assert lesson.predict_kind == "instrument"
+    assert lesson.reveal_label == "What the radio does"
+
+
+def test_a_lesson_with_no_radio_reveals_a_fact():
+    lesson = parse_lesson(_consolidation(hardware=[]))
+    assert lesson.predict_kind == "knowledge"
+    assert lesson.reveal_label == "In fact"
+
+
+def test_a_radio_lesson_whose_predict_is_a_fact_says_so():
+    lesson = parse_lesson(_consolidation(hardware=["rtl-sdr"], predict_kind="knowledge"))
+    assert lesson.reveal_label == "In fact"
+
+
+def test_an_unknown_predict_kind_is_refused():
+    with pytest.raises(LessonError, match="predict_kind"):
+        parse_lesson(_consolidation(predict_kind="trivia"))
+
+
 def test_the_answer_rides_the_sealed_reveal():
     lesson = parse_lesson(_intro(choices=_CHIPS, answer=["same"], verdict="Same width."))
     with pytest.raises(RevealLockedError):

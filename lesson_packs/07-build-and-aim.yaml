@@ -42,7 +42,7 @@ stages:
     stretch, 88 to 108 MHz, and nothing else. Is 915 MHz anywhere inside it? And when 915 is weak,
     is the likelier culprit the far-off FM you removed, or the antenna length and aim from earlier?
   explain: >-
-    No — wrong culprit. The notch is a targeted tool, not a cleanup: it removes the FM broadcast
+    No — FM isn't the culprit. The notch is a targeted tool, not a cleanup: it removes the FM broadcast
     band, 88 to 108 MHz, and nothing else. It helps another band only when strong FM is swamping
     the front end and blinding the whole radio, as under a tower. With no tower near, there is
     nothing to take away, and the hiss at 915 isn't FM, so it isn't quieter either. Weak 915 wants
@@ -56,8 +56,11 @@ stages:
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
   - {key: "yes", label: "Yes, it cleans the radio up"}
-  - {key: "no", label: "No, wrong culprit"}
+  - {key: "no", label: "No, not the culprit"}
   - {key: little, label: "A little, less noise overall"}
+
+# The predict asks what is true, not what the radio will show, so the reveal reads "In fact".
+predict_kind: knowledge
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 # The stem rules out the one case where the notch would help (strong FM nearby), so one chip is
