@@ -29,6 +29,7 @@ from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
+from .battery import BatteryGauge
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event, read_events
@@ -255,14 +256,26 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                apt_factory=None, sstv_factory=None,
                flock_factory=None, rayhunter_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
-               kiosk_exit=request_exit) -> FastAPI:
+               kiosk_exit=request_exit, battery_gauge=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
     reports "no radio" — which is how the suite honours the no-mock-hardware invariant with no
     dongle attached. The module-level `app` below uses the real ones.
     """
-    templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+    # The status bar's battery, on every page: the UPS's INA219 as its daemon reports it, or
+    # unknown. A box with no gauge shows a dash, never a number. Tests hand in their own gauge.
+    battery = BatteryGauge() if battery_gauge is None else battery_gauge
+
+    def status_bar(request: Request) -> dict:
+        reading = battery.read()
+        if reading is None:
+            return {"battery_pct": None, "battery_charging": False}
+        return {"battery_pct": reading.percent, "battery_charging": reading.charging,
+                "battery_low": reading.low, "battery_volts": reading.voltage}
+
+    templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
+                                context_processors=[status_bar])
 
     # The radios the bus held the last time a tool looked, as each SDR tool enumerates them before
     # it opens one. A reception names its radio's serial from here, so logging one never has to
@@ -1441,6 +1454,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         radio = probe()
         return {"present": radio.present, "method": radio.method, "detail": radio.detail}
+
+    @app.get("/api/battery")
+    def battery_reading():
+        """The pack as the status bar shows it, for the bar's own refresh: a reading, or absent
+        with the reason (no daemon, an I2C error, a stale poll)."""
+        reading = battery.read()
+        if reading is None:
+            return {"present": False, "reason": battery.reason}
+        return reading.as_dict()
 
     @app.post("/api/tune")
     def tune(payload: dict = Body(default={})):
