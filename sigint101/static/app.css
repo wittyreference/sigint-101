@@ -477,6 +477,8 @@ body {
   position: relative;
   width: 34px;
   height: 18px;
+  /* The fill's track sits 2px inside the border, so its width % is a share of the track. */
+  padding: 2px;
   border: 2px solid var(--fg-dim);
   border-radius: 0;
 }
@@ -492,8 +494,8 @@ body {
 }
 
 .batt__fill {
-  position: absolute;
-  inset: 2px;
+  display: block;
+  height: 100%;
   width: 60%;
   background: var(--ok);
 }
