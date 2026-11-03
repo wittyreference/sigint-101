@@ -17,10 +17,17 @@
     return (page && page.address != null) ? String(page.address) : "—";
   }
 
-  // The one line a learner reads for a page: its message, or a note for a tone-only page.
+  // The one line a learner reads for a page: its message where the words are lawfully ours, its
+  // length where the server withheld them (the commercial paging band: framing live, text hidden),
+  // or a note for a tone-only page. The words never reach the browser on that band at all.
   function summary(page) {
     page = page || {};
     if (page.text) return page.text;
+    if (page.text_withheld) {
+      var n = page.length || 0;
+      if (page.kind === "numeric") return "digits withheld · " + n;
+      return "text withheld · " + n + (n === 1 ? " char" : " chars");
+    }
     return page.kind === "tone" ? "(tone only)" : "";
   }
 
@@ -59,20 +66,20 @@
         '<span class="decoder__tone">' + esc(p.baud) + " bd</span>";
       list.appendChild(li);
     });
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
+    DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = pages.length > 0;
       if (!pages.length) empty.textContent = "listening… no pages heard yet";
     }
   }
 
-  function showEmpty(panel, reason) {
+  function showEmpty(panel, body) {
     var list = panel.querySelector("[data-pocsag-list]");
     var empty = panel.querySelector("[data-pocsag-empty]");
     var badge = panel.querySelector("[data-pocsag-badge]");
     if (list) list.innerHTML = "";
-    if (badge) { badge.textContent = "NO RADIO"; badge.className = "decoder__status decoder__status--empty"; }
-    if (empty) { empty.hidden = false; empty.textContent = reason || "no radio to decode POCSAG"; }
+    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode POCSAG");
   }
 
   function tick() {
@@ -81,8 +88,7 @@
       .then(function (res) {
         var waiting = false;
         if (!res.ok || res.body.available === false) {
-          var reason = (res.body && res.body.reason) || "no radio to decode POCSAG";
-          panels.forEach(function (p) { showEmpty(p, reason); });
+          panels.forEach(function (p) { showEmpty(p, res.body); });
           waiting = true;
         } else {
           panels.forEach(function (p) { render(p, res.body); });

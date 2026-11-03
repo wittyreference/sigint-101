@@ -35,7 +35,7 @@ stages:
     a colour, so it reads the same in bright sun or red-night. Sit with the question this unit is built
     around. You already know what the Flipper can do in your hand, out in the field, with nobody
     watching. So what does setting it next to the nomad — plugging it into the console you have built
-    all course — actually buy you that the Flipper alone, screen the size of a postage stamp, cannot?
+    all course — actually buy you that the Flipper alone cannot?
   predict: >-
     Plugged into the nomad like this, what does the Flipper gain? Lock it in.
   observe: >-
@@ -51,11 +51,18 @@ stages:
     analyst's desk. The console reads the device over the cable, pulls the capture you just saved off
     its card, and draws it large enough to actually study, beside the lesson that explains what you are
     looking at. Standalone, the Flipper is what you take into the world. Plugged into the nomad, it is
-    what you take apart what you found. The rest of this unit is you doing exactly that, one capability
+    where you take apart what you found. The rest of this unit is you doing exactly that, one capability
     at a time.
 
-# Keyboard-free predict chips: {key, label}.
+# Keyboard-free predict chips: {key, label}. Three like-for-like gains, so no label argues its own
+# case (the 11-02 curriculum audit's §8d R8 wording).
 choices:
-  - {key: "more-radios", label: "More radios / range"}
-  - {key: "a-bench", label: "A bench: screen + storage"}
-  - {key: "nothing", label: "Nothing, just charging"}
+  - {key: "a-bench", label: "Screen + storage"}
+  - {key: "more-range", label: "More range"}
+  - {key: "faster-radios", label: "Faster radios"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["a-bench"]
+verdict: >-
+  It gains a bench, not radios: the same antennas, but a big screen, a disk and the lessons to study
+  what it caught.

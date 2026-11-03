@@ -1,13 +1,13 @@
 # ABOUTME: Lesson pack M5 "The One Rule" — the legal/ethics line (no RF): listening is broad and
-# ABOUTME: lawful, transmitting is licensed; taught as knowledge and an on-ramp, never a lockout (D16).
+# ABOUTME: mostly lawful, transmitting is licensed; taught as knowledge, never a lockout (D16).
 
 id: 5
 slug: the-rules
 title: "The One Rule"
 type: intro
 concept: >-
-  Listening is broad and lawful; transmitting is licensed — the one line to know is between
-  receiving and transmitting.
+  Listening is broad and mostly lawful; transmitting is licensed — the one line to know is between
+  receiving and transmitting, with a few hard limits on listening.
 requires_tx: false
 hardware: []
 panels: []
@@ -21,13 +21,14 @@ stages:
   demo: >-
     Here is the whole of it, and it is simpler than people fear. Receiving — listening — is broad
     and, in most places, lawful: you may tune and watch nearly anything your radio can hear, the way
-    you have all course. There are two honest limits on listening: you may not break encryption to
-    read what was scrambled, and you may not pass on or act on certain private communications you
-    happen to catch, such as cellular. Transmitting is the other power, and it is the licensed one:
-    keying up on the amateur bands needs an amateur licence, and every band has its own rule for who
-    may talk and how loud. Some bands — the ISM bands your LoRa and Meshtastic use — are open to
-    short-range transmitting with no personal licence, inside set power limits. So the line is
-    simple: listen freely, transmit only where you are authorised.
+    you have all course. There are honest limits on listening: you may not break encryption to read
+    what was scrambled; you may not intercept phone calls or pager messages carried by a phone or
+    paging company at all; and you may not pass on a private message you happen to catch.
+    Transmitting is the other power, and it is the licensed one: keying up on the amateur bands
+    needs an amateur licence, and every band has its own rule for who may talk and how loud. Some
+    bands — the 915 MHz band your LoRa and Meshtastic use — allow licence-free transmitting under
+    FCC Part 15, inside set power limits. So the line is simple: listen within those limits,
+    transmit only where you are authorised.
   try: >-
     Your turn, comrade — sort these four in your head before the next screen. One: you watch an
     unencrypted aircraft channel scroll by. Two: you record a neighbour's encrypted phone call and
@@ -46,10 +47,12 @@ stages:
     and it is the clearest case of the rule. Listening to that repeater all evening was fine;
     transmitting on it is the licensed power, and the amateur bands want a licence first. Walk the
     four back. Watching the aircraft channel is receiving — fine. Descrambling the neighbour's phone
-    breaks encryption and intrudes on a private call, the one listening limit — not fine. The ham
+    breaks encryption and intercepts a carrier's call, which is the offence in itself, recorded or
+    not, passed on or not — not fine. (The scanner rule you may hear of, 47 CFR 15.121, governs
+    which scanners may be certified and sold, not owning a receiver like this one.) The ham
     repeater is transmitting unlicensed — not fine. The Meshtastic text is transmitting too, but on
-    an ISM band that allows short-range use with no personal licence, so it is fine inside its power
-    limits. One line explains all of it: receiving is broad and lawful, transmitting is licensed.
+    a band that allows licence-free use under Part 15, so it is fine inside its power limits. One
+    line explains most of it: receiving is broad and mostly lawful, transmitting is licensed.
     None of this is a wall around your radio — the exam trainer in this course is the on-ramp, and
     an amateur licence opens the transmit side for real. The rule is knowledge you carry, not a lock
     on the gift. Specifics vary by country and, for listening, by state — treat this as the shape of
@@ -59,6 +62,11 @@ stages:
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
 # learner reads. Keys are quoted so a YAML-boolean word could never coerce them to True/False.
 choices:
-  - {key: "legal", label: "Legal — it's just one call"}
-  - {key: "illegal", label: "Illegal — transmitting needs a licence"}
-  - {key: "identify", label: "Legal if you give your name first"}
+  - {key: "legal", label: "Legal"}
+  - {key: "illegal", label: "Illegal"}
+  - {key: "identify", label: "Legal if you identify"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["illegal"]
+verdict: >-
+  Illegal: listening to the repeater was fine, but transmitting on it needs an amateur licence.

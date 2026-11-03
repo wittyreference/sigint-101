@@ -58,3 +58,20 @@ def unit_for_lesson(lesson_id: int) -> Unit | None:
         if lesson_id in unit.lesson_ids:
             return unit
     return None
+
+
+def teaching_order() -> tuple:
+    """Every planned lesson id in the order a learner meets them: unit by unit, as displayed.
+
+    Ids were handed out as lessons were built, so they are not this order (AIS, id 26, is the 17th
+    lesson taught). Ids stay the storage keys and the URLs; this order is what the learner is shown.
+    """
+    return tuple(lesson_id for unit in UNITS for lesson_id in unit.lesson_ids)
+
+
+def teaching_position(lesson_id: int) -> int | None:
+    """Where a lesson falls in the teaching order, counting from 1; None if it is in no unit."""
+    order = teaching_order()
+    if lesson_id not in order:
+        return None
+    return order.index(lesson_id) + 1

@@ -1,12 +1,15 @@
 # ABOUTME: Tests the rtl_433 decode backend — JSON-line parsing and the Decoder lifecycle.
 # ABOUTME: The process is a fake at the boundary; no radio or no rtl_433 is an honest refusal.
 
+from pathlib import Path
+
 import pytest
 
 from sigint101.decode import (
     DEFAULT_DECODE_HZ,
     Decoder,
     DecodeUnavailable,
+    RepeatFilter,
     parse_decode_line,
 )
 
@@ -203,3 +206,66 @@ def test_parse_tolerates_a_malformed_frequency_without_inventing_one():
     assert d is not None
     assert d.freq_hz == 0 and d.snr_db is None
     assert d.readings["humidity"] == 5
+
+
+# --- one reception per transmission, however many copies rtl_433 prints -------------------------
+
+# A real capture: 75 s of `rtl_433 -f 433920000 -F json -M level -d 0` on nomad-b (2026-11-02),
+# each line prefixed with its arrival time (epoch s). The Acurite-Tower sends every reading three
+# times in one burst and rtl_433 prints all three, byte-identical, within 6 ms; the next burst
+# comes ~17 s later carrying the same 16.0 °C / 42 % — a new reading that happens to match.
+REPEATS = Path(__file__).parent / "fixtures" / "rtl_433" / "acurite-tower-repeats.txt"
+
+
+def _captured():
+    """The capture as (arrival time, rtl_433 line) pairs, in arrival order."""
+    pairs = []
+    for row in REPEATS.read_text().splitlines():
+        stamp, line = row.split(" ", 1)
+        pairs.append((float(stamp), line))
+    return pairs
+
+
+def test_the_capture_is_four_bursts_of_three_identical_copies():
+    lines = [line for _, line in _captured()]
+    assert len(lines) == 12
+    assert len(set(lines[0:3])) == len(set(lines[3:6])) == 1
+    assert lines[0] != lines[3]                 # the burst's envelope differs; the reading does not
+
+
+def test_copies_of_one_transmission_are_repeats_and_the_next_burst_is_not():
+    repeats = RepeatFilter()
+    verdicts = [repeats.is_repeat(parse_decode_line(line), now) for now, line in _captured()]
+    # One new reception per burst, even though every burst reports the same values.
+    assert verdicts == [False, True, True] * 4
+
+
+def test_the_same_values_after_the_window_are_a_new_reading():
+    repeats = RepeatFilter(window_s=2.0)
+    first = parse_decode_line(_captured()[0][1])
+    assert repeats.is_repeat(first, 100.0) is False
+    assert repeats.is_repeat(first, 101.9) is True
+    assert repeats.is_repeat(first, 102.0) is False  # measured from the copy that was reported
+
+
+def test_a_changed_reading_or_another_sensor_inside_the_window_is_new():
+    repeats = RepeatFilter()
+    tower_now = parse_decode_line(_captured()[0][1])   # id 16262, 16.0 °C, 42 %
+    tower_then = parse_decode_line(ASK_LINE)           # same sensor, 18.0 °C, 51 %
+    lacrosse = parse_decode_line(FSK_LINE)
+    assert repeats.is_repeat(tower_now, 10.0) is False
+    assert repeats.is_repeat(tower_then, 10.1) is False
+    assert repeats.is_repeat(lacrosse, 10.2) is False
+
+
+def test_the_decoder_reports_one_reception_per_burst_but_lists_every_copy():
+    burst = [line for _, line in _captured()[0:3]]
+    dec = _decoder(burst + [FSK_LINE])
+    heard = []
+    dec.on_reception = heard.append
+    dec.start()
+    dec.drain()
+    assert [h["model"] for h in heard] == ["Acurite-Tower", "LaCrosse-TX141THBv2"]
+    assert heard[0]["readings"]["temperature_C"] == pytest.approx(16.0)
+    # The panel still shows what rtl_433 printed: three copies of the tower, then the LaCrosse.
+    assert len(dec.recent()) == 4

@@ -361,3 +361,203 @@ render. **Unit 5 Decode (M13-M16) is complete; 7 SDR-exclusive consumers now sha
 `claim()` helper refactor (flagged M14) is overdue, still gated on MC.**
 **How to apply.** Prefer a decoder's own test asset + its file-input mode for real fixtures and a real
 populated render; inject it through the existing `*_factory` seam rather than changing production code.
+
+## 2026-11-02: kiosk autostart on nomad-b — two traps a reboot test would have hidden
+**Finding.** `deploy/install.sh` makes the panel self-starting. The server is a systemd *user*
+unit with linger, and tty1 autologin runs `~/.profile`, which execs `~/.local/bin/sigint101-kiosk`
+(labwc plus a looping kiosk Chromium). Two traps turned up on the first real run:
+- **Chromium asks the GNOME keyring for a password store.** On a fresh profile that puts a
+  "Choose password for new keyring" dialog over the whole panel, and nobody can dismiss it
+  without a keyboard. `--password-store=basic` stops it. Only a `grim` screenshot of the real
+  panel showed this; the process list said "chromium running".
+- **`systemctl restart getty@tty1` does not end the old session.** logind leaves session
+  processes alive, so you get two labwc instances fighting over DRM, a dead `wayland-0`, and a
+  `grim` that hangs.
+A third trap only showed up after several minutes:
+- **`/usr/bin/chromium` returns before the browser exits.** A `while true; do chromium …; done`
+  relaunch loop therefore fires every few seconds. Each launch hands off to the running browser
+  as another window, and nomad-b reached load 20 with about 260 chromium processes.
+- Orphaned autostart loops also outlive their labwc.
+- The launcher is now a watchdog: it relaunches only when no
+  `[u]ser-data-dir=…/chromium-kiosk` process is alive. Crash-tested by killing the browser: it
+  relaunched exactly once.
+**How to apply.**
+- After any kiosk change, check `uptime` and the kiosk process count a few minutes later, not
+  just "it's on screen".
+- To restart the kiosk, kill the running `labwc` by PID. The login shell exits and autologin
+  respawns a single fresh kiosk on its own. Never also restart getty.
+- Screenshot the real panel with
+  `XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-N grim` (the live socket's number
+  climbs after restarts).
+- The server now owns port 8008: `systemctl --user stop sigint101` before running a manual
+  server there.
+
+## 2026-11-02: headless Chromium on nomad-b needs --password-store=basic
+**Finding.**
+- **What broke:** once the kiosk session existed (tty1 autologin starts `gnome-keyring-daemon`,
+  and linger keeps a user D-Bus up), every *freshly launched* headless Chromium hung on its
+  first http page:
+  - `Page.navigate` and every later command went silent, while the browser endpoint still
+    answered;
+  - a `data:` URL rendered fine.
+- **Why:** on first use of cookies, Chromium initialises its cookie encryption (OSCrypt) through
+  the desktop keyring, and the keyring waits forever on a "choose a password" prompt nobody
+  can answer. That is the same dialog that covered the kiosk panel. A `data:` page never
+  touches cookies.
+- **Why one instance kept working:** the UX auditor's instance launched at 20:55, before the
+  kiosk session existed, so it never asked the keyring.
+- **What it was not:** the CDP client, the server branch, the topology, `/dev/shm`, the
+  respawn-storm kill, or a reboot (it still hung after one).
+**How to apply.**
+- Every Chromium on a course box, kiosk or headless, launches with `--password-store=basic`.
+- The render recipe is `--headless=new --no-sandbox --disable-gpu --password-store=basic
+  --remote-allow-origins=* --user-data-dir=<fresh> --disk-cache-size=1`.
+- If a tab goes silent while the browser endpoint answers, suspect a blocking OS prompt (keyring,
+  dialog) before suspecting the protocol client.
+
+## 2026-11-02: provisioning inventory — what nomad-b's hand setup actually was
+**Finding.** `deploy/provision.sh --check` on nomad-b, plus a read-only inventory, showed:
+- **wlan1 is back in managed mode.** Monitor mode was a manual step, so the 11-01 reboot undid
+  it, and the Flock lesson on nomad-b can't capture until monitor mode comes back.
+  `provision.sh` now persists it with an NM unmanaged rule (driver `rtw_8821cu`), a udev rule,
+  and a `sigint101-monitor@.service` oneshot.
+- **The kiosk depends on raspi-config's "console autologin" (B2).** nomad-b's `default.target`,
+  `getty@tty1` `autologin.conf` and `lightdm.conf` all share one timestamp (2026-09-08 22:02),
+  which is a B2 run. `install.sh` assumes it, but a stock Recon probably boots to the desktop.
+  `provision.sh` sets B2.
+- **A tcpdump upgrade drops its file caps.** apt replaces the binary. An apt `DPkg::Post-Invoke`
+  hook re-applies `cap_net_raw,cap_net_admin+eip`.
+- **`iw`, `getcap` and `setcap` live in /usr/sbin**, which is off `spec5`'s PATH over
+  non-login SSH. `command -v iw` says "missing" even though iw is installed. Check
+  `/usr/sbin` before calling a tool absent.
+- **Build provenance:** the checkouts in `~` are shallow and have no tags. They give the pins
+  for dump1090 (`465e063`), acarsdec 3.7 (`339f63e`) and redsea (`7555c9f`). The rtl-ais
+  checkout is gone. Its pin (`d84764b`) is inferred: the binary has `-U` (added 2026-08-05),
+  and nothing has landed upstream since. acarsdec must stay on TLeconte 3.x: our argv
+  (`-o 4 -r <dev>`) is 3.x syntax.
+**How to apply.** Offline, side-effect-free probes to reuse:
+- `pip install --dry-run --no-index -r requirements.txt` tells you whether a venv satisfies
+  its requirements.
+- `git --no-optional-locks status` reads status without rewriting the index.
+- `fc-list ':charset=262d' family` lists the fonts that carry a glyph.
+
+## 2026-11-02: a scrolling CSS grid never grows `minmax(N, auto)` rows
+**Finding.** The home tiles used `grid-auto-rows: minmax(124px, auto)` to let a two-line tile
+grow, yet every tile measured exactly 124px: the glyph was squashed to 38x13 (U7's to 0) and U7
+clipped by 10px. In track sizing an `auto` maximum only grows into *free space*, and a grid that
+overflows its scroll container has none, so rows stay at the 124px base. `max-content` rows with
+`min-height` on the item fix it, and a flex-column child that must keep its size needs
+`flex: none` or it absorbs the squeeze silently.
+**How to apply.** In any grid that can overflow (home, unit pages, exam lists), size rows with
+`max-content` or a fixed height, never `minmax(..., auto)`. Measure the item boxes (not the
+screenshot) after any tile change.
+
+## 2026-11-02: the lesson shell's vertical budget at 800x480 (where the pixels go)
+**Finding.** Content below the 66px bar and 40px rail is 374px, and the stage panel pads 12px top
+and bottom. On an instrument stage a separate eyebrow line plus the 30px title cost about 69px.
+Moving the eyebrow onto the title's row (`.stage-panel--instrument` grid) and a 124px decoder
+gave the narration about 90px (3 lines) instead of 35. A square instrument (the ADS-B radar)
+can't shrink usefully; it goes beside the narration instead. Prev rides the existing Next row,
+because a 72px-tall rail would eat the narration band.
+**How to apply.** Before adding anything to a lesson stage, take its height from this budget.
+Re-measure with `.instrument > .stage-panel__body` clientHeight at a forced 800x480; a band under
+about 58px (2 lines) is a regression.
+
+## 2026-11-02: a header above a scrolling body steals its height; scored gates leak by position
+**Finding.** The explain verdict ("You said X · Answer: Y" plus a line) first went between the
+title and the explain body as a `flex: none` block. At 800x480 it took ~100px, and under a long
+eyebrow it squeezed the reading to 0px (M15) and 7px (M24/M27): the page "fit" because the body
+had nothing left to show. Inside the scrolling body, as its first child, the reading kept 195px.
+Separately, scoring exposed a pattern: with chip A committed everywhere, 14 of 28 lessons scored
+RIGHT, because authors put the right answer first.
+**How to apply.** Anything added to a reading stage goes inside `.stage-panel__body`, not beside
+it. Measure the body's clientHeight, not only the button bottom. Keep answer positions spread
+(`test_lesson_answers` caps any one chip at 40%). The YAML reloads only on a server restart, so
+restart before re-rendering a pack change.
+
+## 2026-11-02: PR_SET_PDEATHSIG fires when the forking *thread* exits, not the process
+**Finding.** The parent-death signal is tied to the thread that called fork. FastAPI runs sync
+routes on a pooled anyio worker that expires after ~10 s idle, so a tool forked from a request
+thread with `preexec_fn=prctl(PR_SET_PDEATHSIG)` would be SIGKILLed seconds into a lesson.
+`sigint101/childproc.py` forks every tool from one long-lived spawner thread instead;
+`test_a_child_outlives_the_request_thread_that_started_it` fails if that is undone.
+**How to apply.** Never Popen a radio tool directly: use `childproc.spawn` (own session,
+parent-death SIGKILL) and `childproc.stop_process` (terminate, wait, kill the session, wait).
+
+## 2026-11-02: a socket timeout is not end-of-stream
+**Finding.** `socket.create_connection(..., timeout=1.0)` leaves that timeout on the socket, and
+`TimeoutError` is an `OSError`, so the ADS-B reader's `except OSError: return` ended the feed
+after one quiet second while dump1090 ran on: a LIVE panel with a dead reader. UDP (AIS) has no
+end-of-stream at all, and `close()` from another thread does not wake a blocked `recv`.
+**How to apply.** Feed readers catch `TimeoutError` first and keep reading while the process
+lives; stop paths `shutdown(SHUT_RDWR)` before `close()`.
+
+## 2026-11-02: a span centred on a target puts the target on rtl_power's one unmeasured bin
+**Finding.** rtl_power cuts a span into the fewest equal hops <= 2.8 MHz and each hop's centre bin
+is its DC copy (kept as None). Centred on 433.92 MHz, M9's 2 MHz span is one hop, so the carrier
+sat exactly on the gap: measured on nomad-b, the 433.92 bin read None with -17.9/-18.2 dB either
+side. An even hop count (the 20 MHz FM default) puts a tap on a hop edge instead, in the roll-off.
+`spectrum.hop_plan` reproduces the hop/bin arithmetic (checked against the three real captures,
+including the downsampled <1 MHz path: bins = smallest power of two with hop/bins <= bin), and
+`target_span` shifts the span until the target is 4 bins from its hop's centre. Live: offset
+span 432.9825-434.9825, 433.92 bin measured (-18.43 dB), the gap moved to 433.9825.
+**How to apply.** Never build a sweep span by centring it on a frequency you want to see: tune
+by `{center, span}` through /api/tune (or `Sweeper.retune_to`) and read the dial from the
+response's `center`. A pack's default 125 kHz bin makes the 4-bin guard 500 kHz; give a narrow
+pack a fine `bin_hz` (M9 uses 15625) so the offset stays a sliver of the span.
+
+## 2026-11-02: an ssh-launched server outlives the ssh; Acurite sends each reading three times
+**Finding.** A HIL server run as `ssh host 'exec flock … uvicorn …'` (no tty) did not get SIGHUP
+when the local ssh was stopped: uvicorn, its flock and its rtl_433 child kept the dongle until the
+uvicorn PID was killed by hand. Separately, rtl_433 decodes the Acurite-Tower's three repeats of
+each transmission as three decodes, so the reception log gains three events per reading.
+**How to apply.** After a HIL session, `pgrep -af` for your port and the rtl_* tools and kill your
+own uvicorn PID (SIGTERM lets the lifespan stop the radio tool), then `rtl_test -t` in the flock.
+Expect reception counts in threes from that sensor; deduplicating repeats is a follow-up.
+
+## 2026-11-02: the RTL8821CU in monitor mode browns out the Nomad's USB
+**Finding.**
+- On nomad-b, `provision.sh` brought wlan1 (RTL8821CU, `rtw_8821cu`) up in monitor mode at
+  10:26:27. Within two minutes `dmesg` showed 192 `usb 1-1-port3: over-current change` events.
+- Each event reset the adapter: it came back in "Driver CDROM Mode" `0bda:1a2b` and then
+  re-enumerated, 34 times.
+- Each event also reset the touch panel's controller (MPI5001 `0484:5750`, on the same hub), 23
+  times. Touch input dropped on the kiosk.
+- While wlan1 sat DOWN (the state before provisioning), the bus was stable. With the radio up,
+  the adapter draws more than the port supplies.
+- Taking it down stopped the events: 0 in 30 s, with 0 touch resets.
+**How to apply.**
+- The Flock adapter needs a **self-powered USB hub** on a Nomad.
+- `provision.sh` makes monitor mode opt-in (`--with-flock-adapter`), and the quick-start says
+  to use the hub.
+- On nomad-b, the udev rule is parked at
+  `/etc/udev/rules.d/70-sigint101-monitor.rules.disabled` until a hub is in place.
+- After any USB or radio change, grep `dmesg` for `over-current` before calling it done.
+
+## 2026-11-03: course on the Pi desktop — Chromium retitles itself; pcmanfm trusts only /usr/share
+**Finding.**
+- **Chromium rewrites its process title.** On nomad-b, `/proc/<pid>/cmdline` for every kiosk
+  Chromium process is ONE space-joined string with a single trailing NUL, not one element per
+  flag. `pgrep -f` still matches (it searches the joined line). A test double that served neat
+  argv lists passed, but an exact argv-element match found nothing on the real box. Only a dry
+  run of `request_exit` against nomad-b's real `/proc`, with signals recorded rather than sent,
+  caught it.
+- **pcmanfm prompts before running a desktop entry.** On a double-tap of a `Type=Application`
+  `.desktop` in `~/Desktop`, libfm 1.3.2 (rpt18) treats any readable desktop entry as executable.
+  It then asks "This text file seems to be an executable script. Execute / Execute in Terminal?"
+  unless the global `quick_exec` is set. Neither the exec bit nor `gio` metadata helps: there is no
+  trust attribute in this libfm.
+  - The one prompt-free path is a `Type=Link` whose `URL` is a plain path (not `file://`) to an
+    entry under `/usr/share/` or `/usr/local/share/`.
+  - So the menu entry lives in `/usr/local/share/applications`, and the desktop icon links to it.
+- **raspi-config B4 also writes the tty1 getty autologin.** The desktop boots and tty1 logs in too,
+  so a leftover `~/.profile` kiosk hook would start a second compositor there. `install.sh`
+  removes the hook by its markers.
+**How to apply.**
+- Match a Chromium process by a whole flag in the joined command line, never by argv element.
+- Dry-run anything that picks processes to kill against the real target's `/proc`, recording
+  signals instead of sending them.
+- For a tap-to-launch desktop icon on Pi OS, use a Link to a `/usr/local/share/applications`
+  entry; don't flip `quick_exec`, which changes every script on the desktop.
+- Exit order matters: write the flag, then SIGTERM. The watchdog checks the browser first and the
+  flag second, so it can never see "no browser" from an Exit without also seeing the flag.

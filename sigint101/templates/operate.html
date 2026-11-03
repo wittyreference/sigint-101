@@ -1,0 +1,154 @@
+<!-- ABOUTME: Operator mode ("the rack"): the course's instruments with the lesson script removed — a
+     ABOUTME: picker down the left, one panel at full size, free tuning, the command strip and a reception log. -->
+{% extends "base.html" %}
+{% import "_panels.html" as panels %}
+
+{% block title %}Operator mode{% endblock %}
+
+{# The dial of an instrument that listens where its protocol puts it: the frequency and a caption,
+   read as text the way the lesson's fixed dial does. A decoder that names its own frequency
+   shows that; the rest show their band. #}
+{% set FIXED = {
+  'adsb': ('1090', 'MHz', 'Mode S · dump1090 decoding ADS-B'),
+  'ais': ('162.0', 'MHz', 'Marine AIS · 161.975 + 162.025 · rtl_ais'),
+  'apt': (none, 'MHz', 'NOAA APT · satdump decoding a pass'),
+  'sstv': (none, 'MHz', 'SSTV · rtl_fm|sox|sstv decoding a picture'),
+  'lora': ('915', 'MHz', 'US LoRa band · meshtastic listening'),
+  'flock': ('2.4', 'GHz', 'WiFi · wlan1 monitor mode, receive-only'),
+  'rayhunter': ('ORBIC', '·4G', 'Rayhunter · control plane, receive-only'),
+} %}
+
+{% macro step_label(hz) %}{{ "%g MHz"|format(hz / 1000000) if hz >= 1000000 else "%g kHz"|format(hz / 1000) }}{% endmacro %}
+
+{% macro step_key(steps) %}
+  {# The step key: each tap moves +/- to the next step size in the instrument's list. #}
+  <button class="tune-btn rack__step" type="button" data-step-cycle
+          data-steps="{{ steps|join(',') }}" aria-label="Tune step size">
+    <span class="rack__step-tag">STEP</span><b data-step-label>{{ step_label(steps[0]) }}</b>
+  </button>
+{% endmacro %}
+
+{% block content %}
+<div class="rack">
+  {# The instrument picker: one touch-sized button each, scrolling on its own when they outrun
+     the screen. Picking one is a page of its own, so Back and a reload both land where you are. #}
+  <nav class="rack__picker" aria-label="Instruments">
+    {% for i in instruments %}
+    <a class="rack__pick{% if i.key == inst.key %} rack__pick--on{% endif %}" href="/operate/{{ i.key }}"{% if i.key == inst.key %} aria-current="page"{% endif %}>
+      <span class="rack__pick-label">{{ i.label }}</span>
+      <span class="rack__pick-tool">{{ i.tool }}</span>
+    </a>
+    {% endfor %}
+  </nav>
+
+  {# The bench: the panel at full size, then the tune strip, the command strip and the newest
+     reception. It is the panels' .instrument and their [data-command-scope]: the one command strip
+     under the panel is the one each panel's script fills from its API's `command`. #}
+  <section class="rack__bench instrument" data-command-scope data-instrument="{{ inst.key }}">
+    {% if inst.api == 'spectrum' %}
+    <div class="instrument__row rack__row">
+      {{ panels.waterfall() }}
+      {% if inst.key == 'clock' %}
+      {{ panels.ppm() }}
+      {% elif inst.key == 'health' %}
+      {{ panels.provenance() }}
+      {% endif %}
+    </div>
+    {# Free tuning: +/- by the step, or a tap on the waterfall, through /api/tune (waterfall.js).
+       The dial reads the frequency tuned to, pending until the radio confirms it. #}
+    <div class="tune rack__tune" data-tune-strip data-step-hz="{{ inst.steps[0] }}">
+      <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
+      <div class="tune__dial">
+        <div class="tune__freq tune__freq--pending" data-freq>{{ "%.3f"|format(freq_hz / 1000000) }}<span>MHz</span></div>
+        <div class="tune__caption" data-tune-caption>tap the waterfall to tune</div>
+      </div>
+      <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+      {{ step_key(inst.steps) }}
+      {# Gain, through /api/gain: down, the gain the radio reports (AUTO, or unknown), up. #}
+      <div class="rack__gain" aria-label="Tuner gain">
+        <button class="tune-btn" type="button" data-gain-step="-1" aria-label="Gain down">&minus;</button>
+        <span class="rack__gain-read"><span class="rack__gain-tag">GAIN</span><b class="rack__gain-value" data-gain-value>&mdash;</b></span>
+        <button class="tune-btn" type="button" data-gain-step="1" aria-label="Gain up">+</button>
+      </div>
+    </div>
+    {% else %}
+    <div class="rack__panel">
+      {% if inst.key == 'ism' %}{{ panels.decode(freq_hz / 1000000, head_command=false) }}
+      {% elif inst.key == 'adsb' %}{{ panels.adsb(head_command=false) }}
+      {% elif inst.key == 'aprs' %}{{ panels.aprs(freq_hz / 1000000, head_command=false) }}
+      {% elif inst.key == 'pager' %}{{ panels.pocsag(freq_hz / 1000000, head_command=false) }}
+      {% elif inst.key == 'acars' %}{{ panels.acars(freq_hz / 1000000, head_command=false) }}
+      {% elif inst.key == 'ais' %}{{ panels.ais(head_command=false) }}
+      {% elif inst.key == 'rds' %}{{ panels.rds(head_command=false) }}
+      {% elif inst.key == 'dmr' %}{{ panels.dmr(freq_hz / 1000000, head_command=false) }}
+      {% elif inst.key == 'apt' %}{{ panels.apt(head_command=false) }}
+      {% elif inst.key == 'sstv' %}{{ panels.sstv(freq_hz / 1000000, head_command=false) }}
+      {% elif inst.key == 'lora' %}{{ panels.lora() }}
+      {% elif inst.key == 'flock' %}{{ panels.flock(head_command=false) }}
+      {% elif inst.key == 'rayhunter' %}{{ panels.rayhunter() }}
+      {% endif %}
+    </div>
+    {% if inst.band %}
+    {# A frequency override: +/- by the step, inside the decoder's band, through
+       /api/{{ inst.api }}/tune (operate.js). The dial reads the frequency the console confirmed. #}
+    <div class="tune rack__tune" data-decoder-tune="{{ inst.api }}" data-freq-hz="{{ freq_hz }}"
+         data-band-low="{{ inst.band.low_hz }}" data-band-high="{{ inst.band.high_hz }}"
+         data-step-hz="{{ inst.steps[0] }}"
+         {% if inst.key == 'pager' %}data-withheld-low="929000000" data-withheld-high="932000000"{% endif %}>
+      <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
+      <div class="tune__dial">
+        <div class="tune__freq" data-decoder-freq>{{ ("%.4f" if inst.key == 'pager' else "%.3f")|format(freq_hz / 1000000) }}<span>MHz</span></div>
+        <div class="tune__caption" data-tune-caption data-band-name="{{ inst.band.name }}">{% if text_withheld %}framing only &middot; text withheld{% else %}{{ inst.band.name }}{% endif %}</div>
+      </div>
+      <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+      {{ step_key(inst.steps) }}
+    </div>
+    {% else %}
+    {% set fixed = FIXED[inst.key] %}
+    <div class="tune tune--fixed rack__tune">
+      <div class="tune__dial">
+        <div class="tune__freq">{{ fixed[0] if fixed[0] else "%.3f"|format(freq_hz / 1000000) }}<span>{{ fixed[1] }}</span></div>
+        <div class="tune__caption">{{ fixed[2] }}</div>
+      </div>
+    </div>
+    {% endif %}
+    {% endif %}
+    {# The command strip: the whole line, wrapped across the bench's width. The panel above gives
+       up the height it takes, so it needs no tap to show the end of a long pipeline. #}
+    <div class="cmdstrip cmdstrip--rack" data-command hidden
+         aria-label="The command this instrument is running"><code data-command-text></code></div>
+    {# The newest reception this instrument logged, with its time and frequency; on a sweep view
+       (which decodes nothing) the newest from any instrument. operate.js reads /api/receptions. #}
+    <div class="rack__log" data-rack-log data-instrument="{{ '' if inst.api == 'spectrum' else inst.key }}">
+      <span class="rack__log-tag">LOG</span><span class="rack__log-line" data-rack-log-line>no receptions logged yet</span>
+    </div>
+  </section>
+</div>
+{% if inst.key in ('apt', 'sstv') %}
+{{ panels.gallery_ink_filter() }}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<!-- The rack draws the lessons' own panels, so it loads their scripts: each finds its panel or
+     does nothing. decoder-panel.js fills the one command strip under the panel. -->
+<script src="/static/decoder-panel.js"></script>
+<script src="/static/waterfall.js"></script>
+<script src="/static/prov.js"></script>
+<script src="/static/ppm.js"></script>
+<script src="/static/decode.js"></script>
+<script src="/static/lora.js"></script>
+<script src="/static/rds.js"></script>
+<script src="/static/adsb.js"></script>
+<script src="/static/aprs.js"></script>
+<script src="/static/pocsag.js"></script>
+<script src="/static/acars.js"></script>
+<script src="/static/ais.js"></script>
+<script src="/static/dmr.js"></script>
+<script src="/static/apt.js"></script>
+<script src="/static/sstv.js"></script>
+<script src="/static/flock.js"></script>
+<script src="/static/rayhunter.js"></script>
+<!-- The rack's own wiring: the step key, the decoder frequency override, the reception log. -->
+<script src="/static/operate.js"></script>
+{% endblock %}

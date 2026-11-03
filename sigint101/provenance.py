@@ -7,13 +7,22 @@ import shutil
 import statistics
 import subprocess
 
-from .events import log_event, read_events
+from .events import EventFollower, log_event, read_events
+from .rds import configured_fm_hz
 
 # The reference station. 106.5 MHz is the one broadcast signal that reproduces across sessions
 # in this rural spot (104.9 swung 32 dB between nights; 106.5 held) — so it is the fixed thing
 # a receiver's health can be measured against. A front end that goes deaf shows up as this
-# level dropping while the transmitter has not moved.
+# level dropping while the transmitter has not moved. That is true of the box this course was
+# built on; a recipient's site has its own steady station, which the provisioner sets in
+# SIGINT101_REF_HZ (Hz). 106.5 MHz stays the default when none is set.
+REFERENCE_HZ_ENV = "SIGINT101_REF_HZ"
 REFERENCE_HZ = 106_500_000
+
+
+def configured_reference_hz(environ=None) -> int:
+    """The reference station: SIGINT101_REF_HZ when it names an FM channel, else 106.5 MHz."""
+    return configured_fm_hz(REFERENCE_HZ_ENV, REFERENCE_HZ, environ)
 
 # Where the Pi exposes its SoC temperature, in milli-degrees Celsius.
 THERMAL_PATH = "/sys/class/thermal/thermal_zone0/temp"
@@ -122,14 +131,15 @@ def gather_provenance(*, serial, gain, row=None,
     cannot be read is None in the snapshot, so a gap reads as "unknown" rather than a plausible
     zero that a later comparison would trust.
     """
+    ref_hz = configured_reference_hz()
     return {
         "serial": serial or None,
         "gain": gain,
         "bias_state": BIAS_STATE,
         "soc_temp_c": temp(),
         "throttled": throttled(),
-        "ref_hz": REFERENCE_HZ,
-        "ref_db": reference_level_db(row, REFERENCE_HZ) if row is not None else None,
+        "ref_hz": ref_hz,
+        "ref_db": reference_level_db(row, ref_hz) if row is not None else None,
     }
 
 
@@ -146,6 +156,17 @@ def read_baseline(events_path) -> list:
     """Every baseline sample recorded so far, oldest first."""
     return [event["payload"] for event in read_events(events_path)
             if event.get("kind") == "baseline_sample"]
+
+
+class BaselineLog:
+    """The baseline samples, followed as the event log grows instead of re-read on every poll."""
+
+    def __init__(self, events_path):
+        self._follower = EventFollower(events_path, kind="baseline_sample")
+
+    def samples(self) -> list:
+        """Every baseline sample recorded so far, oldest first."""
+        return [event["payload"] for event in self._follower.events()]
 
 
 def compare_to_baseline(current_ref_db, samples, *, drop_threshold_db: float = 6.0) -> dict:

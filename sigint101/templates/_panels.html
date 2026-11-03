@@ -1,0 +1,362 @@
+<!-- ABOUTME: The instrument panels, one macro per panel, shared by the lesson stages and the rack.
+     ABOUTME: A macro draws only the live panel; the lesson stage or the rack adds its own strips. -->
+
+{# Every process-backed panel's head carries a command strip between its title and badge: the exact
+   command the console is running, read off the live process by the route (`command` in its JSON)
+   and filled by decoder-panel.js. It starts empty and hidden and truncates to one line. A tap
+   anywhere on the panel opens the whole line over the panel, so the touch target is the panel,
+   not the one-line strip. Sitting in the head row, it costs the fixed-height panel no height. The
+   rack draws one strip under the whole panel instead (head_command=false), which decoder-panel.js
+   finds through the rack's [data-command-scope]. #}
+{% macro command_strip() %}<button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
+                          aria-label="The command this panel is running; tap the panel to show it whole"><code data-command-text></code></button>{% endmacro %}
+
+{# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson with no
+   hardware (e.g. the legal rules) has no radio, so its instrument-named stages fall through to the
+   plain text branch instead of drawing a waterfall. ---- #}
+{% macro waterfall(tune_band=none) %}
+                <div class="waterfall-wrap">
+                  <canvas class="waterfall" width="760" height="200" data-tune data-sample="1"
+                          {% if tune_band %}data-tune-low="{{ tune_band.low_hz }}" data-tune-high="{{ tune_band.high_hz }}"{% if tune_band.bin_hz %} data-tune-bin="{{ tune_band.bin_hz }}"{% endif %}{% endif %}
+                          aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
+                  <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
+                  {# Why the band is empty (no radio, radio busy), as page text over the canvas: text
+                     drawn into the stretched canvas bitmap came out ~7 px tall. #}
+                  <div class="waterfall__reason" data-wf-reason hidden><span></span></div>
+                  {# The axis labels only a span the sweep is pointed at: the lesson's own band until
+                     the radio reports, otherwise blank. waterfall.js redraws it from each live span. #}
+                  <div class="waterfall__axis" aria-hidden="true">
+                    {% if tune_band %}
+                    <span>{{ "%.1f"|format(tune_band.low_hz / 1000000) }} MHz</span>
+                    <span>{{ "%.3f"|format(tune_band.center_hz / 1000000) }} MHz</span>
+                    <span>{{ "%.1f"|format(tune_band.high_hz / 1000000) }} MHz</span>
+                    {% endif %}
+                  </div>
+                </div>
+{% endmacro %}
+
+{# Gain / SNR level meter (M2): the floor and peak as lines on a vertical dB scale, the gap between
+   them — the SNR — shaded and labelled. Driven live by waterfall.js from the same sweep as the
+   waterfall; no radio shows an honest empty meter. The -/+ stepper beside it really changes the
+   sweep's gain through /api/gain, under the gain the radio reports (unknown until it does). #}
+{% macro gain_meter() %}
+                <aside class="gain-meter" data-gain-meter aria-label="Gain and SNR level meter">
+                  <div class="gain-meter__scale">
+                  <div class="gain-meter__title">GAIN</div>
+                  <div class="gain-meter__track">
+                    <div class="gain-meter__mark gain-meter__mark--peak" data-gain-peak hidden>
+                      <span class="gain-meter__tag">PEAK</span><b data-gain-peak-v>&mdash;</b>
+                    </div>
+                    <div class="gain-meter__gap" data-gain-gap hidden>
+                      <span class="gain-meter__gap-label">SNR</span><b data-gain-gap-v>&mdash;</b>
+                    </div>
+                    <div class="gain-meter__mark gain-meter__mark--floor" data-gain-floor hidden>
+                      <span class="gain-meter__tag">FLOOR</span><b data-gain-floor-v>&mdash;</b>
+                    </div>
+                    <div class="gain-meter__empty" data-gain-empty>&mdash; no radio &mdash;</div>
+                  </div>
+                  </div>
+                  <div class="gain-meter__control">
+                    <b class="gain-meter__value" data-gain-value>&mdash;</b>
+                    <div class="gain-meter__buttons">
+                      <button class="tune-btn gain-meter__btn" type="button" data-gain-step="-1" aria-label="Gain down">&minus;</button>
+                      <button class="tune-btn gain-meter__btn" type="button" data-gain-step="1" aria-label="Gain up">+</button>
+                    </div>
+                  </div>
+                </aside>
+{% endmacro %}
+
+{# Provenance panel (M3): the radio's account of itself and, led large, whether its reference level
+   still matches the captured baseline — a dropped reference is the deaf-vs-empty signal. Driven
+   live by prov.js; honest "no radio" when nothing reads. #}
+{% macro provenance() %}
+                <aside class="prov-panel" data-prov-panel aria-label="Provenance and baseline">
+                  <div class="prov__title">PROVENANCE</div>
+                  <div class="prov__verdict" data-prov-verdict>&mdash;</div>
+                  <div class="prov__ref">REF <b data-prov-ref>&mdash;</b> &middot; base <span data-prov-base>&mdash;</span></div>
+                  <div class="prov__meta">
+                    <span>gain <b data-prov-gain>&mdash;</b></span>
+                    <span>temp <b data-prov-temp>&mdash;</b></span>
+                    <span>pwr <b data-prov-power>&mdash;</b></span>
+                  </div>
+                  <button class="btn btn--primary prov__capture" type="button" data-prov-capture>Capture baseline</button>
+                </aside>
+{% endmacro %}
+
+{# PPM panel (M4): the receiver's crystal error. Measure-on-demand — the button captures the tuned
+   station's 19 kHz stereo pilot via /api/ppm/measure; a mono or weak station carries no pilot, and
+   the panel says so rather than guess. #}
+{% macro ppm() %}
+                <aside class="ppm-panel" data-ppm-panel aria-label="Clock error in ppm">
+                  <div class="ppm__title">CLOCK &middot; PPM</div>
+                  <div class="ppm__status">correction <b>RAW</b></div>
+                  <div class="ppm__result" data-ppm-result>measured &mdash;</div>
+                  <div class="ppm__detail" data-ppm-detail>tune strong, then tap</div>
+                  <button class="btn btn--primary ppm__measure" type="button"
+                          data-ppm-measure data-ppm-hz="98100000">Measure ppm</button>
+                </aside>
+{% endmacro %}
+
+{# The sweep's command strip: /api/spectrum carries the live rtl_power line as `command`;
+   waterfall.js fills this hook with DecoderPanel.showCommand. Empty and hidden until it does, so it
+   takes no room. It has the instrument's full width, so it shows the whole line and takes no tap
+   (the panel beside it is the waterfall, where a tap tunes). #}
+{% macro sweep_command_strip() %}
+              <div class="cmdstrip cmdstrip--sweep" data-command hidden
+                   aria-label="The command the waterfall is running"><code data-command-text></code></div>
+{% endmacro %}
+
+{# ---- Decode instrument (M10): rtl_433 reads the ISM band and lists what each sensor said. FSK's
+   two tones do not resolve on a 125 kHz-bin waterfall, so the honest instrument here is the
+   decoder, not the eye. decode.js polls /api/decode and fills the list; no radio / no rtl_433 shows
+   an honest empty state, never a fabricated read. ---- #}
+{% macro decode(mhz, head_command=true) %}
+              <div class="decoder" data-decode-panel
+                   aria-label="Live rtl_433 sensor decodes on the ISM band">
+                <div class="decoder__head">
+                  <span class="decoder__title">rtl_433 &middot; DECODE</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-decode-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-decode-list></ul>
+                <div class="decoder__empty" data-decode-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- LoRa instrument (M11): the Nomad's meshtastic radio decodes packets the SDR could not,
+   because LoRa's chirp spreads the signal below the noise floor. lora.js polls /api/lora and lists
+   each reception with the SNR it decoded at (negative = below the floor); no meshtasticd shows an
+   honest empty state, never a fabricated packet. ---- #}
+{% macro lora() %}
+              <div class="decoder" data-lora-panel
+                   aria-label="Live LoRa packets the Nomad received">
+                <div class="decoder__head">
+                  <span class="decoder__title">meshtastic &middot; LoRa</span>
+                  <span class="decoder__status" data-lora-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-lora-list></ul>
+                <div class="decoder__empty" data-lora-empty>listening for packets&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- RDS instrument (M12): the data riding the FM station's 57 kHz subcarrier, which the
+   waterfall never showed. rtl_fm|redsea decodes it; rds.js polls /api/rds and fills the station
+   card as the groups assemble. No radio / no redsea shows an honest empty state, never a fabricated
+   station. ---- #}
+{% macro rds(head_command=true) %}
+              <div class="decoder" data-rds-panel aria-label="Live RDS station data">
+                <div class="decoder__head">
+                  <span class="decoder__title">redsea &middot; RDS</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-rds-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <div class="rds" hidden data-rds-card>
+                  <div class="rds__ps" data-rds-ps>&mdash;</div>
+                  <div class="rds__meta">
+                    <span>PI <b data-rds-pi>&mdash;</b></span>
+                    <span data-rds-pty>&mdash;</span>
+                    <span>groups <b data-rds-count>0</b></span>
+                  </div>
+                  <div class="rds__rt" data-rds-rt></div>
+                </div>
+                <div class="decoder__empty" data-rds-empty>listening for RDS&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- ADS-B radar (M13): aircraft transponders at 1090 MHz, which never appear on an FM waterfall.
+   dump1090 decodes them; adsb.js polls /api/adsb and places each contact on the scope by its range
+   (ring) and bearing (angle) from the receiver. No radio / no dump1090 / no planes overhead shows an
+   honest empty sky, never a fabricated contact. The scope skeleton (rings, crosshair, compass) is
+   static; adsb.js draws the dots. ---- #}
+{% macro adsb(head_command=true) %}
+              <div class="decoder radar" data-adsb-panel aria-label="Live ADS-B radar scope">
+                <div class="decoder__head">
+                  <span class="decoder__title">dump1090 &middot; ADS-B</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-adsb-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <div class="radar__scope">
+                  <svg class="radar__svg" viewBox="0 0 200 200" aria-hidden="true">
+                    <g class="radar__grid">
+                      <circle cx="100" cy="100" r="90"/>
+                      <circle cx="100" cy="100" r="60"/>
+                      <circle cx="100" cy="100" r="30"/>
+                      <line x1="100" y1="10" x2="100" y2="190"/>
+                      <line x1="10" y1="100" x2="190" y2="100"/>
+                    </g>
+                    <circle class="radar__me" cx="100" cy="100" r="2.5"/>
+                    <g class="radar__dots" data-adsb-dots></g>
+                    <text class="radar__compass" x="100" y="8">N</text>
+                    <text class="radar__compass" x="196" y="103">E</text>
+                    <text class="radar__compass" x="100" y="199">S</text>
+                    <text class="radar__compass" x="4" y="103">W</text>
+                  </svg>
+                  <div class="radar__ring-label" data-adsb-ring>&mdash;</div>
+                </div>
+                <div class="radar__count"><b data-adsb-count>0</b> contacts</div>
+                <div class="decoder__empty" data-adsb-empty>listening on 1090 MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- APRS roster (M14): amateur packet on the 2m channel, which a waterfall only shows as a brief
+   FM blip. rtl_fm|multimon-ng decodes the AX.25 frames; aprs.js polls /api/aprs and lists each
+   station with its latest packet (position, message or status). No radio / no multimon-ng / a quiet
+   channel shows an honest empty roster. ---- #}
+{% macro aprs(mhz=144.39, head_command=true) %}
+              <div class="decoder" data-aprs-panel aria-label="Live APRS station roster">
+                <div class="decoder__head">
+                  <span class="decoder__title">multimon-ng &middot; APRS</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-aprs-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-aprs-list></ul>
+                <div class="decoder__empty" data-aprs-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- POCSAG page log (M15): pager framing on the paging band, which a waterfall shows only as a
+   burst of FSK. rtl_fm|multimon-ng decodes the pages; pocsag.js polls /api/pocsag and lists each
+   page's cap code, kind, length and baud. On the commercial band the words are dropped server-side
+   (MC's call: framing live, text hidden). No radio / no multimon-ng / a silent channel shows an
+   honest empty log. ---- #}
+{% macro pocsag(mhz, head_command=true) %}
+              <div class="decoder" data-pocsag-panel aria-label="Live POCSAG page framing">
+                <div class="decoder__head">
+                  <span class="decoder__title">multimon-ng &middot; POCSAG</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-pocsag-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-pocsag-list></ul>
+                <div class="decoder__empty" data-pocsag-empty>listening on {{ "%.4f"|format(mhz) }} MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- ACARS log (M16): the typed messages aircraft send on VHF, which a waterfall shows only as a
+   brief AM burst. acarsdec decodes them; acars.js polls /api/acars and lists each message with its
+   aircraft and text. No radio / no acarsdec / a quiet channel shows an honest empty log, never a
+   fabricated message. ---- #}
+{% macro acars(mhz=131.55, head_command=true) %}
+              <div class="decoder" data-acars-panel aria-label="Live ACARS message log">
+                <div class="decoder__head">
+                  <span class="decoder__title">acarsdec &middot; ACARS</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-acars-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-acars-list></ul>
+                <div class="decoder__empty" data-acars-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- AIS roster (M26): the identity + position big ships broadcast in the clear on marine VHF,
+   which a waterfall shows only as a GMSK burst. rtl_ais decodes the AIVDM sentences; ais.js polls
+   /api/ais and lists each vessel by MMSI. No radio / no rtl_ais / an inland empty sea shows an
+   honest empty roster, never a fabricated vessel. ---- #}
+{% macro ais(head_command=true) %}
+              <div class="decoder" data-ais-panel aria-label="Live AIS vessel roster">
+                <div class="decoder__head">
+                  <span class="decoder__title">rtl_ais &middot; AIS</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-ais-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-ais-list></ul>
+                <div class="decoder__empty" data-ais-empty>listening on 161.975 / 162.025 MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- DMR/P25 call log (M27): digital voice carried as a four-level FSK bitstream, which a
+   waterfall shows only as a channel lighting up. dsd-fme reads the clear signaling; dmr.js polls
+   /api/dmr and lists each call by talkgroup + source. No radio / no dsd-fme / a quiet channel shows
+   an honest empty log, never a fabricated call. ---- #}
+{% macro dmr(mhz=450.0, head_command=true) %}
+              <div class="decoder" data-dmr-panel aria-label="Live DMR/P25 call log">
+                <div class="decoder__head">
+                  <span class="decoder__title">dsd-fme &middot; DMR / P25</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-dmr-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-dmr-list></ul>
+                <div class="decoder__empty" data-dmr-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- NOAA APT image (M24): a weather picture from a ~137 MHz satellite pass, which a waterfall
+   shows only as a wandering FM carrier. satdump decodes the pass to a PNG; apt.js polls /api/apt
+   and shows the newest image (served from /media). No radio / no satdump / no pass decoded shows an
+   honest empty frame, never a placeholder picture. ---- #}
+{% macro apt(head_command=true) %}
+              <div class="decoder gallery" data-apt-panel aria-label="Live NOAA APT weather image">
+                <div class="decoder__head">
+                  <span class="decoder__title">satdump &middot; NOAA APT</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-apt-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <figure class="gallery__frame">
+                  <img class="gallery__img" data-apt-img alt="Decoded NOAA APT weather image" hidden>
+                  <figcaption class="gallery__cap" data-apt-cap></figcaption>
+                </figure>
+                <div class="decoder__empty" data-apt-empty>waiting for a pass on 137.100 MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- SSTV image (M25): a picture sent as audio tones (the ISS downlink), which a waterfall shows
+   only as a warbling FM signal. rtl_fm|sox|sstv decodes it to a PNG; sstv.js polls /api/sstv and
+   shows the newest image (served from /media). No radio / no tools / nothing decoded shows an
+   honest empty frame, never a placeholder picture. ---- #}
+{% macro sstv(mhz, head_command=true) %}
+              <div class="decoder gallery" data-sstv-panel aria-label="Live SSTV picture">
+                <div class="decoder__head">
+                  <span class="decoder__title">sstv &middot; SSTV</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-sstv-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <figure class="gallery__frame">
+                  <img class="gallery__img" data-sstv-img alt="Decoded SSTV picture" hidden>
+                  <figcaption class="gallery__cap" data-sstv-cap></figcaption>
+                </figure>
+                <div class="decoder__empty" data-sstv-empty>waiting for a picture on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# Red-night re-inks a decoded picture: its luminance (Rec. 709 weights) goes to red, and green and
+   blue get nothing, so the picture keeps its shading in one hue. Same technique as the exam
+   figures' ink filters; applied by app.css only in red-night. A page that shows an APT or SSTV
+   gallery draws this once. #}
+{% macro gallery_ink_filter() %}
+  <svg class="sr-only" aria-hidden="true" focusable="false">
+    <filter id="gallery-ink-red" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.2126 0.7152 0.0722 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+    </filter>
+  </svg>
+{% endmacro %}
+
+{# ---- Flock detector (M18): 802.11 management frames off wlan1 in monitor mode, matched against
+   the camera's OUI + IE fingerprint. flock.js polls /api/flock and lists each detected device with
+   its evidence tier. No monitor interface / no tcpdump / no camera in range shows an honest empty
+   list, never a fabricated detection — no alert never means no camera. ---- #}
+{% macro flock(head_command=true) %}
+              <div class="decoder" data-flock-panel aria-label="Live Flock camera detections">
+                <div class="decoder__head">
+                  <span class="decoder__title">wlan1 &middot; Flock detector</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-flock-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <ul class="decoder__list" data-flock-list></ul>
+                <div class="decoder__empty" data-flock-empty>listening on 2.4 GHz&hellip;</div>
+              </div>
+{% endmacro %}
+
+{# ---- Rayhunter monitor (M19): an Orbic running EFF's Rayhunter, polled receive-only over WiFi.
+   rayhunter.js polls /api/rayhunter and shows the recording line (green clean / red warning / grey
+   off) and the heuristic findings. No Orbic reachable shows an honest empty state; a quiet line
+   never proves no catcher — red means look closer, never a verdict. ---- #}
+{% macro rayhunter() %}
+              <div class="decoder" data-rayhunter-panel aria-label="Live Rayhunter cell-site-simulator findings">
+                <div class="decoder__head">
+                  <span class="decoder__title">Rayhunter &middot; Orbic</span>
+                  <span class="decoder__status" data-rayhunter-badge>SAMPLE &middot; NOT LIVE</span>
+                </div>
+                <div class="rayhunter__line" data-rayhunter-line>&mdash; recording line &mdash;</div>
+                <ul class="decoder__list" data-rayhunter-list></ul>
+                <div class="decoder__empty" data-rayhunter-empty>polling 192.168.1.1:8080&hellip;</div>
+              </div>
+{% endmacro %}

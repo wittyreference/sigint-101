@@ -1,8 +1,13 @@
 # ABOUTME: Tests the M29 "Meet the Flipper" pack loads as a valid six-stage intro — id 29, the
 # ABOUTME: flipper instrument on a separate USB device, and the field-tool-plus-bench thesis.
 
+import re
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from sigint101.app import create_app
+from sigint101.hardware import RadioProbe
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
 
 PACK = (Path(__file__).resolve().parent.parent / "lesson_packs" / "29-meet-flipper.yaml")
@@ -40,6 +45,18 @@ def test_m29_offers_the_bench_answer_as_a_predict_choice():
         assert isinstance(choice.get("label"), str) and choice["label"]
     # Plugged into the nomad the Flipper gains a bench (screen, storage, lessons), not more radios.
     assert any(c["key"] == "a-bench" for c in lesson.choices)
+
+
+def test_m29_tile_reads_l29_and_badges_the_flipper_before_the_lesson_starts(tmp_path):
+    """U10 follows the mesh in the teaching order, and its tile names the kit it needs."""
+    with TestClient(create_app(pack_dir=PACK.parent, data_dir=tmp_path,
+                               probe=lambda: RadioProbe(False, "lsusb", "none"))) as client:
+        home = client.get("/").text
+        unit = client.get("/unit/10").text
+    assert 'href="/unit/10"' in home and "Flipper" in home
+    assert re.search(r'tile__code">\s*L29\s*<', unit)
+    assert 'href="/lesson/29"' in unit
+    assert re.findall(r'tile__need">\s*([^<]*?)\s*<', unit) == ["Flipper"]
 
 
 def test_m29_carries_the_field_tool_plus_bench_thesis_in_the_reveal():

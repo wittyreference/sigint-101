@@ -1,0 +1,21 @@
+<!-- ABOUTME: The NCVEC diagram a figure question refers to — a tap opens it full-screen.
+     ABOUTME: No JavaScript: the overlay is a :target panel, closed by tapping it or its Close bar. -->
+{% if question.figure %}
+  <a class="exam-figure__open btn" href="#figure-{{ question.figure }}">Show diagram {{ question.figure }}</a>
+  <div class="exam-figure" id="figure-{{ question.figure }}" role="dialog" aria-label="Figure {{ question.figure }}">
+    <a class="exam-figure__close" href="#" aria-label="Close diagram">
+      <img class="exam-figure__img" src="/static/exam/{{ question.figure }}.jpg" alt="NCVEC Figure {{ question.figure }}">
+      <span class="exam-figure__bar btn">Close diagram</span>
+    </a>
+  </div>
+  {# Re-ink the black-on-white line art in a phosphor theme's own colour on black: each output
+     channel is ink * (1 - input), so white paper goes to black and black lines go to the ink. #}
+  <svg class="sr-only" aria-hidden="true" focusable="false">
+    <filter id="figure-ink-dark" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="-0.180 0 0 0 0.180  -0.902 0 0 0 0.902  -0.416 0 0 0 0.416  0 0 0 1 0"/>
+    </filter>
+    <filter id="figure-ink-red" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="-1 0 0 0 1  -0.294 0 0 0 0.294  -0.294 0 0 0 0.294  0 0 0 1 0"/>
+    </filter>
+  </svg>
+{% endif %}

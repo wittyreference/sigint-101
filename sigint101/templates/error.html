@@ -1,0 +1,12 @@
+<!-- ABOUTME: The console's own error screen (a 404 or any other refusal) for the kiosk browser, in the
+     ABOUTME: learner's theme with Back, so a missing screen is never raw JSON or a white sheet at night. -->
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="error-screen">
+    <div class="error-screen__code">{{ status }}</div>
+    <h1 class="stage-panel__title">{{ heading }}</h1>
+    <p class="error-screen__detail">{{ detail }}</p>
+    <a class="btn btn--primary error-screen__home" href="/">Home</a>
+  </section>
+{% endblock %}

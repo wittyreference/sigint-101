@@ -37,9 +37,53 @@ CREATE TABLE IF NOT EXISTS responses (
 );
 """
 
+# Where the learner is inside each lesson: the stage last shown, and the furthest position (index
+# in the lesson's stage order) ever reached, so a reload or a power cut resumes in place and the
+# rail keeps every visited stage reachable. Its own table for the same reason as responses: a
+# database from an earlier build gains it on open, with its progress and predictions untouched.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS stages (
+    lesson_id INTEGER PRIMARY KEY,
+    stage     TEXT NOT NULL,
+    furthest  INTEGER NOT NULL DEFAULT 0,
+    updated   REAL
+);
+"""
+
+# Where the learner was left outside a lesson, one row per place: the rack's last instrument, so
+# /operate reopens on it after a reload or a power cut the way a lesson resumes its stage. Its own
+# table, so an earlier build's database gains it on open.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS places (
+    name    TEXT PRIMARY KEY,
+    value   TEXT NOT NULL,
+    updated REAL
+);
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
+
+
+class PredictionAlreadyCommitted(RuntimeError):
+    """A second commit for a lesson whose prediction is already on record.
+
+    A prediction is the learner's word before the reveal. Once the explain has shown the answer,
+    accepting a new one would let the score copy the reveal, so the store refuses it outright.
+    """
+
+
+def _add_correct_column(conn) -> None:
+    """Give an earlier build's responses table the `correct` column, keeping every row it holds.
+
+    CREATE IF NOT EXISTS cannot add a column to a table that already exists, so a database from
+    before scoring is checked on open and altered in place; a fresh one is left as SCHEMA made it.
+    NULL means "not scored" (the pack had no answer key), never a guessed wrong.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(responses)")}
+    if "correct" not in columns:
+        conn.execute("ALTER TABLE responses ADD COLUMN correct INTEGER")
 
 
 class Progress:
@@ -59,6 +103,7 @@ class Progress:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            _add_correct_column(self._conn)
             self._conn.commit()
 
     def mark_opened(self, lesson_id: int, *, clock=None) -> None:
@@ -88,28 +133,34 @@ class Progress:
             )
             self._conn.commit()
 
-    def record_prediction(self, lesson_id: int, body: str, *, clock=None) -> None:
-        """Store what the learner expects to see, and open the lesson.
+    def record_prediction(self, lesson_id: int, body: str, *, correct=None, clock=None) -> None:
+        """Store what the learner expects to see, whether it was right, and open the lesson.
 
         Fails closed on a blank answer: an empty prediction is not a prediction, and
         accepting one would unlock the explanation without the learner committing first.
+        `correct` is the lesson's own scoring of the chip (None when the pack names no answer).
+        A lesson that already has a prediction refuses a second one (PredictionAlreadyCommitted).
         """
         body = (body or "").strip()
         if not body:
             raise ValueError("a prediction cannot be blank")
 
         updated = clock() if clock else None
+        stored_correct = None if correct is None else int(bool(correct))
         with self._lock:
             # Both writes share one lock and one commit: a prediction that saved without
             # opening the lesson, or the reverse, would leave the console showing a state
-            # the learner never reached. `excluded` is SQLite's name for the row that
-            # collided, so this overwrites an earlier prediction rather than failing.
-            self._conn.execute(
-                "INSERT INTO responses(lesson_id, kind, body, updated) VALUES(?, ?, ?, ?) "
-                "ON CONFLICT(lesson_id, kind) DO UPDATE SET body=excluded.body, "
-                "updated=excluded.updated",
-                (lesson_id, PREDICTION, body, updated),
-            )
+            # the learner never reached. DO NOTHING on a collision, then a zero rowcount, is
+            # how a second commit is caught: the first prediction stands untouched.
+            inserted = self._conn.execute(
+                "INSERT INTO responses(lesson_id, kind, body, updated, correct) "
+                "VALUES(?, ?, ?, ?, ?) ON CONFLICT(lesson_id, kind) DO NOTHING",
+                (lesson_id, PREDICTION, body, updated, stored_correct),
+            ).rowcount
+            if not inserted:
+                self._conn.rollback()
+                raise PredictionAlreadyCommitted(
+                    f"lesson {lesson_id} already has a committed prediction")
             self._conn.execute(
                 "INSERT INTO progress(lesson_id, opened, updated) VALUES(?, 1, ?) "
                 "ON CONFLICT(lesson_id) DO UPDATE SET opened=1, updated=excluded.updated",
@@ -129,6 +180,72 @@ class Progress:
                 (lesson_id, PREDICTION),
             ).fetchone()
         return row["body"] if row else None
+
+    def get_correct(self, lesson_id: int):
+        """Whether the committed prediction was right: True, False, or None (unscored/absent)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT correct FROM responses WHERE lesson_id=? AND kind=?",
+                (lesson_id, PREDICTION),
+            ).fetchone()
+        if row is None or row["correct"] is None:
+            return None
+        return bool(row["correct"])
+
+    def record_stage(self, lesson_id: int, stage: str, position: int, *, clock=None) -> None:
+        """Remember the stage the learner is on, and keep the furthest position ever reached.
+
+        `position` is the stage's index in the lesson's own order. Stepping back lowers the
+        current stage but never the furthest, so going back to re-read the setup does not lock
+        the stages already seen. Fails closed on a blank stage or a negative position, which no
+        real walk produces.
+        """
+        stage = (stage or "").strip()
+        if not stage:
+            raise ValueError("a stage cannot be blank")
+        if position < 0:
+            raise ValueError("a stage position cannot be negative")
+
+        updated = clock() if clock else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO stages(lesson_id, stage, furthest, updated) VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(lesson_id) DO UPDATE SET stage=excluded.stage, "
+                "furthest=MAX(furthest, excluded.furthest), updated=excluded.updated",
+                (lesson_id, stage, position, updated),
+            )
+            self._conn.commit()
+
+    def get_stage(self, lesson_id: int):
+        """The stage last shown and the furthest position reached, or None if never recorded."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT stage, furthest FROM stages WHERE lesson_id=?", (lesson_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_place(self, name: str, value: str, *, clock=None) -> None:
+        """Remember where the learner was left in a place outside the lessons (the rack).
+
+        Fails closed on a blank value, which no real visit produces.
+        """
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("a place cannot be blank")
+        updated = clock() if clock else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO places(name, value, updated) VALUES(?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+                (name, value, updated),
+            )
+            self._conn.commit()
+
+    def get_place(self, name: str):
+        """Where the learner was last left in a place, or None if never."""
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM places WHERE name=?", (name,)).fetchone()
+        return row["value"] if row else None
 
     def get(self, lesson_id: int):
         """Everything known about one lesson's progress, prediction included."""

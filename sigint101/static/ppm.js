@@ -4,10 +4,21 @@
 (function () {
   "use strict";
 
-  // Loaded in node only for its pure formatter — the measurement-result text — with no document.
+  // Loaded in node only for its pure helpers — the frequency to measure and the result text — with
+  // no document.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { ppmResultText: ppmResultText };
+    module.exports = { ppmResultText: ppmResultText, measureHz: measureHz };
     return;
+  }
+
+  // The station to measure: the frequency the radio is confirmed on (the dial's data-tuned-hz, set
+  // by the waterfall only once the server confirms a span), else the panel's own station. The
+  // dial's printed text is never read, since before confirmation it is only the lesson's target.
+  function measureHz(tunedAttr, fallbackAttr) {
+    var tuned = parseInt(tunedAttr, 10);
+    if (isFinite(tuned) && tuned > 0) return tuned;
+    var fallback = parseInt(fallbackAttr, 10);
+    return isFinite(fallback) && fallback > 0 ? fallback : 98100000;
   }
 
   var panels = Array.prototype.slice.call(document.querySelectorAll("[data-ppm-panel]"));
@@ -21,8 +32,8 @@
     btn.addEventListener("click", function () {
       // Measure the station the learner has tuned to — a strong stereo one carries the pilot.
       var freqEl = panel.closest(".instrument").querySelector("[data-freq]");
-      var mhz = freqEl ? parseFloat(freqEl.textContent) : NaN;
-      var hz = isNaN(mhz) ? (btn.getAttribute("data-ppm-hz") || "98100000") : Math.round(mhz * 1e6);
+      var hz = measureHz(freqEl && freqEl.getAttribute("data-tuned-hz"),
+                         btn.getAttribute("data-ppm-hz"));
       btn.disabled = true;
       result.textContent = "measuring… (~8s)";
       result.className = "ppm__result";

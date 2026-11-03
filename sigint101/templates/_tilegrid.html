@@ -40,6 +40,12 @@
           {% endif %}
         </div>
         {{ glyph(t.glyph) }}
+        {# Kit the lesson needs beyond the built-in radio, known before the lesson starts. #}
+        {% if t.needs %}
+          <div class="tile__needs">
+            {% for need in t.needs %}<span class="tile__need">{{ need }}</span>{% endfor %}
+          </div>
+        {% endif %}
         <div class="tile__name">{{ t.name }}</div>
         <div class="tile__meta">
           <span class="tile__bar"><span style="width: {{ pct }}%"></span></span>

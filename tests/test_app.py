@@ -14,6 +14,7 @@ from sigint101.ais import AisDecoder
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.apt import AptDecoder
+from sigint101.childproc import ChildWatch
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.dmr import DmrDecoder
 from sigint101.flock import FlockDetector
@@ -38,6 +39,20 @@ def _present(detail="RTL2832U 0bda:2838 on USB bus"):
 def _absent(detail="no RTL2832U on USB bus"):
     """A probe result standing for an empty bus — the no-mock honest answer."""
     return RadioProbe(False, "lsusb", detail)
+
+
+class _ChildStub:
+    """What every decoder stand-in shares with the real decoders the routes read.
+
+    A real ChildWatch that never sees a death, and no live command: the stand-ins run no process.
+    """
+
+    @property
+    def watch(self):
+        return self.__dict__.setdefault("_watch", ChildWatch("stub"))
+
+    def live_command(self):
+        return None
 
 
 class _StubSweeper:
@@ -89,7 +104,7 @@ def _rows():
     ]
 
 
-class _StubDecoder:
+class _StubDecoder(_ChildStub):
     """An app-boundary stand-in for the real rtl_433 Decoder.
 
     Holds real Decode objects and reports them as a running decoder would, so the decode route
@@ -175,7 +190,7 @@ def _packets():
     return [below, above]
 
 
-class _StubRDS:
+class _StubRDS(_ChildStub):
     """An app-boundary stand-in for the rtl_fm|redsea RDSDecoder (no real radio)."""
 
     def __init__(self, station):
@@ -214,7 +229,7 @@ def _station():
     return s
 
 
-class _StubAdsb:
+class _StubAdsb(_ChildStub):
     """An app-boundary stand-in for the dump1090 AdsbDecoder (no real radio)."""
 
     def __init__(self, aircraft, *, located=True):
@@ -253,7 +268,7 @@ def _aircraft():
     }]
 
 
-class _StubAprs:
+class _StubAprs(_ChildStub):
     """An app-boundary stand-in for the rtl_fm|multimon-ng AprsDecoder (no real radio)."""
 
     def __init__(self, stations):
@@ -292,14 +307,14 @@ def _aprs_stations():
     }]
 
 
-class _StubPocsag:
+class _StubPocsag(_ChildStub):
     """An app-boundary stand-in for the rtl_fm|multimon-ng PocsagDecoder (no real radio)."""
 
     def __init__(self, pages):
         self._pages = pages
         self._started = False
         self._released = False
-        self.freq_hz = 929_600_000
+        self.freq_hz = 929_612_500
 
     @property
     def running(self):
@@ -323,14 +338,15 @@ class _StubPocsag:
 
 
 def _pocsag_pages():
-    """One decoded pager page, in the dict shape PocsagDecoder.pages() hands the route."""
+    """One decoded pager page, in the dict shape PocsagDecoder.pages() hands the route: framing
+    only, the words withheld, as the real decoder serves the commercial paging band."""
     return [{
         "baud": 1200, "address": 1234567, "function": 3,
-        "kind": "alpha", "text": "CALL EXT 2210 URGENT",
+        "kind": "alpha", "text": None, "length": 20, "text_withheld": True,
     }]
 
 
-class _StubAcars:
+class _StubAcars(_ChildStub):
     """An app-boundary stand-in for the acarsdec AcarsDecoder (no real radio)."""
 
     def __init__(self, messages):
@@ -369,7 +385,7 @@ def _acars_messages():
     }]
 
 
-class _StubAis:
+class _StubAis(_ChildStub):
     """An app-boundary stand-in for the rtl_ais AisDecoder (no real radio)."""
 
     def __init__(self, vessels):
@@ -407,7 +423,7 @@ def _ais_vessels():
     }]
 
 
-class _StubDmr:
+class _StubDmr(_ChildStub):
     """An app-boundary stand-in for the dsd-fme DmrDecoder (no real radio)."""
 
     def __init__(self, calls):
@@ -445,7 +461,7 @@ def _dmr_calls():
     }]
 
 
-class _StubApt:
+class _StubApt(_ChildStub):
     """An app-boundary stand-in for the satdump AptDecoder (no real radio, no pass)."""
 
     def __init__(self, images):
@@ -483,7 +499,7 @@ def _apt_images():
     }]
 
 
-class _StubSstv:
+class _StubSstv(_ChildStub):
     """An app-boundary stand-in for the rtl_fm|sox|sstv SstvDecoder (no real radio, no picture)."""
 
     def __init__(self, images):
@@ -521,7 +537,7 @@ def _sstv_images():
     }]
 
 
-class _StubFlock:
+class _StubFlock(_ChildStub):
     """An app-boundary stand-in for the FlockDetector (no real wlan1 monitor radio)."""
 
     def __init__(self, detections):
@@ -664,6 +680,57 @@ def test_unit_page_lists_its_lessons(tmp_path):
     assert 'href="/lesson/2"' in resp.text
 
 
+def _write_pack(pack_dir, lesson_id, *, hardware=("rtl-sdr",), title=None, intro=False):
+    """Write a minimal pack, for tests that need a lesson id or shape the fixtures lack.
+
+    Consolidation by default; `intro` writes the six-stage shape, whose frame/demo/try open
+    before the predict gate. Each stage body carries a STAGE_<name> marker to find it by.
+    """
+    hw = ", ".join(hardware)
+    stages = (("frame", "demo", "try", "predict", "observe", "explain") if intro
+              else ("predict", "operate", "observe", "explain"))
+    body = "".join(f"  {s}: STAGE_{s} of lesson {lesson_id}\n" for s in stages)
+    (pack_dir / f"{lesson_id:02d}-tmp.yaml").write_text(
+        f"id: {lesson_id}\nslug: tmp-{lesson_id}\ntitle: {title or f'Tmp Lesson {lesson_id}'}\n"
+        f"concept: tmp concept {lesson_id}\ntype: {'intro' if intro else 'consolidation'}\n"
+        f"hardware: [{hw}]\nstages:\n{body}",
+        encoding="utf-8")
+
+
+def _client_with_packs(tmp_path, *packs):
+    """A console over a temp pack dir holding just the given (lesson_id, kwargs) packs."""
+    pack_dir = tmp_path / "packs"
+    pack_dir.mkdir()
+    for lesson_id, kwargs in packs:
+        _write_pack(pack_dir, lesson_id, **kwargs)
+    return TestClient(create_app(pack_dir=pack_dir, data_dir=tmp_path, probe=_absent))
+
+
+def test_a_lesson_tile_shows_its_teaching_order_code_not_its_id(tmp_path):
+    """AIS is id 26 but the 17th lesson taught, so its tile reads L17; the id stays the URL."""
+    with _client_with_packs(tmp_path, (13, {}), (26, {})) as client:
+        html = client.get("/unit/5").text
+    assert re.search(r'tile__code">\s*L13\s*<', html)
+    assert re.search(r'tile__code">\s*L17\s*<', html)
+    assert "L26" not in html
+    assert 'href="/lesson/26"' in html
+
+
+def test_a_lesson_tile_badges_the_hardware_it_needs_beyond_the_radio(tmp_path):
+    """A need shows on the tile before the lesson starts; the built-in RTL-SDR earns no badge."""
+    with _client_with_packs(tmp_path, (17, {"hardware": []}),
+                            (18, {"hardware": ["wifi-monitor"]}),
+                            (19, {"hardware": ["orbic-rayhunter"]})) as client:
+        html = client.get("/unit/7").text
+    assert re.findall(r'tile__need">\s*([^<]*?)\s*<', html) == ["Wi-Fi adapter", "Orbic"]
+
+
+def test_a_radio_only_lesson_tile_carries_no_badge(tmp_path):
+    with _client_with_packs(tmp_path, (13, {"hardware": ["rtl-sdr"]})) as client:
+        html = client.get("/unit/5").text
+    assert "tile__need" not in html
+
+
 def test_unit_page_for_an_unknown_unit_is_404(tmp_path):
     with _client(tmp_path) as client:
         resp = client.get("/unit/99")
@@ -750,6 +817,42 @@ def test_a_prediction_accepts_json_too(tmp_path):
     assert "OPERATE_SENTINEL" in resp.text
 
 
+def test_a_committed_prediction_is_scored_against_the_pack_answer(tmp_path):
+    with _client(tmp_path) as client:
+        client.post("/api/predict?lesson_id=1", data={"prediction": "c"}, follow_redirects=False)
+        client.post("/api/predict?lesson_id=2", data={"prediction": "a"}, follow_redirects=False)
+        progress = client.app.state.progress
+        assert progress.get_correct(1) is True
+        # Fixture 2 names no answer, so it is stored unscored rather than guessed wrong.
+        assert progress.get_correct(2) is None
+
+
+def test_a_second_commit_is_refused_and_the_first_prediction_stands(tmp_path):
+    with _client(tmp_path) as client:
+        first = client.post("/api/predict?lesson_id=1", data={"prediction": "a"},
+                            follow_redirects=False)
+        assert first.status_code == 303
+        second = client.post("/api/predict?lesson_id=1", data={"prediction": "c"},
+                             follow_redirects=False)
+        assert second.status_code == 409
+        assert second.json()["recorded"] is False
+        assert "already" in second.json()["reason"]
+        progress = client.app.state.progress
+        assert progress.get_prediction(1) == "a"
+        assert progress.get_correct(1) is False
+
+
+def test_the_explain_header_shows_the_scored_call_after_a_commit(tmp_path):
+    with _client(tmp_path) as client:
+        sealed = client.get("/lesson/1").text
+        assert "VERDICT_SENTINEL" not in sealed
+        client.post("/api/predict?lesson_id=1", data={"prediction": "a"}, follow_redirects=False)
+        html = client.get("/lesson/1").text
+    assert "VERDICT_SENTINEL" in html
+    assert "You said <b>The gap grows</b>" in html
+    assert "Answer: <b>The gap shrinks past a point</b>" in html
+
+
 def test_predict_on_an_unknown_lesson_is_404(tmp_path):
     with _client(tmp_path) as client:
         resp = client.post("/api/predict?lesson_id=999", data={"prediction": "a"})
@@ -760,6 +863,44 @@ def test_opening_an_unknown_lesson_is_404(tmp_path):
     with _client(tmp_path) as client:
         resp = client.get("/lesson/999")
     assert resp.status_code == 404
+
+
+# --- error pages: a browser gets a themed page, never raw JSON or a white sheet ----------------
+
+_BROWSER = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+
+
+def test_an_unknown_lesson_is_a_themed_page_for_the_kiosk_browser(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/lesson/999", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert resp.headers["content-type"].startswith("text/html")
+    # The console's own shell, so it takes the learner's theme (red-night stays red) and keeps Back.
+    assert 'class="app"' in resp.text and "btn-back" in resp.text
+    assert "lesson 999 not found" in resp.text
+    assert 'href="/"' in resp.text
+
+
+def test_an_unknown_path_is_a_themed_page_for_the_kiosk_browser(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/no/such/screen", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert 'class="app"' in resp.text
+
+
+def test_api_errors_stay_json_even_for_a_browser(tmp_path):
+    # The panels' fetch() calls read the JSON reason; an HTML page there would break them.
+    with _client(tmp_path) as client:
+        resp = client.post("/api/complete?lesson_id=999", headers=_BROWSER)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "lesson 999 not found"
+
+
+def test_a_client_that_does_not_ask_for_html_still_gets_json(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/lesson/999")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "lesson 999 not found"
 
 
 # --- complete -----------------------------------------------------------------
@@ -786,6 +927,134 @@ def test_complete_on_an_unknown_lesson_is_404(tmp_path):
     with _client(tmp_path) as client:
         resp = client.post("/api/complete?lesson_id=999")
     assert resp.status_code == 404
+
+
+def _complete_href(html):
+    """Where the Complete button sends the learner once the lesson is recorded."""
+    return re.search(r'data-complete[^>]*data-next-href="([^"]*)"', html).group(1)
+
+
+def test_completing_a_lesson_leads_on_to_the_next_one_in_its_unit(tmp_path):
+    """Finishing L1 lands on L2, not on home three taps away from it."""
+    with _client(tmp_path) as client:
+        client.post("/api/predict?lesson_id=1", data={"prediction": "a"})
+        html = client.get("/lesson/1").text
+    assert _complete_href(html) == "/lesson/2"
+
+
+def test_completing_the_last_lesson_of_a_unit_returns_to_the_unit(tmp_path):
+    """Lesson 2 is the last loaded lesson of Unit 1 in the fixtures, so it lands on /unit/1."""
+    with _client(tmp_path) as client:
+        client.post("/api/predict?lesson_id=2", data={"prediction": "a"})
+        html = client.get("/lesson/2").text
+    assert _complete_href(html) == "/unit/1"
+
+
+def test_the_next_lesson_skips_ids_that_have_no_pack_yet(tmp_path):
+    """Unit 5 holds 13-16, 26, 27; with only 13 and 26 built, 13 leads straight to 26."""
+    with _client_with_packs(tmp_path, (13, {}), (26, {})) as client:
+        client.post("/api/predict?lesson_id=13", data={"prediction": "a"})
+        html = client.get("/lesson/13").text
+    assert _complete_href(html) == "/lesson/26"
+
+
+def test_a_lessons_back_goes_to_its_unit_not_home(tmp_path):
+    with _client(tmp_path) as client:
+        html = client.get("/lesson/1").text
+    assert re.search(r'class="btn-back" href="/unit/1"', html)
+    assert "Unit 1" in html
+
+
+def test_a_lesson_outside_every_unit_falls_back_to_home(tmp_path):
+    """No unit to return to or continue in, so Back and Complete both lead home."""
+    with _client_with_packs(tmp_path, (99, {})) as client:
+        client.post("/api/predict?lesson_id=99", data={"prediction": "a"})
+        html = client.get("/lesson/99").text
+    assert re.search(r'class="btn-back" href="/"', html)
+    assert _complete_href(html) == "/"
+
+
+# --- where the learner is inside a lesson (resume, two-way navigation) -------
+
+
+def _shown_stage(html):
+    """The one stage panel rendered without `hidden`: where the lesson opens."""
+    return re.search(r'<section class="stage-panel[^"]*" data-stage="(\w+)">', html).group(1)
+
+
+def _stage(client, lesson_id, stage):
+    return client.post(f"/api/stage?lesson_id={lesson_id}", data={"stage": stage},
+                       headers={"content-type": "application/x-www-form-urlencoded"})
+
+
+def test_reopening_a_lesson_resumes_the_stage_the_learner_left(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        assert _shown_stage(client.get("/lesson/1").text) == "frame"
+        resp = _stage(client, 1, "try")
+        assert resp.status_code == 200
+        assert resp.json() == {"recorded": True, "stage": "try", "furthest": 2}
+        assert _shown_stage(client.get("/lesson/1").text) == "try"
+
+
+def test_committing_a_prediction_moves_the_learner_on_to_the_first_sealed_stage(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        _stage(client, 1, "predict")
+        client.post("/api/predict?lesson_id=1", data={"prediction": "a"})
+        html = client.get("/lesson/1").text
+    assert _shown_stage(html) == "observe"
+
+
+def test_after_a_commit_the_learner_may_go_back_and_resume_there(tmp_path):
+    """Revisiting the setup after the reveal is allowed, and a reload keeps them on it."""
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        client.post("/api/predict?lesson_id=1", data={"prediction": "a"})
+        _stage(client, 1, "explain")
+        assert _stage(client, 1, "frame").json()["furthest"] == 5
+        html = client.get("/lesson/1").text
+    assert _shown_stage(html) == "frame"
+    assert "STAGE_explain" in html          # the reveal stays unsealed after going back
+
+
+def test_a_sealed_stage_cannot_be_recorded_before_the_commit(tmp_path):
+    """Commit-before-reveal: no stage past predict can be reached, or resumed, without a guess."""
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        resp = _stage(client, 1, "observe")
+        assert resp.status_code == 400
+        assert resp.json()["recorded"] is False
+        html = client.get("/lesson/1").text
+    assert _shown_stage(html) == "frame"
+    assert "STAGE_observe" not in html
+
+
+def test_a_stage_the_lesson_does_not_have_is_refused(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        assert _stage(client, 1, "operate").status_code == 400    # an intro pack has no operate
+        assert _stage(client, 1, "").status_code == 400
+
+
+def test_recording_a_stage_on_an_unknown_lesson_is_404(tmp_path):
+    with _client(tmp_path) as client:
+        assert _stage(client, 999, "predict").status_code == 404
+
+
+def _pip(html, stage):
+    """The rail pip for one stage: its tag (button = tappable) and attributes."""
+    return re.search(r'<(button|span) class="rail-pip[^"]*"[^>]*data-stage="' + stage + r'"[^>]*>',
+                     html).group(0)
+
+
+def test_the_rail_opens_every_visited_stage_and_no_further(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        _stage(client, 1, "try")
+        _stage(client, 1, "demo")                 # stepped back: try was still reached
+        html = client.get("/lesson/1").text
+    assert "rail-pip--active" in _pip(html, "demo")
+    for visited in ("frame", "try"):
+        pip = _pip(html, visited)
+        assert pip.startswith("<button") and "disabled" not in pip
+    assert "disabled" in _pip(html, "predict")    # not reached yet
+    assert _pip(html, "observe").startswith("<span")   # sealed: not even a button
+    assert "rail-pip--locked" in _pip(html, "observe")
 
 
 # --- spectrum (no-mock: absence is an answer, never a fake row) ---------------
@@ -1221,11 +1490,44 @@ def test_pocsag_returns_the_pages_when_running(tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     assert body["available"] is True
-    assert body["freq_hz"] == 929_600_000
+    assert body["freq_hz"] == 929_612_500
     page = body["pages"][0]
     assert page["address"] == 1234567
     assert page["kind"] == "alpha"
-    assert page["text"] == "CALL EXT 2210 URGENT"
+    assert page["text"] is None
+    assert page["length"] == 20
+
+
+def test_pocsag_never_serves_the_words_of_a_commercial_page(tmp_path):
+    # End to end through the real decoder, faked only at the rtl_fm|multimon-ng boundary: the
+    # framing reaches the API and the words never do — not in the body, not in the event log.
+    line = "POCSAG1200: Address: 1234567  Function: 3  Alpha:   CALL EXT 2210 URGENT"
+
+    class _Pipeline:
+        stdout = iter([line])
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    decoder = PocsagDecoder(spawn=lambda f, d: _Pipeline(), radio_present=lambda: True,
+                            which=lambda name: "/usr/bin/" + name)
+    with _client(tmp_path, probe=_present, pocsag_factory=lambda: decoder) as client:
+        client.get("/api/pocsag")
+        decoder.drain()
+        resp = client.get("/api/pocsag")
+    assert resp.status_code == 200
+    page = resp.json()["pages"][0]
+    assert (page["address"], page["kind"], page["baud"], page["length"]) == (1234567, "alpha",
+                                                                              1200, 20)
+    assert page["text_withheld"] is True
+    assert "CALL EXT" not in resp.text
+    assert "CALL EXT" not in (tmp_path / "events.jsonl").read_text()
 
 
 def test_pocsag_stands_the_sweeper_down(tmp_path):
@@ -1746,6 +2048,27 @@ def test_tune_refuses_an_out_of_range_span_with_the_reason(tmp_path):
     assert "tunes" in resp.json()["reason"]  # "this radio tunes 24-1766 MHz ..."
 
 
+def test_tune_refuses_a_span_that_asks_for_more_bins_than_a_row_holds(tmp_path):
+    # 2 MHz at 100 Hz asks rtl_power for 20,000 bins every row; refused before any radio is touched.
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.post("/api/tune",
+                           json={"low": 95_000_000, "high": 97_000_000, "bin_size": 100})
+    assert resp.status_code == 400
+    assert "bins" in resp.json()["reason"]
+
+
+def test_tune_reports_the_bin_size_it_applied(tmp_path):
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        resp = client.post("/api/tune", json={"low": 1_089_000_000, "high": 1_091_000_000,
+                                              "bin_size": 31_250})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.json()["bin_size"] == 31_250
+    assert (spectrum["freq_low"], spectrum["freq_high"], spectrum["bin_size"]) == (
+        1_089_000_000, 1_091_000_000, 31_250)
+
+
 def test_tune_without_a_radio_is_503(tmp_path):
     with _client(tmp_path, probe=_absent) as client:
         resp = client.post("/api/tune", json={"low": 100_000_000, "high": 104_000_000})
@@ -1762,6 +2085,78 @@ def test_tune_accepts_a_valid_span_when_a_radio_is_present(tmp_path):
     assert body["tuned"] is True
     assert body["low"] == 100_000_000
     assert body["high"] == 104_000_000
+
+
+# --- gain (M2: "step the gain from the bottom up") ------------------------------------
+
+
+class _IdleProc:
+    """A launched rtl_power at the process boundary: alive, printing nothing yet."""
+
+    def __init__(self):
+        self.stdout = iter(())
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _gain_client(tmp_path, spawned):
+    """A console whose real Sweeper launches recorded rtl_power command lines."""
+    def spawn(cmd):
+        spawned.append(list(cmd))
+        return _IdleProc()
+    return _client(tmp_path, probe=_present,
+                   sweeper_factory=lambda: Sweeper(spawn=spawn, radio_present=lambda: True))
+
+
+def test_a_gain_step_restarts_the_sweep_with_that_gain(tmp_path):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        client.get("/api/spectrum")
+        resp = client.post("/api/gain", json={"gain": 29.7})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.status_code == 200
+    assert resp.json() == {"set": True, "gain": 29.7}
+    # The new gain reaches the rtl_power actually launched, not just the reply.
+    assert spawned[-1][spawned[-1].index("-g") + 1] == "29.7"
+    assert spectrum["gain"] == 29.7
+
+
+def test_a_null_gain_hands_the_tuner_back_to_automatic(tmp_path):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        client.post("/api/gain", json={"gain": 12.5})
+        client.get("/api/spectrum")
+        resp = client.post("/api/gain", json={"gain": None})
+        spectrum = client.get("/api/spectrum").json()
+    assert resp.json() == {"set": True, "gain": None}
+    assert "-g" not in spawned[-1]
+    assert spectrum["gain"] is None
+
+
+@pytest.mark.parametrize("bad", [60, -1, "loud"])
+def test_a_gain_the_tuner_cannot_do_is_refused_with_the_reason(tmp_path, bad):
+    spawned = []
+    with _gain_client(tmp_path, spawned) as client:
+        resp = client.post("/api/gain", json={"gain": bad})
+    assert resp.status_code == 400
+    assert resp.json()["set"] is False
+    assert "gain" in resp.json()["reason"]
+
+
+def test_gain_without_a_radio_is_503_and_changes_nothing(tmp_path):
+    with _client(tmp_path, probe=_absent) as client:
+        resp = client.post("/api/gain", json={"gain": 29.7})
+        spectrum = client.get("/api/spectrum")
+    assert resp.status_code == 503
+    assert resp.json()["set"] is False
+    assert spectrum.status_code == 503
 
 
 # --- exam trainer: one study card, commit-before-reveal (like the predict gate) ---------
@@ -1921,6 +2316,132 @@ def test_exam_sim_answer_for_an_unknown_question_is_404(tmp_path):
     assert resp.status_code == 404
 
 
+_FORM = {"content-type": "application/x-www-form-urlencoded"}
+
+
+def _sim_current(client):
+    """The question id /exam/sim is serving now, and the page."""
+    page = client.get("/exam/sim", follow_redirects=False)
+    return re.search(r"sim/answer\?question_id=(T\w+)", page.text).group(1), page
+
+
+def _sim_answer(client, qid, choice):
+    return client.post(f"/api/exam/sim/answer?question_id={qid}", data={"choice": choice},
+                       headers=_FORM, follow_redirects=False)
+
+
+def _wrong(qid):
+    return next(c for c in "ABCD" if c != _pool_answer(qid))
+
+
+def test_exam_sim_answer_cannot_change_after_review(tmp_path):
+    # T-10: answer wrong, see the reveal, then POST the right letter (history/resubmit or a direct
+    # POST). The stored answer, the running score and the Leitner credit must all stay put.
+    with _client(tmp_path) as client:
+        qid, _ = _sim_current(client)
+        _sim_answer(client, qid, _wrong(qid))
+        again = _sim_answer(client, qid, _pool_answer(qid))
+        assert again.status_code == 303
+        assert again.headers["location"].endswith(f"/exam/sim/review/{qid}")
+        review = client.get(again.headers["location"])
+        store = client.app.state.exam_store
+        assert store.sim()["answers"] == {qid: _wrong(qid)}
+        state = store.state(qid)
+    assert state["seen"] == 1 and state["correct"] == 0      # not re-credited
+    assert "Not quite" in review.text
+    assert "0 right of 1 answered" in review.text
+
+
+def test_exam_sim_answer_that_is_not_an_option_is_not_recorded(tmp_path):
+    # Answers are final, so a blank or stray letter (a direct POST; the card's radios are
+    # required) must not lock the question in as wrong. It goes back to the question instead.
+    with _client(tmp_path) as client:
+        qid, _ = _sim_current(client)
+        for bad in ("", "Z"):
+            resp = _sim_answer(client, qid, bad)
+            assert resp.status_code == 303
+            assert resp.headers["location"].endswith("/exam/sim")
+        sim = client.app.state.exam_store.sim()
+        state = client.app.state.exam_store.state(qid)
+    assert sim["answers"] == {}
+    assert state is None
+
+
+def test_exam_sim_review_shows_the_stored_answer_not_the_query(tmp_path):
+    # The review reads the learner's choice from the sim, so a hand-edited ?choice= can't
+    # turn a miss into "Correct".
+    with _client(tmp_path) as client:
+        qid, _ = _sim_current(client)
+        _sim_answer(client, qid, _wrong(qid))
+        review = client.get(f"/exam/sim/review/{qid}?choice={_pool_answer(qid)}")
+    assert "Not quite" in review.text
+    assert "exam-chip--chosen" in review.text
+
+
+def test_exam_sim_review_refuses_an_unanswered_question(tmp_path):
+    # The reveal is only for a question already answered; asking for one early goes back to it.
+    with _client(tmp_path) as client:
+        qid, _ = _sim_current(client)
+        resp = client.get(f"/exam/sim/review/{qid}", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"].endswith("/exam/sim")
+        page = client.get(resp.headers["location"])
+    assert "exam-chip--correct" not in page.text
+    assert "exam-reveal" not in page.text
+
+
+def test_exam_sim_card_offers_skip(tmp_path):
+    with _client(tmp_path) as client:
+        qid, page = _sim_current(client)
+    assert f"/api/exam/sim/skip?question_id={qid}" in page.text
+    assert ">Skip<" in page.text
+
+
+def test_exam_sim_skip_serves_the_next_question_and_keeps_the_skipped_one(tmp_path):
+    with _client(tmp_path) as client:
+        first, page = _sim_current(client)
+        assert "Question 1 of 35" in page.text
+        skipped = client.post(f"/api/exam/sim/skip?question_id={first}", follow_redirects=False)
+        assert skipped.status_code == 303
+        assert skipped.headers["location"].endswith("/exam/sim")
+        second, page = _sim_current(client)
+        sim = client.app.state.exam_store.sim()
+    assert second != first
+    assert "Question 2 of 35" in page.text
+    assert "1 skipped" in page.text
+    assert first not in sim["answers"]                   # deferred, not answered or dropped
+
+
+def test_exam_sim_results_wait_for_a_skipped_question_then_score_it(tmp_path):
+    # Results score only once every question is answered: a skipped one comes back after the
+    # rest, and the sheet can't be finished around it.
+    with _client(tmp_path) as client:
+        first, _ = _sim_current(client)
+        client.post(f"/api/exam/sim/skip?question_id={first}")
+        for _ in range(34):
+            qid, _ = _sim_current(client)
+            assert qid != first
+            _sim_answer(client, qid, _pool_answer(qid))
+        back, page = _sim_current(client)
+        assert back == first
+        assert "Question 1 of 35" in page.text
+        assert ">Skip<" not in page.text                 # the last one left: nowhere to skip to
+        early = client.get("/exam/sim/results", follow_redirects=False)
+        assert early.headers["location"].endswith("/exam/sim")
+        last = _sim_answer(client, first, _pool_answer(first))
+        review = client.get(last.headers["location"])
+        assert 'href="/exam/sim/results"' in review.text
+        results = client.get("/exam/sim/results")
+    assert "35 of 35" in results.text
+
+
+def test_exam_sim_skip_for_an_unknown_question_is_404(tmp_path):
+    with _client(tmp_path) as client:
+        client.get("/exam/sim")
+        resp = client.post("/api/exam/sim/skip?question_id=NOPE99")
+    assert resp.status_code == 404
+
+
 # --- provenance panel (M3): the radio's account of itself + baseline (deaf vs. empty) ---------
 
 
@@ -2001,6 +2522,11 @@ def test_ppm_measure_releases_the_radio_before_measuring(tmp_path):
         def stop(self):
             client_sweeper["running"] = False
             super().stop()
+
+        def release(self):
+            # The real Sweeper's release() stops the sweep and keeps it down until resumed.
+            self.stop()
+            super().release()
 
     with _client(tmp_path, ppm_measure=fake_measure,
                  sweeper_factory=lambda: _RecordingSweeper(_rows())) as client:

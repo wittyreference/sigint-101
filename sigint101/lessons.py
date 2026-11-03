@@ -8,7 +8,14 @@ from pathlib import Path
 
 import yaml
 
-from .spectrum import MAX_SPAN_HZ, MIN_SPAN_HZ, TUNER_MAX_HZ, TUNER_MIN_HZ
+from .spectrum import (
+    MAX_SPAN_HZ,
+    MIN_SPAN_HZ,
+    TUNER_MAX_HZ,
+    TUNER_MIN_HZ,
+    TuneError,
+    validate_span,
+)
 
 # A pack declares its shape with `type`. An intro lesson teaches a concept from a blank
 # slate, so it opens with frame/demo/try before the learner predicts; a consolidation
@@ -60,6 +67,17 @@ KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 # lesson on a narrow signal can ask for a finer step; 100 kHz is the FM-band default.
 DEFAULT_TUNE_STEP_HZ = 100_000
 
+# What a lesson tile says the learner must bring, keyed by the pack's `hardware:` names. The
+# RTL-SDR is built into the Recon, so it earns no badge. LoRa's radio is built in too, but its
+# lessons need a second node to talk to, so that is the badge.
+BUILT_IN_HARDWARE = ("rtl-sdr",)
+HARDWARE_BADGES = {
+    "wifi-monitor": "Wi-Fi adapter",
+    "orbic-rayhunter": "Orbic",
+    "lora": "2nd node",
+    "flipper": "Flipper",
+}
+
 
 class LessonError(ValueError):
     """Raised when a lesson pack is missing required fields or is malformed."""
@@ -97,11 +115,45 @@ class Lesson:
     panels: list
     choices: list
     tune: dict | None
+    answer: tuple = ()
+    verdict: str = ""
+
+    def is_correct(self, key: str):
+        """Was this committed chip key right? None when the pack names no answer to score."""
+        if not self.answer:
+            return None
+        return key in self.answer
+
+    def score(self, key: str):
+        """What the learner said and what the answer was, by label, for the explain header.
+
+        None when the pack names no answer. A key the pack never offered is echoed back as-is
+        rather than dropped, so the header still says what was committed.
+        """
+        if not self.answer:
+            return None
+        labels = {choice["key"]: choice["label"] for choice in self.choices}
+        return {
+            "said": labels.get(key, key),
+            "answer": [labels[k] for k in self.answer],
+            "correct": self.is_correct(key),
+            "verdict": self.verdict,
+        }
 
     @property
     def needs_hardware(self) -> bool:
         """Does this lesson require a radio to be attached before it can be worked?"""
         return bool(self.hardware)
+
+    @property
+    def hardware_badges(self) -> list:
+        """The kit this lesson needs beyond the built-in radio, as the learner should read it.
+
+        Shown on the lesson tile so a need is known before the lesson starts, not mid-demo. A name
+        with no label is shown as written rather than dropped: an unlabelled need is still a need.
+        """
+        return [HARDWARE_BADGES.get(name, name)
+                for name in self.hardware if name not in BUILT_IN_HARDWARE]
 
     @property
     def uses_decoder(self) -> bool:
@@ -267,6 +319,8 @@ class Lesson:
             "hints": list(self.hints),
             "quiz": list(self.quiz),
             "artifact": self.artifact,
+            "answer": list(self.answer),
+            "verdict": self.verdict,
         }
 
 
@@ -284,12 +338,13 @@ def _require(data: dict, key: str, ctx: str):
 def _parse_tune(data: dict, ctx: str) -> dict | None:
     """Validate an optional `tune` band and normalise it to centre/span/step + edges.
 
-    A pack names where its instrument should start — `tune: {center_hz, span_hz, step_hz?}` —
-    because the eight FM-band lessons predate any need to leave 88-108 MHz, and a lesson on a
-    signal elsewhere (OOK at 433.92 MHz) cannot be hand-tuned there a hundred kHz at a time. The
-    band is checked against what the radio can actually reach and what the sweeper can sweep, at
-    load, so an unreachable pack fails here rather than mid-lesson in front of a learner. A pack
-    with no `tune` returns None and keeps the default FM sweep.
+    A pack names where its instrument should start — `tune: {center_hz, span_hz, step_hz?,
+    bin_hz?}` — because the eight FM-band lessons predate any need to leave 88-108 MHz, and a
+    lesson on a signal elsewhere (OOK at 433.92 MHz) cannot be hand-tuned there a hundred kHz at
+    a time. The band is checked against what the radio can actually reach and what the sweeper
+    can sweep, at load, so an unreachable pack fails here rather than mid-lesson in front of a
+    learner. A pack with no `tune` returns None and keeps the default FM sweep. `bin_hz` is the
+    sweep's bin size; without one the sweep keeps its FM-sized default bin.
     """
     raw = data.get("tune")
     if raw in (None, {}):
@@ -310,6 +365,7 @@ def _parse_tune(data: dict, ctx: str) -> dict | None:
     center = _positive_int("center_hz", required=True)
     span = _positive_int("span_hz", required=True)
     step = _positive_int("step_hz", required=False, default=DEFAULT_TUNE_STEP_HZ)
+    bin_hz = _positive_int("bin_hz", required=False)
 
     if span < MIN_SPAN_HZ or span > MAX_SPAN_HZ:
         raise LessonError(
@@ -323,8 +379,52 @@ def _parse_tune(data: dict, ctx: str) -> dict | None:
             f"{ctx}: 'tune' band {low / 1e6:.3f}-{high / 1e6:.3f} MHz is outside the radio's "
             f"{TUNER_MIN_HZ // 1_000_000}-{TUNER_MAX_HZ // 1_000_000} MHz range"
         )
-    return {"center_hz": center, "span_hz": span, "step_hz": step,
+    if bin_hz is not None:
+        # The same gate /api/tune applies, so a pack can never name a sweep the console refuses.
+        try:
+            validate_span(low, high, bin_hz)
+        except TuneError as exc:
+            raise LessonError(f"{ctx}: 'tune.bin_hz' {bin_hz} Hz: {exc}") from exc
+    return {"center_hz": center, "span_hz": span, "step_hz": step, "bin_hz": bin_hz,
             "low_hz": low, "high_hz": high}
+
+
+def _parse_answer(data: dict, choices: list, ctx: str) -> tuple:
+    """Validate an optional `answer` (one key or a list) and its one-line `verdict`.
+
+    The answer scores the predict gate, so every key in it must be one of the pack's own choice
+    keys: a typo would mark every learner wrong, in front of them, and is caught here instead. A
+    list lets a lesson whose explain defends two chips accept either. Answer and verdict travel
+    together — a scored gate with no verdict to print, or a verdict with nothing to score, is a
+    half-authored pack. Returns (answer tuple, verdict string); () and "" when the pack has none.
+    """
+    raw_answer = data.get("answer")
+    raw_verdict = data.get("verdict")
+    if raw_answer in (None, "", []) and raw_verdict in (None, ""):
+        return (), ""
+    if raw_answer in (None, "", []):
+        raise LessonError(f"{ctx}: a 'verdict' needs an 'answer' to score against")
+    if raw_verdict in (None, ""):
+        raise LessonError(f"{ctx}: an 'answer' needs a one-line 'verdict' for the explain header")
+    if not choices:
+        raise LessonError(f"{ctx}: an 'answer' needs predict 'choices' to name")
+    keys = raw_answer if isinstance(raw_answer, list) else [raw_answer]
+    answer = []
+    known = [choice["key"] for choice in choices]
+    for key in keys:
+        # Same YAML 1.1 trap as the choice keys: a bare `no` arrives as False.
+        if isinstance(key, bool):
+            raise LessonError(
+                f'{ctx}: answer {key!r} is a YAML boolean — quote it in the pack (e.g. "no")')
+        key = str(key).strip()
+        if key not in known:
+            raise LessonError(
+                f"{ctx}: answer '{key}' is not one of its choice keys ({', '.join(known)})")
+        answer.append(key)
+    verdict = str(raw_verdict).strip()
+    if "\n" in verdict:
+        raise LessonError(f"{ctx}: the 'verdict' must be one line")
+    return tuple(answer), verdict
 
 
 def parse_lesson(data: dict) -> Lesson:
@@ -402,6 +502,8 @@ def parse_lesson(data: dict) -> Lesson:
             raise LessonError(f"{ctx}: each predict choice needs a non-empty 'key' and 'label'")
         choices.append({"key": key, "label": label})
 
+    answer, verdict = _parse_answer(data, choices, ctx)
+
     # Optional fields default to empty rather than None so the templates can iterate them
     # without guarding every one, and a pack can omit what it does not use. Only the stages
     # this type requires are carried onto the Lesson; any extra keys in the pack are dropped.
@@ -420,6 +522,8 @@ def parse_lesson(data: dict) -> Lesson:
         panels=list(panels),
         choices=choices,
         tune=_parse_tune(data, ctx),
+        answer=answer,
+        verdict=verdict,
     )
 
 

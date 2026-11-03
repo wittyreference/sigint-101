@@ -7,64 +7,62 @@ title: "Two Shapes: AM vs FM"
 type: intro
 concept: >-
   Modulation is which property of a wave carries the message — its height (AM) or its pitch (FM) —
-  and the two draw different shapes on the waterfall, so you can tell them apart by sight, and by
-  sound, before you ever listen.
+  and the two draw different shapes on the waterfall, so you can tell them apart by sight, before
+  you ever listen.
 requires_tx: false
 hardware: [rtl-sdr]
 panels: []
+# The instrument sits on the whole VHF airband, 118-137 MHz, so a controller's channel shows wherever
+# it is. rtl_power sweeps it in 7 hops and splits the 50 kHz request into ~42 kHz bins (448 a row):
+# an AM voice channel is one thin line, and the row fits the waterfall one bin per pixel. The step
+# is the 25 kHz airband channel spacing.
+tune:
+  center_hz: 127500000
+  span_hz: 19000000
+  step_hz: 25000
+  bin_hz: 50000
 
 stages:
   frame: >-
     Tonight, comrade, you learn to read a signal's modulation — the trick it uses to carry a message — straight
-    off its shape on the waterfall, so you can call AM from FM on sight, before you ever turn up the
-    sound.
+    off its shape on the waterfall, so you can call AM from FM on sight, with no speaker at all.
   demo: >-
-    Watch — hands off for now. Two signals, one after the other. First the airband — aircraft
-    voice, 118 to 137 MHz — on a controller's channel: a single hard, bright line, dead still at
-    center. That's the carrier, a pure steady tone, no message yet. A pilot keys up and talks —
-    the brightness blooms and flickers around the line with the words, then falls back when they
-    stop. The line never moves, only the brightness on it, and it's skinny, under ten kHz. That's
-    AM — amplitude modulation — the message written in height. Now broadcast FM, the music band
-    from Lesson 1: a different animal — a fat block about 200 kHz wide, twenty times wider, and
-    instead of sitting still it writhes, the bright part darting side to side with the music. The
-    height barely changes; the sideways wiggle carries the song. That's FM — frequency modulation
-    — the message in pitch. Two shapes: AM, a still line that flickers; FM, a wide band that
-    wiggles — tell them apart with the sound off.
+    Watch — hands off for now. Two shapes. On a fine display, an airband AM voice channel is a
+    single hard, bright line, dead still at center — the carrier — with brightness blooming and
+    flickering around it as the words come and go. It's skinny, under ten kHz. That's AM: the
+    message in height. Broadcast FM, from Lesson 1, is a fat block about 200 kHz wide that writhes
+    side to side with the music. That's FM: the message in pitch.
   try: >-
-    Now it's your turn, comrade — the job is your eyes, so leave the volume down. Tap between the
-    two presets, the airband controller channel and the FM music station, and watch the shapes. On
-    the airband, find the thin bright carrier line and wait for it to flicker when someone talks;
-    on FM, find the wide block and watch it wiggle. Then call them out loud — the narrow flickering
-    one is AM, the wide wiggling one is FM. Don't listen yet; the shape already told you, so learn
-    to trust it.
+    Your turn, comrade — eyes only; this console has no speaker yet, and the shapes are the
+    lesson. The waterfall sits on the aircraft band. At this resolution an airband channel is one
+    thin column of pixels, lit only while someone talks. Watch for one to blink on, then hold it
+    against the wide FM blocks from Lesson 1: thin is AM, wide is FM.
   predict: >-
-    You watched the airband carrier flare bright whenever the controller spoke. The call is about
-    the gaps between words: does a carrier vanish from the screen in that silence, or stay lit? Pick
-    the one whose carrier you think disappears between words — the AM airband voice, the FM music
-    station, or neither. Lock it in — the rest stays hidden until you do.
+    In the silence between words, does a carrier vanish from the screen? Pick the one whose
+    carrier disappears between words — the AM airband voice, the FM music station, or neither.
+    Lock it in.
   observe: >-
-    Go back to the airband and watch the carrier through a whole exchange, not just while someone
-    talks. In a gap between transmissions, eye on the center line: does it blink out, or stay lit
-    while only the brightness around it drops? And why call it a carrier — what must it do in the
-    quiet to earn the name?
+    Watch one transmission from key-up to release. Between words, does the line stay lit? And at
+    release? Why call it a carrier — what must it do in the quiet to earn the name?
   explain: >-
-    Here's the straight answer: neither — the carrier does not vanish. Watch an AM carrier through the
-    quiet and you'll see the center line stay lit and rock-steady between words; what comes and goes is
-    only the brightness riding on it. That's the whole idea of amplitude modulation: a steady carrier
-    is transmitted the entire time, holding its spot on the dial, and the voice is written onto it as
-    changes in height — louder sound, taller signal, more brightness blooming around the line. Take the
-    voice away in a gap and you haven't taken the carrier away; you've just stopped writing on it, so
-    it drops back to the bare, even line. That is literally why it's called a carrier: it carries the
-    message, and it's still there in the silence, holding the channel open for the next word. FM holds
-    its carrier too — its message is written in pitch, the sideways wiggle, so between notes the energy
-    just settles toward the center rather than blinking out. So the two shapes you learned tonight each
-    ride on a carrier that stays: AM is a still line that flickers bright because height carries the
-    message; FM is a wide band that wiggles because pitch carries it. Read the shape and you've named
-    the modulation before a single sound reaches your ears — and when you do finally listen, AM's
-    scratchy voice and FM's clean hi-fi only confirm what the shape already told you. One honest
-    footnote, because a carrier that vanishes is a real thing, just not here: there's a simpler code,
-    on-off keying — Morse with a flashlight — that switches its carrier all the way off and on, and
-    you'll meet it next lesson. Tonight's carriers stay lit; that one won't.
+    Here's the straight answer: neither, while a transmission lasts. Watch an AM carrier through
+    the quiet between words and the center line stays lit and rock-steady; what comes and goes is
+    only the brightness riding on it. That's the whole idea of amplitude modulation: a steady
+    carrier holds its spot on the dial, and the voice is written onto it as changes in height —
+    louder sound, taller signal, more brightness blooming around the line. Stop talking for a
+    moment and you haven't taken the carrier away; you've just stopped writing on it. That is
+    literally why it's called a carrier: it carries the message, and it's still there in the
+    silence. FM holds its carrier too — its message is written in pitch, so between notes the
+    energy settles toward the center rather than blinking out. One catch: airband is
+    push-to-talk. When the speaker lets go, the whole transmission ends, carrier and all, and the
+    channel goes dark until the next key-up — which is why those thin columns blink. (A few
+    channels, like ATIS recordings, never let go.) So the two shapes each ride a carrier that stays
+    for as long as someone is transmitting: AM is a still line that flickers bright because height
+    carries the message; FM is a wide band that wiggles because pitch carries it. This console has
+    no speaker path yet; the shapes are the lesson, and they name the modulation before a single
+    sound reaches your ears. One honest footnote, because a carrier that vanishes mid-message is a
+    real thing, just not here: on-off keying — Morse with a flashlight — switches its carrier all
+    the way off and on, and you'll meet it next lesson.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
@@ -74,3 +72,9 @@ choices:
   - {key: am, label: AM}
   - {key: fm, label: FM}
   - {key: neither, label: Neither}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [neither]
+verdict: >-
+  Neither, while a transmission lasts: the carrier holds between words and goes only when
+  push-to-talk is released.

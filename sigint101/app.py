@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,9 +18,11 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .acars import AcarsDecoder, AcarsUnavailable
 from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
@@ -26,28 +31,56 @@ from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
-from .events import log_event
-from .exam import EXAM_SIZE, PASS_MARK, ExamStore, build_exam, load_pool, score_exam
+from .events import log_event, read_events
+from .exam import (
+    EXAM_SIZE,
+    PASS_MARK,
+    ExamStore,
+    build_exam,
+    load_pool,
+    next_sim_question,
+    score_exam,
+)
 from .flipper import FlipperError, FlipperSelectionError
 from .flipperconsole import FlipperConsole
 from .flock import FlockDetector, FlockUnavailable
-from .hardware import list_rtlsdr_devices, probe_rtlsdr
-from .lessons import load_lessons
+from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
+from .kiosk import request_exit
+from .lessons import COMMIT_STAGE, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
-from .pocsag import PocsagDecoder, PocsagUnavailable
-from .ppm import measure_pilot_ppm
-from .progress import Progress
+from .operate import (
+    DEFAULT_INSTRUMENT,
+    INSTRUMENTS,
+    RECEIVERS,
+    reception_record,
+    tunable,
+    validate_decoder_hz,
+)
+from .operate import instrument as rack_instrument
+from .pocsag import PocsagDecoder, PocsagUnavailable, on_commercial_paging_band
+from .ppm import PpmUnavailable, measure_pilot_ppm
+from .progress import PredictionAlreadyCommitted, Progress
 from .provenance import (
+    BaselineLog,
     compare_to_baseline,
     gather_provenance,
-    read_baseline,
     record_baseline_sample,
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
-from .spectrum import SpectrumUnavailable, Sweeper, TuneError, validate_span
+from .spectrum import (
+    DEFAULT_BIN,
+    DEFAULT_HIGH,
+    DEFAULT_LOW,
+    SpectrumUnavailable,
+    Sweeper,
+    TuneError,
+    validate_gain,
+    validate_span,
+    validate_target_span,
+)
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
-from .units import UNITS, get_unit
+from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
@@ -83,6 +116,13 @@ def _env_float(name: str):
 # default so the kiosk's "Measure ppm" tap returns promptly; the trade-off is resolution, which the
 # measurement reports so the learner sees how finely it could read.
 PPM_SECONDS = 8.0
+
+# How many recent receptions the console keeps in memory for the rack's log line. The events log
+# keeps every one; this only bounds what a poll looks through.
+RECEPTION_MEMORY = 200
+
+# The progress store's place name for the rack's last instrument.
+RACK_PLACE = "rack"
 
 
 async def _field(request: Request, name: str) -> str:
@@ -163,15 +203,51 @@ def _lesson_tiles(unit, lessons: dict, progress: Progress) -> list:
             status = ""
         tiles.append({
             "id": lesson.id,
-            "code": f"L{lesson.id}",
+            # The code a learner reads is the lesson's place in the teaching order, not its id:
+            # ids were handed out as lessons were built and stay the storage keys and URLs.
+            "code": f"L{teaching_position(lesson.id)}",
             "name": lesson.title,
             "glyph": DEFAULT_TILE_GLYPH,
             "status": status,
             "href": f"/lesson/{lesson.id}",
             "lessons_total": 1,
             "lessons_done": 1 if done else 0,
+            "needs": lesson.hardware_badges,
         })
     return tiles
+
+
+def _after_complete_href(lesson_id: int, lessons: dict) -> str:
+    """Where finishing a lesson leads: the next built lesson in its unit, else the unit's page.
+
+    Teaching order within the unit, skipping ids whose packs have not loaded, so the learner goes
+    straight on to what they can actually open. The end of a unit returns to it, where its tiles
+    show the unit finished.
+    """
+    unit = unit_for_lesson(lesson_id)
+    if unit is None:
+        return "/"
+    for next_id in unit.lesson_ids[unit.lesson_ids.index(lesson_id) + 1:]:
+        if next_id in lessons:
+            return f"/lesson/{next_id}"
+    return f"/unit/{unit.id}"
+
+
+def _resume_stage(lesson, saved, committed: bool) -> tuple:
+    """The stage a lesson opens on and the furthest position reached, from the saved place.
+
+    Opens where the learner left it, provided that stage is one this visit renders: a sealed stage
+    never opens before a commit (commit-before-reveal), and an unknown name falls back to the
+    start. With nothing saved it opens on the first stage, or the first sealed one once committed.
+    The furthest position never passes predict before a commit, and always covers the open stage.
+    """
+    order = lesson.stage_order
+    open_now = order if committed else order[:order.index(COMMIT_STAGE) + 1]
+    current = lesson.sealed_stages[0] if committed else order[0]
+    if saved and saved["stage"] in open_now:
+        current = saved["stage"]
+    reached = max(saved["furthest"] if saved else 0, order.index(current))
+    return current, min(reached, len(open_now) - 1)
 
 
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
@@ -180,7 +256,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                acars_factory=None, ais_factory=None, dmr_factory=None,
                apt_factory=None, sstv_factory=None,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None, pool_path=None,
-               ppm_measure=None) -> FastAPI:
+               ppm_measure=None, list_devices=list_rtlsdr_devices,
+               kiosk_exit=request_exit) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -188,6 +265,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     dongle attached. The module-level `app` below uses the real ones.
     """
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+    # The radios the bus held the last time a tool looked, as each SDR tool enumerates them before
+    # it opens one. A reception names its radio's serial from here, so logging one never has to
+    # run the enumerator again while a tool holds the dongle.
+    radio_census = []
+
+    def enumerate_radios():
+        devices = list_devices()
+        radio_census[:] = list(devices)
+        return devices
 
     # The sweeper trusts the same probe the console does, so a radio-less probe in a test can
     # never reach for the real dongle. The real enumerator is wired here and nowhere else: it is
@@ -198,7 +285,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return Sweeper(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_sweeper = sweeper_factory
@@ -210,7 +297,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return Decoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_decoder = decoder_factory
@@ -230,7 +317,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return RDSDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_rds = rds_factory
@@ -243,7 +330,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return AdsbDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
                 receiver_lat=_env_float(RX_LAT_ENV),
                 receiver_lon=_env_float(RX_LON_ENV),
             )
@@ -257,7 +344,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return AprsDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_aprs = aprs_factory
@@ -269,7 +356,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return PocsagDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_pocsag = pocsag_factory
@@ -281,7 +368,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return AcarsDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_acars = acars_factory
@@ -293,7 +380,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return AisDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_ais = ais_factory
@@ -305,7 +392,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return DmrDecoder(
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_dmr = dmr_factory
@@ -319,7 +406,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 data_dir=Path(data_dir),
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_apt = apt_factory
@@ -333,7 +420,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 data_dir=Path(data_dir),
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=list_rtlsdr_devices,
+                list_devices=enumerate_radios,
             )
     else:
         build_sstv = sstv_factory
@@ -370,6 +457,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.lessons = load_lessons(pack_dir)
         app.state.progress = Progress(Path(data_dir) / "progress.db")
         app.state.events_path = Path(data_dir) / "events.jsonl"
+        # The provenance panel asks for the baseline every poll; this follows the log as it grows
+        # rather than re-reading all of it each time.
+        app.state.baseline = BaselineLog(app.state.events_path)
         app.state.sweeper = build_sweeper()
         app.state.decoder = build_decoder()
         app.state.lora = build_lora()
@@ -394,6 +484,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # the real pilot measurement, which holds the dongle exclusively (the route stands the
         # sweeper down first, below).
         app.state.ppm_measure = ppm_measure or measure_pilot_ppm
+        # Operator mode: every receiver logs each live reception with its provenance. The
+        # in-memory tail is read in from the log on first ask; the last ppm measured this run is
+        # part of each record's provenance.
+        app.state.receptions = None
+        app.state.reception_error = None
+        app.state.last_ppm = None
+        for attr, inst in RECEIVERS.items():
+            receiver = getattr(app.state, attr)
+            receiver.on_reception = _heard(inst, receiver)
         try:
             yield
         finally:
@@ -417,6 +516,26 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
+    @app.exception_handler(StarletteHTTPException)
+    async def error_page(request: Request, exc: StarletteHTTPException):
+        """A browser asking for a screen gets the console's own themed error page.
+
+        The kiosk renders raw JSON as a full white sheet, which at night is the one thing
+        red-night exists to prevent. Only a request that asks for HTML outside /api/ gets the page;
+        the panels' fetch() calls read the JSON reason, so /api/ and non-browser clients keep it.
+        """
+        wants_page = (not request.url.path.startswith("/api/")
+                      and "text/html" in request.headers.get("accept", ""))
+        if not wants_page:
+            return await http_exception_handler(request, exc)
+        heading = "Not found" if exc.status_code == 404 else f"Error {exc.status_code}"
+        return templates.TemplateResponse(
+            request=request, name="error.html", status_code=exc.status_code,
+            headers=getattr(exc, "headers", None),
+            context={"title": heading, "back_href": "/", "back_label": "Home",
+                     "status": exc.status_code, "heading": heading, "detail": exc.detail},
+        )
+
     def _require_lesson(lesson_id: int):
         """Refuse an unknown lesson id the same way from every lesson route."""
         if lesson_id not in app.state.lessons:
@@ -430,8 +549,34 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             request=request,
             name="home.html",
             context={"title": "SIGINT 101", "back_href": "/", "back_label": "Home",
-                     "tiles": tiles},
+                     "exit_to_desktop": True, "tiles": tiles},
         )
+
+    @app.post("/api/kiosk/exit")
+    def kiosk_exit_route(request: Request):
+        """Exit SIGINT 101: close the full-screen course window, leaving the learner on the desktop.
+
+        The kiosk browser is usually gone before it reads the answer. Any other browser that asked
+        lands home once the kiosk is closed, or gets a themed page saying there was nothing to close
+        (the dev server has no kiosk at all), never a raw JSON sheet.
+        """
+        result = kiosk_exit()
+        log_event(app.state.events_path, "kiosk_exit",
+                  {"closed": list(result.closed), "reason": result.reason})
+        wants_page = "text/html" in request.headers.get("accept", "")
+        if result.exited:
+            if wants_page:
+                return RedirectResponse("/", status_code=303)
+            return {"exited": True, "closed": list(result.closed)}
+        if wants_page:
+            heading = "Nothing to close"
+            return templates.TemplateResponse(
+                request=request, name="error.html", status_code=409,
+                context={"title": heading, "back_href": "/", "back_label": "Home",
+                         "status": 409, "heading": heading, "detail": result.reason},
+            )
+        return JSONResponse(status_code=409, content={"exited": False, "closed": [],
+                                                      "reason": result.reason})
 
     @app.get("/unit/{unit_id}", response_class=HTMLResponse)
     def unit_view(request: Request, unit_id: int):
@@ -451,6 +596,27 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "unit": unit, "tiles": tiles},
         )
 
+    def _restore_lesson_tuning(lesson) -> None:
+        """Put the radios back where a lesson expects them, whatever the rack left them on.
+
+        The rack retunes the single-channel decoders and the sweep; a lesson's copy and panels
+        name its own frequencies. Each decoder goes back to the frequency it was built for, and
+        a lesson with no band of its own gets the FM sweep it was written against (a lesson with
+        a band retunes the sweep itself when it loads). Nothing restarts that is already there.
+        """
+        for inst in INSTRUMENTS:
+            if inst.band:
+                receiver = getattr(app.state, inst.receiver)
+                home = getattr(receiver, "home_hz", None)
+                if home is not None and receiver.freq_hz != home:
+                    receiver.retune(home)
+        sweeper = app.state.sweeper
+        if not lesson.tune and (
+                (sweeper.low, sweeper.high, sweeper.bin_size) != (DEFAULT_LOW, DEFAULT_HIGH,
+                                                                  DEFAULT_BIN)
+                or getattr(sweeper, "target", None) is not None):
+            sweeper.retune(DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_BIN)
+
     @app.get("/lesson/{lesson_id}", response_class=HTMLResponse)
     def lesson_view(request: Request, lesson_id: int):
         """Render one lesson, sealing every post-predict stage until a prediction exists.
@@ -460,20 +626,28 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         is what the template uses to decide which stages it emits, so the sealed bodies are never
         put into the HTML before the commit. Lesson.reveal() is asked for the sealed material only
         once committed — it refuses otherwise — as the code-level backstop behind the template.
-        Opening a lesson counts as progress but never as completion.
+        Opening a lesson counts as progress but never as completion. It opens on the stage the
+        learner last reached (a reload or a power cut resumes in place), and Back leads to the
+        lesson's unit rather than skipping it.
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
+        _restore_lesson_tuning(lesson)
         app.state.progress.mark_opened(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
+        current, reached = _resume_stage(lesson, app.state.progress.get_stage(lesson_id),
+                                         committed)
+        unit = unit_for_lesson(lesson_id)
         context = {
             "title": lesson.title,
-            "back_href": "/",
-            "back_label": "Home",
+            "back_href": f"/unit/{unit.id}" if unit else "/",
+            "back_label": f"Unit {unit.id}" if unit else "Home",
             "lesson": lesson,
-            "current_stage": lesson.sealed_stages[0] if committed else lesson.stage_order[0],
+            "current_stage": current,
+            "reached": reached,
+            "complete_href": _after_complete_href(lesson_id, app.state.lessons),
             "prediction_committed": committed,
             "committed_choice": prediction,
             "predict_choices": lesson.choices,
@@ -499,14 +673,50 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         is redirected back to the now-unsealed lesson, so the gate works with no JavaScript.
         """
         _require_lesson(lesson_id)
+        # The pack scores the chip (None when it names no answer); the score is stored with the
+        # prediction. A second commit is refused (409): once the explain has shown the answer, a
+        # re-answer would only copy it.
+        body = await _field(request, "prediction")
+        correct = app.state.lessons[lesson_id].is_correct((body or "").strip())
         try:
-            app.state.progress.record_prediction(lesson_id, await _field(request, "prediction"))
+            app.state.progress.record_prediction(lesson_id, body, correct=correct)
         except ValueError as exc:
             log_event(app.state.events_path, "prediction_refused",
                       {"lesson": lesson_id, "reason": str(exc)})
             return JSONResponse(status_code=400, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "prediction", {"lesson": lesson_id})
+        except PredictionAlreadyCommitted as exc:
+            log_event(app.state.events_path, "prediction_refused",
+                      {"lesson": lesson_id, "reason": str(exc)})
+            return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
+        log_event(app.state.events_path, "prediction", {"lesson": lesson_id, "correct": correct})
+        # Committing walks the learner past the gate, so the lesson reopens on the first sealed
+        # stage rather than resuming on the predict screen they just left.
+        lesson = app.state.lessons[lesson_id]
+        first_sealed = lesson.sealed_stages[0]
+        app.state.progress.record_stage(lesson_id, first_sealed,
+                                        lesson.stage_order.index(first_sealed))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    @app.post("/api/stage")
+    async def stage(lesson_id: int, request: Request):
+        """Remember the stage the learner is on, so a reload or a power cut resumes there.
+
+        The lesson screen posts this on every step, forward or back. A stage the lesson does not
+        have is refused, and so is any sealed stage before a prediction exists: commit-before-reveal
+        covers where a learner can be, not only what the page shows.
+        """
+        _require_lesson(lesson_id)
+        lesson = app.state.lessons[lesson_id]
+        name = (await _field(request, "stage")).strip()
+        if name not in lesson.stage_order:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"lesson {lesson_id} has no stage '{name}'"})
+        if name in lesson.sealed_stages and app.state.progress.get_prediction(lesson_id) is None:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": "predict before going past the gate"})
+        app.state.progress.record_stage(lesson_id, name, lesson.stage_order.index(name))
+        furthest = app.state.progress.get_stage(lesson_id)["furthest"]
+        return {"recorded": True, "stage": name, "furthest": furthest}
 
     @app.post("/api/complete")
     def complete(lesson_id: int):
@@ -582,15 +792,20 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # --- scored 35-question practice exam (answer-then-advance) ---------------------------
 
     def _sim_progress(sim):
-        """From a sim dict: (first-unanswered id or None, that question's 1-based position,
-        correct-so-far). The current question is always the first the learner has not answered."""
+        """From a sim dict: (the question to serve now or None, its 1-based sheet position,
+        correct-so-far). The question to serve is the first unanswered, passing over skipped
+        ones until only they are left (next_sim_question)."""
         pool = app.state.exam_pool
         ids, answers = sim["question_ids"], sim["answers"]
         correct = sum(1 for qid, c in answers.items()
                       if pool.get(qid) is not None and c == pool.get(qid).answer)
-        current = next((qid for qid in ids if qid not in answers), None)
+        current = next_sim_question(ids, answers, sim["skipped"])
         pos = (ids.index(current) + 1) if current is not None else len(ids)
         return current, pos, correct
+
+    def _sim_skipped(sim):
+        """How many skipped questions are still waiting for an answer."""
+        return sum(1 for qid in sim["skipped"] if qid not in sim["answers"])
 
     def _sim_breakdown(questions, answers):
         """Per-subelement correct/total for the results screen, in exam order (T1..T9, T0 last)."""
@@ -608,9 +823,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def exam_sim(request: Request):
         """Serve the current question of a scored practice exam, starting one if none is active.
 
-        The current question is the first unanswered on the drawn sheet; once all 35 are in, this
-        hands off to the results screen. The correct answer is never in the question HTML —
-        commit-before-reveal, exactly like the study card and the lesson predict gate.
+        The current question is the first unanswered on the drawn sheet, passing over skipped
+        ones until only they remain; once all 35 are in, this hands off to the results screen.
+        Skip is offered while another question is still waiting. The correct answer is never in
+        the question HTML — commit-before-reveal, like the study card and the lesson predict gate.
         """
         store = app.state.exam_store
         sim = store.sim()
@@ -620,44 +836,66 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         current, pos, correct = _sim_progress(sim)
         if current is None:
             return RedirectResponse("/exam/sim/results", status_code=303)
+        waiting = len(sim["question_ids"]) - len(sim["answers"])
         return templates.TemplateResponse(
             request=request,
             name="exam_sim.html",
             context={"title": "Practice Exam", "back_href": "/exam", "back_label": "Exam",
                      "question": app.state.exam_pool.get(current), "reviewed": False,
                      "position": pos, "total": len(sim["question_ids"]),
-                     "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK},
+                     "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK,
+                     "skipped": _sim_skipped(sim), "can_skip": waiting > 1},
         )
 
     @app.post("/api/exam/sim/answer")
     async def exam_sim_answer(question_id: str, request: Request):
-        """Record one sim answer and redirect to its review — no JS, like the study card."""
+        """Record one sim answer and redirect to its review — no JS, like the study card.
+
+        An answer is final: a second POST for a question already answered (browser history, a
+        resubmit) changes nothing and is not credited again; it just lands on the review. So a
+        choice that is not one of the question's options is never stored — it goes back to the
+        question rather than locking it in as wrong.
+        """
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
         choice = (await _field(request, "choice")).strip().upper()
+        if choice not in question.options:
+            return RedirectResponse("/exam/sim", status_code=303)
         correct = choice == question.answer
-        app.state.exam_store.record_sim_answer(question_id, choice)
-        # Also credit the Leitner history so the sim feeds the study card's weak-first order.
-        app.state.exam_store.record(question_id, correct)
-        log_event(app.state.events_path, "exam_sim_answer",
-                  {"question": question_id, "choice": choice, "correct": correct})
-        return RedirectResponse(f"/exam/sim/review/{question_id}?choice={choice}", status_code=303)
+        if app.state.exam_store.record_sim_answer(question_id, choice):
+            # Also credit the Leitner history so the sim feeds the study card's weak-first order.
+            app.state.exam_store.record(question_id, correct)
+            log_event(app.state.events_path, "exam_sim_answer",
+                      {"question": question_id, "choice": choice, "correct": correct})
+        return RedirectResponse(f"/exam/sim/review/{question_id}", status_code=303)
+
+    @app.post("/api/exam/sim/skip")
+    def exam_sim_skip(question_id: str):
+        """Defer a sim question until the others are done; it stays answerable, and the results
+        wait for it (a skip never leaves a question blank)."""
+        if app.state.exam_pool.get(question_id) is None:
+            raise HTTPException(status_code=404, detail=f"question {question_id} not found")
+        app.state.exam_store.skip_sim_question(question_id)
+        return RedirectResponse("/exam/sim", status_code=303)
 
     @app.get("/exam/sim/review/{question_id}", response_class=HTMLResponse)
-    def exam_sim_review(request: Request, question_id: str, choice: str = ""):
-        """Show the answered sim question revealed, with Next pointing at the next question or,
-        once the sheet is done, the results screen."""
+    def exam_sim_review(request: Request, question_id: str):
+        """Show an answered sim question revealed, with Next pointing at the next question or,
+        once the sheet is done, the results screen.
+
+        Only an answered question is revealed, and the choice shown is the stored one: a question
+        not yet answered goes back to the sim, so the review can never leak an answer early.
+        """
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
         sim = app.state.exam_store.sim()
-        if sim is None or question_id not in sim["question_ids"]:
+        if sim is None or question_id not in sim["answers"]:
             return RedirectResponse("/exam/sim", status_code=303)
         ids = sim["question_ids"]
-        _, _, correct = _sim_progress(sim)
-        nxt = next((qid for qid in ids if qid not in sim["answers"]), None)
-        chosen = choice.strip().upper()
+        nxt, _, correct = _sim_progress(sim)
+        chosen = sim["answers"][question_id]
         return templates.TemplateResponse(
             request=request,
             name="exam_sim.html",
@@ -666,6 +904,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "chosen": chosen, "correct": chosen == question.answer,
                      "position": ids.index(question_id) + 1, "total": len(ids),
                      "score": correct, "answered": len(sim["answers"]), "pass_mark": PASS_MARK,
+                     "skipped": _sim_skipped(sim),
                      "next_href": "/exam/sim" if nxt is not None else "/exam/sim/results",
                      "last": nxt is None},
         )
@@ -730,7 +969,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         than guessing a verdict.
         """
         snapshot = _snapshot()
-        verdict = compare_to_baseline(snapshot["ref_db"], read_baseline(app.state.events_path))
+        verdict = compare_to_baseline(snapshot["ref_db"], app.state.baseline.samples())
         return {"provenance": snapshot, "baseline": verdict}
 
     @app.post("/api/provenance/baseline")
@@ -753,16 +992,40 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def ppm_measure_route(hz: int = 98_100_000):
         """Measure the receiver's crystal error against a station's 19 kHz stereo pilot.
 
-        rtl_fm needs the dongle to itself, so the sweep stands down first (the next spectrum poll
-        lazily brings it back). ppm is None with a reason whenever no pilot is there to measure
-        against — a mono station carries none, and a weak one reads the same — never a guessed ppm.
+        rtl_fm needs the dongle to itself, so the measurement claims it like any other tenant and
+        holds the claim until rtl_fm is done: a waterfall poll arriving mid-capture waits rather
+        than taking the radio back (the next spectrum poll after it brings the sweep back). ppm is
+        None with a reason whenever no pilot is there to measure against — a mono station carries
+        none, and a weak one reads the same — never a guessed ppm. A capture that cannot run at
+        all (no rtl_fm, a pinned radio that is not on the bus) is a 503 with the reason.
         """
-        app.state.sweeper.stop()
-        result = app.state.ppm_measure(
-            hz=hz, seconds=PPM_SECONDS, device=os.environ.get(RTLSDR_SERIAL_ENV))
+        def measure():
+            return app.state.ppm_measure(hz=hz, seconds=PPM_SECONDS, device=_pinned_index())
+
+        try:
+            result = _claim_sdr("ppm", measure)
+        except (PpmUnavailable, DeviceSelectionError) as exc:
+            reason = str(exc)
+            log_event(app.state.events_path, "ppm_measure",
+                      {"hz": hz, "ppm": None, "reason": reason})
+            return JSONResponse(status_code=503, content={
+                "available": False, "hz": hz, "ppm": None, "reason": reason})
         log_event(app.state.events_path, "ppm_measure",
                   {"hz": hz, "ppm": result.get("ppm"), "reason": result.get("reason")})
+        if result.get("ppm") is not None:
+            app.state.last_ppm = result["ppm"]
         return result
+
+    def _pinned_index():
+        """The index rtl_fm's -d needs for the pinned radio, or None to take the only one.
+
+        A serial cannot go to -d directly: rtl_fm reads "00000001" as index 1, which on a bus
+        with two radios is the wrong one. It is looked up the way the decoders look it up.
+        """
+        serial = os.environ.get(RTLSDR_SERIAL_ENV)
+        if not serial:
+            return None
+        return select_rtlsdr_index(serial, devices=list_devices())
 
     # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time;
     # each opens the dongle exclusively and would fight the others for it. A route takes the radio
@@ -772,14 +1035,50 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
                      "apt", "sstv")
 
-    def _claim_sdr(target: str) -> None:
-        """Hand the one RTL-SDR to `target`, standing every other SDR-exclusive consumer down."""
-        for name in sdr_consumers:
-            consumer = getattr(app.state, name)
-            if name == target:
-                consumer.resume()
-            else:
-                consumer.release()
+    # Handing the radio over and starting its new tenant happen under one lock, so two pollers (two
+    # open panels, or a late poll after navigating away) cannot land a release inside another
+    # route's start — the audit's thrash drill wedged the dongle exactly that way.
+    sdr_lock = threading.RLock()
+
+    def _claim_sdr(target: str, start=None):
+        """Hand the one RTL-SDR to `target`, standing every other SDR-exclusive consumer down.
+
+        With `start`, the new tenant is started under the same lock and its result returned.
+        """
+        with sdr_lock:
+            for name in sdr_consumers:
+                consumer = getattr(app.state, name)
+                if name == target:
+                    consumer.resume()
+                else:
+                    consumer.release()
+            return start() if start is not None else None
+
+    # The last refusal logged per route. A route that cannot start answers every poll, and logging
+    # every identical refusal is how events.jsonl grew by 42 lines a minute behind a dead Flock. A
+    # refusal is logged when it changes, and again after the next successful start.
+    last_refusal = {}
+
+    def _refused(kind: str, exc, empty: dict, watch=None):
+        """A 503 that says why. A tool that died on its own reads as stopped, with its retry."""
+        reason = str(exc)
+        if last_refusal.get(kind) != reason:
+            last_refusal[kind] = reason
+            log_event(app.state.events_path, f"{kind}_blocked", {"reason": reason})
+        body = {"available": False, "reason": reason, "command": None, **empty}
+        if watch is not None and watch.stopped:
+            retry = watch.retry_in()
+            body["state"] = "stopped"
+            body["retry_in"] = round(retry, 1) if retry is not None else 0
+        return JSONResponse(status_code=503, content=body)
+
+    def _started(kind: str, payload: dict) -> None:
+        last_refusal.pop(kind, None)
+        log_event(app.state.events_path, f"{kind}_start", payload)
+
+    def _live_state(watch) -> str:
+        """"starting" until a fresh tool has held on a moment, then "running"."""
+        return "starting" if watch.settling() else "running"
 
     @app.get("/api/spectrum")
     def spectrum(limit: int | None = None):
@@ -792,25 +1091,29 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             # The decoder, the RDS pipeline and the waterfall share one dongle. Taking it back from
             # the SDR-exclusive tools (release) and clearing any prior release on the sweeper lets
             # the sweep start after an M10/M12 lesson handed the radio to rtl_433 or rtl_fm.
-            _claim_sdr("sweeper")
+            # A refusal is logged once per streak, like every decoder's: a sweep that cannot start
+            # answers every poll, and an identical line per poll is how the log fills up.
             try:
-                sweeper.start()
+                _claim_sdr("sweeper", sweeper.start)
             except SpectrumUnavailable as exc:
-                log_event(app.state.events_path, "spectrum_blocked", {"reason": str(exc)})
-                return JSONResponse(status_code=503,
-                                    content={"available": False, "reason": str(exc), "rows": []})
-            log_event(app.state.events_path, "spectrum_start",
-                      {"command": " ".join(sweeper.command())})
+                return _refused("spectrum", exc, {"rows": []})
+            _started("spectrum", {"command": " ".join(sweeper.command())})
         # The span rides along with every response because the waterfall cannot label its axis
         # (or spot a retune) from bare rows of dB values. bin_size is the requested bin — a
         # maximum rtl_power may undercut — while each row's freq_step reports what the hardware
-        # actually delivered. gain is None while the tuner runs automatic.
+        # actually delivered. gain is None while the tuner runs automatic. center is what the dial
+        # reads: the frequency tuned to when the span was built around one (offset off it so the
+        # target is measured), else the span's middle.
+        target = getattr(sweeper, "target", None)
         return {
             "available": True,
             "freq_low": sweeper.low,
             "freq_high": sweeper.high,
+            "center": target if target is not None else (sweeper.low + sweeper.high) // 2,
             "bin_size": sweeper.bin_size,
             "gain": sweeper.gain,
+            # The exact rtl_power line running now, for the panel's command strip.
+            "command": shlex.join(sweeper.command()) if sweeper.running else None,
             "rows": [row.as_dict() for row in sweeper.rows(limit)],
         }
 
@@ -824,17 +1127,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.decoder
         if not decoder.running:
-            _claim_sdr("decoder")
             try:
-                decoder.start()
+                _claim_sdr("decoder", decoder.start)
             except DecodeUnavailable as exc:
-                log_event(app.state.events_path, "decode_blocked", {"reason": str(exc)})
-                return JSONResponse(status_code=503,
-                                    content={"available": False, "reason": str(exc), "decodes": []})
-            log_event(app.state.events_path, "decode_start",
-                      {"command": " ".join(decoder.command())})
+                return _refused("decode", exc, {"decodes": []}, decoder.watch)
+            _started("decode", {"command": decoder.live_command()})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "decodes": [d.as_dict() for d in decoder.recent(limit)],
         }
@@ -852,13 +1153,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             try:
                 listener.start()
             except LoRaUnavailable as exc:
-                log_event(app.state.events_path, "lora_blocked", {"reason": str(exc)})
-                return JSONResponse(status_code=503,
-                                    content={"available": False, "reason": str(exc), "packets": []})
-            log_event(app.state.events_path, "lora_start",
-                      {"host": listener.hostname, "port": listener.port})
+                return _refused("lora", exc, {"packets": []})
+            _started("lora", {"host": listener.hostname, "port": listener.port})
         return {
             "available": True,
+            # meshtasticd is a daemon the console reads, not a tool it runs: no command line.
+            "command": None,
             "host": listener.hostname,
             "port": listener.port,
             "packets": [p.as_dict() for p in listener.recent(limit)],
@@ -877,13 +1177,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             try:
                 detector.start()
             except FlockUnavailable as exc:
-                log_event(app.state.events_path, "flock_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "detections": []})
-            log_event(app.state.events_path, "flock_start", {"interface": detector.interface})
+                return _refused("flock", exc, {"detections": []}, detector.watch)
+            _started("flock", {"interface": detector.interface})
         return {
             "available": True,
+            "command": detector.live_command(),
+            "state": _live_state(detector.watch),
             "interface": detector.interface,
             "detections": detector.detections(limit),
         }
@@ -900,16 +1199,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         try:
             if not monitor.running:
                 monitor.start()
-                log_event(app.state.events_path, "rayhunter_start", {"base_url": monitor.base_url})
+                _started("rayhunter", {"base_url": monitor.base_url})
             status = monitor.status()
             warnings = monitor.warnings(limit)
         except RayhunterUnavailable as exc:
-            log_event(app.state.events_path, "rayhunter_blocked", {"reason": str(exc)})
-            return JSONResponse(
-                status_code=503,
-                content={"available": False, "reason": str(exc), "status": "off", "warnings": []})
+            return _refused("rayhunter", exc, {"status": "off", "warnings": []})
         return {
             "available": True,
+            # The Orbic is polled over HTTP, not run as a tool: no command line.
+            "command": None,
             "host": monitor.host,
             "port": monitor.port,
             "status": status,
@@ -943,17 +1241,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.rds
         if not decoder.running:
-            _claim_sdr("rds")
             try:
-                decoder.start()
+                _claim_sdr("rds", decoder.start)
             except RDSUnavailable as exc:
-                log_event(app.state.events_path, "rds_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "station": None})
-            log_event(app.state.events_path, "rds_start", {"freq_hz": decoder.freq_hz})
+                return _refused("rds", exc, {"station": None}, decoder.watch)
+            _started("rds", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "station": decoder.station().as_dict(),
         }
@@ -969,17 +1265,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.adsb
         if not decoder.running:
-            _claim_sdr("adsb")
             try:
-                decoder.start()
+                _claim_sdr("adsb", decoder.start)
             except AdsbUnavailable as exc:
-                log_event(app.state.events_path, "adsb_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "aircraft": []})
-            log_event(app.state.events_path, "adsb_start", {"freq_hz": DEFAULT_ADSB_HZ})
+                return _refused("adsb", exc, {"aircraft": []}, decoder.watch)
+            _started("adsb", {"freq_hz": DEFAULT_ADSB_HZ})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": DEFAULT_ADSB_HZ,
             "receiver_located": decoder.receiver.known,
             "aircraft": decoder.aircraft(),
@@ -996,17 +1290,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.aprs
         if not decoder.running:
-            _claim_sdr("aprs")
             try:
-                decoder.start()
+                _claim_sdr("aprs", decoder.start)
             except AprsUnavailable as exc:
-                log_event(app.state.events_path, "aprs_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "stations": []})
-            log_event(app.state.events_path, "aprs_start", {"freq_hz": decoder.freq_hz})
+                return _refused("aprs", exc, {"stations": []}, decoder.watch)
+            _started("aprs", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "stations": decoder.stations(),
         }
@@ -1022,17 +1314,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.pocsag
         if not decoder.running:
-            _claim_sdr("pocsag")
             try:
-                decoder.start()
+                _claim_sdr("pocsag", decoder.start)
             except PocsagUnavailable as exc:
-                log_event(app.state.events_path, "pocsag_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "pages": []})
-            log_event(app.state.events_path, "pocsag_start", {"freq_hz": decoder.freq_hz})
+                return _refused("pocsag", exc, {"pages": []}, decoder.watch)
+            _started("pocsag", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "pages": decoder.pages(limit),
         }
@@ -1048,17 +1338,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.acars
         if not decoder.running:
-            _claim_sdr("acars")
             try:
-                decoder.start()
+                _claim_sdr("acars", decoder.start)
             except AcarsUnavailable as exc:
-                log_event(app.state.events_path, "acars_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "messages": []})
-            log_event(app.state.events_path, "acars_start", {"freq_hz": decoder.freq_hz})
+                return _refused("acars", exc, {"messages": []}, decoder.watch)
+            _started("acars", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "messages": decoder.messages(limit),
         }
@@ -1074,18 +1362,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.ais
         if not decoder.running:
-            _claim_sdr("ais")
             try:
-                decoder.start()
+                _claim_sdr("ais", decoder.start)
             except AisUnavailable as exc:
-                log_event(app.state.events_path, "ais_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "vessels": []})
-            log_event(app.state.events_path, "ais_start",
-                      {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ})
+                return _refused("ais", exc, {"vessels": []}, decoder.watch)
+            _started("ais", {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "channel_a_hz": AIS_CHANNEL_A_HZ,
             "channel_b_hz": AIS_CHANNEL_B_HZ,
             "vessels": decoder.vessels(limit),
@@ -1102,17 +1387,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.dmr
         if not decoder.running:
-            _claim_sdr("dmr")
             try:
-                decoder.start()
+                _claim_sdr("dmr", decoder.start)
             except DmrUnavailable as exc:
-                log_event(app.state.events_path, "dmr_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "calls": []})
-            log_event(app.state.events_path, "dmr_start", {"freq_hz": decoder.freq_hz})
+                return _refused("dmr", exc, {"calls": []}, decoder.watch)
+            _started("dmr", {"freq_hz": decoder.freq_hz})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "calls": decoder.calls(limit),
         }
@@ -1128,17 +1411,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.apt
         if not decoder.running:
-            _claim_sdr("apt")
             try:
-                decoder.start()
+                _claim_sdr("apt", decoder.start)
             except AptUnavailable as exc:
-                log_event(app.state.events_path, "apt_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "images": []})
-            log_event(app.state.events_path, "apt_start", {"freq_hz": DEFAULT_APT_HZ})
+                return _refused("apt", exc, {"images": []}, decoder.watch)
+            _started("apt", {"freq_hz": DEFAULT_APT_HZ})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "images": decoder.images(limit),
         }
@@ -1153,17 +1434,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         decoder = app.state.sstv
         if not decoder.running:
-            _claim_sdr("sstv")
             try:
-                decoder.start()
+                _claim_sdr("sstv", decoder.start)
             except SstvUnavailable as exc:
-                log_event(app.state.events_path, "sstv_blocked", {"reason": str(exc)})
-                return JSONResponse(
-                    status_code=503,
-                    content={"available": False, "reason": str(exc), "images": []})
-            log_event(app.state.events_path, "sstv_start", {"freq_hz": DEFAULT_SSTV_HZ})
+                return _refused("sstv", exc, {"images": []}, decoder.watch)
+            _started("sstv", {"freq_hz": DEFAULT_SSTV_HZ})
         return {
             "available": True,
+            "command": decoder.live_command(),
+            "state": _live_state(decoder.watch),
             "freq_hz": decoder.freq_hz,
             "images": decoder.images(limit),
         }
@@ -1200,10 +1479,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         with the gate's own words, whether or not a dongle is attached. A valid span with no radio
         to drive is a 503 — honest about why nothing retuned, rather than reporting a success the
         hardware never performed.
+
+        A request may name its span by its edges (low/high) or by the frequency to tune to
+        (center, with the span's width as `span`). A centred request is offset so the target is
+        measured rather than lost in a hop's unmeasured centre bin (spectrum.target_span), and
+        the answer's `center` is that target: what the dial reads.
         """
+        centred = payload.get("center") is not None
         try:
-            low, high, bin_size = validate_span(
-                payload.get("low"), payload.get("high"), payload.get("bin_size"))
+            if centred:
+                low, high, bin_size = validate_target_span(
+                    payload.get("center"), payload.get("span"), payload.get("bin_size"))
+                center = int(float(payload["center"]))
+            else:
+                low, high, bin_size = validate_span(
+                    payload.get("low"), payload.get("high"), payload.get("bin_size"))
+                center = (low + high) // 2
         except TuneError as exc:
             log_event(app.state.events_path, "tune_rejected", {"reason": str(exc)})
             return JSONResponse(status_code=400, content={"tuned": False, "reason": str(exc)})
@@ -1214,10 +1505,170 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "tune_blocked", {"reason": reason})
             return JSONResponse(status_code=503, content={"tuned": False, "reason": reason})
 
-        app.state.sweeper.retune(low, high, bin_size)
-        tuned = {"low": low, "high": high, "bin_size": bin_size}
+        if centred:
+            app.state.sweeper.retune(low, high, bin_size, target=center)
+        else:
+            app.state.sweeper.retune(low, high, bin_size)
+        tuned = {"low": low, "high": high, "bin_size": bin_size, "center": center}
         log_event(app.state.events_path, "tune", tuned)
         return {"tuned": True, **tuned}
+
+    @app.post("/api/gain")
+    def gain(payload: dict = Body(default={})):
+        """Set the tuner gain in dB, or null for automatic, failing closed with the reason.
+
+        The gain meets validate_gain first, so a gain this tuner cannot do is refused (400) with
+        the gate's own words. A valid gain with no radio is a 503 and changes nothing, like a tune.
+        The sweep stands down and the next spectrum poll restarts it with `-g` at the new gain.
+        """
+        try:
+            value = validate_gain(payload.get("gain"))
+        except TuneError as exc:
+            log_event(app.state.events_path, "gain_rejected", {"reason": str(exc)})
+            return JSONResponse(status_code=400, content={"set": False, "reason": str(exc)})
+
+        radio = probe()
+        if not radio.present:
+            reason = f"no RTL-SDR to set the gain on — {radio.detail}"
+            log_event(app.state.events_path, "gain_blocked", {"reason": reason})
+            return JSONResponse(status_code=503, content={"set": False, "reason": reason})
+
+        app.state.sweeper.set_gain(value)
+        log_event(app.state.events_path, "gain", {"gain": value})
+        return {"set": True, "gain": value}
+
+    # --- operator mode: the rack ---------------------------------------------------------------
+    # The course's instruments with the lesson script removed: a picker down the left, the chosen
+    # panel at full size, free tuning, the command strip, and a reception log. Every receiver's
+    # live receptions are logged to events with their provenance, whichever screen is open — the
+    # substrate later badges cite. A replay or sample has no receiver behind it, so it never logs.
+
+    reception_lock = threading.Lock()
+
+    def _radio(inst, receiver) -> dict:
+        """The radio a reception came in on: an RTL-SDR's serial and index, or the other radio."""
+        if inst.radio == "rtl-sdr":
+            index = getattr(receiver, "device", None)
+            serial = os.environ.get(RTLSDR_SERIAL_ENV) or next(
+                (d.serial for d in radio_census if d.index == index), None)
+            return {"kind": "rtl-sdr", "serial": serial or None, "index": index}
+        if inst.radio == "lora":
+            return {"kind": "meshtasticd", "host": f"{getattr(receiver, 'hostname', None)}:"
+                                                   f"{getattr(receiver, 'port', None)}"}
+        if inst.radio == "wlan1":
+            return {"kind": "wifi", "interface": getattr(receiver, "interface", None)}
+        return {"kind": "orbic", "host": f"{getattr(receiver, 'host', None)}:"
+                                         f"{getattr(receiver, 'port', None)}"}
+
+    def _heard(inst, receiver):
+        """The on_reception hook for one receiver: log each live reception with its provenance.
+
+        Called from the receiver's reader thread. It never raises: a reception that cannot be
+        written is reported through /api/receptions rather than ending the live decode.
+        """
+        def hook(item: dict) -> None:
+            freq = getattr(receiver, "freq_hz", None)
+            if freq is None and inst.fixed_hz:
+                freq = inst.fixed_hz[0] if len(inst.fixed_hz) == 1 else list(inst.fixed_hz)
+            live_command = getattr(receiver, "live_command", None)
+            record = reception_record(
+                inst, item, freq_hz=freq,
+                command=live_command() if live_command else None,
+                # No tool is ever handed a ppm correction, so every reception is uncorrected;
+                # the last measurement this run rides along for whoever reads the record.
+                ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
+                radio=_radio(inst, receiver))
+            with reception_lock:
+                try:
+                    event = log_event(app.state.events_path, "reception", record)
+                except OSError as exc:
+                    app.state.reception_error = f"a reception could not be logged: {exc}"
+                    return
+                if app.state.receptions is not None:
+                    app.state.receptions.append(event)
+
+        return hook
+
+    def _recent_receptions() -> list:
+        """The newest receptions, oldest first, read in from the log the first time asked."""
+        with reception_lock:
+            if app.state.receptions is None:
+                logged = (e for e in read_events(app.state.events_path)
+                          if e.get("kind") == "reception")
+                app.state.receptions = deque(logged, maxlen=RECEPTION_MEMORY)
+            return list(app.state.receptions)
+
+    @app.get("/api/receptions")
+    def receptions(instrument: str | None = None, limit: int = 20):
+        """The receptions logged with provenance, newest first, optionally for one instrument."""
+        rows = [event for event in reversed(_recent_receptions())
+                if instrument is None or event["payload"].get("instrument") == instrument]
+        return {"receptions": rows[:max(limit, 0)], "error": app.state.reception_error}
+
+    @app.get("/operate")
+    def operate_home():
+        """The rack opens on the instrument last used, or the waterfall the first time."""
+        last = app.state.progress.get_place(RACK_PLACE)
+        key = last if rack_instrument(last or "") else DEFAULT_INSTRUMENT
+        return RedirectResponse(f"/operate/{key}", status_code=303)
+
+    @app.get("/operate/{key}", response_class=HTMLResponse)
+    def operate_view(request: Request, key: str):
+        """One instrument in the rack, remembered so /operate reopens on it.
+
+        The panel's own poll claims the dongle through _claim_sdr exactly as a lesson's does, so
+        switching instruments hands the radio over the same way. The page renders the receiver's
+        current frequency; a tunable decoder carries its band for the tune keys.
+        """
+        inst = rack_instrument(key)
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"the rack has no instrument '{key}'")
+        app.state.progress.record_place(RACK_PLACE, inst.key)
+        receiver = getattr(app.state, inst.receiver) if inst.receiver else None
+        freq_hz = None
+        if inst.api == "spectrum":
+            target = getattr(receiver, "target", None)
+            freq_hz = target if target is not None else (receiver.low + receiver.high) // 2
+        elif receiver is not None:
+            freq_hz = getattr(receiver, "freq_hz", None)
+        if freq_hz is None and len(inst.fixed_hz) == 1:
+            freq_hz = inst.fixed_hz[0]
+        return templates.TemplateResponse(
+            request=request,
+            name="operate.html",
+            context={"title": "Operator mode", "back_href": "/", "back_label": "Home",
+                     "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
+                     "text_withheld": (inst.key == "pager" and freq_hz is not None
+                                       and on_commercial_paging_band(freq_hz))},
+        )
+
+    @app.post("/api/{api}/tune")
+    def decoder_tune(api: str, payload: dict = Body(default={})):
+        """Point a single-channel decoder at another frequency inside its band.
+
+        Refused (400) with the reason outside the decoder's band, and (503) with no radio to
+        drive, changing nothing either way — like /api/tune. Otherwise the running child stops
+        and the panel's next poll restarts it on the new frequency. The pager band's text rule
+        stays the decoder's own: tuned into 929-932 MHz it shows framing only.
+        """
+        inst = tunable(api)
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"/api/{api} takes no frequency override")
+        try:
+            hz = validate_decoder_hz(inst, payload.get("freq_hz"))
+        except TuneError as exc:
+            log_event(app.state.events_path, "decoder_tune_rejected",
+                      {"instrument": inst.key, "reason": str(exc)})
+            return JSONResponse(status_code=400, content={"tuned": False, "reason": str(exc)})
+        radio = probe()
+        if not radio.present:
+            reason = f"no RTL-SDR to tune — {radio.detail}"
+            log_event(app.state.events_path, "decoder_tune_blocked",
+                      {"instrument": inst.key, "reason": reason})
+            return JSONResponse(status_code=503, content={"tuned": False, "reason": reason})
+        getattr(app.state, inst.receiver).retune(hz)
+        log_event(app.state.events_path, "decoder_tune", {"instrument": inst.key, "freq_hz": hz})
+        return {"tuned": True, "instrument": inst.key, "freq_hz": hz}
 
     return app
 
