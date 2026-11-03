@@ -354,6 +354,88 @@ def iter_pcap_frames(stream):
             yield dot11
 
 
+# ESP32 Marauder streams a sniff's pcap over its serial console when the sniff command carries
+# -serial. Each pass of its main loop sends everything buffered since the last pass as one write
+# between these markers, and console text falls between the chunks (v1.20.0 Buffer.cpp:228-267).
+MARAUDER_BEGIN = b"[BUF/BEGIN]"
+MARAUDER_CLOSE = b"[BUF/CLOSE]"
+PCAP_MAGIC = struct.pack("<I", 0xA1B2C3D4)
+
+# Marauder stamps a record from micros(), a uint32 (Buffer.cpp:122-125): its seconds never pass
+# 4294 and its microseconds stay under a million. Console text cannot make fields that small (a
+# printable byte in a field's top octet makes it millions), so with caplen == origlen (Marauder
+# writes the length twice) these tell a real record from text that only looked like a chunk start.
+MARAUDER_MAX_SECONDS = 0xFFFFFFFF // 1_000_000
+USEC_PER_SECOND = 1_000_000
+
+
+def _marauder_record_ok(header: bytes, snaplen: int) -> bool:
+    """Could these 16 bytes be a record header Marauder wrote?"""
+    seconds, usec, caplen, origlen = struct.unpack("<IIII", header)
+    return (seconds <= MARAUDER_MAX_SECONDS and usec < USEC_PER_SECOND
+            and caplen == origlen and caplen <= snaplen)
+
+
+def iter_marauder_frames(stream, read_size: int = 4096):
+    """Yield the 802.11 bytes of each frame Marauder streams over serial, its console text skipped.
+
+    Outside a chunk the reader looks only for the begin marker. Inside one it reads the pcap by
+    length (a global header, which fixes the linktype, then records) until the close marker. A
+    record is never cut at a marker, because an SSID can contain one. Bytes that do not parse as a
+    record send the reader back to looking for the next chunk. Chunks heard before any global
+    header are skipped: without its linktype there is no honest way to read a record.
+    """
+    buf = bytearray()
+    inside = False
+    to_dot11 = None
+    snaplen = 0
+    while True:
+        while True:
+            if not inside:
+                at = buf.find(MARAUDER_BEGIN)
+                if at < 0:
+                    # Keep only a tail that could be the first part of a marker split across reads.
+                    del buf[:-(len(MARAUDER_BEGIN) - 1)]
+                    break
+                del buf[:at + len(MARAUDER_BEGIN)]
+                inside = True
+            if buf.startswith(MARAUDER_CLOSE):
+                del buf[:len(MARAUDER_CLOSE)]
+                inside = False
+                continue
+            if MARAUDER_CLOSE.startswith(buf) or len(buf) < len(PCAP_MAGIC):
+                break                       # the close marker, or the next field, is still arriving
+            if buf.startswith(PCAP_MAGIC):
+                if len(buf) < PCAP_GLOBAL_HEADER_LEN:
+                    break
+                global_header = bytes(buf[:PCAP_GLOBAL_HEADER_LEN])
+                to_dot11 = pcap_link_decoder(global_header)
+                (snaplen,) = struct.unpack("<I", global_header[16:20])
+                del buf[:PCAP_GLOBAL_HEADER_LEN]
+                continue
+            if to_dot11 is None:
+                inside = False              # records of a pcap whose header was never heard
+                continue
+            if len(buf) < PCAP_RECORD_HEADER_LEN:
+                break
+            header = bytes(buf[:PCAP_RECORD_HEADER_LEN])
+            if not _marauder_record_ok(header, snaplen):
+                inside = False              # not a record: console text after a false start
+                continue
+            caplen = struct.unpack("<I", header[8:12])[0]
+            end = PCAP_RECORD_HEADER_LEN + caplen
+            if len(buf) < end:
+                break
+            dot11 = to_dot11(bytes(buf[PCAP_RECORD_HEADER_LEN:end]))
+            del buf[:end]
+            if dot11 is not None:
+                yield dot11
+        data = stream.read(read_size)
+        if not data:
+            return
+        buf += data
+
+
 def _interface_present(interface: str) -> bool:
     """True when the named network interface exists on the host."""
     return os.path.exists(f"/sys/class/net/{interface}")

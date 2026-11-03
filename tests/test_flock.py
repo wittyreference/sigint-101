@@ -15,6 +15,7 @@ from sigint101.flock import (
     FlockDetector,
     FlockRoster,
     FlockUnavailable,
+    iter_marauder_frames,
     iter_pcap_frames,
     match_signatures,
     parse_management_frame,
@@ -374,3 +375,152 @@ def test_a_reader_error_is_recorded_not_swallowed():
     dec.start()
     dec.drain()
     assert dec.error == "capture pipe died"
+
+
+# --------------------------------------------------------------------------- Marauder serial
+
+# CONSTRUCTED FROM MARAUDER'S SOURCE, NOT CAPTURED. No devboard has streamed over nomad-b's bridge
+# yet, so this wraps the real probe requests of flock_ch1.pcap byte for byte the way ESP32
+# Marauder v1.20.0 says it emits them over serial; a real on-air capture through the Flipper's
+# bridge replaces it at HIL. Each piece cites what it reproduces (esp32_marauder/ at v1.20.0):
+# - the console echoes a command as "#<cmd>", prints its reply, then the "> " prompt
+#   (CommandLine.cpp:270, :87); println ends a line with CRLF;
+# - a pcap opens with a 24-byte global header, linktype 105, snaplen 4096 on the Flipper build
+#   (PcapHeader.cpp:20-29, configs.h:3373-3375 with HAS_PSRAM from :529);
+# - a record is a 16-byte header {secs, usecs, len, len} from micros(), then the frame
+#   (Buffer.cpp:122-139);
+# - every main-loop pass sends the buffer as one write between "[BUF/BEGIN]" and "[BUF/CLOSE]"
+#   (Buffer.cpp:228-267, esp32_marauder.ino:552), so the first pass carries the header alone;
+# - sniffprobe prints a console line for each probe request before buffering it
+#   (WiFiScan.cpp:9092-9144), with the client MAC in lowercase (WiFiScan.cpp:7416-7417).
+MARAUDER_BEGIN = b"[BUF/BEGIN]"
+MARAUDER_CLOSE = b"[BUF/CLOSE]"
+MARAUDER_SNAPLEN = 4096
+
+
+def marauder_console(command, *replies):
+    """What Marauder's console prints for one command: its echo, its reply lines, the prompt."""
+    return "".join(line + "\r\n" for line in (f"#{command}", *replies)).encode() + b"> "
+
+
+MARAUDER_STARTUP = (
+    marauder_console("stopscan", "Stopping WiFi tran/recv")
+    + marauder_console("channel -s 1", "1", "1")
+    + marauder_console("sniffprobe -serial", "StartingProbe sniff. Stop with stopscan"))
+
+
+def marauder_header(linktype=105):
+    return struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, MARAUDER_SNAPLEN, linktype)
+
+
+def marauder_record(frame, micros):
+    secs = micros // 1_000_000
+    return struct.pack("<IIII", secs, micros - secs * 1_000_000, len(frame), len(frame)) + frame
+
+
+def marauder_probe_line(frame, rssi=-61, channel=1):
+    """sniffprobe's console line for one probe request: RSSI, channel, client, the SSID's bytes."""
+    client = ":".join(f"{b:02x}" for b in frame[10:16])
+    ssid = frame[26:26 + frame[25]]
+    return f"{rssi} Ch: {channel} Client: {client} Requesting: ".encode() + ssid + b"\r\n"
+
+
+def marauder_chunk(body):
+    return MARAUDER_BEGIN + body + MARAUDER_CLOSE
+
+
+def marauder_stream(frames, per_chunk=5, startup=MARAUDER_STARTUP):
+    """A sniffprobe session as the serial line carries it: the console, then the pcap in chunks."""
+    out = startup + marauder_chunk(marauder_header())
+    micros = 1_250_000
+    for start in range(0, len(frames), per_chunk):
+        body = b""
+        for frame in frames[start:start + per_chunk]:
+            out += marauder_probe_line(frame)
+            micros += 37_000
+            body += marauder_record(frame, micros)
+        out += marauder_chunk(body)
+    return out
+
+
+def fixture_probes():
+    """flock_ch1.pcap's probe requests: the frames sniffprobe keeps (first octet 0x40)."""
+    with open(FIXTURE, "rb") as fh:
+        return [f for f in iter_pcap_frames(fh) if f[0] == 0x40]
+
+
+class Trickle:
+    """A serial line that hands over one byte per read, so every marker and record is split."""
+
+    def __init__(self, data):
+        self._data = data
+        self._at = 0
+
+    def read(self, _n=-1):
+        chunk = self._data[self._at:self._at + 1]
+        self._at += len(chunk)
+        return chunk
+
+
+def test_marauder_reader_yields_every_probe_the_session_carried():
+    probes = fixture_probes()
+    assert len(probes) == 63
+    assert list(iter_marauder_frames(io.BytesIO(marauder_stream(probes)))) == probes
+
+
+def test_marauder_reader_survives_reads_that_split_markers_and_records():
+    probes = fixture_probes()
+    assert list(iter_marauder_frames(Trickle(marauder_stream(probes)))) == probes
+
+
+def test_marauder_frames_take_the_same_detector_path_as_tcpdumps():
+    # Our parser and matcher judge them, never Marauder's own verdicts: the same 63 real probes,
+    # the same honest true negative.
+    stream = io.BytesIO(marauder_stream(fixture_probes()))
+    infos = [parse_management_frame(f) for f in iter_marauder_frames(stream)]
+    assert len(infos) == 63 and all(i.is_probe_request for i in infos)
+    assert all(match_signatures(i, ssid_match_enabled=True) is None for i in infos)
+
+
+def test_marauder_reader_reads_records_by_length_not_by_marker():
+    # An SSID is any 32 bytes, so a probe can carry the close marker. Reading by the record's
+    # length keeps it inside its frame instead of ending the chunk there.
+    sneaky = mgmt_frame(4, BROADCAST, NON_FLOCK + b"\x00\x00\x0c", BROADCAST,
+                        ssid_ies("[BUF/CLOSE]"))
+    flock = mgmt_frame(4, BROADCAST, FLOCK_OUI + b"\x00\x00\x0d", BROADCAST, FLOCK_IES)
+    stream = io.BytesIO(marauder_stream([sneaky, flock]))
+    assert list(iter_marauder_frames(stream)) == [sneaky, flock]
+
+
+def test_marauder_reader_drops_a_false_start_printed_on_the_console():
+    # sniffprobe prints the SSID a client asked for, raw. One named "[BUF/BEGIN]" puts a false
+    # chunk start in the console text; what follows is no pcap record, so the reader goes back to
+    # looking for the next real chunk.
+    sneaky = mgmt_frame(4, BROADCAST, NON_FLOCK + b"\x00\x00\x0e", BROADCAST,
+                        ssid_ies("[BUF/BEGIN]"))
+    flock = mgmt_frame(4, BROADCAST, FLOCK_OUI + b"\x00\x00\x0f", BROADCAST, FLOCK_IES)
+    data = marauder_stream([sneaky, flock], per_chunk=1)
+    assert MARAUDER_BEGIN in marauder_probe_line(sneaky)
+    assert list(iter_marauder_frames(io.BytesIO(data))) == [sneaky, flock]
+
+
+def test_marauder_reader_skips_chunks_heard_before_a_global_header():
+    # Joined mid-sniff (one left running), the chunks hold records of a pcap whose header went by
+    # unheard, so their linktype is unknown: they are skipped until a pcap opens.
+    stale = mgmt_frame(4, BROADCAST, FLOCK_OUI + b"\x00\x00\x10", BROADCAST, FLOCK_IES)
+    fresh = fixture_probes()[0]
+    data = (marauder_probe_line(stale) + marauder_chunk(marauder_record(stale, 9_000_000))
+            + marauder_stream([fresh]))
+    assert list(iter_marauder_frames(io.BytesIO(data))) == [fresh]
+
+
+def test_marauder_reader_follows_a_pcap_reopened_mid_stream():
+    probes = fixture_probes()
+    data = marauder_stream(probes[:3]) + marauder_stream(probes[3:6])
+    assert list(iter_marauder_frames(io.BytesIO(data))) == probes[:6]
+
+
+def test_marauder_reader_refuses_a_linktype_it_cannot_read():
+    data = MARAUDER_STARTUP + marauder_chunk(marauder_header(linktype=1))
+    with pytest.raises(ValueError, match="linktype 1"):
+        list(iter_marauder_frames(io.BytesIO(data)))
