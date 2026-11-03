@@ -25,33 +25,46 @@ set_key() {
 install -d "$HOME/.local/share/fonts/sigint101"
 install -m 0644 "$REPO"/sigint101/static/fonts/{ptmono,russoone}-*.woff2 \
   "$REPO/sigint101/static/fonts/OFL.txt" "$HOME/.local/share/fonts/sigint101/"
-fc-cache -f "$HOME/.local/share/fonts" >/dev/null
+if command -v fc-cache >/dev/null; then
+  fc-cache -f "$HOME/.local/share/fonts" >/dev/null
+fi
 
 # 2) GTK theme (bar, menus, dialogs). It lives in ~/.themes because the session start-up script
 #    deletes ~/.config/gtk-3.0/gtk.css on every login.
 install -D -m 0644 "$HERE/gtk-3.0/gtk.css" "$HOME/.themes/SIGINT101/gtk-3.0/gtk.css"
 install -D -m 0644 "$HERE/index.theme" "$HOME/.themes/SIGINT101/index.theme"
 gsettings set org.gnome.desktop.interface gtk-theme 'SIGINT101'
-if fc-list | grep -q "PT Mono"; then
-  gsettings set org.gnome.desktop.interface font-name "$FONT"
-fi
+# Captured first: under pipefail, `fc-list | grep -q` fails when grep's early exit kills fc-list.
+families="$(fc-list : family 2>/dev/null || true)"
+case "$families" in
+  *"PT Mono"*) gsettings set org.gnome.desktop.interface font-name "$FONT" ;;
+esac
 
 # 3) Window frames and the compositor's menus.
 install -D -m 0644 "$HERE/themerc-override" "$HOME/.config/labwc/themerc-override"
 
 # 4) Wallpaper and desktop labels: black ground, green labels, no shadow.
+#    On the Wayland desktop pcmanfm keeps one file per screen (desktop-items-HDMI-A-1.conf on the
+#    Nomad's panel), falling back to desktop-items-0.conf; every one that exists gets the keys.
 install -D -m 0644 "$HERE/sigint101-wallpaper.png" "$HOME/.local/share/sigint101/wallpaper.png"
-DESK="$HOME/.config/pcmanfm/LXDE-pi/desktop-items-0.conf"
-if [ ! -f "$DESK" ] && [ -f /etc/xdg/pcmanfm/LXDE-pi/desktop-items-0.conf ]; then
-  install -D -m 0644 /etc/xdg/pcmanfm/LXDE-pi/desktop-items-0.conf "$DESK"
+DESKDIR="$HOME/.config/pcmanfm/LXDE-pi"
+if ! ls "$DESKDIR"/desktop-items-*.conf >/dev/null 2>&1; then
+  if [ -f /etc/xdg/pcmanfm/LXDE-pi/desktop-items-0.conf ]; then
+    install -D -m 0644 /etc/xdg/pcmanfm/LXDE-pi/desktop-items-0.conf "$DESKDIR/desktop-items-0.conf"
+  else
+    install -d "$DESKDIR"
+    printf '[*]\n' > "$DESKDIR/desktop-items-0.conf"
+  fi
 fi
-set_key "$DESK" "*" wallpaper "$HOME/.local/share/sigint101/wallpaper.png"
-set_key "$DESK" "*" wallpaper_mode crop
-set_key "$DESK" "*" wallpaper_common 1
-set_key "$DESK" "*" desktop_bg "#000000000000"
-set_key "$DESK" "*" desktop_shadow "#000000000000"
-set_key "$DESK" "*" desktop_fg "#2e2ee6e66a6a"
-set_key "$DESK" "*" desktop_font "$FONT"
+for DESK in "$DESKDIR"/desktop-items-*.conf; do
+  set_key "$DESK" "*" wallpaper "$HOME/.local/share/sigint101/wallpaper.png"
+  set_key "$DESK" "*" wallpaper_mode crop
+  set_key "$DESK" "*" wallpaper_common 1
+  set_key "$DESK" "*" desktop_bg "#000000000000"
+  set_key "$DESK" "*" desktop_shadow "#000000000000"
+  set_key "$DESK" "*" desktop_fg "#2e2ee6e66a6a"
+  set_key "$DESK" "*" desktop_font "$FONT"
+done
 
 # 5) The terminal: phosphor green on black, in PT Mono.
 TERMCONF="$HOME/.config/lxterminal/lxterminal.conf"
@@ -67,7 +80,8 @@ if pgrep -x labwc >/dev/null; then
 fi
 WAYLAND="$(ls "$RUNTIME" 2>/dev/null | grep -E '^wayland-[0-9]+$' | head -1 || true)"
 if [ -n "$WAYLAND" ] && pgrep -f "[p]cmanfm --desktop" >/dev/null; then
-  XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$WAYLAND" pcmanfm --reconfigure || true
+  # pcmanfm warns about a missing accessibility bus on every call from SSH; it is harmless.
+  XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$WAYLAND" pcmanfm --reconfigure 2>/dev/null || true
 fi
 # The bar is restarted by lwrespawn, so a theme change shows at once.
 if pgrep -x wf-panel-pi >/dev/null; then

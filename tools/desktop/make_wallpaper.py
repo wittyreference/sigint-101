@@ -1,5 +1,5 @@
-# ABOUTME: Renders the SIGINT 101 desktop wallpaper: a big LED-matrix hammer and sickle and a faux-Cyrillic
-# ABOUTME: "Welcome Comrade" in phosphor green on black, with scanlines. Dev tool (Pillow + fonttools).
+# ABOUTME: Renders the SIGINT 101 wallpaper: an LED-matrix hammer and sickle over faux-Cyrillic
+# ABOUTME: "Welcome Comrade", phosphor green on black with scanlines. Dev tool (Pillow, fonttools).
 """Usage: make_wallpaper.py FONTS_DIR DEJAVU_BOLD_TTF OUT_PNG [WIDTH HEIGHT]
 
 FONTS_DIR is sigint101/static/fonts (Russo One woff2). DEJAVU_BOLD_TTF carries U+262D.
@@ -24,7 +24,8 @@ GREETING = "ШЭLСФМЭ СФМЯДDЭ"
 
 
 def woff2_to_font(path, size):
-    """A Pillow font from a woff2 file, decompressed in memory (Pillow's FreeType may lack brotli)."""
+    """A Pillow font from a woff2 file, decompressed in memory (Pillow's FreeType may lack
+    brotli)."""
     buf = io.BytesIO()
     font = TTFont(path)
     font.flavor = None

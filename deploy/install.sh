@@ -40,4 +40,8 @@ sudo install -D -m 0644 "$HERE/system/journald-sigint101.conf" \
 sudo mkdir -p /var/log/journal
 sudo systemctl restart systemd-journald
 
+# 5) The desktop itself in the course's phosphor-terminal look: fonts, bar, frames, wallpaper,
+#    labels and terminal (MC's call, 2026-11-03). Per-user; reloads whatever is running.
+bash "$HERE/desktop/apply-theme.sh"
+
 echo "install: server service enabled, course on the desktop with Exit and icon, journal persistent"
