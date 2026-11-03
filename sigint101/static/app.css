@@ -893,22 +893,26 @@ button.rail-pip:disabled {
   text-shadow: var(--glow);
 }
 
-/* ===== Explain verdict (the scored predict gate) ========================= */
-/* What the learner committed against the answer, then the one-line verdict, at the top of the
+/* ===== Explain verdict (the predict reveal) and the check result ========== */
+/* The learner's call beside what the radio does, then the one-line verdict, at the top of the
    explain's scrolling body (so it is the first thing read, and never squeezes the reading). The
-   tag WORD carries hit/miss, so red-night (one hue) still reads it, with brightness (--ok vs
-   --warn) as the second cue. */
+   predict reveal is unscored, so its box is neutral. Only the scored check adds hit/miss: there the
+   tag WORD carries it, so red-night (one hue) still reads it, with brightness (--ok vs --warn) as
+   the second cue. */
 .verdict {
   display: flex;
   flex-direction: column;
   gap: 4px;
   margin-bottom: 12px;
   padding: 8px 12px;
-  border: 2px solid var(--warn);
+  border: 2px solid var(--border-strong);
   background: var(--surface-2);
 }
 .verdict--hit {
   border-color: var(--ok);
+}
+.verdict--miss {
+  border-color: var(--warn);
 }
 .verdict__line {
   font-family: var(--font-mono);

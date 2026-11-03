@@ -849,8 +849,9 @@ def test_the_explain_header_shows_the_scored_call_after_a_commit(tmp_path):
         client.post("/api/predict?lesson_id=1", data={"prediction": "a"}, follow_redirects=False)
         html = client.get("/lesson/1").text
     assert "VERDICT_SENTINEL" in html
-    assert "You said <b>The gap grows</b>" in html
-    assert "Answer: <b>The gap shrinks past a point</b>" in html
+    assert "Your call: <b>The gap grows</b>" in html
+    assert "What the radio does: <b>The gap shrinks past a point</b>" in html
+    assert "MISSED" not in html
 
 
 def test_predict_on_an_unknown_lesson_is_404(tmp_path):

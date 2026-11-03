@@ -441,25 +441,31 @@ def _verdict_block(html):
     return m.group(1) if m else ""
 
 
-def test_explain_header_says_what_you_said_and_the_answer():
+def test_explain_header_sets_your_call_beside_what_the_radio_does():
     html = _console(lesson=_scored_lesson(), prediction_committed=True,
                     current_stage="explain", committed_choice="a")
     block = _verdict_block(html)
-    assert "You said" in block and CHOICES[0]["label"] in block
-    assert "Answer" in block
-    assert CHOICES[1]["label"] in block and CHOICES[2]["label"] in block
+    assert f"Your call: <b>{CHOICES[0]['label']}</b>" in block
+    assert (f"What the radio does: <b>{CHOICES[1]['label']} or {CHOICES[2]['label']}</b>"
+            in block)
     assert "VERDICT_marker" in block
-    assert "verdict--miss" in block
     # The header rides at the top of the explain's scrolling body, so a long eyebrow can never
     # squeeze the reading itself to nothing on the fixed 800x480 panel.
     assert re.search(r'<div class="stage-panel__body">\s*<div class="verdict', html)
     assert "EXPLAIN_SCORED_marker" in html
 
 
-def test_explain_header_marks_a_right_call():
-    html = _console(lesson=_scored_lesson(), prediction_committed=True,
-                    current_stage="explain", committed_choice="c")
-    assert "verdict--hit" in _verdict_block(html)
+@pytest.mark.parametrize("choice", ["a", "c"])
+def test_the_predict_reveal_never_scores_the_guess(choice):
+    # A predict is a guess made before the teaching, so the reveal reads it as a call, not a
+    # result: no RIGHT/MISSED tag and no hit/miss styling, whichever chip was committed. The
+    # stored `correct` is item-analysis data for the author, never shown to the learner.
+    block = _verdict_block(_console(lesson=_scored_lesson(), prediction_committed=True,
+                                    current_stage="explain", committed_choice=choice))
+    assert block
+    for score_word in ("RIGHT", "MISSED", "Answer:", "verdict--hit", "verdict--miss",
+                       "verdict__tag"):
+        assert score_word not in block
 
 
 def test_the_verdict_stays_sealed_until_a_commit():
