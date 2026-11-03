@@ -231,17 +231,7 @@ def test_check_chips_more_than_twice_apart_trip_check_chip_length():
 # waiver is a debt, not a pass: the next test fails the moment one is no longer needed, so the
 # table only ever shrinks.
 
-_REWRITE = "BROKEN in the 11-03 item review: being rewritten in a parallel PR"
-
 WAIVERS = {
-    (2, "single-key"): _REWRITE,
-    (2, "stem-length"): _REWRITE,
-    (2, "chip-length"): _REWRITE,
-    (3, "stem-length"): _REWRITE,
-    (3, "chip-length"): _REWRITE,
-    (7, "single-key"): _REWRITE,
-    (7, "chip-length"): _REWRITE,
-    (8, "chip-length"): _REWRITE,
     (4, "chip-length"): "OK in the review: the long chip is the 'About the same' lure, not the key",
     (5, "chip-length"): "MINOR (R+) in the review: the long chip is the 'if you identify' lure",
     (9, "giveaway"): "MINOR (T, R+, H) in the review: the demo already says the carrier goes",

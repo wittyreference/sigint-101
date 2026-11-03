@@ -26,37 +26,36 @@ stages:
     radio, its settings, its temperature, the reference level. The lesson is in the repeat: do
     it again tomorrow, and the night after.
   predict: >-
-    You've saved a baseline. Weeks from now this receiver slowly goes deaf — a corroded
-    connector, a dying front end (the first amplifier behind the antenna). Next to a band merely
-    quiet tonight, would its picture look IDENTICAL, a LITTLE different, or OBVIOUSLY different?
-    Lock it in.
+    Two pictures of the same empty stretch of band, comrade: one from a healthy radio, one from a
+    radio whose antenna cable has corroded through. From the pictures alone, could you tell which
+    radio is deaf? Lock it in.
   observe: >-
     Imagine this radio goes deaf tonight. From the waterfall alone — grass, dark, flat floor —
     could you tell? Which number on the provenance panel would tell you?
   explain: >-
-    No difference at all: a dead front end and an empty sky both draw a flat floor with no
-    stripes, so a blank waterfall never, on its own, proves nothing is on the air. Your reference
-    settles it. If your known station holds its baseline level, the radio is healthy and the band
-    is quiet; if it has dropped or vanished while nothing else changed, the radio has gone deaf.
-    That's why you logged radio, gain, temperature and power: that context is provenance, and
-    it makes one reading comparable to the next. Carry this out the door: a number on the screen is
-    not ground truth; a number beside its known-good baseline is — keep the baseline, trust the
-    reference.
+    They look alike: this screen rescales its colours to whatever noise reaches it, so a deaf
+    radio and an empty sky both paint plain grass. A blank waterfall alone never proves the air is
+    empty. Your reference settles it. If your known station holds its baseline level, the radio is
+    healthy and the band is quiet; if it has dropped or vanished while nothing else changed, the
+    radio has gone deaf. That's why you logged radio, gain, temperature and power: that context is
+    provenance, making one reading comparable to the next. Carry this out the door: a number on
+    the screen is not ground truth; a number beside its known-good baseline is — keep the
+    baseline, trust the reference.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
 # learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
-  - {key: identical, label: Identical}
-  - {key: little, label: A little different}
-  - {key: obvious, label: Obviously different}
+  - {key: glance, label: "Yes, at a glance"}
+  - {key: dimming, label: Only by a faint dimming}
+  - {key: alike, label: "No, they look alike"}
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
-answer: [identical]
+answer: [alike]
 verdict: >-
-  Identical: a deaf radio and an empty band draw the same picture; only the reference against
-  your baseline tells them apart.
+  They look alike: the screen rescales its colours to whatever noise it gets, so a deaf radio
+  paints the same grass. Only your reference tells.
 
 # The post-lesson check: one new situation on this lesson's idea (only the reference against your
 # baseline tells a deaf radio from a quiet band), scored after the explain. Each chip's `why` is the

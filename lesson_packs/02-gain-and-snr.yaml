@@ -21,42 +21,40 @@ stages:
     times the power. The grassy band along the bottom is the noise floor; the station pokes up
     above it. The meter reads both. Peak minus floor is the SNR — the one number worth chasing.
   try: >-
-    Now you drive, comrade. Step the gain with its − and + from the bottom up, and stop at three
-    settings — low, middle, maximum. At each, read the floor, the peak and the gap off the meter
+    Now you drive, comrade. Step the gain with its − and + from the bottom up, and stop at two
+    settings — low, then middle. At each, read the floor, the peak and the gap off the meter
     and note them. Don't chase the tallest peak — just record what you see.
   predict: >-
-    You've read the gap at low and middle gain. Before you push to the very top, make the call:
-    from middle to maximum, will the gap get WIDER, stay about the SAME, or get NARROWER? Lock it
-    in — the rest of the lesson stays hidden until you do.
+    You've read the meter at low and middle gain. Next you'll push to maximum and the station's
+    peak will climb. Watch the grassy noise floor: will it RISE with the peak, STAY PUT, or SINK?
+    Lock it in.
   observe: >-
     Take the gain to maximum and hold it against your middle setting. Tell me what actually
     happened: did the floor and the peak move together or apart — and did the gap grow, hold, or
     close as you reached the top?
   explain: >-
-    The peak and the floor rose together. Gain is an amplifier — a hearing aid in a loud
-    restaurant that lifts your friend and the room alike — and it can't tell signal from noise.
-    Past the middle the gap barely moved; at the very top it often shrinks, as strong signals
-    overload the receiver and smear false copies across the band. That gap is SNR: it decides what
-    you can hear, not the peak's height, and because decibels are a ratio it is a plain
-    subtraction off the screen. Carry this out the door: set gain where the gap is widest, usually
-    mid-scale; a bigger gap comes from a better or better-placed antenna, or getting closer, never
-    more gain.
+    The floor rose with the peak. Gain is an amplifier — a hearing aid in a loud restaurant that
+    lifts your friend and the room alike — and it can't tell signal from noise. Read your own
+    meter: the floor climbed nearly as far as the peak, so the gap moved far less than either. At
+    the very top it can even shrink, as strong stations overload the receiver. That gap is SNR: it
+    decides what you can hear, not the peak's height. Carry this out the door: set gain where the
+    gap is widest, usually mid-scale; a bigger gap comes from a better or better-placed antenna,
+    or getting closer, never more gain.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
 # learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
-  - {key: wider, label: Wider}
-  - {key: same, label: About the same}
-  - {key: narrower, label: Narrower}
+  - {key: rises, label: Rises with it}
+  - {key: stays, label: Stays put}
+  - {key: sinks, label: Sinks lower}
 
-# The scored gate. Two chips are right: the explain defends "about the same" past the middle and
-# "narrower" at the very top, where overload can close the gap.
-answer: [same, narrower]
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [rises]
 verdict: >-
-  About the same, or narrower: gain lifts signal and noise together, and at the top overload can
-  close the gap.
+  Rises with it: gain can't tell signal from noise, so it lifts both, and the gap between them,
+  your SNR, barely moves.
 
 # The post-lesson check: one new situation on this lesson's idea (gain is not signal; the gap is),
 # scored after the explain. Each chip's `why` is the feedback for choosing it.

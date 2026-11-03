@@ -37,33 +37,32 @@ stages:
     only while someone talks. Watch for one to blink on, then hold it against Lesson 1's wide FM
     blocks: thin is AM, wide is FM.
   predict: >-
-    In the silence between words, does a carrier vanish from the screen? Pick the one whose
-    carrier disappears between words — the AM airband voice, the FM music station, or neither.
-    Lock it in.
+    Watch an airband channel through a conversation, comrade: its thin column lights, goes dark
+    for a few seconds, then lights again. When it goes dark, what happened? Lock it in.
   observe: >-
     Watch one transmission from key-up to release. Between words, does the line stay lit? And at
     release? Why call it a carrier — what must it do in the quiet to earn the name?
   explain: >-
-    Neither. Between words the AM center line stays lit; only the brightness riding on it comes
-    and goes. That's amplitude modulation: a steady carrier holds its spot, and the voice is
-    written on it as height — louder sound, taller signal. Stop talking and you've only stopped
-    writing on it; that's why it's called a carrier. FM keeps its carrier too, settling toward
-    center between notes. The columns blink because airband is push-to-talk: release the key and
-    the transmission ends, carrier and all (ATIS recordings never let go). A carrier that vanishes
-    mid-message is on-off keying, Morse with a flashlight — next lesson. Carry this out the door:
-    a still, flickering line is AM; a wide, wiggling band is FM.
+    They released push-to-talk. While the key is held, the AM center line stays lit through
+    every pause; only the brightness on it comes and goes. That's amplitude modulation: a steady
+    carrier, with the voice written on it as height. Stop talking and you've only stopped writing
+    on it; that's why it's called a carrier. Release the key and the carrier goes too, until the
+    next voice keys up. This screen draws a row a second, too slow to show a word gap anyway:
+    every dark stretch is a transmission ending. A carrier that vanishes mid-message is on-off
+    keying — next lesson. Carry this out the door: a still, flickering line is AM; a wide,
+    wiggling band is FM.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
 # learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
-  - {key: am, label: AM}
-  - {key: fm, label: FM}
-  - {key: neither, label: Neither}
+  - {key: ptt, label: They released push-to-talk}
+  - {key: words, label: They paused between words}
+  - {key: faded, label: The signal faded out}
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
-answer: [neither]
+answer: [ptt]
 verdict: >-
-  Neither, while a transmission lasts: the carrier holds between words and goes only when
-  push-to-talk is released.
+  Released push-to-talk: an AM carrier holds through the pauses between words, so the column goes
+  dark only when the transmitter stops.

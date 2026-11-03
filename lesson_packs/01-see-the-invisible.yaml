@@ -26,21 +26,20 @@ stages:
     Now it's your turn, comrade. Tap a different bright stripe and the dial jumps to it, or step
     there with − and +. Read its frequency off the dial. That's it — you just tuned a radio.
   predict: >-
-    Next you'll tune to the next bright stripe to the right. First, commit to a guess: will that
-    station's stripe be WIDER, NARROWER, or the SAME width as this one? Lock it in — the rest of
-    the lesson stays hidden until you do.
+    Next you'll tune to the next bright stripe to the right and hold the two side by side. On this
+    screen, will the dimmer of the two look NARROWER, the SAME width, or WIDER? Lock it in.
   observe: >-
     Now tune to the next bright stripe to the right and hold the two stations side by side. Tell
     me what you actually see, not what you expected: which stripe is BRIGHTER — the stronger
     signal — and which is WIDER, or do the two look the same?
   explain: >-
-    Same width, station after station: broadcast FM hands every station an identical slice of
-    the dial, about 200 kHz. A few stripes look twice as wide because HD Radio digital sidebands
-    sit either side of the analog block. Why so fat? Width is fidelity — 200 kHz gives FM room
-    for full stereo music, where a skinny voice channel would sound like a phone call. Brightness
-    was still power, so a closer or stronger transmitter paints a brighter stripe, and the signal
-    scrolled down as the seconds passed. Carry this out the door: three axes, read off a real
-    station — frequency across, time down, brightness is power.
+    Narrower. Broadcast FM hands every station the same slice of the dial, about 200 kHz, but
+    this screen paints only the power that clears the noise floor. A strong station lifts its
+    whole slice, skirts and all, well above the grass; a weak one clears it only at its core, so
+    its stripe draws thinner. The slice is fixed; the stripe you see is not. A few stripes look
+    twice as wide: HD Radio digital sidebands sit either side of the analog block. Why 200 kHz?
+    Room for stereo music; a skinny voice channel sounds like a phone call. Carry this out the
+    door: three axes off a real station — frequency across, time down, brightness is power.
 
 # The predict stage offers three keyboard-free, tap-to-choose answers (no on-screen keyboard
 # at the predict gate). The loader parses and validates `choices` (key and label, fail-closed); it is carried here for the
@@ -49,16 +48,16 @@ stages:
 choices:
   - label: Wider
     key: wider
+  - label: Same width
+    key: same
   - label: Narrower
     key: narrower
-  - label: Same
-    key: same
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
-answer: [same]
+answer: [narrower]
 verdict: >-
-  Same: every FM station gets the same ~200 kHz slice, so width names the kind of signal, not
-  the station.
+  Narrower: every FM station gets the same 200 kHz slice, but this screen paints only what clears
+  the noise floor, so a weak one shows just its core.
 
 # The post-lesson check: one new situation on this lesson's idea (a signal's shape names what it
 # is), scored after the explain. Each chip's `why` is the feedback for choosing it.
