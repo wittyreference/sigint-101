@@ -27,11 +27,10 @@ stages:
     quiet subcarrier, a second signal tucked inside the station's own. Tonight you read the words
     that were there all along.
   demo: >-
-    Watch — hands off for now. No waterfall tonight. redsea is listening to the station on the
-    dial and pulling a hidden stream out of it. Watch the card fill in: the station's name — the
-    PS, eight characters — a couple at a time, its programme type, and the RadioText scrolling
-    beneath. This is PSK at work: a 57 kHz subcarrier whose phase flips nearly twelve hundred
-    times a second to spell those letters.
+    Watch — hands off for now. No waterfall tonight: redsea pulls a hidden stream out of the
+    station on the dial. The card fills: the station's name — the PS, eight characters — a
+    couple at a time, its programme type, and the RadioText scrolling beneath. That's PSK: a
+    57 kHz subcarrier flipping phase nearly twelve hundred times a second.
   try: >-
     Your turn, comrade — watch the card assemble. RDS is slow, so give it a few seconds. Read the
     programme type and the RadioText. An empty card means this station sends no RDS or arrives too
@@ -46,23 +45,14 @@ stages:
     question: if shifting phase changes neither height nor frequency, what instrument could ever have
     shown it to you?
   explain: >-
-    Here's the straight answer: not at all — it is invisible there. A waterfall is built from one
-    thing: how much energy sits at each frequency, moment to moment — amplitude across frequency.
-    Phase-shift keying leaves both of those alone. It holds the frequency steady and the height steady
-    and shifts only the phase, the exact timing of the wave's crossings. Two signals identical in
-    height and frequency but half a cycle apart in phase look exactly the same on any waterfall, yet
-    they carry opposite bits. A PSK signal still shows up as energy — a Wi-Fi signal is a plain
-    20 MHz block — but never which phase, so never the bits. RDS hides twice over: its 57 kHz
-    subcarrier rides inside the FM station's own block, flipping phase 1187.5 times a second to spell
-    the station name and text, locked to the 19 kHz pilot so the receiver knows where each bit
-    begins — and not one bit of it moves a pixel on this waterfall. To read phase you need a decoder
-    that recovers the carrier's own reference and measures the shift against it, which is exactly
-    what redsea did. And that is the quiet lesson of the whole unit: your eyes on the waterfall are a
-    powerful instrument, but they see amplitude and frequency, never phase — and a whole class of
-    signals, from this RDS to Wi-Fi to satellite downlinks, shows only a hump of energy, never the
-    message. One honest footnote: reading a broadcaster's RDS is as ordinary as reading the station
-    name off a car radio — it is public, meant to be seen. Next, you stop naming modulations and
-    start turning signals into meaning: decoding, in earnest.
+    Invisible, every time. A waterfall draws amplitude across frequency, moment to moment; PSK
+    holds both steady and shifts only the phase, the timing of the wave's crossings. Two signals
+    half a cycle apart look identical yet carry opposite bits. RDS's 57 kHz subcarrier flips phase
+    1187.5 times a second, locked to the 19 kHz pilot so the receiver knows where each bit begins.
+    Reading phase takes a decoder that recovers the carrier's reference and measures the shift, as
+    redsea did. Broadcast RDS is public, as ordinary as a car radio's display. Carry this out the
+    door: eyes see amplitude and frequency, never phase — Wi-Fi's plain 20 MHz block, RDS,
+    satellite downlinks all show energy, never the message.
 
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
 # (yes/no/on/off/true/false), so they load as plain strings without needing quotes.

@@ -43,15 +43,14 @@ stages:
     frequencies, only while it is switched on and listening. Ask yourself what a silent hour leaves
     out.
   explain: >-
-    The honest answer, comrade, is no — and this is the first law of the whole track. A quiet
-    detector never proves absence. It only sees the signatures it was taught, on the bands it happens
-    to watch, in the moments it is listening. A camera that was powered down, or sat on a frequency
-    you were not watching, or wears a fingerprint nobody has catalogued yet, is simply invisible to
-    you — and your silence is not its absence. So no alert never means no camera. What detection buys
-    you is real but narrow: when a signature you DO know is in the air, you get to know it is there.
-    Awareness, not safety; a reading, not a verdict. Carry that and the rest of the track pays off —
-    next you will rebuild a real Flock-camera detector on your own radio, then catch fake towers
-    with a borrowed one. Both receive-only. You watch the watchers; you never touch them.
+    No, comrade: a quiet detector never proves absence, the first law of this whole track. It sees
+    only signatures it was taught, on bands it watches, while it listens. A camera powered down, on
+    a band you weren't watching, or wearing an uncatalogued fingerprint is invisible, and your
+    silence is not its absence. No alert never means no camera. What detection buys is narrow but
+    real: when a signature you DO know is on the air, you know. Carry this out the door: awareness,
+    not safety; a reading, not a verdict. Next: a real Flock-camera detector on your own radio, then
+    catching fake towers with a borrowed one — both receive-only. You watch the watchers; you never
+    touch them.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:

@@ -43,20 +43,16 @@ stages:
     which were receiving and which were transmitting — and once you knew which side a thing was on,
     did the answer get easier?
   explain: >-
-    Here is the straight answer, comrade: no — keying up unlicensed on a ham repeater is not legal,
-    and it is the clearest case of the rule. Listening to that repeater all evening was fine;
-    transmitting on it is the licensed power, and the amateur bands want a licence first. Walk the
-    four back. Watching the aircraft channel is receiving — fine. Descrambling the neighbour's phone
-    breaks encryption and intercepts a carrier's call, which is the offence in itself, recorded or
-    not, passed on or not — not fine. (The scanner rule you may hear of, 47 CFR 15.121, governs
-    which scanners may be certified and sold, not owning a receiver like this one.) The ham
-    repeater is transmitting unlicensed — not fine. The Meshtastic text is transmitting too, but on
-    a band that allows licence-free use under Part 15, so it is fine inside its power limits. One
-    line explains most of it: receiving is broad and mostly lawful, transmitting is licensed.
-    None of this is a wall around your radio — the exam trainer in this course is the on-ramp, and
-    an amateur licence opens the transmit side for real. The rule is knowledge you carry, not a lock
-    on the gift. Specifics vary by country and, for listening, by state — treat this as the shape of
-    the law, and check your local rules before you rely on it.
+    No, comrade — the clearest case of the rule. Walk the four back: the aircraft channel is
+    receiving — fine. Descrambling the neighbour's phone breaks encryption and intercepts a
+    carrier's call, which is the offence in itself, recorded or not, passed on or not — not fine.
+    (The scanner rule you may hear of, 47 CFR 15.121, governs which scanners may be certified and
+    sold, not owning a receiver like this one.) The ham repeater is transmitting unlicensed — not
+    fine. The Meshtastic text is transmitting too, but on a band that allows licence-free use
+    under Part 15, so it is fine inside its power limits. Carry this out the door: receiving is
+    broad and mostly lawful, transmitting is licensed; the exam trainer is your on-ramp to a
+    licence, not a lock. Specifics vary by country and, for listening, by state — treat this as
+    the shape of the law, and check your local rules before you rely on it.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the

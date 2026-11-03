@@ -24,41 +24,33 @@ stages:
     this one never switches off. Its trick sits too fine to tell by eye on this screen, so tonight
     you meet a new instrument: a decoder that reads it for you.
   demo: >-
-    Watch — hands off for now. No waterfall tonight; rtl_433 is listening on 433.92, the same
-    crowded spot, and it does the hard part — it demodulates each transmission and prints what it
-    found: the make of the device, a reading it sent, and the modulation. A cheap remote or
-    doorbell reads ASK: one frequency switched on and off, last lesson's on-off keying. Some
-    sensors read FSK, frequency-shift, and print two frequencies, not one. You are reading a
-    signal you cannot see.
+    Watch — hands off for now. No waterfall tonight: rtl_433 listens on 433.92 again,
+    demodulates each transmission and prints the device's make, its reading and the modulation.
+    A cheap remote or doorbell reads ASK: one frequency switched on and off, last lesson's OOK.
+    Some sensors read FSK, frequency-shift, and print two frequencies. You're reading a signal you
+    cannot see.
   try: >-
     Your turn, comrade — eyes on the list, and be patient; a sensor chirps every minute or two.
-    Sort the reads by their modulation: ASK, one frequency, or FSK, two? If you find an FSK read,
-    note how far apart its tones sit. If every read says ASK, that's normal here: most US 433 MHz
-    sensors are on-off keyed, and the FSK ones mostly live up at 915.
+    Sort the reads by modulation: ASK, one frequency, or FSK, two? For an FSK read, note how far
+    apart its tones sit. All ASK is normal here: most US 433 MHz sensors are on-off keyed; FSK ones
+    mostly live at 915.
   predict: >-
     An FSK sensor sends a bit, but unlike last lesson's OOK its carrier never switches off. So how
     does it carry that bit? Lock it in.
   observe: >-
-    Go back to the list and find an FSK read, eye on its two frequencies. Are they the same number or
-    two different ones, and how far apart? Then ask yourself why we trusted the decoder over the
-    waterfall: if those two tones are only tens of kHz apart, could a screen whose every bin — the
-    slice of spectrum one pixel column sums — is 125 kHz wide ever have shown them as two?
+    Find an FSK read in the list, eye on its two frequencies. Same number or two, and how far
+    apart? Then ask why we trusted the decoder: if those tones sit tens of kHz apart, could a screen
+    whose every bin — the slice of spectrum one pixel column sums — is 125 kHz wide ever show them
+    as two?
   explain: >-
-    Here's the straight answer: it shifts to a second frequency. Frequency-shift keying keeps the
-    carrier on the whole time and moves it between two tones — a mark and a space, a high pitch and a
-    low — and the pattern of which tone is sounding carries the bits. Nothing ever switches off, which
-    is exactly why FSK beats OOK out in the noise: a burst of interference can fake a carrier blinking
-    off, but it is much harder to fake a clean jump between two set frequencies. That robustness is
-    why many sensors, especially up at 915 MHz, speak FSK while the dollar-store doorbell speaks OOK.
-    And here is the catch you felt tonight: those two tones sit only tens of kHz apart, while this
-    waterfall's bins are 125 kHz wide — so FSK's two frequencies land in the same fat bin and the
-    screen can never split them. You did not fail to see it; it is simply below the screen's
-    resolution. So you changed instruments: rtl_433 demodulates the shift at full resolution, recovers
-    the bits, and even prints the sensor's message — the temperature it was reporting all along. That
-    is the lesson under the lesson: some signals you read with your eyes on the waterfall, and some you
-    read with a decoder, and knowing which is which is half the craft. One honest footnote, the one
-    rule from Unit 2 still standing over all of it: reading that a sensor said "eighteen degrees" is
-    fine; a device that is not yours is still not yours to act on.
+    A second frequency, carrier lit: which tone is sounding, mark or space, carries the bits.
+    Nothing switches off, so FSK beats OOK in noise: interference can fake a blink, but hardly a
+    clean jump between two set frequencies. So many sensors, especially at 915 MHz, speak FSK
+    while the dollar-store doorbell speaks OOK. Those tones share one 125 kHz bin, below the
+    screen's resolution; rtl_433 demodulates the shift at full resolution and prints the message,
+    the temperature all along. Unit 2's rule stands: reading "eighteen degrees" is fine; acting on
+    a device not yours is not. Carry this out the door: some signals you read by eye, some with a
+    decoder — knowing which is half the craft.
 
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
 # (yes/no/on/off/true/false), so they load as plain strings without needing quotes.

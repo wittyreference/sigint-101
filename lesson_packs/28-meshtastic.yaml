@@ -24,24 +24,15 @@ stages:
     hand short encrypted messages down a chain until they reach someone no single node could hear
     alone. The chirp was the wire. This is what talks over it.
   demo: >-
-    Watch — hands off. This is not the SDR; the Nomad's own LoRa radio is still running meshtasticd,
-    and the lora panel just lists what it already received — the same list you read in Lesson 11, now
-    with new eyes. Each row is one packet the Nomad heard: the node that sent it, by its id; the SNR
-    it arrived at, often down below the noise floor; and the text it carried — or, when that packet
-    rode a channel whose key the Nomad does not hold, an honest "(encrypted — not on our channel)"
-    where the words would be. That readable-or-not column is the channel showing itself: the Nomad
-    sits on LongFast, the default channel whose key is public knowledge, so a neighbour on LongFast
-    reads as plain text while a node on a private channel reads as encrypted. Right now the list is
-    bare — your Nomad is a mesh of one, and a mesh of one hears nothing come in from the air. A mesh
-    needs a second voice before it is a mesh.
+    Watch — hands off. Not the SDR: the Nomad's LoRa radio runs meshtasticd, and the lora panel
+    lists what it heard, as in Lesson 11. Each row: sender's node id, the SNR (often below the
+    noise floor), and its text — or an honest "(encrypted — not on our channel)". Empty? A mesh of
+    one hears nothing.
   try: >-
-    Your turn, comrade, though tonight it is reading, not keying. Walk the list: each line is a node
-    your Nomad heard and what it sent. Read the column where the message should be — a line of text
-    means that node shares LongFast's public key and the Nomad could read it; "(encrypted — not on
-    our channel)" means a real reception it received but cannot read, a node on a channel it is not
-    on. The list stays empty until a second node transmits; add one when you can, and its packet is
-    where the first text will land. For now, hold the harder question: how would a text
-    even get from a far node to this one?
+    Your turn, comrade — reading, not keying. Walk the list: text means the node shares LongFast,
+    our default channel with a public key; "(encrypted — not on our channel)" is a real reception
+    from another channel. The list stays empty until a second node sends on LongFast; add one
+    when you can. How would a far node's text reach here?
   predict: >-
     A node too far to hear you directly, one node between. Does your text reach it, or die at your
     edge? Lock it in.
@@ -50,23 +41,13 @@ stages:
     many, each willing to repeat what it hears. If the node between you repeats your packet, where
     does it land — and what stops that repeat from echoing around the network forever?
   explain: >-
-    The straight answer, comrade: it reaches — relayed. That is the whole point of a mesh and the
-    reason Meshtastic exists on top of LoRa. Your packet goes out; the node between you hears it and
-    rebroadcasts it, and the far node hears the rebroadcast. What stops the echo is the hop limit: a
-    small counter, three by default, that every relay knocks down by one. At zero a node stops
-    repeating, so a packet floods outward a bounded number of hops and then dies — reach without an
-    endless storm. Two more truths finish the picture. First, a channel is a named group with a key:
-    nodes that share the name and key read each other's text, and the Nomad's LongFast uses the
-    public default key, so treat anything there as readable by anyone — which is exactly why some
-    rows show words and others show "(encrypted — not on our channel)". Second — and this ties
-    straight back to Lesson 11 — a relay forwards a packet it cannot read. Routing does not need the
-    key; a node with your radio settings carries your message onward even on a channel it cannot
-    read, blind to its contents. Hearing, relaying, and reading are three separate things. One honest
-    limit tonight: with a single node you cannot watch a hop happen — a mesh of one has nowhere to
-    send and nothing coming back. When a second node is in range, have it send on LongFast and watch
-    its packet land in the list —
-    sender, SNR and text; add a third node someday and a packet that reaches you from beyond direct
-    range is one the mesh relayed to get there.
+    Hop by hop: a node in between repeats it, and the far node hears that — the point of a mesh.
+    Every relay knocks the hop limit (three by default) down by one; at zero, repeating stops, so
+    the flood stays bounded, never an endless storm. A channel is a name and a key; LongFast's is
+    the public default, so treat it as readable by anyone. Back to Lesson 11: routing needs no
+    key, so a node with your radio settings relays a packet it cannot read. Carry this out the
+    door: hearing, relaying and reading are three separate things. One node can't show a hop; with
+    a third, a packet from beyond direct range is one the mesh relayed.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:

@@ -37,21 +37,14 @@ stages:
     times higher than that FM station — how far off would the built-in radio land, and would that
     error still tuck inside a channel or throw you clean off the signal?
   explain: >-
-    Here's why. The radio's cheap crystal sets every frequency it tunes, so if that crystal runs
-    a millionth fast, every frequency the radio prints comes out a millionth wrong — the same ppm
-    everywhere. But because the error is per MHz, the kHz grow right along with the frequency:
-    +16 kHz at 100 MHz becomes about +179 kHz at 1090 MHz — more than ten times bigger, because
-    1090 is more than ten times higher. So the honest answer is BIGGER. How much that matters
-    depends on how wide the signal is. It is harmless for ADS-B, whose pulses fill about 2 MHz and
-    whose transmitters may themselves sit 1 to 3 MHz off, so dump1090, sampling 2.4 MHz wide,
-    shrugs it off. But at 162 MHz the same error is 27 kHz, more than a whole AIS channel, and at
-    450 MHz it is 74 kHz, several DMR channels. This is the trap that convinces beginners they did
-    something wrong or that the device is broken. They didn't, and it isn't — when a narrow signal
-    isn't where the book says, suspect the radio's own known error first. Carry two things out:
-    this radio runs well over a hundred ppm, and the cure is to tell each tool its error —
-    `rtl_fm -p 164`, `rtl_433 -p 164`, `dump1090-fa --ppm 164`, with your own measured number. This
-    console doesn't apply it yet; the PPM RAW chip says so. The kit's V3, with its 1 ppm clock,
-    would read near zero.
+    Bigger, about elevenfold: one cheap crystal sets every frequency, so the ppm holds everywhere
+    and the kHz grow with it. Width decides if it hurts. ADS-B, 2 MHz wide, shrugs it off — its
+    transmitters may sit 1–3 MHz off, and dump1090 samples 2.4 MHz — but at 162 MHz it's 27 kHz,
+    past an AIS channel; at 450 MHz, 74 kHz, several DMR channels. Narrow signal off its listed
+    frequency? Suspect this, not yourself or the device. Carry this out the door: tell each tool
+    your measured number — `rtl_fm -p 164`, `rtl_433 -p 164`, `dump1090-fa --ppm 164`. This
+    console doesn't apply it yet; its PPM RAW chip says so. The kit's 1 ppm V3 would read near
+    zero.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the

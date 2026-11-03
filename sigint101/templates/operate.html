@@ -16,6 +16,7 @@
   'lora': ('915', 'MHz', 'US LoRa band · meshtastic listening'),
   'flock': ('2.4', 'GHz', 'WiFi · wlan1 monitor mode, receive-only'),
   'rayhunter': ('ORBIC', '·4G', 'Rayhunter · control plane, receive-only'),
+  'flipper': ('USB', '·CLI', 'Flipper Zero · serial, receive-only'),
 } %}
 
 {% macro step_label(hz) %}{{ "%g MHz"|format(hz / 1000000) if hz >= 1000000 else "%g kHz"|format(hz / 1000) }}{% endmacro %}
@@ -86,6 +87,7 @@
       {% elif inst.key == 'lora' %}{{ panels.lora() }}
       {% elif inst.key == 'flock' %}{{ panels.flock(head_command=false) }}
       {% elif inst.key == 'rayhunter' %}{{ panels.rayhunter() }}
+      {% elif inst.key == 'flipper' %}{{ panels.flipper() }}
       {% endif %}
     </div>
     {% if inst.band %}
@@ -149,6 +151,7 @@
 <script src="/static/sstv.js"></script>
 <script src="/static/flock.js"></script>
 <script src="/static/rayhunter.js"></script>
+<script src="/static/flipper.js"></script>
 <!-- The rack's own wiring: the step key, the decoder frequency override, the reception log. -->
 <script src="/static/operate.js"></script>
 {% endblock %}

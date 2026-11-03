@@ -22,6 +22,7 @@ LEAKY_LABELS = (
     "Yes — its mirror below the LO",
     "2.4 MHz — the full rate",
     "Illegal — transmitting needs a licence",
+    "A bench: screen + storage",
 )
 
 

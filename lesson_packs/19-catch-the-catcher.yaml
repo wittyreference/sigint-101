@@ -23,47 +23,32 @@ stages:
     packed inside an LTE carrier wider than your dongle and addressed to one phone; only a modem in
     the conversation can read it. So tonight you borrow a different radio.
   demo: >-
-    Watch — hands off. The radio you borrow is a cheap mobile hotspot, an Orbic, flashed with
-    Rayhunter, the EFF's open-source catcher-catcher. It does what your dongle cannot: it taps its own
-    cellular modem's diagnostic feed and reads the control-plane signaling — the handshake between
-    modem and tower, before any of your data rides. Rayhunter watches that handshake for red flags a
-    normal tower has no reason to raise: a tower that shoves your connection down to flimsy 2G, where
-    it is easy to intercept, or one that demands your phone's permanent IMSI out of turn. A green line
-    runs across the device's little screen while it records and nothing is wrong; when a heuristic
-    fires, the line turns yellow, orange or solid red as the warning grows, and it goes white when
-    recording is paused. Its web page at 192.168.1.1:8080 serves the recordings, the
-    heuristic findings as JSON, and the capture files you can download. In this course your console
-    joins the Orbic's WiFi and simply polls that page. You read; you never transmit. The Orbic is
-    yours, off the tailnet, and nothing you do reaches the tower.
+    Watch — hands off. You borrow a cheap Orbic hotspot running Rayhunter, the EFF's open-source
+    catcher-catcher. It taps its modem's diagnostic feed to read the control-plane handshake with
+    the tower, before any data rides, and flags what a normal tower has no reason to do: shove you
+    down to easily intercepted 2G, or demand your permanent IMSI out of turn.
   try: >-
-    Your watch now, comrade. The panel shows you two things: that green line holding steady, and a
-    list of warnings when a heuristic trips, each tagged low, medium, or high. Sit with what a warning
-    actually is — not a photograph of a Stingray, but a pattern in the signaling that looked wrong to
-    a rule someone wrote. So before the next screen, settle the question this whole lesson turns on:
-    when that line goes red, what have you actually been handed?
+    Your watch, comrade. The console joins the Orbic's WiFi and polls its page at 192.168.1.1:8080
+    (recordings, findings as JSON, captures): receive-only, off the tailnet. Its screen's line:
+    green while recording cleanly; yellow, orange, then solid red as a warning grows; white when
+    paused. Warnings come tagged low, medium or high. Red: what have you been handed?
   predict: >-
     Rayhunter's status line snaps to solid red while you ride the bus. Does red prove a cell-site
     simulator is operating nearby? Lock it in.
   observe: >-
-    Hold your guess against what the heuristic is really doing. It does not see a Stingray; it sees
-    signaling and matches it against rules for behavior a tower should not show. Now ask the hard part:
-    is a cell-site simulator the only thing on earth that could produce that pattern — or could a tower
-    you have never camped on before, freshly installed or plain misconfigured, trip the very same rule?
+    Weigh your guess against what the heuristic does. It never sees a Stingray; it matches
+    signaling against rules for behavior a tower should not show. The hard part: is a cell-site
+    simulator the only thing that could produce that pattern — or could a tower you've never
+    camped on, freshly installed or plain misconfigured, trip the very same rule?
   explain: >-
-    The honest answer, comrade, is no — red does not prove a catcher. Rayhunter's flags are heuristics:
-    the EFF's own documentation warns that its IMSI-request rule still false-positives on aircraft
-    coming in to land, that older downgrade rules were noisy, and that an incomplete broadcast "on its
-    own might just be a misconfigured base station." A real cell-site simulator and a brand-new
-    legitimate tower can wear the same suspicious signature, because the detector reads behavior, not
-    intent. So red means exactly one thing: look closer. It is a reason to investigate — change
-    location, note the time, save the capture — never a verdict you can hand anyone as proof. And the
-    law from the first night rides the other way too, just as hard: a green line all day never means no
-    catcher was near. It means none of the heuristics Rayhunter knows fired, on the one modem it
-    listened through, in the hours it was switched on. A catcher using a trick no rule covers, or one
-    that struck while you were not recording, leaves the line green. No alert never means no device
-    present — a detector only ever sees the signatures it was taught, on the band it watches, while it
-    is listening. What you hold is awareness, bounded and receive-only: when a known bad pattern is in
-    the air, you get to know it is there. That is the gift, and its honest size.
+    No, comrade, red doesn't prove a catcher. Rayhunter's flags are heuristics: EFF's own docs warn
+    its IMSI-request rule false-positives on landing aircraft, older downgrade rules were
+    noisy, and an incomplete broadcast "on its own might just be a misconfigured base
+    station." A catcher and a brand-new legitimate tower can wear the same signature; the detector
+    reads behavior, not intent. So red means look closer — change location, note the time, save the
+    capture — never proof. Green all day means only that no known rule fired, on one modem, while
+    it recorded; a trick no rule covers, or a strike while paused, stays green. Carry this out the
+    door: no alert never means no catcher — awareness, bounded and receive-only.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:

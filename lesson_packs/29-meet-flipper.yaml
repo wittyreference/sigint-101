@@ -1,0 +1,59 @@
+# ABOUTME: Lesson M29 "Meet the Flipper" — the Flipper Zero unit's orientation: what it is, how it
+# ABOUTME: stands alone, and what plugging it into the nomad adds. The console mirrors it over USB.
+
+id: 29
+slug: meet-flipper
+title: "Meet the Flipper"
+type: intro
+concept: >-
+  The Flipper Zero is a pocket multi-tool for the short-range radios and wired protocols around you —
+  sub-GHz remotes, RFID and NFC cards, infrared, iButton keys, the GPIO header. It works alone in your
+  hand; plugged into the nomad it gains a big screen, storage, and the lessons that read what it caught.
+requires_tx: false
+hardware: [flipper]
+panels: [flipper]
+
+stages:
+  frame: >-
+    New unit, comrade. Set the SDR down — tonight you pick up a different instrument, one that fits in
+    a pocket. The Flipper Zero is a small orange-and-white slab with a screen, a d-pad, and a cartoon
+    dolphin that lives inside it. Where your dongle listens to radio you cannot touch, the Flipper
+    reaches the signals right next to you: the fob on your keyring, the remote for the gate, the card
+    in your wallet, the TV across the room. Over this unit you will drive each of those yourself. But
+    first, meet the device — and see what changes the moment you set it next to the nomad.
+  demo: >-
+    Watch, hands off. The Flipper is plugged in by USB and speaks a plain-text command line. The
+    nomad asks it to describe itself and shows the answer: model, firmware, region, and whether
+    its sub-GHz radio is alive. Reading it never disturbs a sweep or a decode. No Flipper
+    attached? The panel says so and invents nothing.
+  try: >-
+    Your turn, comrade. The panel names the device and its radio state in words, so it reads the
+    same in sun or red-night. Now the question this unit is built around: you know what the Flipper
+    does alone in the field. What does plugging it into the nomad buy you that it can't do alone?
+  predict: >-
+    Plugged into the nomad like this, what does the Flipper gain? Lock it in.
+  observe: >-
+    Hold your guess against the device. The Flipper's screen is a few lines of pixels; its storage
+    is a microSD you can't read at a glance. The nomad has an 800-by-480 panel, a disk, and every
+    lesson in this course. The cable carries the Flipper's command line and saved files both ways.
+  explain: >-
+    A bench, not radios: the Flipper has the same antennas plugged in as in your pocket, so no
+    range or speed is gained. On its own it is the field tool: you carry it, capture with it, and
+    squint at a postage-stamp screen. Next to the nomad it becomes half of a pair, the field tool
+    plus the analyst's desk: the console reads the device over the cable, pulls the capture off its
+    card, and draws it large enough to study beside the lesson that explains it. Carry this out the
+    door: take the Flipper into the world, and bring what it caught back to the bench. The rest of
+    this unit does exactly that, one capability at a time.
+
+# Keyboard-free predict chips: {key, label}. Three like-for-like gains, so no label argues its own
+# case (the 11-02 curriculum audit's §8d R8 wording).
+choices:
+  - {key: "a-bench", label: "Screen + storage"}
+  - {key: "more-range", label: "More range"}
+  - {key: "faster-radios", label: "Faster radios"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["a-bench"]
+verdict: >-
+  It gains a bench, not radios: the same antennas, but a big screen, a disk and the lessons to study
+  what it caught.
