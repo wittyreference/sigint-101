@@ -5,6 +5,10 @@ Power on the Recon. In a minute or two the Raspberry Pi desktop starts and the c
 full-screen on top of it, by itself. Everything is driven by touch. **Back** is in the status bar at
 the top of every screen except home, and the home screen lists the units in order.
 
+**The check.** Each lesson asks you to predict before you watch, and that call is never scored.
+Unit 1's lessons then end on a one-question **check**: a new situation on the same idea, scored
+Right or Not yet with the reason, and **Complete lesson** appears once you answer it.
+
 ## Leaving the course, and coming back
 - **Exit.** On the home screen, the top-left control is **Exit SIGINT 101**. Tap it to close the
   course window. You are left on the Pi desktop, and your progress is kept.
