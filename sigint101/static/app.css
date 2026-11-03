@@ -615,6 +615,13 @@ button.rail-pip:disabled {
   border: 2px solid var(--warn);
   padding: 4px 9px;
 }
+/* Seven pips (an intro lesson with a check) leave the gate label room only to wrap onto two lines;
+   tighten them so both sit inside the 40px rail instead of clipping at its edges. */
+.rail--long .rail__gate {
+  line-height: 1.1;
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
 
 /* ===== Stage view ========================================================= */
 .stage {
@@ -893,22 +900,26 @@ button.rail-pip:disabled {
   text-shadow: var(--glow);
 }
 
-/* ===== Explain verdict (the scored predict gate) ========================= */
-/* What the learner committed against the answer, then the one-line verdict, at the top of the
+/* ===== Explain verdict (the predict reveal) and the check result ========== */
+/* The learner's call beside what the radio does, then the one-line verdict, at the top of the
    explain's scrolling body (so it is the first thing read, and never squeezes the reading). The
-   tag WORD carries hit/miss, so red-night (one hue) still reads it, with brightness (--ok vs
-   --warn) as the second cue. */
+   predict reveal is unscored, so its box is neutral. Only the scored check adds hit/miss: there the
+   tag WORD carries it, so red-night (one hue) still reads it, with brightness (--ok vs --warn) as
+   the second cue. */
 .verdict {
   display: flex;
   flex-direction: column;
   gap: 4px;
   margin-bottom: 12px;
   padding: 8px 12px;
-  border: 2px solid var(--warn);
+  border: 2px solid var(--border-strong);
   background: var(--surface-2);
 }
 .verdict--hit {
   border-color: var(--ok);
+}
+.verdict--miss {
+  border-color: var(--warn);
 }
 .verdict__line {
   font-family: var(--font-mono);
@@ -936,6 +947,38 @@ button.rail-pip:disabled {
 .verdict__why {
   font-size: 18px;
   color: var(--fg-dim);
+}
+
+/* ===== Post-lesson check ================================================= */
+/* Interactive like the predict, so it takes the predict's tight spacing: the prompt doubles as the
+   title at the 18px floor, and the chips, the result and Commit/Complete all fit the fixed 800x480
+   with no scroll. The result sits in the form's flow, so it carries no bottom margin of its own. */
+.stage-panel[data-stage="check"] {
+  gap: 2px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.stage-panel[data-stage="check"] .stage-panel__title {
+  font-size: 18px;
+  line-height: 1.2;
+}
+.stage-panel[data-stage="check"] .predict {
+  gap: 4px;
+}
+.check__result {
+  margin-bottom: 0;
+  padding: 6px 12px;
+}
+.check__result b {
+  color: var(--fg);
+}
+/* Red-night's dim --warn fill under dark ink measured 3.3:1, so there "Not yet" is an outline:
+   the bright red ink on the darkest red fill (about 6:1), told from "Right"'s filled tag by its
+   fill as well as its word, and still red alone. */
+.app[data-theme="red-night"] .verdict--miss .verdict__tag {
+  color: var(--fg);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--warn);
 }
 
 /* ===== Instrument (waterfall + tune) ===================================== */

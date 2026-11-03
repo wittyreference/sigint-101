@@ -47,7 +47,7 @@ from .flipperconsole import FlipperConsole
 from .flock import FlockUnavailable, configured_flock_detector
 from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
 from .kiosk import request_exit
-from .lessons import COMMIT_STAGE, load_lessons
+from .lessons import CHECK_STAGE, COMMIT_STAGE, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
 from .operate import (
     DEFAULT_INSTRUMENT,
@@ -60,7 +60,7 @@ from .operate import (
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable, on_commercial_paging_band
 from .ppm import PpmUnavailable, measure_pilot_ppm
-from .progress import PredictionAlreadyCommitted, Progress
+from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress
 from .provenance import (
     BaselineLog,
     compare_to_baseline,
@@ -669,6 +669,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "commit_url": f"/api/predict?lesson_id={lesson.id}",
             "revealed": revealed,
         }
+        # A lesson with a check: where its answer posts, and once answered, the feedback to show.
+        # The check is sealed with the rest of the reveal, so none of this is read before a commit.
+        if lesson.check and committed:
+            answered = app.state.progress.get_check(lesson_id)
+            context["check_url"] = f"/api/check?lesson_id={lesson.id}"
+            context["check_answer"] = answered["choice"] if answered else None
+            context["check_feedback"] = (lesson.check_feedback(answered["choice"])
+                                         if answered else None)
         # A lesson that names its own band starts the instrument there instead of the default FM
         # sweep: the dial reads its centre and step, and the live waterfall carries the band edges
         # the console retunes the sweep to. A lesson with no band leaves these unset, so the
@@ -710,6 +718,37 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         first_sealed = lesson.sealed_stages[0]
         app.state.progress.record_stage(lesson_id, first_sealed,
                                         lesson.stage_order.index(first_sealed))
+        return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    @app.post("/api/check")
+    async def check(lesson_id: int, request: Request):
+        """Record the learner's answer to a lesson's check, scored, then reopen on its feedback.
+
+        The check sits past the predict gate, so it is refused (400) before a prediction. The
+        answer must be one of the check's own chips (400 otherwise), and a second answer is refused
+        (409): the feedback names the key, so a re-answer would only copy it. A lesson with no
+        check has nothing here (404). Like the predict gate it posts a plain form, no JavaScript.
+        """
+        _require_lesson(lesson_id)
+        lesson = app.state.lessons[lesson_id]
+        if not lesson.check:
+            return JSONResponse(status_code=404, content={
+                "recorded": False, "reason": f"lesson {lesson_id} has no check"})
+        if app.state.progress.get_prediction(lesson_id) is None:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": "predict before the check"})
+        choice = (await _field(request, "choice")).strip()
+        if choice not in [c["key"] for c in lesson.check["choices"]]:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"'{choice}' is not one of the check's choices"})
+        correct = choice == lesson.check["answer"]
+        try:
+            app.state.progress.record_check(lesson_id, choice, correct=correct)
+        except CheckAlreadyAnswered as exc:
+            return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
+        log_event(app.state.events_path, "check", {"lesson": lesson_id, "correct": correct})
+        app.state.progress.record_stage(lesson_id, CHECK_STAGE,
+                                        lesson.stage_order.index(CHECK_STAGE))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
 
     @app.post("/api/stage")

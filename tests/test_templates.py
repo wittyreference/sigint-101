@@ -421,7 +421,7 @@ def test_a_sealed_stage_requested_without_a_commit_stays_sealed():
 # --- the explain verdict (a scored predict gate) ------------------------------
 
 
-def _scored_lesson():
+def _scored_lesson(**overrides):
     data = {
         "id": 1, "slug": "gain-snr", "title": "Gain and SNR", "type": "intro",
         "concept": "the gap over the noise floor is the signal",
@@ -433,6 +433,7 @@ def _scored_lesson():
         "answer": ["b", "c"],
         "verdict": "VERDICT_marker the gap holds, then shrinks at the top.",
     }
+    data.update(overrides)
     return parse_lesson(data)
 
 
@@ -441,25 +442,46 @@ def _verdict_block(html):
     return m.group(1) if m else ""
 
 
-def test_explain_header_says_what_you_said_and_the_answer():
-    html = _console(lesson=_scored_lesson(), prediction_committed=True,
+def test_explain_header_sets_your_call_beside_what_the_radio_does():
+    # A predict about the instrument (a radio lesson) reveals what the radio does.
+    html = _console(lesson=_scored_lesson(hardware=["rtl-sdr"]), prediction_committed=True,
                     current_stage="explain", committed_choice="a")
     block = _verdict_block(html)
-    assert "You said" in block and CHOICES[0]["label"] in block
-    assert "Answer" in block
-    assert CHOICES[1]["label"] in block and CHOICES[2]["label"] in block
+    assert f"Your call: <b>{CHOICES[0]['label']}</b>" in block
+    assert (f"What the radio does: <b>{CHOICES[1]['label']} or {CHOICES[2]['label']}</b>"
+            in block)
     assert "VERDICT_marker" in block
-    assert "verdict--miss" in block
     # The header rides at the top of the explain's scrolling body, so a long eyebrow can never
     # squeeze the reading itself to nothing on the fixed 800x480 panel.
     assert re.search(r'<div class="stage-panel__body">\s*<div class="verdict', html)
     assert "EXPLAIN_SCORED_marker" in html
 
 
-def test_explain_header_marks_a_right_call():
-    html = _console(lesson=_scored_lesson(), prediction_committed=True,
-                    current_stage="explain", committed_choice="c")
-    assert "verdict--hit" in _verdict_block(html)
+@pytest.mark.parametrize("lesson", [
+    _scored_lesson(),                                            # no radio: the rules, theory
+    _scored_lesson(hardware=["rtl-sdr"], predict_kind="knowledge"),  # a radio lesson's fact
+])
+def test_a_knowledge_predict_reveals_in_fact(lesson):
+    # A predict about what is true (the law, what a detection proves) is not something the radio
+    # does, so its reveal reads "In fact".
+    block = _verdict_block(_console(lesson=lesson, prediction_committed=True,
+                                    current_stage="explain", committed_choice="a"))
+    assert f"Your call: <b>{CHOICES[0]['label']}</b>" in block
+    assert f"In fact: <b>{CHOICES[1]['label']} or {CHOICES[2]['label']}</b>" in block
+    assert "What the radio does" not in block
+
+
+@pytest.mark.parametrize("choice", ["a", "c"])
+def test_the_predict_reveal_never_scores_the_guess(choice):
+    # A predict is a guess made before the teaching, so the reveal reads it as a call, not a
+    # result: no RIGHT/MISSED tag and no hit/miss styling, whichever chip was committed. The
+    # stored `correct` is item-analysis data for the author, never shown to the learner.
+    block = _verdict_block(_console(lesson=_scored_lesson(), prediction_committed=True,
+                                    current_stage="explain", committed_choice=choice))
+    assert block
+    for score_word in ("RIGHT", "MISSED", "Answer:", "verdict--hit", "verdict--miss",
+                       "verdict__tag"):
+        assert score_word not in block
 
 
 def test_the_verdict_stays_sealed_until_a_commit():

@@ -52,6 +52,9 @@ choices:
   - {key: "more-range", label: "More range"}
   - {key: "faster-radios", label: "Faster radios"}
 
+# The predict asks what is true, not what the radio will show, so the reveal reads "In fact".
+predict_kind: knowledge
+
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: ["a-bench"]
 verdict: >-
