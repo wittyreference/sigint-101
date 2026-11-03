@@ -111,7 +111,8 @@ def test_every_instrument_view_renders_with_the_picker_and_back_goes_home(tmp_pa
     ("acars", "data-acars-panel"), ("ais", "data-ais-panel"), ("rds", "data-rds-panel"),
     ("dmr", "data-dmr-panel"), ("apt", "data-apt-panel"), ("sstv", "data-sstv-panel"),
     ("lora", "data-lora-panel"), ("flock", "data-flock-panel"),
-    ("rayhunter", "data-rayhunter-panel"), ("clock", "data-ppm-panel"),
+    ("rayhunter", "data-rayhunter-panel"), ("flipper", "data-flipper-panel"),
+    ("clock", "data-ppm-panel"),
     ("health", "data-prov-panel"),
 ])
 def test_each_view_draws_the_same_panel_the_lessons_do(tmp_path, key, hook):
@@ -143,6 +144,16 @@ def test_a_fixed_instrument_has_no_tune_keys(tmp_path):
     assert "data-decoder-tune" not in html
     assert "data-tune-step" not in html
     assert "1090" in html
+
+
+def test_the_flipper_view_reads_the_device_over_usb_with_nothing_to_tune(tmp_path):
+    # The Flipper is its own USB device: no dial to turn, no SDR to claim, and no receptions to
+    # log yet; its panel polls /api/flipper like the lesson's and says plainly when none is there.
+    with _client(tmp_path) as client:
+        html = client.get("/operate/flipper").text
+    assert 'src="/static/flipper.js"' in html
+    assert "data-decoder-tune" not in html and "data-tune-step" not in html
+    assert "USB" in html
 
 
 def test_the_pager_view_says_its_text_is_withheld_on_the_paging_band(tmp_path):
