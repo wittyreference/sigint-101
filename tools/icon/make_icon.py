@@ -1,5 +1,5 @@
-# ABOUTME: Builds the SIGINT 101 desktop icon: a phosphor-green hammer and sickle over faux-Cyrillic
-# ABOUTME: "ЅIGIИT 101", every glyph converted to SVG paths so the icon needs no installed font.
+# ABOUTME: Builds the SIGINT 101 desktop icon: a Soviet-red hammer and sickle over faux-Cyrillic
+# ABOUTME: "ЅIGIИT 101" on black, every glyph an SVG path so the icon needs no installed font.
 import sys
 
 from fontTools.pens.svgPathPen import SVGPathPen
@@ -10,7 +10,7 @@ FONTS = sys.argv[1]          # sigint101/static/fonts
 DEJAVU = sys.argv[2]         # DejaVuSans-Bold.ttf (carries U+262D)
 OUT = sys.argv[3]
 
-GREEN = "#2ee66a"            # the console's dark-theme phosphor
+INK = sys.argv[4] if len(sys.argv) > 4 else "#cc0000"   # Soviet red (MC, 2026-11-03)
 BG = "#040806"
 
 latin = TTFont(f"{FONTS}/russoone-latin.woff2")
@@ -74,10 +74,10 @@ svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="2
   </defs>
   <rect x="4" y="4" width="248" height="248" rx="22" fill="{BG}"/>
   <rect x="10" y="10" width="236" height="236" rx="17" fill="none"
-        stroke="{GREEN}" stroke-width="3"/>
+        stroke="{INK}" stroke-width="3"/>
   <rect x="16" y="16" width="224" height="224" rx="12" fill="none"
-        stroke="{GREEN}" stroke-width="1.5" opacity="0.7"/>
-  <g fill="{GREEN}" filter="url(#glow)">
+        stroke="{INK}" stroke-width="1.5" opacity="0.7"/>
+  <g fill="{INK}" filter="url(#glow)">
     <path d="{sickle}"/>
     <path d="{word}"/>
     <path d="{num}"/>

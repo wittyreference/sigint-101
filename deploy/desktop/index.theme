@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=SIGINT101
+Comment=SIGINT 101 phosphor-terminal desktop: PiXflat widgets in green on black
+Encoding=UTF-8
+
+[X-GNOME-Metatheme]
+GtkTheme=SIGINT101

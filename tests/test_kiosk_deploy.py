@@ -47,6 +47,11 @@ class Box:
         _stub(self.bin, "sudo", f'echo "sudo $*" >> {self.log}')
         # sleep ends the desktop session, so a watch loop runs exactly one pass.
         _stub(self.bin, "sleep", f'echo "sleep $*" >> {self.log}; rm -f {self.runtime}/wayland-9')
+        # The desktop theme (install.sh step 5) talks to fontconfig and GSettings.
+        _stub(self.bin, "gsettings", f'echo "gsettings $*" >> {self.log}')
+        _stub(self.bin, "fc-cache", "exit 0")
+        _stub(self.bin, "fc-list", 'echo "PT Mono"; echo "Russo One"')
+        _stub(self.bin, "pkill", f'echo "pkill $*" >> {self.log}')
 
     def start_session(self):
         self.socket = socket.socket(socket.AF_UNIX)
