@@ -40,6 +40,33 @@
     - gain-meter labels never overlap;
     - rtl_433 repeats collapse to one reception (HIL: 27 decodes became 9 receptions).
   - **Remaining in the cut line:** item 19 (prove provision on a spare SD, then cold boot).
+- **Since the sprint (2026-11-02/03, also on `ux-polish`, now @989c496):**
+  - #29 provision: Flock monitor mode is opt-in (`--with-flock-adapter`). On nomad-b the
+    RTL8821CU dongle in monitor mode browned out USB (192 over-current events in 2 min, 23
+    touch-panel resets). It needs a powered hub; MC unplugged it.
+  - #32 **desktop + course on top** (MC's call: "Desktop + course on top (Recommended)").
+    - lightdm desktop autologin (B4), with the course opened by an XDG-autostart watchdog.
+    - Home's Back is now **Exit SIGINT 101**: it closes the course to the Pi desktop.
+    - A desktop icon and menu entry reopen it.
+    - HIL on nomad-b: cold boot opens the course, Exit lands on the desktop, the icon reopens it.
+  - #33 **desktop theme** (MC's call, 2026-11-03):
+    - phosphor wallpaper (an LED-matrix ☭ over "ШЭLСФМЭ СФМЯДDЭ");
+    - a black bar with a green rule, green frames and labels, a green-on-black terminal;
+    - the course icon in Soviet red.
+    - Applied live on nomad-b; MC saw it on the panel.
+  - Flipper: firmware 1.5.1; the 7 approved apps are installed (#31, `docs/flipper-apps.md`).
+  - Wi-Fi devboard: flashed with Marauder (hash-verified) to be the Flock radio in place of the
+    dongle (MC's call, plan in #30). Two things are still open:
+    - it sits in ESP32 download mode until someone presses its RESET button;
+    - the Flipper's USB-UART bridge has not shown a second CDC port yet.
+    - The flock.py Marauder capture source is not built.
+  - Antennas (MC, field kit): the ANT500 moved to the SDR jack, and a 915 MHz whip went on LoRa.
+    FM SNR fell from 27 dB to 5.5 dB. Re-measure with the ANT500 fully extended.
+  - MC ran `provision.sh` on nomad-b (2026-11-02).
+- **In flight (agents, PRs into `ux-polish`):**
+  - a real battery readout from the UPS INA219 in place of "—";
+  - a Flipper module refresh on today's base (supersedes PR #5);
+  - lesson explains trimmed to the fit budget.
 - **Known small follow-ups (not in the cut line):**
   - the sunlight "LIVE" badge on the waterfall is low contrast;
   - the red-night image filter is verified on a test pattern only;
@@ -47,19 +74,19 @@
   - FLEX paging isn't decoded;
   - DMR repeat de-dup is unverified (no capture);
   - the RDS station is a provisioning value (no auto-pick);
-  - home's second unit row tucks about 20 px under the bars (the grid scrolls).
+  - home's second unit row tucks about 20 px under the bars (the grid scrolls);
+  - the desktop bar's green rule has small gaps under the tray icons;
+  - `/tmp/theme-wt` on nomad-b is a scratch worktree; remove it when the box is home.
 - **Hand-over is 2026-11-08.**
 
 **Needed from MC, one at a time when reached:**
-1. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
+1. Press RESET on the Wi-Fi devboard, so it boots Marauder. Then Claude builds the flock.py
+   Marauder source and chases the bridge's second CDC port.
+2. Extend the ANT500 fully. Claude then re-measures FM SNR.
+3. One look at the panel, then an OK to merge `ux-polish` to main (PR #15). nomad-b runs
+   @3b96cf0; #33 only adds the theme files, which are already applied there.
+4. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
    triage item 19.
-2. Run `deploy/provision.sh` on nomad-b (MC's call: "I'll run it with !"). The fixed script is
-   staged at `/tmp/provision.sh` on nomad-b, and `--check` predicts 6 changes. Command:
-   `! ssh spec5@100.108.20.20 'bash /tmp/provision.sh 2>&1 | tee /tmp/provision-run.txt'`.
-   Afterwards Claude verifies wlan1 monitor mode and a Flock capture.
-3. One look at the panel. The kiosk shows `ux-polish` @494e268 (the whole sprint), and
-   confirming it unblocks merging it to main (PR #15).
-4. Re-plug the Flipper on nomad-b and update it 1.4.3 → 1.5.1 in the app.
 5. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
 
 ## Current state (observed 2026-11-02)
@@ -95,7 +122,7 @@ again. Sources: `/home/mc/.claude/plans/eager-spinning-frost.md`, CLAUDE.md, the
 | Kiosk autostart | P0 DoD | **done** (#7, #9); cold boot passed 2026-11-02 | — |
 | Provisioning + scrub of MC's data + recipient quick-start | P5/P6 | nothing exists | build (hand-over) |
 | Updater (atomic apply, rollback, migrations) | P5 | nothing exists | triage |
-| Safe-shutdown + real battery readout | plan arch | status bar shows a hardcoded **100%** (invented) | triage (S0: no-mock) |
+| Safe-shutdown + real battery readout | plan arch | #12 shows "—" (no invented 100%); UPS INA219 readout in flight | battery: building; shutdown: triage |
 | `safety.py` antenna-before-TX guard + any TX path | D16, CLAUDE.md | never existed; no TX route | triage |
 | Reception badges / replay marks | CLAUDE.md invariant | no code; `events.py` logs only | triage |
 | SigMF recorded walkthroughs R1–R6, sample recording | plan curriculum | none | triage |
@@ -104,7 +131,7 @@ again. Sources: `/home/mc/.claude/plans/eager-spinning-frost.md`, CLAUDE.md, the
 | M5 12-card sort + "show me the law" | plan | 3-choice predict only | triage |
 | GPS + Wi-Fi/BLE survey lessons | plan U5 | replaced by POCSAG/ACARS, never recorded | triage |
 | Flock passive BLE scan | plan CS | Wi-Fi only | triage |
-| Flock provisioning (tcpdump caps, wlan1 monitor) | CS2 HIL | manual steps | provisioning |
+| Flock provisioning (tcpdump caps, wlan1 monitor) | CS2 HIL | caps in `provision.sh`; the dongle browns out USB, so monitor mode is opt-in (#29); Marauder devboard is the replacement radio (#30) | devboard: needs RESET, then build |
 | ☭ glyph comes from a system-font fallback | restyle | unconfirmed on a fresh image | provisioning check |
 | M8 predict 1px over at 800x480 | M8 HIL | open | fix sprint |
 | Flipper Companion FAP (Track E) | 10-29 roadmap | superseded 10-31 by the USB-CLI live mirror (`flipper-module` spec §11) | confirm dropped at triage |
@@ -150,10 +177,15 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 - **The panel is self-starting** (`deploy/install.sh`, idempotent; re-run it after changing
   `deploy/`).
   - The lesson server is the user unit `sigint101.service` on 127.0.0.1:8008, with linger.
-  - The kiosk is tty1 autologin → `~/.profile` hook → `~/.local/bin/sigint101-kiosk` (labwc +
-    a looping Chromium).
-  - **Restart the kiosk:** kill the `labwc` PID and autologin respawns it. Never also restart
-    `getty@tty1`: you get duplicate sessions (see learnings).
+  - On `ux-polish` (#32, live on nomad-b), the box autologs in to the Pi desktop. The XDG
+    autostart runs `/usr/local/bin/sigint101-course watch`, which reopens the kiosk Chromium
+    (profile `~/.config/chromium-kiosk`) unless Exit wrote
+    `$XDG_RUNTIME_DIR/sigint101-kiosk-exited`. The desktop icon runs `sigint101-course open`.
+  - **Restart the course browser:** kill the kiosk Chromium by PID and the watchdog reopens it.
+    Never kill `labwc` (that ends the whole desktop session) and never restart `getty@tty1`
+    (duplicate sessions, see learnings).
+  - On `main` the kiosk is still the old tty1 autologin → `~/.profile` hook, until ux-polish
+    lands.
   - **Restart the server:** `systemctl --user restart sigint101`, which also reloads lesson
     YAML.
   - **Manual server on 8008:** `systemctl --user stop sigint101` first.
@@ -190,9 +222,10 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 
 ## HIL targets
 - **nomad-b** (`spec5b`, 100.108.20.20, user `spec5`) is PRIMARY. It is a stock Nomad 2 Recon
-  twin: RTL2832U with a working antenna (deaf at 1090 and 2m), MeshAdv HAT (`/dev/ttyAMA0`), a
-  working LoRa jack, the RTL8821CU monitor-mode adapter as `wlan1`, and the Flipper on
-  `/dev/ttyACM0` when plugged in.
+  twin: RTL2832U (now on the ANT500; deaf at 1090 and 2m), MeshAdv HAT (`/dev/ttyAMA0`) with a
+  915 MHz whip on the LoRa jack, and the Flipper (fw 1.5.1, Marauder devboard on its GPIO) on
+  `/dev/ttyACM0` when plugged in. The RTL8821CU dongle is unplugged: it browns out USB without a
+  powered hub.
 - **spec5** (100.90.68.20) is the deaf secondary: busted RX antenna, dead LoRa jack. Useful as
   a deaf-receiver fixture.
 - **pi5** (100.126.132.9, user `mc`) has an ESP32 on `/dev/ttyACM1`. No Flipper.

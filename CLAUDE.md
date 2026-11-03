@@ -130,3 +130,8 @@ capable instrument, not a locked toy.
   pinned (`.stage-foot`) and keyboard scroll (`static/scroll-keys.js`) — do NOT trim a reveal to
   nothing or rip that scroll out. And lessons must be COMPLETABLE: the last stage carries a
   "Complete lesson" button wired to `POST /api/complete`. (Session 2026-11-01, MC.)
+- **Know the kit; look it up before asking MC to.** The Nomad has a physical keyboard. Its jacks,
+  ports and antenna layout are in the hardware research (`eager-spinning-frost-agent-ports.md`
+  beside the plan) and the vendor's docs. Read those, and try every remote fix (an esptool reset,
+  an ssh command), before handing MC a check or step in the real world. (Session 2026-11-02, MC:
+  "why do you need me to do something IRL".)
