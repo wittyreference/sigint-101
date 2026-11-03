@@ -35,34 +35,33 @@ stages:
     changed. If this antenna stays deaf at 1090, the floor barely moves — a real result, not your
     mistake.
   predict: >-
-    The FM-notch filter throws away 88 to 108 MHz before it reaches the radio. Now picture
-    915 MHz, where small wireless gadgets live, and their signal looks weak. Will that same notch
-    help 915 — YES, NO, or IT DEPENDS? Lock it in.
+    Your 915 MHz gadget reads weak, comrade. No FM tower is near, and your dipole legs are still
+    cut for 1090. Will sliding in the FM-notch filter make 915 stronger? Lock it in.
   observe: >-
     Reason from what the notch actually does, and say what you expect first: the filter removes one
     stretch, 88 to 108 MHz, and nothing else. Is 915 MHz anywhere inside it? And when 915 is weak,
     is the likelier culprit the far-off FM you removed, or the antenna length and aim from earlier?
   explain: >-
-    Not on its own. The notch is a targeted tool, not a cleanup: it removes the FM broadcast
-    band, 88 to 108 MHz, nowhere near 915. It rescues 1090 only when strong FM overloads the front
-    end, smearing the picture. Adding nothing, it can't conjure a 915 signal your antenna misses.
-    Weak 915 wants last lesson's fix: legs grown to about 8.2 cm, aimed for how the gadget is
-    polarized. A missing signal can mean too much of the wrong thing, cured by taking away. Carry
-    this out the door: name the disease first — length and aim are fixed at the antenna, an
-    overloading neighbour with a notch, and more gain, as you learned, fixes neither.
+    No — wrong culprit. The notch is a targeted tool, not a cleanup: it removes the FM broadcast
+    band, 88 to 108 MHz, and nothing else. It helps another band only when
+    strong FM is swamping the front end and blinding the whole radio, as under a tower. With no
+    tower near, there is nothing to take away, and the hiss at 915 isn't FM, so it isn't quieter
+    either. Weak 915 wants last lesson's fix: legs grown to about 8.2 cm, aimed for how the gadget
+    is polarized. Carry this out the door: name the disease first — length and aim are fixed at
+    the antenna, an overloading neighbour with a notch, and more gain fixes neither.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
 # learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
-  - {key: "yes", label: "Yes"}
-  - {key: "no", label: "No"}
-  - {key: depends, label: It depends}
+  - {key: "yes", label: "Yes, it cleans the radio up"}
+  - {key: "no", label: "No, wrong culprit"}
+  - {key: little, label: "A little, less noise overall"}
 
-# The scored gate. Two chips are right: the explain says "no — not on its own" and then defends
-# "it depends" for the one case where FM overload reaches 915 too.
-answer: ["no", depends]
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+# The stem rules out the one case where the notch would help (strong FM nearby), so one chip is right.
+answer: ["no"]
 verdict: >-
-  No, on its own: the notch removes only 88 to 108 MHz, so it helps 915 only if FM is
-  overloading the front end there too.
+  No: the notch removes only 88 to 108 MHz. With no strong FM overloading the front end, it does
+  nothing for 915. Lengthen the legs to about 8.2 cm.
