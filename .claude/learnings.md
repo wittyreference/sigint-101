@@ -561,3 +561,40 @@ Expect reception counts in threes from that sensor; deduplicating repeats is a f
   entry; don't flip `quick_exec`, which changes every script on the desktop.
 - Exit order matters: write the flag, then SIGTERM. The watchdog checks the browser first and the
   flag second, so it can never see "no browser" from an Exit without also seeing the flag.
+
+## 2026-11-03: theming the Pi desktop — where each setting actually lives
+**Finding.**
+- **`/usr/bin/labwc-pi` runs `rm ~/.config/gtk-3.0/gtk.css` at every login.** A user gtk.css
+  disappears on the next boot. A named theme in `~/.themes/<name>/gtk-3.0/gtk.css`, selected with
+  `gsettings set org.gnome.desktop.interface gtk-theme`, survives.
+- **On Wayland pcmanfm reads one desktop file per screen.** On nomad-b that file is
+  `~/.config/pcmanfm/LXDE-pi/desktop-items-HDMI-A-1.conf`. A wallpaper written only to
+  `desktop-items-0.conf` never shows. `apply-theme.sh` sets the keys in every
+  `desktop-items-*.conf`.
+- **wf-panel-pi is a GTK window named `PanelToplevel`.** Style it with `#PanelToplevel` in the GTK
+  theme. Killing it is safe because `lwrespawn` restarts it with the new style.
+- **`cmd | grep -q` fails under `set -o pipefail`.** grep exits on its first match, the writer
+  takes SIGPIPE, and the pipeline returns non-zero even though the text was there. Capture the
+  output first (`x="$(cmd || true)"`) and match it with `case`.
+**How to apply.** Put desktop styling in a named theme rather than `~/.config/gtk-3.0`. Write
+pcmanfm keys to every per-screen file. Check a `grep -q` pipeline under pipefail against the real
+command, not a stub that prints one line.
+
+## 2026-11-02: the ESP32-S2 Wi-Fi devboard — download mode needs a hand on RESET
+**Finding.**
+- The board on its own USB enumerates as `303a:0002 Espressif ESP32-S2`, which is the ROM
+  download mode reached through its GPIO0 strap.
+- esptool flashed Marauder and verified every region's hash. Its "hard reset" cannot leave ROM
+  download mode over the S2's native USB, so the board stays in the bootloader until someone
+  presses its RESET button.
+- A full-flash read for a backup (`read_flash 0 ALL`) stalled at byte 159744 on every attempt,
+  chunked reads included. The same run showed over-current events climbing on nomad-b's bus
+  (`overcurrent=177`), so power is a suspect, not proven.
+- The official rollback image is the stock Blackmagic firmware from lab.flipper.net, used instead
+  of a local backup.
+- With the board on the Flipper's GPIO and the Flipper's USB-UART bridge on channel 1, nomad-b has
+  not yet shown the second CDC port.
+**How to apply.**
+- Budget one physical RESET press after any devboard flash.
+- Take a devboard backup on a powered hub, or rely on the official image as the rollback.
+- Prove the bridge's second CDC port (`ls /dev/ttyACM*` shows two) before building on it.
