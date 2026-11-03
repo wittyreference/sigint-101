@@ -221,6 +221,17 @@
                 <div class="decoder__axis" aria-hidden="true">Rayhunter &middot; Orbic 192.168.1.1:8080</div>
               </div>
             </div>
+            {% elif lesson.uses_flipper %}
+            {# A Flipper lesson seals the device panel, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; DEVICE HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">Flipper Zero &middot; USB serial CLI</div>
+              </div>
+            </div>
             {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
@@ -450,6 +461,21 @@
               </div>
               <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
             </div>
+            {% elif lesson.uses_flipper %}
+            {# Flipper (M29): the attached device's own account of itself (panels.flipper), read
+               over its USB serial CLI, over a fixed dial. #}
+            <div class="instrument instrument--decode">
+              {{ panels.flipper() }}
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">USB<span>&middot;CLI</span></div>
+                  <div class="tune__caption">Flipper Zero &middot; serial, receive-only</div>
+                </div>
+                {{ prev_step(loop.first) }}
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            </div>
             {% else %}
             {# Instrument: the waterfall (panels.waterfall), with the pack's declared side panels
                (gain, provenance, ppm) beside it and the sweep's command strip under the row. #}
@@ -583,6 +609,9 @@
 <!-- The live Rayhunter monitor (M19): polls /api/rayhunter and shows the recording line + heuristic
      findings from the Orbic. No Orbic reachable shows honestly; a quiet line never proves no catcher. -->
 <script src="/static/rayhunter.js"></script>
+<!-- The attached Flipper (M29+): polls /api/flipper and shows the device identity + radio state
+     over the USB serial CLI. No Flipper on USB shows the reason, never a fabricated device. -->
+<script src="/static/flipper.js"></script>
 <!-- Shell behaviour that is NOT the waterfall lives in its own files: stepping between the
      lesson's rendered stage panels in /static/lesson-nav.js (below), and the tune strip (+/- and
      tap-to-tune retune the live sweep) in /static/waterfall.js, which alone paints the canvas — a

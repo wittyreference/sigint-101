@@ -45,11 +45,13 @@
 
         {# A reading the console does not have is shown as unknown, never as a made-up number. #}
         {% set batt_known = battery_pct is defined and battery_pct is not none %}
-        <span class="readout readout--batt batt" title="Battery">
+        <span class="readout readout--batt batt{% if batt_known and battery_low %} batt--low{% endif %}"
+              title="Battery{% if battery_volts is defined and battery_volts is not none %} {{ '%.2f'|format(battery_volts) }} V{% endif %}">
           <span class="batt__glyph">
             <span class="batt__fill" style="width: {{ battery_pct if batt_known else 0 }}%"></span>
           </span>
-          {% if battery_charging %}<span class="batt__bolt" aria-hidden="true">&#9889;</span>{% endif %}
+          {# Always present so battery.js can show or hide it as the charger comes and goes. #}
+          <span class="batt__bolt" aria-hidden="true"{% if not battery_charging %} hidden{% endif %}>&#9889;</span>
           <span class="readout__value">{% if batt_known %}{{ battery_pct }}%{% else %}&mdash;{% endif %}</span>
         </span>
 
@@ -97,6 +99,8 @@
   </script>
   <!-- Keyboard scrolling on every screen (the Nomad's keys), home grid and lesson bodies alike. -->
   <script src="/static/scroll-keys.js"></script>
+  <!-- The battery gauge redraws itself from /api/battery, so a screen left open stays true. -->
+  <script src="/static/battery.js"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

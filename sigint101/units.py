@@ -37,6 +37,10 @@ UNITS: tuple = (
     Unit(7, "counter-surveillance", "Counter-Surveillance", "counter-surv", (17, 18, 19)),
     Unit(8, "images", "Images", "images", (24, 25)),
     Unit(9, "mesh", "Mesh", "mesh", (28,)),
+    # U10 the Flipper unit (2026-10-31): a device-in-hand tour of the base capabilities, with the
+    # nomad console as a live mirror over USB. M29 intro, M30-M36 one per capability, M37 rig
+    # rescue, M38 capstone. Lesson ids are planned; a lesson appears once its pack has loaded.
+    Unit(10, "flipper", "Flipper", "flipper", (29, 30, 31, 32, 33, 34, 35, 36, 37, 38)),
 )
 
 

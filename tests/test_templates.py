@@ -884,6 +884,54 @@ def test_a_flock_lessons_predict_frame_seals_the_list():
     assert "waterfall-wrap--frozen" not in html
 
 
+def _flipper_intro_lesson():
+    """An intro lesson whose instrument is the attached Flipper (M29's), read over its USB CLI."""
+    return parse_lesson({
+        "id": 29, "slug": "meet-flipper", "title": "Meet the Flipper", "type": "intro",
+        "concept": "plugged into the nomad the Flipper gains a bench, not radios",
+        "panels": ["flipper"], "hardware": ["flipper"],
+        "stages": {"frame": "f", "demo": "DEMO watch the device answer", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_a_flipper_lesson_shows_the_device_panel_not_a_waterfall():
+    html = _console(lesson=_flipper_intro_lesson(), current_stage="demo")
+    demo = _section(html, "demo")
+    assert "data-flipper-panel" in demo
+    assert "canvas class=\"waterfall\"" not in html
+    # The honest states every panel has: a badge that is not LIVE until the device answers, the
+    # device card hidden, and the empty line at the readable size, never a device line up front.
+    assert re.search(r"data-flipper-badge[^>]*>SAMPLE &middot; NOT LIVE<", demo)
+    assert re.search(r"<div[^>]*data-flipper-card[^>]*\shidden", demo)
+    assert re.search(r'class="decoder__empty" data-flipper-empty', demo)
+    # Back a step rides the fixed dial beside Next, as on every other panel's stages.
+    assert 'data-nav="prev"' in demo and 'data-nav="next"' in demo
+
+
+def test_a_flipper_lessons_predict_frame_seals_the_device():
+    html = _console(lesson=_flipper_intro_lesson(), current_stage="predict",
+                    prediction_committed=False)
+    assert "DEVICE HIDDEN" in html
+    assert "data-flipper-panel" not in _section(html, "predict")
+    assert "waterfall-wrap--frozen" not in html
+
+
+def test_the_flipper_panel_is_the_shared_macro_not_lesson_markup():
+    # The rack draws the same panel a lesson does, so its markup lives once, in _panels.html.
+    assert "{% macro flipper() %}" in (TEMPLATES_DIR / "_panels.html").read_text()
+    console = (TEMPLATES_DIR / "console.html").read_text()
+    assert "{{ panels.flipper() }}" in console
+    assert "data-flipper-panel" not in console
+
+
+def test_the_flipper_device_card_reads_at_the_body_text_floor():
+    for selector in (".flipper__line", ".flipper__radio"):
+        assert _font_px(_css_rule(selector)) >= 18, selector
+    # The card is a flex column, which would beat the UA [hidden] rule and show an empty card.
+    assert "display: none" in _css_rule(".flipper[hidden]")
+
+
 def _provenance_lesson():
     """An intro lesson that declares the provenance panel (M3's, deaf-vs-empty)."""
     return parse_lesson({
