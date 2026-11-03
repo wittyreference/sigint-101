@@ -27,6 +27,12 @@ TCPDUMP = "tcpdump"
 PCAP_GLOBAL_HEADER_LEN = 24
 PCAP_RECORD_HEADER_LEN = 16
 
+# The global header's last field is the linktype, which says what each record holds. tcpdump on a
+# monitor interface writes 127 (802.11 behind a radiotap header); ESP32 Marauder writes 105 (bare
+# 802.11, no radiotap). Any other linktype is refused rather than guessed at.
+LINKTYPE_IEEE802_11 = 105
+LINKTYPE_IEEE802_11_RADIOTAP = 127
+
 # 802.11 frame control: type and subtype live in the first octet. A probe request is management
 # (type 0), subtype 4. A management frame header is 24 bytes: fc(2) dur(2) addr1(6) addr2(6)
 # addr3(6) seq(2); the information elements of a probe request begin right after it.
@@ -304,14 +310,37 @@ def _strip_radiotap(frame: bytes) -> bytes | None:
     return frame[rt_len:]
 
 
+def _bare_802_11(frame: bytes) -> bytes:
+    """A linktype-105 record already is the 802.11 frame."""
+    return frame
+
+
+def pcap_link_decoder(global_header: bytes):
+    """The function that turns one record into 802.11 bytes, chosen by the header's linktype.
+
+    Raises ValueError for any linktype but 105 and 127: reading another layout as 802.11 would
+    turn its bytes into addresses that were never on the air.
+    """
+    (linktype,) = struct.unpack("<I", global_header[20:24])
+    if linktype == LINKTYPE_IEEE802_11_RADIOTAP:
+        return _strip_radiotap
+    if linktype == LINKTYPE_IEEE802_11:
+        return _bare_802_11
+    raise ValueError(
+        f"pcap linktype {linktype} is not 802.11 ({LINKTYPE_IEEE802_11}) or 802.11 with "
+        f"radiotap ({LINKTYPE_IEEE802_11_RADIOTAP}); SIGINT 101 will not guess at its frames")
+
+
 def iter_pcap_frames(stream):
-    """Yield the 802.11 bytes of each frame in a pcap stream, radiotap stripped.
+    """Yield the 802.11 bytes of each frame in a pcap stream, radiotap stripped where present.
 
     Reads the global header once, then one record at a time, so it works on a live tcpdump pipe
     exactly as on a captured file. A short read (a truncated or ended stream) stops iteration.
     """
-    if len(_read_exact(stream, PCAP_GLOBAL_HEADER_LEN)) < PCAP_GLOBAL_HEADER_LEN:
+    global_header = _read_exact(stream, PCAP_GLOBAL_HEADER_LEN)
+    if len(global_header) < PCAP_GLOBAL_HEADER_LEN:
         return
+    to_dot11 = pcap_link_decoder(global_header)
     while True:
         header = _read_exact(stream, PCAP_RECORD_HEADER_LEN)
         if len(header) < PCAP_RECORD_HEADER_LEN:
@@ -320,7 +349,7 @@ def iter_pcap_frames(stream):
         frame = _read_exact(stream, caplen)
         if len(frame) < caplen:
             return
-        dot11 = _strip_radiotap(frame)
+        dot11 = to_dot11(frame)
         if dot11 is not None:
             yield dot11
 

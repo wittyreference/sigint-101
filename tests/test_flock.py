@@ -1,6 +1,7 @@
 # ABOUTME: Tests the Flock ALPR detector — parsing real 802.11 mgmt frames and matching signatures.
 # ABOUTME: Fixtures are genuine off-air captures from nomad-b's wlan1; the tcpdump process is faked.
 
+import hashlib
 import io
 import re
 import struct
@@ -81,6 +82,45 @@ def test_iter_pcap_frames_reads_every_record_from_the_real_capture():
     with open(FIXTURE, "rb") as fh:
         frames = list(iter_pcap_frames(fh))
     assert len(frames) == 207
+
+
+# The 802.11 bytes iter_pcap_frames yielded for flock_ch1.pcap before it read the linktype: each
+# frame's length (little-endian uint32) then its bytes, hashed in order. The tcpdump path must
+# keep yielding exactly these bytes.
+FIXTURE_FRAMES_SHA256 = "2669ae276fbd22965c6f398c1da9c4347851d0f3bb5d3e094d313909915a7a99"
+
+
+def test_iter_pcap_frames_keeps_the_real_radiotap_capture_byte_for_byte():
+    digest = hashlib.sha256()
+    with open(FIXTURE, "rb") as fh:
+        for frame in iter_pcap_frames(fh):
+            digest.update(struct.pack("<I", len(frame)) + frame)
+    assert digest.hexdigest() == FIXTURE_FRAMES_SHA256
+
+
+def raw_pcap_stream(frames, linktype):
+    """A pcap byte stream carrying each frame as-is under the given linktype (no radiotap)."""
+    out = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 4096, linktype)
+    for frame in frames:
+        out += struct.pack("<IIII", 0, 0, len(frame), len(frame)) + frame
+    return out
+
+
+def test_iter_pcap_frames_passes_linktype_105_802_11_through_untouched():
+    # LINKTYPE_IEEE802_11 is bare 802.11, the linktype ESP32 Marauder writes: there is no
+    # radiotap header to strip, so the record is the frame.
+    probe = mgmt_frame(4, BROADCAST, FLOCK_OUI + b"\x00\x00\x01", BROADCAST, FLOCK_IES)
+    beacon = mgmt_frame(8, BROADCAST, NON_FLOCK + b"\x00\x00\x09", NON_FLOCK + b"\x00\x00\x09")
+    frames = list(iter_pcap_frames(io.BytesIO(raw_pcap_stream([probe, beacon], 105))))
+    assert frames == [probe, beacon]
+
+
+def test_iter_pcap_frames_refuses_a_linktype_it_cannot_read():
+    # Ethernet (linktype 1) is not 802.11. Guessing at its layout would turn bytes into made-up
+    # addresses, so the reader says so loudly instead.
+    stream = io.BytesIO(raw_pcap_stream([b"\x00" * 60], 1))
+    with pytest.raises(ValueError, match="linktype 1"):
+        list(iter_pcap_frames(stream))
 
 
 def test_parses_real_probe_requests_with_sane_macs_and_signatures():
