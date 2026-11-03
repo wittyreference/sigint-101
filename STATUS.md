@@ -55,18 +55,41 @@
     - the course icon in Soviet red.
     - Applied live on nomad-b; MC saw it on the panel.
   - Flipper: firmware 1.5.1; the 7 approved apps are installed (#31, `docs/flipper-apps.md`).
+  - **Flipper app cleanup** (MC, 2026-11-03: "just remove any apps that aren't ours or directly
+    related to the Elmer stuff"):
+    - 31 old catalog apps were removed from `/ext/apps`, all built for API 87.1 or older, which is
+      the "out of date app" error. Each was backed up first and removed only after its checksum
+      matched the backup. The backups and SHA256SUMS are in the session scratchpad on the
+      droplet (`flipper-apps-removed/`).
+    - Kept: firmware 1.5.1's own apps (checked against the official resources bundle), our 8,
+      and the WiFi Marauder companion. Marauder was rebuilt at catalog pin `5dc2fd68` for API
+      88.2; its MD5 matches and it launched.
   - Wi-Fi devboard: flashed with Marauder (hash-verified) to be the Flock radio in place of the
-    dongle (MC's call, plan in #30). Two things are still open:
-    - it sits in ESP32 download mode until someone presses its RESET button;
-    - the Flipper's USB-UART bridge has not shown a second CDC port yet.
-    - The flock.py Marauder capture source is not built.
+    dongle (MC's call, plan in #30).
+    - It sat in ESP32 download mode until a reset. MC has since unplugged and re-seated it; that
+      it booted is not checked.
+    - The flock.py Marauder capture source is built (#40) and off by default
+      (`SIGINT101_FLOCK_SOURCE=marauder`). It is NOT verified on the device: the bridge's
+      `-if02` port and live frames are untested.
   - Antennas (MC, field kit): the ANT500 moved to the SDR jack, and a 915 MHz whip went on LoRa.
     FM SNR fell from 27 dB to 5.5 dB. Re-measure with the ANT500 fully extended.
   - MC ran `provision.sh` on nomad-b (2026-11-02).
-- **In flight (agents, PRs into `ux-polish`):**
-  - a real battery readout from the UPS INA219 in place of "—";
-  - a Flipper module refresh on today's base (supersedes PR #5);
-  - lesson explains trimmed to the fit budget.
+- **Also merged into `ux-polish`, 2026-11-03:**
+  - #36: the bar's green rule runs the full width.
+  - #37: the real battery from the UPS daemon.
+    - Open question for MC: the daemon is custom to nomad-b, so the gift box shows "—".
+  - #38: Flipper module U10/M29. It supersedes #5, which is closed.
+  - #39: explains ≤120 words and narration ≤60, enforced by a test.
+  - #40: the Marauder Flock source.
+- **Lesson item quality** (MC, 2026-11-03: "the quality of the questions is extremely poor. I've
+  gotten every one wrong"):
+  - MC's record: L1–L4, 4 of 4 missed.
+  - The review is in `docs/audit/2026-11-03-item-review.md`: the method, a per-item rubric and
+    rewrites. The blind expert pass is in `docs/audit/2026-11-03-item-blind-expert.md`.
+  - **5 predicts are BROKEN:** L1, L2, L3, L7 and L8. The keys come from theory, not from what
+    this screen draws. L4 is sound.
+  - There is no post-lesson check, so teaching quality is unmeasured.
+  - **Pending MC:** scope before 11-08.
 - **Known small follow-ups (not in the cut line):**
   - the sunlight "LIVE" badge on the waterfall is low contrast;
   - the red-night image filter is verified on a test pattern only;
@@ -75,19 +98,24 @@
   - DMR repeat de-dup is unverified (no capture);
   - the RDS station is a provisioning value (no auto-pick);
   - home's second unit row tucks about 20 px under the bars (the grid scrolls);
-  - the desktop bar's green rule has small gaps under the tray icons;
+  - the M19 Rayhunter panel shows raw urlopen error text, which overflows its box by 30 px;
+  - in the tcpdump Flock path, a pcap parse error ends the reader while tcpdump keeps running,
+    so the panel reads LIVE with nothing reading;
   - `/tmp/theme-wt` on nomad-b is a scratch worktree; remove it when the box is home.
 - **Hand-over is 2026-11-08.**
 
 **Needed from MC, one at a time when reached:**
-1. Press RESET on the Wi-Fi devboard, so it boots Marauder. Then Claude builds the flock.py
-   Marauder source and chases the bridge's second CDC port.
-2. Extend the ANT500 fully. Claude then re-measures FM SNR.
-3. One look at the panel, then an OK to merge `ux-polish` to main (PR #15). nomad-b runs
-   @3b96cf0; #33 only adds the theme files, which are already applied there.
-4. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
+1. Lesson item quality: decide the scope before 11-08 (see Lesson item quality above). Also a
+   ten-minute think-aloud on L1–L4: why "wider", why "smaller".
+2. Check Marauder answers: in the Flipper's WiFi Marauder app, Scan APs. Then put GPIO →
+   USB-UART Bridge on channel 1, so Claude can prove the `-if02` port and live Flock frames.
+3. Extend the ANT500 fully. Claude then re-measures FM SNR.
+4. One look at the panel, then an OK to merge `ux-polish` to main (PR #15). nomad-b runs
+   @3b96cf0; the ux-polish merges since then are not deployed there yet.
+5. Battery on the gift box: ship nomad-b's daemon, or read the INA219 directly (read-only).
+6. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
    triage item 19.
-5. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
+7. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
 
 ## Current state (observed 2026-11-02)
 - **main**: the 28-lesson curriculum (U1–U9), plus today's merges:
