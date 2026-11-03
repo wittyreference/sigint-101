@@ -75,6 +75,40 @@ def test_the_gain_verdict_reads_the_meter_floor_at_middle_and_top_rungs():
     assert keys.gain_verdict(flat) == "stays"
 
 
+def _frames(plan):
+    """50 ms I/Q frames from a plan of (seconds, keyed, talking) stretches."""
+    frames, t = [], 0.0
+    for seconds, keyed, talking in plan:
+        for _ in range(round(seconds * 20)):
+            frames.append({"t": t, "carrier_db": 30.0 if keyed else 2.0,
+                           "voice_db": 20.0 if (keyed and talking) else 1.0,
+                           "chan_lin": 100.0 if keyed else 1.0, "bins_lin": 1.0})
+            t += 0.05
+    return frames
+
+
+def test_a_carrier_held_through_a_word_gap_darkens_only_rows_after_the_key_is_let_go():
+    # Key up and talk 2 s, pause 0.5 s still keyed, talk 1.5 s, let go for 3 s, a reply of 2 s.
+    frames = _frames([(2, True, True), (0.5, True, False), (1.5, True, True), (3, False, False),
+                      (2, True, True), (1, False, False)])
+    found = keys.carrier_check(frames)
+    assert found["transmissions"] == 2
+    assert found["speech_pauses"] == 1
+    assert found["carrier_dropouts"] == 0
+    assert found["rows_lit"] == [True] * 4 + [False] * 3 + [True] * 2 + [False]
+    assert found["dark_rows_while_keyed"] == 0
+    assert keys.carrier_verdict(found) == "ptt"
+
+
+def test_with_no_pause_heard_under_a_held_carrier_the_check_names_no_chip():
+    # Every quiet stretch here is a carrier-off one, so nothing says whether it was a word gap or
+    # a released key: the capture can't back either chip.
+    frames = _frames([(2, True, True), (1.5, False, False), (2, True, True), (1, False, False)])
+    found = keys.carrier_check(frames)
+    assert found["speech_pauses"] == 0
+    assert keys.carrier_verdict(found) is None
+
+
 def test_airband_gaps_are_dark_runs_between_lit_runs_on_one_channel():
     # Bin 3 is a channel that keys up for 3 rows, drops for 2, keys up for 1, then stays dark.
     lit = [1, 1, 1, 0, 0, 1, 0, 0]

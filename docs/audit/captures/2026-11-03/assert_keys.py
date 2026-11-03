@@ -224,6 +224,61 @@ def airband_channels(rows, above_db=LIT_DB) -> list:
     return channels
 
 
+def read_frames(path) -> list:
+    """50 ms frames as iq_carrier.py wrote them."""
+    with open(path, newline="") as fh:
+        return [{"t": float(r[0]), "carrier_db": float(r[1]), "voice_db": float(r[2]),
+                 "chan_lin": float(r[3]), "bins_lin": float(r[4])} for r in csv.reader(fh)]
+
+
+def carrier_check(frames, keyed_db=10.0, pause_db=10.0, pause_frames=4, per_row=20) -> dict:
+    """What the I/Q frames say about L8's dark rows.
+
+    A frame is keyed while its carrier line stands `keyed_db` over the median bin. A speech pause
+    is `pause_frames` or more frames, inside one keyed stretch, whose sidebands sit `pause_db`
+    below that stretch's median: a word gap heard while the carrier was still up. A dropout is a
+    carrier-off stretch shorter than a row with a keyed one either side. Rows are `per_row`
+    frames (one second), lit as the waterfall lights them: the channel's 42 kHz bin 6 dB over the
+    median bin.
+    """
+    keyed = [f["carrier_db"] >= keyed_db for f in frames]
+    stretches, i = [], 0
+    for flag, n in _runs(keyed):
+        stretches.append((flag, i, n))
+        i += n
+    pauses = 0
+    for flag, start, n in stretches:
+        if not flag:
+            continue
+        voice = [f["voice_db"] for f in frames[start:start + n]]
+        typical = statistics.median(voice)
+        quiet = [v <= typical - pause_db for v in voice]
+        pauses += sum(1 for q, m in _runs(quiet) if q and m >= pause_frames)
+    dropouts = sum(1 for k, (flag, _, n) in enumerate(stretches)
+                   if not flag and 0 < k < len(stretches) - 1 and n < per_row)
+    rows_lit, dark_keyed = [], 0
+    for start in range(0, len(frames) - per_row + 1, per_row):
+        row = frames[start:start + per_row]
+        chan = sum(f["chan_lin"] for f in row) / per_row
+        median = sum(f["bins_lin"] for f in row) / per_row
+        lit = chan >= median * 10 ** (LIT_DB / 10)
+        rows_lit.append(lit)
+        if not lit and sum(keyed[start:start + per_row]) >= per_row / 2:
+            dark_keyed += 1
+    return {"transmissions": sum(1 for flag, _, _ in stretches if flag),
+            "speech_pauses": pauses, "carrier_dropouts": dropouts,
+            "rows_lit": rows_lit, "dark_rows_while_keyed": dark_keyed}
+
+
+def carrier_verdict(found):
+    """"ptt" when the carrier was heard holding through a word gap, no row went dark while a
+    transmitter was keyed, and some row did go dark between transmissions; else None."""
+    if (found["speech_pauses"] >= 1 and found["dark_rows_while_keyed"] == 0
+            and not all(found["rows_lit"])):
+        return "ptt"
+    return None
+
+
 def _pack_answers() -> dict:
     sys.path.insert(0, str(REPO))
     from sigint101.lessons import load_lessons
@@ -274,7 +329,18 @@ def main() -> int:
         for c in sorted(busy, key=lambda c: -len(c["lit_runs"]))[:6]:
             print(f"L8 {c['freq_hz'] / 1e6:.3f} MHz: lit {c['lit_runs']} gaps {c['gaps']}")
     else:
-        print("L8: no capture — key provisional")
+        print("L8: no waterfall capture")
+    iq = HERE / "l8-iq-frames.csv"
+    if iq.exists():
+        found = carrier_check(read_frames(iq))
+        lit = found["rows_lit"]
+        print(f"L8 I/Q: {found['transmissions']} keyed stretches, {found['speech_pauses']} word "
+              f"gaps under a held carrier, {found['carrier_dropouts']} sub-second dropouts, "
+              f"{lit.count(False)}/{len(lit)} rows dark, {found['dark_rows_while_keyed']} of "
+              f"them while keyed")
+        failed |= _report(8, carrier_verdict(found), answers[8])
+    else:
+        print("L8: no I/Q capture — key provisional")
     return 1 if failed else 0
 
 
