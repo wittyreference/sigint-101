@@ -43,12 +43,12 @@ stages:
     is the likelier culprit the far-off FM you removed, or the antenna length and aim from earlier?
   explain: >-
     No — wrong culprit. The notch is a targeted tool, not a cleanup: it removes the FM broadcast
-    band, 88 to 108 MHz, and nothing else. It helps another band only when
-    strong FM is swamping the front end and blinding the whole radio, as under a tower. With no
-    tower near, there is nothing to take away, and the hiss at 915 isn't FM, so it isn't quieter
-    either. Weak 915 wants last lesson's fix: legs grown to about 8.2 cm, aimed for how the gadget
-    is polarized. Carry this out the door: name the disease first — length and aim are fixed at
-    the antenna, an overloading neighbour with a notch, and more gain fixes neither.
+    band, 88 to 108 MHz, and nothing else. It helps another band only when strong FM is swamping
+    the front end and blinding the whole radio, as under a tower. With no tower near, there is
+    nothing to take away, and the hiss at 915 isn't FM, so it isn't quieter either. Weak 915 wants
+    last lesson's fix: legs grown to about 8.2 cm, aimed for how the gadget is polarized. Carry
+    this out the door: name the disease first — length and aim are fixed at the antenna, an
+    overloading neighbour with a notch, and more gain fixes neither.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
@@ -60,7 +60,8 @@ choices:
   - {key: little, label: "A little, less noise overall"}
 
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
-# The stem rules out the one case where the notch would help (strong FM nearby), so one chip is right.
+# The stem rules out the one case where the notch would help (strong FM nearby), so one chip is
+# right.
 answer: ["no"]
 verdict: >-
   No: the notch removes only 88 to 108 MHz. With no strong FM overloading the front end, it does
