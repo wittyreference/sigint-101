@@ -32,24 +32,37 @@ CARRIER_HZ = 60
 VOICE_HZ = (300, 3_000)
 
 
+def spectra(raw, n, window):
+    """Each 50 ms frame's power spectrum, centred (negative frequencies first)."""
+    for k in range(len(raw) // (2 * n)):
+        chunk = raw[2 * n * k: 2 * n * (k + 1)].astype(np.float32) - 127.5
+        x = (chunk[0::2] + 1j * chunk[1::2]) * window
+        yield k, np.abs(np.fft.fftshift(np.fft.fft(x))) ** 2
+
+
 def main(path, rate, offset_hz, out):
     rate, offset_hz = int(rate), float(offset_hz)
     n = int(rate * FRAME_S)
     window = np.hanning(n)
     freqs = np.fft.fftshift(np.fft.fftfreq(n, 1 / rate))
     res = rate / n
+    raw = np.memmap(path, dtype=np.uint8, mode="r")
+    # The waterfall only places the channel within a 42 kHz bin, and the radio reads about
+    # +164 ppm, so the carrier is found here: the strongest line, held over the whole recording,
+    # within a bin of where the waterfall lit.
+    hold = np.zeros(n)
+    for _, p in spectra(raw, n, window):
+        hold = np.maximum(hold, p)
+    look = np.abs(freqs - offset_hz) <= WATERFALL_BIN_HZ
+    offset_hz = freqs[np.flatnonzero(look)[np.argmax(hold[look])]]
+    print(f"carrier found at {offset_hz:+.0f} Hz from the tuned frequency", file=sys.stderr)
     near = np.abs(freqs - offset_hz) <= SEARCH_HZ
     chan = np.abs(freqs - offset_hz) <= WATERFALL_BIN_HZ / 2
     edges = np.arange(freqs[0], freqs[-1], WATERFALL_BIN_HZ)
     which = np.digitize(freqs, edges)
-    raw = np.memmap(path, dtype=np.uint8, mode="r")
-    frames = len(raw) // (2 * n)
     with open(out, "w", newline="") as fh:
         w = csv.writer(fh)
-        for k in range(frames):
-            chunk = raw[2 * n * k: 2 * n * (k + 1)].astype(np.float32) - 127.5
-            x = (chunk[0::2] + 1j * chunk[1::2]) * window
-            p = np.abs(np.fft.fftshift(np.fft.fft(x))) ** 2
+        for k, p in spectra(raw, n, window):
             floor = np.median(p)
             peak = np.flatnonzero(near)[np.argmax(p[near])]
             span = int(round(CARRIER_HZ / res))
