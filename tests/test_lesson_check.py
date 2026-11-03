@@ -1,6 +1,7 @@
 # ABOUTME: The post-lesson check: an optional scored stage after explain posing one new situation on
 # ABOUTME: the lesson's concept — its loader rules, the stored answer, the route, and the screen.
 
+import re
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from sigint101.events import read_events
 from sigint101.hardware import RadioProbe
 from sigint101.lessons import LessonError, RevealLockedError, load_lessons, parse_lesson
 from sigint101.progress import CheckAlreadyAnswered, Progress
+from tests.test_templates import APP_CSS, THEMES, _contrast, _theme_tokens
 
 PACK_DIR = Path(__file__).resolve().parent.parent / "lesson_packs"
 
@@ -320,3 +322,38 @@ def test_the_unit_1_check_keys_are_spread_across_chip_positions():
         check = lessons[i].check
         spots.append([c["key"] for c in check["choices"]].index(check["answer"]))
     assert max(spots.count(spot) for spot in set(spots)) <= 2, spots
+
+
+# --- the result tag reads in every theme --------------------------------------------------------
+
+def _css_rule(selector):
+    match = re.search(r"\n" + re.escape(selector) + r" \{(.*?)\}", APP_CSS.read_text(), re.S)
+    return match.group(1) if match else ""
+
+
+def _token(rule, prop):
+    match = re.search(r"(?<![-\w])" + prop + r":\s*var\((--[\w-]+)\)", rule)
+    return match.group(1) if match else None
+
+
+def _tag_colours(theme, outcome):
+    """The (ink, fill) the check's Right/Not yet tag paints in a theme, through the CSS cascade.
+
+    Resolved through the theme's own tokens, so a colour outside its palette has no hex to find.
+    """
+    ink = fill = None
+    for selector in (".verdict__tag", f".verdict--{outcome} .verdict__tag",
+                     f'.app[data-theme="{theme}"] .verdict--{outcome} .verdict__tag'):
+        rule = _css_rule(selector)
+        ink = _token(rule, "color") or ink
+        fill = _token(rule, "background") or fill
+    tokens = _theme_tokens(theme)
+    return tokens[ink], tokens[fill]
+
+
+@pytest.mark.parametrize("outcome", ["hit", "miss"])
+@pytest.mark.parametrize("theme", THEMES)
+def test_the_check_result_tag_reads_at_4_5_to_1(theme, outcome):
+    ink, fill = _tag_colours(theme, outcome)
+    ratio = _contrast(ink, fill)
+    assert ratio >= 4.5, f"{theme} {outcome} tag {ink} on {fill} is {ratio:.2f}:1"

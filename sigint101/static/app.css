@@ -972,6 +972,14 @@ button.rail-pip:disabled {
 .check__result b {
   color: var(--fg);
 }
+/* Red-night's dim --warn fill under dark ink measured 3.3:1, so there "Not yet" is an outline:
+   the bright red ink on the darkest red fill (about 6:1), told from "Right"'s filled tag by its
+   fill as well as its word, and still red alone. */
+.app[data-theme="red-night"] .verdict--miss .verdict__tag {
+  color: var(--fg);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--warn);
+}
 
 /* ===== Instrument (waterfall + tune) ===================================== */
 .instrument {
