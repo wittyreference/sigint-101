@@ -1,5 +1,5 @@
 <!-- ABOUTME: Kiosk page skeleton for the 800x480 touch console: the persistent status
-     ABOUTME: bar (ppm chip, SNR, battery, theme toggle), an always-visible Back, and a content block. -->
+     ABOUTME: bar (ppm chip, SNR, battery, theme toggle), Back (Exit on home), and a content block. -->
 <!DOCTYPE html>
 <html lang="en" data-theme="{{ theme|default('dark') }}">
 <head>
@@ -11,12 +11,23 @@
 <body>
   <div class="app" data-theme="{{ theme|default('dark') }}">
 
-    {# ---- Persistent status bar: Back is always here, on every screen ---- #}
+    {# ---- Persistent status bar: Back is always here, on every screen but home (Exit there) ---- #}
     <header class="statusbar">
+      {% if exit_to_desktop %}
+      {# Home has nowhere to go back to, so its Back slot closes the course window instead and
+         leaves the learner on the Pi desktop. A plain form: no script needed to leave. #}
+      <form class="statusbar__exit" method="post" action="/api/kiosk/exit">
+        <button class="btn-back btn-exit" type="submit" aria-label="Exit SIGINT 101 to the desktop">
+          <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H4v16h6M14 8l4 4-4 4M18 12H8"/></svg>
+          <span class="btn-back__label btn-exit__label">Exit<br>SIGINT 101</span>
+        </button>
+      </form>
+      {% else %}
       <a class="btn-back" href="{{ back_href|default('/') }}" aria-label="Back to {{ back_label|default('home') }}">
         <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
         <span class="btn-back__label">{{ back_label|default('Back') }}</span>
       </a>
+      {% endif %}
 
       <div class="statusbar__title">{% block title %}{{ title|default('SIGINT 101') }}{% endblock %}</div>
 

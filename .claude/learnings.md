@@ -533,3 +533,31 @@ Expect reception counts in threes from that sensor; deduplicating repeats is a f
 - On nomad-b, the udev rule is parked at
   `/etc/udev/rules.d/70-sigint101-monitor.rules.disabled` until a hub is in place.
 - After any USB or radio change, grep `dmesg` for `over-current` before calling it done.
+
+## 2026-11-03: course on the Pi desktop — Chromium retitles itself; pcmanfm trusts only /usr/share
+**Finding.**
+- **Chromium rewrites its process title.** On nomad-b, `/proc/<pid>/cmdline` for every kiosk
+  Chromium process is ONE space-joined string with a single trailing NUL, not one element per
+  flag. `pgrep -f` still matches (it searches the joined line). A test double that served neat
+  argv lists passed, but an exact argv-element match found nothing on the real box. Only a dry
+  run of `request_exit` against nomad-b's real `/proc`, with signals recorded rather than sent,
+  caught it.
+- **pcmanfm prompts before running a desktop entry.** On a double-tap of a `Type=Application`
+  `.desktop` in `~/Desktop`, libfm 1.3.2 (rpt18) treats any readable desktop entry as executable.
+  It then asks "This text file seems to be an executable script. Execute / Execute in Terminal?"
+  unless the global `quick_exec` is set. Neither the exec bit nor `gio` metadata helps: there is no
+  trust attribute in this libfm.
+  - The one prompt-free path is a `Type=Link` whose `URL` is a plain path (not `file://`) to an
+    entry under `/usr/share/` or `/usr/local/share/`.
+  - So the menu entry lives in `/usr/local/share/applications`, and the desktop icon links to it.
+- **raspi-config B4 also writes the tty1 getty autologin.** The desktop boots and tty1 logs in too,
+  so a leftover `~/.profile` kiosk hook would start a second compositor there. `install.sh`
+  removes the hook by its markers.
+**How to apply.**
+- Match a Chromium process by a whole flag in the joined command line, never by argv element.
+- Dry-run anything that picks processes to kill against the real target's `/proc`, recording
+  signals instead of sending them.
+- For a tap-to-launch desktop icon on Pi OS, use a Link to a `/usr/local/share/applications`
+  entry; don't flip `quick_exec`, which changes every script on the desktop.
+- Exit order matters: write the flag, then SIGTERM. The watchdog checks the browser first and the
+  flag second, so it can never see "no browser" from an Exit without also seeing the flag.

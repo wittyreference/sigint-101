@@ -1,0 +1,10 @@
+# ABOUTME: The SIGINT 101 menu entry; install.sh puts it in /usr/local/share/applications, where the
+# ABOUTME: desktop icon (a Link to it) is trusted by pcmanfm, so a tap opens the course with no prompt.
+[Desktop Entry]
+Type=Application
+Name=SIGINT 101
+Comment=Open the SIGINT 101 course full-screen
+Exec=/usr/local/bin/sigint101-course open
+Icon=/usr/local/share/icons/hicolor/scalable/apps/sigint101.svg
+Terminal=false
+Categories=Education;

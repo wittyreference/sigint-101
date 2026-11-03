@@ -353,6 +353,31 @@ body {
   text-transform: uppercase;
 }
 
+/* Home's Exit takes Back's slot: the form is only a wrapper, so the button keeps the bar's full
+   height. Two short lines keep it about Back's width, which leaves the title its room. */
+.statusbar__exit {
+  display: flex;
+  flex: none;
+  margin: 0;
+}
+.btn-exit__label {
+  line-height: 1.2;
+  text-align: left;
+}
+/* Like the theme toggle, the 63px box's tap area runs on into the grid's top padding below it,
+   where nothing else is tappable, to make a full touch-sized target. */
+.btn-exit {
+  position: relative;
+}
+.btn-exit::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--touch);
+}
+
 .statusbar__title {
   flex: 1 1 auto;
   min-width: 0;
