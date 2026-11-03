@@ -1,25 +1,36 @@
 # ABOUTME: Tests the Flock ALPR detector — parsing real 802.11 mgmt frames and matching signatures.
-# ABOUTME: Fixtures are genuine off-air captures from nomad-b's wlan1; the tcpdump process is faked.
+# ABOUTME: A real off-air wlan1 capture, also wrapped as Marauder's serial; tcpdump and tty faked.
 
 import hashlib
 import io
+import os
 import re
+import select
 import struct
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from sigint101 import childproc
 from sigint101.flock import (
     FLOCK_IE_SIGNATURE,
     FLOCK_OUIS,
+    MARAUDER_TTY_GLOB,
     FlockDetector,
     FlockRoster,
     FlockUnavailable,
+    MarauderFlockDetector,
+    MarauderLink,
+    _open_marauder_port,
+    configured_flock_detector,
     iter_marauder_frames,
     iter_pcap_frames,
     match_signatures,
     parse_management_frame,
 )
+from tests.test_app import _client
 
 # A real off-air capture: tcpdump -i wlan1 -s 512 -w off wlan1 in monitor mode, 2026-10-29.
 # 207 management frames, 63 of them probe requests (random_eero, Fellow_OTA, DIRECT-MBUX, ...).
@@ -524,3 +535,245 @@ def test_marauder_reader_refuses_a_linktype_it_cannot_read():
     data = MARAUDER_STARTUP + marauder_chunk(marauder_header(linktype=1))
     with pytest.raises(ValueError, match="linktype 1"):
         list(iter_marauder_frames(io.BytesIO(data)))
+
+
+# --------------------------------------------------------------------------- Marauder source
+
+
+class Bridge:
+    """A real tty pair standing in for the Flipper's USB-UART bridge port.
+
+    The detector opens the slave end exactly as it opens the bridge's CDC port (real termios, real
+    select); the test plays the devboard on the master end. The double sits only at the hardware
+    boundary: everything between the port and the roster is the product's own code.
+    """
+
+    def __init__(self):
+        self.master, self._slave = os.openpty()
+        self.path = os.ttyname(self._slave)
+
+    def heard(self, quiet=0.3):
+        """What the detector has typed so far, read until the line goes quiet."""
+        out = b""
+        while select.select([self.master], [], [], quiet)[0]:
+            try:
+                data = os.read(self.master, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            out += data
+        return out
+
+    def say(self, data, timeout=5.0):
+        """Send bytes as the devboard would, never blocking past the timeout."""
+        deadline = time.monotonic() + timeout
+        while data:
+            if not select.select([], [self.master], [], max(0.0, deadline - time.monotonic()))[1]:
+                raise AssertionError("the detector stopped reading the port")
+            data = data[os.write(self.master, data):]
+
+    def hang_up(self):
+        """The bridge goes away (the Flipper unplugged, or out of USB-UART Bridge)."""
+        os.close(self.master)
+        self.master = None
+
+    def close(self):
+        for fd in (self.master, self._slave):
+            if fd is not None:
+                os.close(fd)
+
+
+@pytest.fixture
+def bridge():
+    port = Bridge()
+    yield port
+    port.close()
+
+
+def wait_for(check, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not check():
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out waiting")
+        time.sleep(0.02)
+
+
+def test_marauder_source_types_stop_channel_and_sniff_then_stopscan_on_stop(bridge):
+    dec = MarauderFlockDetector(tty=bridge.path)
+    dec.start()
+    try:
+        assert bridge.heard() == b"stopscan\nchannel -s 1\nsniffprobe -serial\n"
+        assert dec.live_command() == "sniffprobe -serial"     # the command strip's real line
+        assert dec.interface == bridge.path
+    finally:
+        dec.stop()
+    assert bridge.heard() == b"stopscan\n"
+    assert dec.running is False
+    assert dec.live_command() is None
+
+
+def test_marauder_source_goes_live_once_marauder_answers_and_detects_from_its_frames(
+        bridge, monkeypatch):
+    monkeypatch.setattr(childproc, "SETTLE_S", 0.0)
+    flock = mgmt_frame(4, BROADCAST, FLOCK_OUI + b"\x00\x00\x11", BROADCAST, FLOCK_IES)
+    dec = MarauderFlockDetector(tty=bridge.path)
+    dec.start()
+    try:
+        bridge.heard()
+        assert dec.watch.settling() is True        # typed to, but no answer yet: starting
+        bridge.say(marauder_stream(fixture_probes()[:20] + [flock]))
+        wait_for(lambda: dec.detections())
+        rows = dec.detections()
+        assert [(r["mac"], r["tier"]) for r in rows] == [("b4:1e:52:00:00:11", 4)]
+        assert dec.watch.settling() is False       # the pcap is flowing: live
+        assert dec.running is True and dec.error is None
+    finally:
+        dec.stop()
+
+
+def test_marauder_source_without_the_bridge_port_has_no_monitor_radio(tmp_path):
+    dec = MarauderFlockDetector(tty=str(tmp_path / "ttyACM1"))
+    with pytest.raises(FlockUnavailable, match="no monitor radio") as refused:
+        dec.start()
+    assert "GPIO → USB-UART Bridge" in str(refused.value)
+    assert dec.running is False
+    assert dec.watch.stopped is False             # never ran: no radio, not a stopped one
+
+
+def test_marauder_source_looks_for_the_bridge_port_by_id():
+    # The bridge on USB channel 1 is the Flipper's second CDC port, USB interface 2.
+    asked = []
+    dec = MarauderFlockDetector(glob=lambda pattern: asked.append(pattern) or [])
+    with pytest.raises(FlockUnavailable, match="no monitor radio"):
+        dec.start()
+    assert asked == [MARAUDER_TTY_GLOB] == ["/dev/serial/by-id/*Flipper*-if02"]
+
+
+def test_marauder_source_uses_the_one_bridge_port_it_finds(bridge):
+    dec = MarauderFlockDetector(glob=lambda pattern: [bridge.path])
+    dec.start()
+    try:
+        assert bridge.heard().endswith(b"sniffprobe -serial\n")
+        assert dec.interface == bridge.path
+    finally:
+        dec.stop()
+
+
+def test_marauder_source_refuses_to_guess_between_two_bridges():
+    two = ["/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_Aaa_flip_Aaa-if02",
+           "/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_Bbb_flip_Bbb-if02"]
+    dec = MarauderFlockDetector(glob=lambda pattern: two)
+    with pytest.raises(FlockUnavailable, match="more than one"):
+        dec.start()
+
+
+def test_marauder_source_refuses_a_path_that_is_no_serial_port(tmp_path):
+    plain = tmp_path / "ttyACM1"
+    plain.write_bytes(b"")
+    dec = MarauderFlockDetector(tty=str(plain))
+    with pytest.raises(FlockUnavailable, match="cannot open"):
+        dec.start()
+
+
+def test_marauder_source_nobody_answers_on_is_stopped_with_that_reason(bridge):
+    dec = MarauderFlockDetector(tty=bridge.path, answer_timeout=0.3)
+    dec.start()
+    dec.drain()
+    with pytest.raises(FlockUnavailable, match="no answer from Marauder") as stopped:
+        dec.start()
+    assert bridge.path in str(stopped.value)
+    assert dec.watch.stopped is True
+    assert dec.watch.reason == str(stopped.value)  # its own words, never an invented exit status
+
+
+def test_marauder_source_that_loses_its_link_is_stopped_with_that_reason(bridge):
+    dec = MarauderFlockDetector(tty=bridge.path)
+    dec.start()
+    bridge.say(marauder_stream([]))
+    wait_for(lambda: dec._proc.answered)
+    bridge.hang_up()
+    dec.drain()
+    assert dec.running is False
+    assert dec.watch.stopped is True
+    # A hung-up tty reads as end of file or as EIO depending on timing; either is said as such.
+    assert re.fullmatch(rf"the serial link to Marauder on {re.escape(bridge.path)} closed "
+                        r"\((end of file|Input/output error)\)", dec.watch.reason)
+    # The port went with the bridge, so the next poll says the radio is gone, not merely stopped.
+    with pytest.raises(FlockUnavailable, match="no monitor radio"):
+        dec.start()
+
+
+def test_marauder_source_whose_devboard_restarts_is_stopped_not_left_live(bridge):
+    # A devboard that browns out and reboots comes back idle: its sniff is gone, and a quiet link
+    # would otherwise read LIVE forever. Marauder's boot prints the ESP-IDF version first
+    # (esp32_marauder.ino:383); the rest of this boot text is illustrative.
+    dec = MarauderFlockDetector(tty=bridge.path)
+    dec.start()
+    bridge.say(marauder_stream([]))
+    wait_for(lambda: dec._proc.answered)
+    bridge.say(b"ESP-ROM:esp32s2-rc4-20191025\r\nESP-IDF version is: v4.4.4\r\n")
+    dec.drain()
+    assert dec.running is False
+    assert dec.watch.reason.startswith("Marauder restarted on the devboard")
+
+
+def test_marauder_stream_it_cannot_read_stops_the_sniff_and_says_why(bridge):
+    dec = MarauderFlockDetector(tty=bridge.path)
+    dec.start()
+    bridge.heard()
+    bridge.say(MARAUDER_STARTUP + marauder_chunk(marauder_header(linktype=1)))
+    dec.drain()
+    with pytest.raises(FlockUnavailable, match="linktype 1"):
+        dec.start()
+    assert bridge.heard() == b"stopscan\n"       # Marauder is not left streaming to nobody
+
+
+def test_a_marauder_link_keeps_the_stop_contract_a_process_keeps(bridge):
+    # stop_process asks (terminate), waits, then insists (kill): the link answers all three the
+    # way a child does, so the watch and the stop path need no special case for it.
+    link = MarauderLink(_open_marauder_port(bridge.path), bridge.path)
+    assert link.poll() is None
+    with pytest.raises(subprocess.TimeoutExpired):
+        link.wait(timeout=0.01)
+    link.kill()                                   # insisting: closed without typing stopscan
+    assert link.wait(timeout=0) == 0 and link.end_reason is None
+    assert bridge.heard() == b""
+    with pytest.raises(OSError):
+        link.send("sniffprobe -serial")
+    assert link.read() == b""
+
+
+def test_the_site_picks_the_flock_radio_from_the_environment():
+    assert type(configured_flock_detector({})) is FlockDetector
+    assert type(configured_flock_detector({"SIGINT101_FLOCK_SOURCE": "tcpdump"})) is FlockDetector
+    by_id = configured_flock_detector({"SIGINT101_FLOCK_SOURCE": "marauder"})
+    assert isinstance(by_id, MarauderFlockDetector)
+    assert by_id.interface == MARAUDER_TTY_GLOB
+    pinned = configured_flock_detector({"SIGINT101_FLOCK_SOURCE": " Marauder ",
+                                        "SIGINT101_MARAUDER_TTY": "/dev/ttyACM1"})
+    assert isinstance(pinned, MarauderFlockDetector)
+    assert pinned.interface == "/dev/ttyACM1"
+
+
+def test_the_console_builds_the_marauder_source_when_the_site_asks(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGINT101_FLOCK_SOURCE", "marauder")
+    monkeypatch.setenv("SIGINT101_MARAUDER_TTY", str(tmp_path / "ttyACM1"))
+    with _client(tmp_path) as client:
+        resp = client.get("/api/flock")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["detections"] == []
+    assert "no monitor radio" in body["reason"] and "USB-UART Bridge" in body["reason"]
+
+
+def test_the_panel_reads_stopped_when_marauder_never_answers(tmp_path, bridge):
+    dec = MarauderFlockDetector(tty=bridge.path, answer_timeout=0.3)
+    with _client(tmp_path, flock_factory=lambda: dec) as client:
+        first = client.get("/api/flock").json()
+        assert first["state"] == "starting" and first["command"] == "sniffprobe -serial"
+        dec.drain()
+        body = client.get("/api/flock").json()
+    assert body["available"] is False
+    assert body["state"] == "stopped"
+    assert body["reason"].startswith(f"no answer from Marauder on {bridge.path}")

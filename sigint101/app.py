@@ -41,7 +41,7 @@ from .exam import (
     next_sim_question,
     score_exam,
 )
-from .flock import FlockDetector, FlockUnavailable
+from .flock import FlockUnavailable, configured_flock_detector
 from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
 from .kiosk import request_exit
 from .lessons import COMMIT_STAGE, load_lessons
@@ -423,10 +423,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_sstv = sstv_factory
 
-    # The Flock detector runs tcpdump on wlan1 in monitor mode — a separate radio from the RTL-SDR,
-    # like the LoRa listener, so it needs no arbitration with the sweeper or the SDR decoders.
+    # The Flock detector runs tcpdump on wlan1 in monitor mode, or reads the Flipper's Marauder
+    # devboard over its USB-UART bridge when the site sets SIGINT101_FLOCK_SOURCE=marauder — a
+    # separate radio from the RTL-SDR either way, like the LoRa listener, so it needs no
+    # arbitration with the sweeper or the SDR decoders.
     if flock_factory is None:
-        build_flock = FlockDetector
+        build_flock = configured_flock_detector
     else:
         build_flock = flock_factory
 

@@ -1,14 +1,18 @@
-# ABOUTME: Detects Flock ALPR cameras on nomad-b's wlan1 — parses 802.11 mgmt frames, matches sigs.
-# ABOUTME: No monitor interface, no tcpdump, no camera in range — an empty roster, never a fake hit.
+# ABOUTME: Detects Flock ALPR cameras from 802.11 mgmt frames off wlan1 or the Flipper's Marauder.
+# ABOUTME: No monitor radio, no capture, no camera in range — an empty roster, never a fake hit.
 
 from __future__ import annotations
 
+import glob as _glob
 import os
+import select
 import shutil
 import struct
 import subprocess
+import termios
 import threading
 import time
+import tty
 from dataclasses import dataclass
 
 from .childproc import ChildWatch, running_command, spawn, stop_process
@@ -495,12 +499,7 @@ class FlockDetector:
         if self.running:
             return
         self._settle()
-        if not self._which(TCPDUMP):
-            raise FlockUnavailable(
-                f"{TCPDUMP} is not installed, so SIGINT 101 cannot watch for Flock cameras")
-        if not self._radio_present():
-            raise FlockUnavailable(
-                f"no monitor interface {self.interface} — SIGINT 101 will not fake a detection")
+        self._check_radio()
         if self.error:
             reason, self.error = self.error, None
             raise FlockUnavailable(reason)
@@ -509,22 +508,38 @@ class FlockDetector:
         blocked = self.watch.blocked()
         if blocked:
             raise FlockUnavailable(blocked)
-        try:
-            self._proc = self._spawn(self.interface)
-        except (OSError, ValueError) as exc:
-            self._proc = None
-            raise FlockUnavailable(f"cannot run tcpdump: {exc}") from exc
+        self._proc = self._open_capture()
         self.watch.spawned(self._proc)
         self.error = None
         self._thread = threading.Thread(target=self._read, args=(self._proc,),
                                         name="sigint101-flock", daemon=True)
         self._thread.start()
 
+    def _check_radio(self) -> None:
+        """Refuse, saying what is missing, when tcpdump or the monitor interface is absent."""
+        if not self._which(TCPDUMP):
+            raise FlockUnavailable(
+                f"{TCPDUMP} is not installed, so SIGINT 101 cannot watch for Flock cameras")
+        if not self._radio_present():
+            raise FlockUnavailable(
+                f"no monitor interface {self.interface} — SIGINT 101 will not fake a detection")
+
+    def _open_capture(self):
+        """Launch tcpdump on the monitor interface; its stdout is the pcap stream."""
+        try:
+            return self._spawn(self.interface)
+        except (OSError, ValueError) as exc:
+            raise FlockUnavailable(f"cannot run tcpdump: {exc}") from exc
+
+    def _frames(self, proc):
+        """The 802.11 frames the running capture yields."""
+        return iter_pcap_frames(proc.stdout)
+
     def _read(self, proc) -> None:
         """Consume the pcap stream on a background thread, feeding matched frames to the roster."""
         detected = set()   # the MACs this capture has already reported as new detections
         try:
-            for dot11 in iter_pcap_frames(proc.stdout):
+            for dot11 in self._frames(proc):
                 frame = parse_management_frame(dot11)
                 if frame is None:
                     continue
@@ -580,3 +595,273 @@ class FlockDetector:
         with self._lock:
             rows = self._roster.detections(limit)
         return [d.as_dict() for d in rows]
+
+
+# The second capture source: the Flipper's Wi-Fi devboard (ESP32-S2) running ESP32 Marauder,
+# reached through the Flipper's GPIO -> USB-UART Bridge. With the bridge on USB channel 1 the
+# Flipper switches to its dual-CDC configuration and the bridge is the second port, USB interface
+# 2, beside the CLI's interface 0 (flipperzero-firmware 1.5.1 usb_uart_bridge.c:107-115,
+# furi_hal_usb_cdc.c:294-305), so udev names it ...-if02. Matched by the stable by-id name, like
+# the Flipper CLI in flipper.py, never by a ttyACM number that moves with plug order.
+MARAUDER = "Marauder"
+MARAUDER_TTY_GLOB = "/dev/serial/by-id/*Flipper*-if02"
+
+# Marauder's console runs at 115200 baud (v1.20.0 esp32_marauder.ino:336). The speed set on the
+# port is not cosmetic: the bridge's default baud is "Host", so the Flipper drives its UART at the
+# rate this side asks for (gpio_scene_usb_uart.c:37, usb_uart_bridge.c:146-158).
+MARAUDER_BAUD = termios.B115200
+
+# What the detector types, one line each (Marauder reads a command up to a newline,
+# CommandLine.cpp:71-79). stopscan first, because -serial is only read while nothing is scanning
+# (CommandLine.cpp:759-761). Channel 1 is pinned so a sniff left on another channel by an earlier
+# session cannot move it (CommandLine.cpp:642-652). sniffprobe captures probe requests only
+# (WiFiScan.cpp:9088-9144), the frames the strongest tiers judge; with ChanHop off by default
+# (settings.cpp:583-585) it stays on that one channel, as wlan1 does.
+MARAUDER_STOP = "stopscan"
+MARAUDER_CHANNEL = "channel -s 1"
+MARAUDER_SNIFF = "sniffprobe -serial"
+
+# How long Marauder has to start streaming its pcap after the sniff is typed. It answers within a
+# few of its 50 ms main-loop passes; a port where nothing answers this long is reported stopped.
+MARAUDER_ANSWER_S = 5.0
+
+# How often a waiting read wakes to check whether the link was closed or the answer is overdue.
+LINK_POLL_S = 0.2
+
+# The first line Marauder prints as it boots (esp32_marauder.ino:383). Heard after the sniff has
+# answered, it means the devboard restarted (a brownout, say) and came back idle: its sniff is gone
+# and a quiet link would otherwise read LIVE. A probe for an SSID spelled the same would cost a
+# needless restart after the back-off, never a fake detection. The link keeps enough of a tail to
+# catch either marker split across reads.
+MARAUDER_BOOT = b"ESP-IDF version is: "
+MARAUDER_MARKER_TAIL = max(len(MARAUDER_BEGIN), len(MARAUDER_BOOT)) - 1
+
+
+def _open_marauder_port(path: str) -> int:
+    """Open the bridge's port raw at Marauder's baud, with any stale input dropped.
+
+    Raw, because pcap is binary: a cooked tty would translate CR/LF and treat 0x11/0x13 as flow
+    control, corrupting records. Non-blocking, so neither the open (a serial port can wait on a
+    carrier line) nor a write to a bridge that stopped draining can hang a console request.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        tty.setraw(fd)
+        attrs = termios.tcgetattr(fd)
+        attrs[4] = attrs[5] = MARAUDER_BAUD
+        attrs[2] |= termios.CLOCAL | termios.CREAD
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIFLUSH)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+class MarauderLink:
+    """The serial line to Marauder on the devboard, held the way FlockDetector holds tcpdump.
+
+    There is no process on this side: Marauder runs on the ESP32 beyond the Flipper's bridge. The
+    link stands in for one (poll, terminate, kill, wait, args), so the detector's watch reports a
+    link that went silent or away exactly as it reports a tcpdump that died, with `end_reason` in
+    place of an exit status. read() is the byte stream iter_marauder_frames consumes. `answered`
+    turns true once Marauder's first pcap chunk arrives.
+    """
+
+    def __init__(self, fd: int, path: str, *, answer_timeout: float = MARAUDER_ANSWER_S,
+                 clock=time.monotonic):
+        self.path = path
+        self.args = MARAUDER_SNIFF.split()
+        self.answered = False
+        self.end_reason = None
+        # No exit status exists: 0 marks a close we asked for, 1 an end that end_reason explains.
+        self.returncode = None
+        self._fd = fd
+        self._lock = threading.Lock()
+        self._ended = threading.Event()
+        self._clock = clock
+        self._answer_timeout = answer_timeout
+        self._answer_by = clock() + answer_timeout
+        self._seen = b""
+
+    def send(self, line: str) -> None:
+        """Type one command into Marauder's console."""
+        data = line.encode() + b"\n"
+        with self._lock:
+            if self._fd is None:
+                raise OSError(f"the link to {self.path} is closed")
+            while data:
+                data = data[os.write(self._fd, data):]
+
+    def read(self, n: int = 4096) -> bytes:
+        """Bytes from Marauder as they arrive; b'' once the link has ended."""
+        while True:
+            fd = self._fd
+            if fd is None:
+                return b""
+            if not self.answered and self._clock() >= self._answer_by:
+                self.end(f"no answer from Marauder on {self.path} within "
+                         f"{self._answer_timeout:g} s: is the Wi-Fi devboard seated and "
+                         "running Marauder?")
+                return b""
+            try:
+                ready = select.select([fd], [], [], LINK_POLL_S)[0]
+            except (OSError, ValueError):
+                ready = [fd]            # closed under us, or failing: the read below says which
+            if not ready:
+                continue
+            with self._lock:
+                # Re-checked under the lock: a close by stop() must never be followed by a read
+                # of whatever file has since taken the same descriptor number.
+                if self._fd is None:
+                    return b""
+                try:
+                    data = os.read(self._fd, n)
+                    why = "end of file"
+                except BlockingIOError:     # woken with nothing to read after all
+                    continue
+                except OSError as exc:
+                    data, why = b"", exc.strerror or str(exc)
+            if not data:
+                self.end(f"the serial link to Marauder on {self.path} closed ({why})")
+                return b""
+            seen = self._seen + data
+            self._seen = seen[-(MARAUDER_MARKER_TAIL):]
+            if not self.answered:
+                self.answered = MARAUDER_BEGIN in seen
+            elif MARAUDER_BOOT in seen:
+                self.end("Marauder restarted on the devboard (its boot text arrived), so its "
+                         "sniff stopped")
+                return b""
+            return data
+
+    def end(self, reason: str | None = None) -> None:
+        """Stop the sniff and release the port, with why if it was not asked for."""
+        with self._lock:
+            if self._fd is None:
+                return
+            try:
+                os.write(self._fd, MARAUDER_STOP.encode() + b"\n")
+            except OSError:  # the bridge is already gone; nothing is left to stop
+                pass
+            self._close_locked(reason)
+
+    def _close_locked(self, reason: str | None) -> None:
+        os.close(self._fd)
+        self._fd = None
+        self.end_reason = reason
+        self.returncode = 1 if reason else 0
+        self._ended.set()
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.end()
+
+    def kill(self) -> None:
+        with self._lock:
+            if self._fd is not None:
+                self._close_locked(None)
+
+    def wait(self, timeout=None):
+        if not self._ended.wait(timeout):
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return self.returncode
+
+
+class _LinkWatch(ChildWatch):
+    """A ChildWatch that keeps a Marauder link "starting" until Marauder has answered on it."""
+
+    def __init__(self, tool: str):
+        super().__init__(tool)
+        self._link = None
+
+    def spawned(self, proc) -> None:
+        super().spawned(proc)
+        self._link = proc
+
+    def settling(self) -> bool:
+        link = self._link
+        unanswered = link is not None and link.poll() is None and not link.answered
+        return unanswered or super().settling()
+
+
+class MarauderFlockDetector(FlockDetector):
+    """FlockDetector listening through the Flipper Wi-Fi devboard (ESP32 Marauder) instead of wlan1.
+
+    Marauder only captures: it sniffs probe requests and streams them as pcap. The frames are
+    judged by parse_management_frame and match_signatures here, never by Marauder's own detectors.
+    It refuses honestly: no bridge port is no monitor radio; a port nobody answers on, or a link
+    that drops, is stopped with the reason.
+    """
+
+    def __init__(self, *, tty=None, glob=_glob.glob, answer_timeout=MARAUDER_ANSWER_S,
+                 ssid_match_enabled=False):
+        super().__init__(interface=tty or MARAUDER_TTY_GLOB,
+                         ssid_match_enabled=ssid_match_enabled)
+        self._tty = tty
+        self._glob = glob
+        self._answer_timeout = answer_timeout
+        self.watch = _LinkWatch(MARAUDER)
+
+    def _check_radio(self) -> None:
+        """Find the bridge's port, or say there is no monitor radio and how to bring it up."""
+        if self._tty:
+            ports = [self._tty] if os.path.exists(self._tty) else []
+        else:
+            ports = sorted(self._glob(MARAUDER_TTY_GLOB))
+        if not ports:
+            raise FlockUnavailable(
+                f"no monitor radio: no Flipper USB-UART bridge port at {self.interface}. On the "
+                "Flipper, with the Wi-Fi devboard seated: GPIO → USB-UART Bridge, USB Channel 1")
+        if len(ports) > 1:
+            names = ", ".join(os.path.basename(p) for p in ports)
+            raise FlockUnavailable(
+                f"more than one Flipper USB-UART bridge, refusing to guess: {names}")
+        self.interface = ports[0]
+
+    def _open_capture(self):
+        """Open the bridge's port and type the sniff; the link is the capture."""
+        try:
+            fd = _open_marauder_port(self.interface)
+        except (OSError, termios.error) as exc:
+            raise FlockUnavailable(f"cannot open {self.interface}: {exc}") from exc
+        link = MarauderLink(fd, self.interface, answer_timeout=self._answer_timeout)
+        try:
+            for line in (MARAUDER_STOP, MARAUDER_CHANNEL, MARAUDER_SNIFF):
+                link.send(line)
+        except OSError as exc:
+            link.kill()
+            raise FlockUnavailable(f"cannot write to {self.interface}: {exc}") from exc
+        return link
+
+    def _frames(self, link):
+        """Marauder's frames. A stream that cannot be read stops the sniff and ends the link."""
+        try:
+            yield from iter_marauder_frames(link)
+        except (ValueError, struct.error) as exc:
+            link.end(str(exc))
+            raise
+
+
+# Which radio the Flock detector listens with, set at provisioning like the site's FM stations.
+# "marauder" reads the Flipper's devboard over the bridge (on SIGINT101_MARAUDER_TTY when set,
+# else the bridge's by-id port); anything else, or nothing, keeps tcpdump on wlan1.
+FLOCK_SOURCE_ENV = "SIGINT101_FLOCK_SOURCE"
+MARAUDER_TTY_ENV = "SIGINT101_MARAUDER_TTY"
+FLOCK_SOURCE_MARAUDER = "marauder"
+
+
+def configured_flock_detector(environ=None) -> FlockDetector:
+    """The Flock detector this site provisioned.
+
+    An unknown source falls back to tcpdump rather than taking the console down at boot; the
+    panel's reason then names the radio actually used (no monitor interface wlan1), so a typo
+    shows instead of hiding.
+    """
+    env = os.environ if environ is None else environ
+    source = (env.get(FLOCK_SOURCE_ENV) or "").strip().lower()
+    if source == FLOCK_SOURCE_MARAUDER:
+        return MarauderFlockDetector(tty=(env.get(MARAUDER_TTY_ENV) or "").strip() or None)
+    return FlockDetector()
