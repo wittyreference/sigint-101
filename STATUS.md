@@ -1,6 +1,14 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
+**First, once nomad-b is back online** (it dropped off Tailscale about 03:50 UTC on 11-03, in the field):
+1. Clear the scratch (see follow-ups).
+2. Deploy `ux-polish` to nomad-b. It runs @3b96cf0, so it is missing #36–#43. Deploying restarts
+   the server, so only when MC isn't using the panel.
+3. Run the L1, L2 and L8 key captures (`docs/audit/captures/2026-11-03/`), with the course closed
+   and inside the SDR flock.
+4. Re-render L2, L7 and L8 at 800x480.
+
 **Phase 3: fix sprint against MC's cut line (2026-11-02).** Plan of record:
 `docs/plans/2026-11-02-resume-audit-handover.md`.
 - Phases 1–2 are done. The audits are in `docs/audit/`; triage page:
@@ -89,7 +97,22 @@
   - **5 predicts are BROKEN:** L1, L2, L3, L7 and L8. The keys come from theory, not from what
     this screen draws. L4 is sound.
   - There is no post-lesson check, so teaching quality is unmeasured.
-  - **Pending MC:** scope before 11-08.
+  - **MC's call, verbatim: "Fix 5 + reframe + U1 check (Recommended)".** Both parts are merged
+    into `ux-polish`:
+    - **#42:**
+      - the reveal reads "Your call: X · What the radio does: Y", or "In fact: Y" for
+        `predict_kind: knowledge`, with no score on a predict (`correct` is still stored);
+      - a scored post-lesson **check** on L1–L4 ("Right" / "Not yet" plus a why per chip);
+      - `tests/test_item_lint.py` (one key, stem ≤45 words, chips within 2×, no giveaway, with a
+        waiver table).
+    - **#43:** L1, L2, L3, L7 and L8 rewritten. All pass the lint with no waivers.
+  - **Keys still provisional (NOT VERIFIED on the real waterfall):**
+    - L1 "Narrower", L2 "Rises with it" and L8 "Released push-to-talk". The kiosk held the dongle,
+      and then nomad-b went offline.
+    - The capture scripts are in `docs/audit/captures/2026-11-03/`. Run them when nomad-b is
+      reachable and the course is closed. If the data disagrees, re-key to match the data.
+    - L3 "No, they look alike" needs MC's antenna-off step (see Needed from MC).
+  - Not yet re-rendered after the merge: L2, L7 and L8's new chips under #42's reveal header.
 - **Known small follow-ups (not in the cut line):**
   - the sunlight "LIVE" badge on the waterfall is low contrast;
   - the red-night image filter is verified on a test pattern only;
@@ -101,12 +124,19 @@
   - the M19 Rayhunter panel shows raw urlopen error text, which overflows its box by 30 px;
   - in the tcpdump Flock path, a pcap parse error ends the reader while tcpdump keeps running,
     so the panel reads LIVE with nothing reading;
-  - `/tmp/theme-wt` on nomad-b is a scratch worktree; remove it when the box is home.
+  - scratch to remove on nomad-b once it's back:
+    - the `/tmp/theme-wt` worktree, `/tmp/fapchk` and `/tmp/items-iq`;
+    - an agent's headless Chromium with profile `/tmp/items-prof`, if it's still running (kill by
+      PID, never `pkill chromium`).
 - **Hand-over is 2026-11-08.**
 
 **Needed from MC, one at a time when reached:**
-1. Lesson item quality: decide the scope before 11-08 (see Lesson item quality above). Also a
-   ten-minute think-aloud on L1–L4: why "wider", why "smaller".
+1. **L3's key, a physical step.**
+   - Claude records an empty 20 MHz span outside FM with the antenna on.
+   - MC unscrews the SDR antenna, not the LoRa one.
+   - Claude records the same span again, then MC screws the antenna back on.
+   - Steps are in `docs/audit/captures/2026-11-03/capture.py`.
+   - Also a ten-minute think-aloud on L1–L4: why "wider", why "smaller".
 2. Check Marauder answers: in the Flipper's WiFi Marauder app, Scan APs. Then put GPIO →
    USB-UART Bridge on channel 1, so Claude can prove the `-if02` port and live Flock frames.
 3. Extend the ANT500 fully. Claude then re-measures FM SNR.
