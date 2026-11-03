@@ -13,6 +13,24 @@ it only records what the console's rtl_power sweep (spectrum.py) delivered.
 
 Every row is written as: label, ts, gain, freq_low, freq_step, then one dB value per bin, with an
 empty field where rtl_power measured nothing (a hop's centre bin).
+
+Running it: serve the branch on nomad-b at 127.0.0.1:8064 inside `flock /tmp/sigint101-sdr.lock`
+(never the kiosk's 8008), forward that port, and pass http://127.0.0.1:8064 as BASE. Then
+`assert_keys.py` reads the CSVs written here (l1-fm-rows.csv, l2-gain-rows.csv,
+l8-airband-rows.csv; l8-iq-frames.csv comes from iq_carrier.py).
+
+L3 needs hands on the radio, so its capture is a short drill:
+  1. Pick a 20 MHz span outside FM where the waterfall shows no stripe at nomad-b's location that
+     day, and record it with the antenna on:
+       capture.py BASE span l3-antenna-on.csv --low LOW --high HIGH --label antenna-on
+     and screenshot the waterfall at 800x480.
+  2. MC unscrews the SDR antenna from the Nomad's SDR port (receive-only, so safe; leave the LoRa
+     antenna alone).
+  3. The same command with l3-antenna-off.csv and --label antenna-off, and a second screenshot.
+  4. MC screws the SDR antenna back on.
+  5. Two people who don't know which is which pick the deaf radio over 5 screenshot pairs. At no
+     better than chance, "No, they look alike" holds. If they can pick it, re-key L3 to "Only by a
+     faint dimming". Record the change in the row median (the meter's floor), in dB, either way.
 """
 
 import argparse
