@@ -47,13 +47,18 @@ def test_m11_predict_choices_are_well_formed_string_key_label():
         assert isinstance(label, str) and label, f"choice {choice!r} needs a non-empty string label"
 
 
-def test_m11_try_puts_the_second_nodes_antenna_on_before_power():
+def test_m11_try_keeps_the_second_nodes_antenna_on():
     # The try asks for a transmission from a second node. A LoRa radio powered with no antenna on
-    # its jack can be damaged, so the try says the antenna goes on first.
+    # its jack can be damaged, so the try keeps the antenna on. Any of three wordings will do:
+    # "antenna always on", "antenna ... before ... power", or Meshtastic's own "never power ...
+    # without ... antenna".
     lesson = load_lesson_file(PACK)
     ask = lesson.stages["try"].lower()
-    assert re.search(r"\bantenna\b[^.?!]*\bbefore\b[^.?!]*\bpower", ask), (
-        "the try must put the second node's antenna on before power")
+    assert re.search(r"\bantenna always on\b"
+                     r"|\bantenna\b[^.?!]*\bbefore\b[^.?!]*\bpower"
+                     r"|\bnever power\b[^.?!]*\bwithout\b[^.?!]*\bantenna\b", ask), (
+        "the try must keep the second node's antenna on: 'antenna always on', "
+        "'antenna ... before ... power' or 'never power ... without ... antenna'")
 
 
 def test_m11_try_names_the_region_and_preset_the_second_node_shares_with_the_box():
@@ -72,3 +77,11 @@ def test_m11_try_keeps_its_distance_and_the_path_with_no_second_node():
     ask = lesson.stages["try"]
     assert "50 cm" in ask
     assert "an empty list is the honest answer" in ask
+
+
+def test_m11_try_measures_the_50_cm_from_the_nomad():
+    # The half metre keeps a close transmitter from overloading the Nomad's own LoRa receiver, so
+    # it is measured from the Nomad, and the try says so.
+    lesson = load_lesson_file(PACK)
+    assert "50 cm from the Nomad" in lesson.stages["try"], (
+        "the try must measure the distance from the Nomad: '50 cm from the Nomad'")

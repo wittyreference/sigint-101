@@ -58,19 +58,28 @@ def test_m28_keeps_the_honest_encrypted_note_in_the_copy():
     assert "encrypted" in lesson.stages["demo"].lower()
 
 
-def test_m28_try_puts_the_second_nodes_antenna_on_before_power():
+def test_m28_try_keeps_the_second_nodes_antenna_on():
     # The try invites the learner to add a second node. A LoRa radio powered with no antenna on
-    # its jack can be damaged, so the try says the antenna goes on first.
+    # its jack can be damaged, so the try keeps the antenna on. Any of three wordings will do:
+    # "antenna always on", "antenna ... before ... power", or Meshtastic's own "never power ...
+    # without ... antenna".
     lesson = load_lesson_file(PACK)
     ask = lesson.stages["try"].lower()
-    assert re.search(r"\bantenna\b[^.?!]*\bbefore\b[^.?!]*\bpower", ask), (
-        "the try must put the second node's antenna on before power")
+    assert re.search(r"\bantenna always on\b"
+                     r"|\bantenna\b[^.?!]*\bbefore\b[^.?!]*\bpower"
+                     r"|\bnever power\b[^.?!]*\bwithout\b[^.?!]*\bantenna\b", ask), (
+        "the try must keep the second node's antenna on: 'antenna always on', "
+        "'antenna ... before ... power' or 'never power ... without ... antenna'")
 
 
 def test_m28_try_names_the_region_and_preset_the_second_node_shares_with_the_box():
     # A Meshtastic node sends nothing until its region is set, and nodes need the same region and
     # modem preset to communicate. Left unsaid, a mismatch is an empty list with no reason given.
+    # The stage names LongFast earlier as our channel, so the preset is looked for in the sentence
+    # about the second node. That sentence named LongFast before this check was written: the
+    # LongFast line is a guard against a later trim, not a test that failed first.
     lesson = load_lesson_file(PACK)
     ask = lesson.stages["try"].lower()
     assert "region" in ask, "the try must name the region"
-    assert "longfast" in ask, "the try must name the LongFast preset"
+    assert re.search(r"\bsecond\b[^.?!]*\bnode\b[^.?!]*\blongfast", ask), (
+        "the sentence about the second node must name LongFast: 'second ... node ... LongFast'")
