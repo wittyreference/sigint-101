@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Target: nomad-b (`spec5b`), Flipper on `/dev/ttyACM0`, official fw 1.4.3. Dev loop: author in this droplet worktree → push branch → on nomad-b `git fetch && git checkout -f <branch>` → run uvicorn → HIL over `ssh spec5@100.108.20.20`.
+- Target: nomad-b (`spec5b`), Flipper on `/dev/ttyACM0`, official fw 1.4.3. Dev loop: author in this droplet worktree → push branch → on nomad-b `git fetch && git checkout -f <branch>` → run uvicorn → HIL over `ssh spec5@<nomad-b tailnet address>`.
 - **No fake/mock mode in the product.** The only test double is `FlipperCli`'s `opener` seam (a scripted byte channel) and `FlipperConsole`'s injected `cli_factory`/`glob`; no real serial in unit tests. Acceptance is real device output.
 - **Build on the existing transport** (`flipper.py`: `FlipperCli`/`probe_flipper`/`read_file`, errors `FlipperError`/`FlipperSelectionError`) and `.sub` parser (`subfile.py`). Do not reimplement them or edit their tests. No new exception type (reuse `FlipperError`).
 - **TDD for logic:** parsers are test-first against **real captured fixtures** (CLI text / saved `.sub`/`.nfc`/`.ir`/RFID/iButton files pulled from the device), the way AIS used the gpsd vectors. Never edit a test to fit a bug.
