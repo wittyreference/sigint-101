@@ -105,14 +105,16 @@ ff_config_array() {
 
 # Read credential patterns as tab-separated: pattern\tname\texcludePattern
 # Usage: while IFS=$'\t' read -r pattern name exclude; do ... done < <(ff_credential_patterns)
+#
+# Callers match with grep -E, which has no (?:...) groups and no \s, so both are rewritten into
+# ERE here; carriage returns from Windows jq builds are dropped. The rewrite sits after both
+# sources, the preloaded variable and jq, so neither path can hand grep the config's raw text.
 ff_credential_patterns() {
     if [ -n "${FF_PRELOADED:-}" ]; then
         printf '%s' "$FF_C_CREDENTIALS"
-        return
-    fi
-    if [ -f "$FF_CONFIG" ] && command -v jq &>/dev/null; then
+    elif [ -f "$FF_CONFIG" ] && command -v jq &>/dev/null; then
         jq -r '.credentialPatterns[]? | [.pattern, .name, (.excludePattern // "")] | join("\t")' "$FF_CONFIG" 2>/dev/null
-    fi
+    fi | tr -d '\r' | sed -e 's/(?:/(/g' -e 's/\\s/[[:space:]]/g'
 }
 
 # Read doc mappings as tab-separated: sourcePattern\tdocTarget
