@@ -52,7 +52,7 @@ floor); **antenna off + around a corner + held in a fist (body absorption at 900
 was the last ~10-15 dB that tipped it. Lowering tx_power alone could not (max ~39 dB, not enough and
 awkward on the Cardputer UI); removing the antenna + losing line-of-sight + body absorption did.
 **Do not repeat the antenna-off step on a node that can transmit:** keep an antenna or a 50-ohm load
-on every LoRa jack, and get path loss from distance, lower power or an attenuator.
+on every LoRa jack, and weaken the link with distance, lower power or an attenuator.
 One HIL fix the render caught:
 the panel was listing the node's OWN telemetry (sender present, no `rxSnr`) — a no-rxSnr packet is
 locally originated, not an air reception, so `parse_lora_packet` now skips it.
