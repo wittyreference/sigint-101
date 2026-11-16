@@ -56,6 +56,8 @@ LINKTYPE_RADIOTAP = 127
 #   - a real device's address behind an allowed vendor prefix;
 #   - an address written another way: without separators, in dotted groups of four digits, or
 #     inside a longer run of octets;
+#   - an address built in code: a byte list, \x escapes, or a vendor prefix joined to a device
+#     part, which is how the tests themselves write them;
 #   - inside a capture, anything but the 802.11 address fields: the names and addresses that
 #     information elements carry (Wi-Fi Direct, WPS, vendor elements) are not read;
 #   - an address in any other binary file: a pcapng or a pcap of another link type is reported

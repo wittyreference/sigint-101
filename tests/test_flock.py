@@ -45,7 +45,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "flock_ch1.pcap"
 FLOCK_OUI = bytes.fromhex("b41e52")          # Flock's own IEEE block
 FLOCK_OUI_LOCALLY_ADMIN = bytes.fromhex("826bf2")   # has the LA bit set — must still match
 BROADCAST = b"\xff\xff\xff\xff\xff\xff"
-NON_FLOCK = bytes.fromhex("ac:f1:08".replace(":", ""))   # a real eero OUI, not Flock's
+NON_FLOCK = bytes.fromhex("ac:f1:08".replace(":", ""))   # a registered vendor prefix, not Flock's
 
 # The exact Flock probe-request IE sequence, per the upstream fingerprint. Built by hand so that
 # walking its TLVs (skipping the SSID) serialises to FLOCK_IE_SIGNATURE. No real camera was in
