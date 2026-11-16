@@ -1,6 +1,7 @@
 # ABOUTME: Tests for deploy/desktop/apply-theme.sh (the phosphor-terminal desktop) run as real bash.
 # ABOUTME: gsettings, fc-cache, fc-list, pgrep and friends are stubs on PATH (the OS boundary).
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,12 +19,32 @@ def box(tmp_path):
     b.close()
 
 
-def test_a_box_without_fontconfig_still_installs_the_theme(box):
+def _path_without_fontconfig(box, tmp_path):
+    """A PATH for this box with no fontconfig anywhere on it, whatever the host has installed.
+
+    Deleting the fc-cache and fc-list stubs is not enough. The box searches /usr/bin after its
+    stubs, so on a host with fontconfig installed the real tools answer in the stubs' place, and
+    the run is not one without fontconfig. Instead every tool on the box's PATH is linked into one
+    directory, leaving out fontconfig's own (all named fc-*), and that directory is the whole PATH.
+    """
+    tools = tmp_path / "no-fontconfig"
+    tools.mkdir()
+    for directory in box.env()["PATH"].split(":"):
+        for tool in Path(directory).iterdir():
+            link = tools / tool.name
+            # The first directory to name a tool wins, as in a PATH lookup: stubs before the host.
+            if not tool.name.startswith("fc-") and not link.is_symlink():
+                link.symlink_to(tool)
+    return str(tools)
+
+
+def test_a_box_without_fontconfig_still_installs_the_theme(box, tmp_path):
     # A box with no fontconfig yet (a bare image provisioned over SSH) gets every file; the font
     # cache and the font choice wait for the desktop's own fontconfig.
-    (box.bin / "fc-cache").unlink()
-    (box.bin / "fc-list").unlink()
-    run = box.run(THEME)
+    path = _path_without_fontconfig(box, tmp_path)
+    for tool in ("fc-cache", "fc-list"):
+        assert shutil.which(tool, path=path) is None, f"{tool} is still on the box's PATH"
+    run = box.run(THEME, PATH=path)
     assert run.returncode == 0, run.stderr
     assert (box.home / ".themes/SIGINT101/gtk-3.0/gtk.css").is_file()
     assert "gsettings set org.gnome.desktop.interface font-name PT Mono 11" not in box.calls(
