@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# ABOUTME: Pre-merge-commit identity guard — runs githooks/pre-commit's check for a merge commit,
+# ABOUTME: which a merge git completes itself (git merge, git pull) writes without pre-commit.
+exec "$(dirname "$0")/pre-commit" --merge
