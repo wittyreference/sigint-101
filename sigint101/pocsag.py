@@ -1,4 +1,4 @@
-# ABOUTME: Decodes POCSAG pager framing via rtl_fm|multimon-ng for M15; on the commercial band the
+# ABOUTME: Decodes POCSAG pager framing via rtl_fm|multimon-ng for M15; on every frequency the
 # ABOUTME: words are dropped at parse time. No radio, no pages: an empty log, never an invented one.
 
 from __future__ import annotations
@@ -24,12 +24,13 @@ from .hardware import (
 # channels at 929.0125 MHz plus n x 25 kHz, so 929.6125 is one (929.6000 sat between two).
 DEFAULT_POCSAG_HZ = 929_612_500
 
-# The US commercial paging band (Part 22 and Part 90 paging, 929-932 MHz). Pages here are carried
-# by a paging company, so under 18 USC 2510(16)(D) they are not "readily accessible to the general
-# public": decoding the words is interception (2511(1)(a)); only tone-only pages are excluded from
-# "electronic communication" (2510(12)(B)). On this band the console shows the framing only.
-COMMERCIAL_PAGING_LOW_HZ = 929_000_000
-COMMERCIAL_PAGING_HIGH_HZ = 932_000_000
+# The text rule: a page's words are withheld on every frequency. A page carried by a paging company
+# is not "readily accessible to the general public" (18 USC 2510(16)(D)), so decoding its words is
+# interception (2511(1)(a)); only tone-only pages are excluded from "electronic communication"
+# (2510(12)(B)). Carriers do not page on 929-932 MHz alone: 47 CFR 22.531 lists paging channels on
+# VHF too (152.24, 152.84, 158.10 and 158.70 MHz), and 22.561 one-way or two-way channels at 152
+# and 454 MHz. Nothing in a page says who carried it, so wherever it is tuned the console shows the
+# framing only, and nothing here turns the words back on.
 
 # multimon-ng expects 16-bit signed mono at 22050 Hz on its raw input; rtl_fm is told to match.
 POCSAG_SAMPLE_RATE = 22050
@@ -49,25 +50,21 @@ _LINE = re.compile(
     r"(?:(?P<label>Alpha|Numeric|Skyper):\s*(?P<text>.*))?$")
 
 
-def on_commercial_paging_band(freq_hz: int) -> bool:
-    """Is this frequency in the US commercial paging band, where a page's words are not ours?"""
-    return COMMERCIAL_PAGING_LOW_HZ <= int(freq_hz) <= COMMERCIAL_PAGING_HIGH_HZ
-
-
 class PocsagUnavailable(RuntimeError):
     """The POCSAG stream cannot be read. Never a reason to invent a page — the log stays empty."""
 
 
 @dataclass(frozen=True)
 class PocsagPage:
-    """One decoded pager message: who it was addressed to, how it was framed, and — only where the
-    words are lawfully ours — what it carried. A withheld page keeps its length, never its text."""
+    """One decoded pager message: who it was addressed to and how it was framed, never what it
+    said. A page that carried words keeps their length and says they were withheld; `text` stays
+    in the record, always None, so what the API serves keeps its shape."""
 
     baud: int
     address: int | None
     function: int | None
     kind: str                  # alpha | numeric | skyper | tone
-    text: str | None = None
+    text: None = None          # always None: the words are dropped before a page is built
     length: int = 0            # characters (or digits) in the message; 0 for a tone-only page
     text_withheld: bool = False
 
@@ -87,15 +84,15 @@ def _maybe_int(token: str):
     return None if token == "-" else int(token)
 
 
-def parse_pocsag_line(line: str, *, keep_text: bool = False) -> PocsagPage | None:
+def parse_pocsag_line(line: str) -> PocsagPage | None:
     """Turn one multimon-ng POCSAG line into a PocsagPage, or None if it is not one.
 
     multimon-ng's other demodulators and its status output take other shapes; only a POCSAG line
     carries a pager message. A line whose address or function will not parse is not a page.
 
-    The words are withheld unless the caller says they may be kept (`keep_text`): the page keeps
-    its framing and its length, and the text is dropped here, before anything can store, log or
-    serve it. Withholding is the default so no caller can forget to mask.
+    The words are always withheld: the page keeps its framing and its length, and the text is
+    dropped here, before anything can store, log or serve it. No argument keeps it, so no caller
+    can forget to mask and none can choose not to.
     """
     m = _LINE.match((line or "").rstrip("\n"))
     if not m:
@@ -112,10 +109,8 @@ def parse_pocsag_line(line: str, *, keep_text: bool = False) -> PocsagPage | Non
         kind = label.lower()
         text = (m["text"] or "").rstrip() or None
     length = len(text) if text else 0
-    withheld = text is not None and not keep_text
     return PocsagPage(baud=int(m["baud"]), address=address, function=function,
-                      kind=kind, text=None if withheld else text, length=length,
-                      text_withheld=withheld)
+                      kind=kind, length=length, text_withheld=text is not None)
 
 
 class PageLog:
@@ -171,9 +166,9 @@ class PocsagDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._log = PageLog()
-        # Called with each page as a plain dict (its words already withheld on the commercial
-        # band), from the reader thread only and outside the log lock. The console's hook logs it
-        # as a reception and never raises, so the call is made directly: it cannot end the decode.
+        # Called with each page as a plain dict (its words already withheld), from the reader
+        # thread only and outside the log lock. The console's hook logs it as a reception and
+        # never raises, so the call is made directly: it cannot end the decode.
         self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
@@ -196,11 +191,6 @@ class PocsagDecoder:
     @property
     def released(self) -> bool:
         return self._released
-
-    @property
-    def keeps_text(self) -> bool:
-        """May this decoder keep a page's words? Never on the commercial paging band."""
-        return not on_commercial_paging_band(self.freq_hz)
 
     def _choose_device(self) -> int:
         if self._list_devices is None:
@@ -226,8 +216,8 @@ class PocsagDecoder:
         """Move to another frequency: the running pipeline stops, and the next start() spawns there.
 
         The pages heard on the old frequency are cleared as release() clears them, but the dongle
-        is not handed away. Tuning to where the decoder already is changes nothing. Whether the
-        next child may keep a page's words is decided by the band it is spawned on.
+        is not handed away. Tuning to where the decoder already is changes nothing. A page's words
+        stay withheld wherever the next child is spawned.
         """
         with self._life:
             if int(freq_hz) == self.freq_hz:
@@ -264,30 +254,22 @@ class PocsagDecoder:
         if blocked:
             raise PocsagUnavailable(blocked)
         self.device = self._choose_device()
-        spawned_hz = self.freq_hz
         try:
-            self._proc = self._spawn(spawned_hz, self.device)
+            self._proc = self._spawn(self.freq_hz, self.device)
         except (OSError, ValueError) as exc:
             self._proc = None
             raise PocsagUnavailable(f"cannot run the POCSAG pipeline: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        # The band rule is fixed by the frequency this child was spawned on, never read live: a
-        # retune can then never let a line heard on one band be parsed under another band's rule.
-        keep_text = not on_commercial_paging_band(spawned_hz)
-        self._thread = threading.Thread(target=self._read, args=(self._proc, keep_text),
+        self._thread = threading.Thread(target=self._read, args=(self._proc,),
                                         name="sigint101-pocsag", daemon=True)
         self._thread.start()
 
-    def _read(self, proc, keep_text: bool = False) -> None:
-        """Consume multimon-ng's output on a background thread, logging pages until it ends.
-
-        `keep_text` is the band rule of the frequency `proc` was spawned on; withholding is the
-        default, as in parse_pocsag_line, so no caller can forget to mask.
-        """
+    def _read(self, proc) -> None:
+        """Consume multimon-ng's output on a background thread, logging pages until it ends."""
         try:
             for raw in proc.stdout:
-                page = parse_pocsag_line(raw, keep_text=keep_text)
+                page = parse_pocsag_line(raw)
                 if page is not None:
                     with self._lock:
                         self._log.add(page)

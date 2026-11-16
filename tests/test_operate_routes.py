@@ -163,6 +163,25 @@ def test_the_pager_view_says_its_text_is_withheld_on_the_paging_band(tmp_path):
     assert "text withheld" in html.lower()
 
 
+@pytest.mark.parametrize("freq_hz, dial", [
+    (152_840_000, "152.8400"),               # a carrier paging channel on VHF (47 CFR 22.531)
+    (454_025_000, "454.0250"),               # a Part 22 channel on UHF (47 CFR 22.561)
+    (138_000_000, "138.0000"),               # the low edge of the pager's range
+])
+def test_the_pager_view_says_its_text_is_withheld_off_the_paging_band_too(tmp_path, freq_hz, dial):
+    def factory():
+        return PocsagDecoder(freq_hz=freq_hz, **_tools())
+
+    with _client(tmp_path, pocsag_factory=factory) as client:
+        html = client.get("/operate/pager").text
+    assert dial in html
+    caption = re.search(r'<div class="tune__caption" data-tune-caption[^>]*>([^<]*)</div>', html)
+    assert caption and caption.group(1) == "framing only &middot; text withheld"
+    # The dial carries no band inside which the text is withheld: it is withheld everywhere.
+    assert "data-text-withheld" in html
+    assert "data-withheld-low" not in html and "data-withheld-high" not in html
+
+
 def test_home_has_the_operator_mode_bar(tmp_path):
     with _client(tmp_path) as client:
         html = client.get("/").text
@@ -278,6 +297,34 @@ def test_the_pager_text_stays_withheld_when_the_rack_tunes_into_the_paging_band(
         pages = client.get("/api/pocsag").json()["pages"]
     assert pages and all(p["text"] is None and p["text_withheld"] for p in pages)
     assert "CALL EXT" not in (tmp_path / "events.jsonl").read_text()
+
+
+def test_the_pager_text_stays_withheld_when_the_rack_tunes_out_of_the_paging_band(tmp_path):
+    # 152.840 MHz is a carrier paging channel on VHF: the framing is served and logged there, and
+    # the words reach neither the API, the reception log nor the event file.
+    def factory():
+        def spawn(freq_hz, device):
+            return Child(["rtl_fm", "-f", str(freq_hz)], said=POCSAG_ALPHA)
+        return PocsagDecoder(spawn=spawn, **_tools())
+
+    with _client(tmp_path, probe=_present, pocsag_factory=factory) as client:
+        assert client.app.state.pocsag.freq_hz == 929_612_500
+        assert client.post("/api/pocsag/tune", json={"freq_hz": 152_840_000}).status_code == 200
+        client.get("/api/pocsag")
+        client.app.state.pocsag.drain()
+        resp = client.get("/api/pocsag")
+        log = client.get("/api/receptions?instrument=pager")
+    body = resp.json()
+    assert body["freq_hz"] == 152_840_000
+    [page] = body["pages"]
+    assert page["text"] is None and page["text_withheld"] is True
+    assert (page["address"], page["function"], page["baud"], page["kind"], page["length"]) == (
+        1234567, 3, 1200, "alpha", 20)
+    [reception] = log.json()["receptions"]
+    assert reception["payload"]["freq_hz"] == 152_840_000
+    assert "text withheld" in reception["payload"]["summary"]
+    for served in (resp.text, log.text, (tmp_path / "events.jsonl").read_text()):
+        assert "CALL EXT" not in served
 
 
 def test_opening_a_lesson_tunes_a_decoder_back_to_its_own_frequency(tmp_path):

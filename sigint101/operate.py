@@ -185,8 +185,9 @@ def _aprs(item: dict) -> str:
 
 
 def _pager(item: dict) -> str:
-    # The words appear only when the decoder kept them; on 929-932 MHz it never does (M15).
-    words = "text withheld" if item.get("text_withheld") else item.get("text")
+    # Framing only: the decoder drops a page's words on every frequency (M15), and this line has
+    # no place that would print them.
+    words = "text withheld" if item.get("text_withheld") else None
     length = f"{item['length']} chars" if item.get("length") else None
     cap = f"cap {item['address']}" if item.get("address") is not None else None
     return _join(cap, item.get("kind"), length, words)

@@ -216,9 +216,9 @@
 
 {# ---- POCSAG page log (M15): pager framing on the paging band, which a waterfall shows only as a
    burst of FSK. rtl_fm|multimon-ng decodes the pages; pocsag.js polls /api/pocsag and lists each
-   page's cap code, kind, length and baud. On the commercial band the words are dropped server-side
-   (MC's call: framing live, text hidden). No radio / no multimon-ng / a silent channel shows an
-   honest empty log. ---- #}
+   page's cap code, kind, length and baud. The words are dropped server-side wherever the decoder
+   is tuned (framing live, text hidden: MC's call). No radio / no multimon-ng / a silent channel
+   shows an honest empty log. ---- #}
 {% macro pocsag(mhz, head_command=true) %}
               <div class="decoder" data-pocsag-panel aria-label="Live POCSAG page framing">
                 <div class="decoder__head">

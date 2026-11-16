@@ -24,13 +24,10 @@
     return (hz / 1e6).toFixed(pager ? 4 : 3);
   }
 
-  // What the decoder dial's caption says: on the commercial paging band the pager shows framing
-  // only (the decoder withholds the words there; this only says so), else the decoder's band.
-  function tuneCaption(hz, strip) {
-    if (strip.withheldLow && hz >= strip.withheldLow && hz <= strip.withheldHigh) {
-      return "framing only · text withheld";
-    }
-    return strip.bandName;
+  // What the decoder dial's caption says: the pager shows framing only wherever it is tuned (the
+  // decoder withholds the words; this only says so), any other decoder its band.
+  function tuneCaption(strip) {
+    return strip.textWithheld ? "framing only · text withheld" : strip.bandName;
   }
 
   // Gathers +/- taps on a decoder's dial into one retune at a time, counted from the frequency
@@ -143,11 +140,10 @@
     var api = tuneStrip.getAttribute("data-decoder-tune");
     var freqEl = tuneStrip.querySelector("[data-decoder-freq]");
     var caption = tuneStrip.querySelector("[data-tune-caption]");
-    var pager = tuneStrip.hasAttribute("data-withheld-low");
+    var pager = tuneStrip.hasAttribute("data-text-withheld");
     var info = {
       bandName: caption ? caption.getAttribute("data-band-name") : "",
-      withheldLow: parseInt(tuneStrip.getAttribute("data-withheld-low"), 10) || 0,
-      withheldHigh: parseInt(tuneStrip.getAttribute("data-withheld-high"), 10) || 0,
+      textWithheld: pager,
     };
     var confirmed = parseInt(tuneStrip.getAttribute("data-freq-hz"), 10);
     var refusal = null;
@@ -179,7 +175,7 @@
       onPending: function (hz) {
         if (hz === null) {
           showDial(confirmed, false);
-          showCaption(refusal || tuneCaption(confirmed, info));
+          showCaption(refusal || tuneCaption(info));
         } else {
           showDial(hz, true);
           showCaption("tuning to " + formatDecoderMHz(hz, pager) + " MHz…");

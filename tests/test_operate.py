@@ -81,9 +81,10 @@ def test_a_frequency_given_as_a_numeric_string_is_read():
 
 
 def test_the_paging_band_stays_tunable_and_its_text_rule_is_the_decoders():
-    # The rack may tune into 929-932 MHz; what it may show there is the decoder's business
-    # (framing only), not a lockout here.
+    # The rack may tune into 929-932 MHz and anywhere else in the pager's range; what it shows
+    # is the decoder's business (framing only, on every frequency), not a lockout here.
     assert validate_decoder_hz(tunable("pocsag"), 929_612_500) == 929_612_500
+    assert validate_decoder_hz(tunable("pocsag"), 152_840_000) == 152_840_000
 
 
 def test_every_tunable_instrument_names_its_steps():
@@ -120,11 +121,21 @@ def test_an_ism_reception_reads_the_sensor_and_its_reading():
     assert line == "Acurite-Tower · 18.0 °C · 51% RH"
 
 
-def test_a_pager_reception_on_the_commercial_band_carries_framing_only():
+def test_a_pager_reception_carries_framing_only():
     page = {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha", "text": None,
             "length": 20, "text_withheld": True}
     line = reception_summary("pager", page)
     assert "1234567" in line and "20" in line and "withheld" in line
+
+
+def test_a_pager_reception_line_has_no_place_for_a_pages_words():
+    # The decoder never hands the words over; if an item ever carried some, the line would still
+    # not print them.
+    page = {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha",
+            "text": "CALL EXT 2210 URGENT", "length": 20, "text_withheld": False}
+    line = reception_summary("pager", page)
+    assert "CALL EXT" not in line
+    assert "1234567" in line and "20" in line
 
 
 @pytest.mark.parametrize("key, item, expect", [

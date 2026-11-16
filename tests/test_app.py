@@ -339,7 +339,7 @@ class _StubPocsag(_ChildStub):
 
 def _pocsag_pages():
     """One decoded pager page, in the dict shape PocsagDecoder.pages() hands the route: framing
-    only, the words withheld, as the real decoder serves the commercial paging band."""
+    only, the words withheld, as the real decoder serves every page it hears."""
     return [{
         "baud": 1200, "address": 1234567, "function": 3,
         "kind": "alpha", "text": None, "length": 20, "text_withheld": True,
