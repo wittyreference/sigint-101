@@ -623,3 +623,24 @@ command, not a stub that prints one line.
   whole server refuses to start.
 **How to apply.** Keep check labels near 20 characters, each why near 90 with its label, and
 re-run the 800x480 render (before and after commit, wrong answer) on any check copy change.
+
+## 2026-11-15: deleting a PATH stub doesn't uninstall the tool; node's piped report isn't always TAP
+**Finding.** On WSL (Ubuntu 26.04, node 26.13) the suite had two failures with no defect behind
+either. Each test leaned on something its host supplied.
+- **A `Box` stub can add a tool or stand in front of one, but deleting the stub only hands the
+  name back to the host.** A box searches `/usr/bin` after its stubs. The no-fontconfig theme
+  test deleted the `fc-cache` and `fc-list` stubs; where fontconfig is installed the real
+  `fc-list` answered, found PT Mono in the box's own home (`apply-theme.sh` had just installed it
+  there) and the script chose the font.
+- **`node --test` has no one default report.** Up to node 22 a piped run prints TAP
+  (`# fail 0`). From node 23 it prints the spec report (`ℹ fail 0`), piped or not. The wrapper in
+  `tests/test_js_panels.py` read the default, so it failed with all 127 panel tests passing.
+- **A `*.test.js` with no tests in it is reported as one passing test** (`# tests 1`,
+  `# pass 1`, exit 0; seen on node 26.13). The wrapper's "discovered nothing" guard fires only
+  when node runs no file at all, so an empty test file still reads as covered. Not fixed.
+**How to apply.**
+- To stage "tool X is not installed", build a PATH with no X on it (`_path_without_fontconfig` in
+  `tests/test_desktop_theme.py`) and assert X is absent before the run. Never rely on the dev
+  host lacking it.
+- Ask a tool for its machine-readable output by name (`--test-reporter=tap`) and read numbers
+  from it. The default report is written for people and changes between versions.

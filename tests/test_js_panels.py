@@ -1,6 +1,7 @@
 # ABOUTME: Runs the browser panels' own tests inside the Python suite, so one command covers both.
 # ABOUTME: Uses node's built-in runner — the console gains no dependency to become testable.
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,6 +18,10 @@ JS_TESTS = sorted(REPO.glob("tests/*.test.js"))
 # panel from shipping untested while the suite still reports green because some OTHER panel's
 # test ran.
 PANELS = sorted(REPO.glob("sigint101/static/*.js"))
+
+# The totals node's TAP reporter ends a run with, one to a line: "# pass 127", "# fail 0". They
+# are read as numbers, so the verdict does not rest on how a report happens to be worded.
+TAP_TOTAL = re.compile(r"^# (pass|fail) (\d+)$", re.MULTILINE)
 
 
 def test_every_shipped_panel_has_its_own_test():
@@ -45,10 +50,15 @@ def test_the_panel_javascript_has_tests_and_they_run():
                   "plainly that the panels are going untested.")
     assert JS_TESTS, "no tests/*.test.js found — the panels would be shipping untested"
 
-    result = subprocess.run([node, "--test", *[str(p) for p in JS_TESTS]],
+    # The reporter is named, because node's default is not one format. Up to node 22 a piped run
+    # prints TAP; from node 23 it prints the spec report written for people ("ℹ fail 0"), and a
+    # check that reads whatever the default is then fails with every panel test passing.
+    result = subprocess.run([node, "--test", "--test-reporter=tap", *[str(p) for p in JS_TESTS]],
                             cwd=REPO, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
+    totals = {name: int(count) for name, count in TAP_TOTAL.findall(result.stdout)}
+    assert {"pass", "fail"} <= totals.keys(), "node printed no TAP totals: " + result.stdout
+    assert totals["fail"] == 0, result.stdout
     # node --test exits 0 on zero tests, so a runner that silently discovered nothing would
     # otherwise read as a pass.
-    assert "# fail 0" in result.stdout, result.stdout
-    assert "# pass 0" not in result.stdout, "node discovered no tests: " + result.stdout
+    assert totals["pass"] > 0, "node discovered no tests: " + result.stdout
