@@ -10,7 +10,7 @@ from sigint101.flipperconsole import APP_OPEN_MARKER, FlipperConsole
 
 FIXTURE = (Path(__file__).parent / "fixtures" / "flipper" / "device_info.txt").read_text()
 
-BY_ID = "/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_Lle0zik_flip_Lle0zik-if00"
+BY_ID = "/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_Ex4mple_flip_Ex4mple-if00"
 SECOND = "/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_Zzz9xyz_flip_Zzz9xyz-if00"
 
 

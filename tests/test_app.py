@@ -147,7 +147,7 @@ class _StubDecoder(_ChildStub):
 def _reads():
     """A real ASK and a real FSK decode (FSK carries both tones), parsed from rtl_433 shapes."""
     ask = parse_decode_line(
-        '{"time":"2026-01-01 00:00:00","model":"Acurite-Tower","id":16262,"channel":"A",'
+        '{"time":"2026-01-01 00:00:00","model":"Acurite-Tower","id":12345,"channel":"A",'
         '"temperature_C":18.0,"humidity":51,"mod":"ASK","freq":433.95,"snr":36.3}')
     fsk = parse_decode_line(
         '{"time":"2026-01-01 00:00:01","model":"LaCrosse-TX141THBv2","id":252,'
@@ -621,7 +621,7 @@ class _StubFlipper:
 
 def _flipper_device():
     """The dict shape FlipperConsole.device() hands the route."""
-    return {"model": "Flipper Zero", "name": "Lle0zik", "firmware": "1.4.3",
+    return {"model": "Flipper Zero", "name": "Ex4mple", "firmware": "1.4.3",
             "region": "US", "radio_alive": True}
 
 
@@ -1910,7 +1910,7 @@ def test_flipper_reports_the_device_when_attached(tmp_path):
     body = resp.json()
     assert body["available"] is True
     assert body["device"]["firmware"] == "1.4.3"
-    assert body["device"]["name"] == "Lle0zik"
+    assert body["device"]["name"] == "Ex4mple"
 
 
 def test_flipper_reports_503_and_a_reason_when_absent(tmp_path):

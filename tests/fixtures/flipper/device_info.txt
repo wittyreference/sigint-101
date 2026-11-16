@@ -12,7 +12,7 @@ hardware_display              : 2
 hardware_color                : 2
 hardware_region               : 4
 hardware_region_provisioned   : US
-hardware_name                 : Lle0zik
+hardware_name                 : Ex4mple
 firmware_commit               : 8622f1a2
 firmware_commit_dirty         : false
 firmware_branch               : 1.4.3

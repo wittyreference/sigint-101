@@ -16,7 +16,7 @@ from sigint101.decode import (
 # Real rtl_433 -F json output shapes. The ASK line is one captured live on nomad-b from an
 # Acurite-Tower weather sensor; the FSK line is rtl_433's documented FSK shape, which reports
 # the two mark/space tones as freq1 and freq2 (the whole point of M10) rather than one freq.
-ASK_LINE = ('{"time" : "2026-10-27 13:04:11", "model" : "Acurite-Tower", "id" : 16262, '
+ASK_LINE = ('{"time" : "2026-10-27 13:04:11", "model" : "Acurite-Tower", "id" : 12345, '
             '"channel" : "A", "battery_ok" : 1, "temperature_C" : 18.000, "humidity" : 51, '
             '"mic" : "CHECKSUM", "mod" : "ASK", "freq" : 433.950, "rssi" : -1.112, '
             '"snr" : 36.261, "noise" : -37.373}')
@@ -104,7 +104,7 @@ def test_decoder_buffers_parsed_reads():
 
 
 def test_decoder_buffer_is_bounded_to_newest():
-    lines = [ASK_LINE.replace("16262", str(1000 + n)) for n in range(30)]
+    lines = [ASK_LINE.replace("12345", str(1000 + n)) for n in range(30)]
     dec = _decoder(lines, history=5)
     dec.start()
     dec.drain()
@@ -149,7 +149,7 @@ def test_default_decode_frequency_is_the_ism_band():
 
 
 def test_recent_keeps_only_the_newest_when_limited():
-    dec = _decoder([ASK_LINE.replace("16262", str(1000 + n)) for n in range(6)])
+    dec = _decoder([ASK_LINE.replace("12345", str(1000 + n)) for n in range(6)])
     dec.start()
     dec.drain()
     assert [r.readings["id"] for r in dec.recent(2)] == [1004, 1005]
@@ -250,7 +250,7 @@ def test_the_same_values_after_the_window_are_a_new_reading():
 
 def test_a_changed_reading_or_another_sensor_inside_the_window_is_new():
     repeats = RepeatFilter()
-    tower_now = parse_decode_line(_captured()[0][1])   # id 16262, 16.0 °C, 42 %
+    tower_now = parse_decode_line(_captured()[0][1])   # id 12345, 16.0 °C, 42 %
     tower_then = parse_decode_line(ASK_LINE)           # same sensor, 18.0 °C, 51 %
     lacrosse = parse_decode_line(FSK_LINE)
     assert repeats.is_repeat(tower_now, 10.0) is False

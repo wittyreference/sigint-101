@@ -58,7 +58,7 @@ Proves the whole live mirror end-to-end on real hardware: the console shows real
 
 - [ ] **Step 1: Fixture** — already captured at `tests/fixtures/flipper/device_info.txt` (real device output). Confirm it is present.
 - [ ] **Step 2: Write failing** `tests/test_deviceinfo.py`:
-  - `test_parse_device_info_reads_core_fields` — load the fixture; `model == "Flipper Zero"`, `name == "Lle0zik"`, `firmware == "1.4.3"`, `region == "US"`, `radio_alive is True`.
+  - `test_parse_device_info_reads_core_fields` — load the fixture; `model == "Flipper Zero"`, `name == "Ex4mple"`, `firmware == "1.4.3"`, `region == "US"`, `radio_alive is True`.
   - `test_parse_device_info_tolerates_missing_key` — a block without `hardware_region_provisioned`; `region == ""`, no KeyError.
   and `tests/test_flipperconsole.py` (fake `cli_factory` returning a context manager whose `.command("device_info")` yields the fixture; fake `glob`):
   - `test_device_returns_parsed_dict_when_present` — present glob; `console.device()["firmware"] == "1.4.3"`.
