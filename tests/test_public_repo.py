@@ -1,6 +1,7 @@
 # ABOUTME: Guards the public repo: no git-tracked text file may hold a tailnet address or a path
 # ABOUTME: into a real person's home directory. A finding names the file and line, never the text.
 
+import os
 import re
 import shutil
 import subprocess
@@ -57,7 +58,8 @@ def foreign_home_lines(text: str) -> list:
 
 
 def tracked_text_files(repo: Path = REPO) -> list:
-    """(path, text) for every git-tracked text file in the checkout at `repo`.
+    """(path, text) for every git-tracked text file in the checkout at `repo`. A tracked symlink
+    counts as a one-line text: the path it points to, which is what git publishes for it.
 
     Deliberately not a skip when git cannot list them: a guard that checked nothing would still
     report success, the same trap tests/test_js_panels.py refuses for the panel tests.
@@ -65,14 +67,22 @@ def tracked_text_files(repo: Path = REPO) -> list:
     git = shutil.which("git")
     assert git, ("git is not on PATH, so the tracked files cannot be listed and this guard would "
                  "check nothing. Install git, or say plainly that the privacy guard is not run.")
-    listing = subprocess.run([git, "ls-files", "-z"], cwd=repo, capture_output=True, timeout=60)
+    listing = subprocess.run([git, "ls-files", "-s", "-z"], cwd=repo, capture_output=True,
+                             timeout=60)
     assert listing.returncode == 0, ("git ls-files failed, so this guard would check nothing. Is "
                                      "this a git checkout? "
                                      + listing.stderr.decode(errors="replace"))
-    paths = [path for path in listing.stdout.decode("utf-8").split("\0") if path]
-    assert paths, "git lists no tracked files here, so this guard would check nothing"
+    entries = [entry for entry in listing.stdout.decode("utf-8").split("\0") if entry]
+    assert entries, "git lists no tracked files here, so this guard would check nothing"
     files = []
-    for path in paths:
+    for entry in entries:
+        info, path = entry.split("\t", 1)           # "<mode> <blob> <stage>", a tab, the path
+        mode, blob, _stage = info.split(" ")
+        if mode == "120000":            # a symlink: its blob is the path it points to
+            target = subprocess.run([git, "cat-file", "-p", blob], cwd=repo, capture_output=True,
+                                    timeout=60, check=True)
+            files.append((path, target.stdout.decode("utf-8", errors="replace")))
+            continue
         full = repo / path
         if not full.is_file():          # tracked but deleted in this checkout: nothing to read
             continue
@@ -83,10 +93,11 @@ def tracked_text_files(repo: Path = REPO) -> list:
     return files
 
 
-def findings(lines_of) -> list:
-    """`path:line` for every line `lines_of` flags in a tracked text file. The text itself never
-    leaves this function, so a failure prints where, not what."""
-    return [f"{path}:{number}" for path, text in tracked_text_files() for number in lines_of(text)]
+def findings(lines_of, repo: Path = REPO) -> list:
+    """`path:line` for every line `lines_of` flags in a tracked text file of the checkout at
+    `repo`. The text itself never leaves this function, so a failure prints where, not what."""
+    return [f"{path}:{number}" for path, text in tracked_text_files(repo)
+            for number in lines_of(text)]
 
 
 def test_no_tracked_file_holds_a_tailnet_address():
@@ -112,6 +123,18 @@ def test_outside_a_git_checkout_the_guard_fails_loudly(tmp_path):
     (tmp_path / "notes.md").write_text("anything\n", encoding="utf-8")
     with pytest.raises(AssertionError, match="would check nothing"):
         tracked_text_files(tmp_path)
+
+
+def test_a_tracked_symlink_into_a_real_home_is_found(tmp_path):
+    # Git publishes a symlink as the path it points to, so a link into a home directory leaks that
+    # path even when it dangles. The path is joined from parts, as the examples below are, and no
+    # GIT_* variable of a calling hook may steer these commands at a real repository.
+    (tmp_path / "plan.md").symlink_to("/home/" + "someone" + "/plans/plan.md")
+    for command in (["git", "init", "-q"], ["git", "add", "plan.md"]):
+        subprocess.run(command, cwd=tmp_path, check=True, capture_output=True, timeout=60,
+                       env={name: value for name, value in os.environ.items()
+                            if not name.startswith("GIT_")})
+    assert findings(foreign_home_lines, tmp_path) == ["plan.md:1"]     # where, never the path
 
 
 # --- the patterns, proved on examples ---------------------------------------------------------
