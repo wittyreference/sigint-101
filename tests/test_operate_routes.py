@@ -12,7 +12,7 @@ from sigint101 import childproc
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder
-from sigint101.events import read_events
+from sigint101.events import log_event, read_events
 from sigint101.hardware import RadioProbe
 from sigint101.operate import INSTRUMENTS
 from sigint101.pocsag import PocsagDecoder
@@ -405,6 +405,38 @@ def test_the_reception_log_reads_back_what_an_earlier_run_logged(tmp_path):
     with _client(tmp_path) as client:
         recent = client.get("/api/receptions").json()["receptions"]
     assert [e["payload"]["instrument"] for e in recent] == ["aprs"]
+
+
+def test_a_stored_pager_reception_is_served_without_its_pages_words(tmp_path):
+    # An event log can hold a pager reception that carries a page's words, in its item and in
+    # its line. The file is the owner's and stays as it is; nothing read in from it has them.
+    log = tmp_path / "events.jsonl"
+    log_event(log, "reception", {
+        "instrument": "pager", "tool": "multimon-ng", "freq_hz": 152_840_000, "gain": "49.6",
+        "ppm": {"correction": "raw", "measured_ppm": None},
+        "radio": {"kind": "rtl-sdr", "serial": None, "index": 0},
+        "command": "rtl_fm -M fm -f 152840000 -s 22050 -g 49.6 -l 0 -d 0",
+        "summary": "cap 1234567 · alpha · 20 chars · CALL EXT 2210 URGENT",
+        "item": {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha",
+                 "text": "CALL EXT 2210 URGENT", "length": 20, "text_withheld": False},
+    })
+    on_disk = log.read_bytes()
+    assert b"CALL EXT" in on_disk
+    with _client(tmp_path) as client:
+        everything = client.get("/api/receptions")
+        newest = client.get("/api/receptions?limit=1&instrument=pager")   # the rack's LOG line
+    for resp in (everything, newest):
+        assert resp.status_code == 200
+        assert "CALL EXT" not in resp.text
+    [event] = newest.json()["receptions"]
+    payload = event["payload"]
+    assert payload["item"]["text"] is None
+    assert payload["item"]["text_withheld"] is True
+    assert payload["summary"] == "cap 1234567 · alpha · 20 chars · text withheld"
+    # The framing and the provenance are served as they were logged.
+    assert (payload["item"]["address"], payload["item"]["length"], payload["freq_hz"]) == (
+        1234567, 20, 152_840_000)
+    assert log.read_bytes() == on_disk
 
 
 def test_with_nothing_received_the_log_is_honestly_empty(tmp_path):

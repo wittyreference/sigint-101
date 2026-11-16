@@ -57,16 +57,20 @@ class PocsagUnavailable(RuntimeError):
 @dataclass(frozen=True)
 class PocsagPage:
     """One decoded pager message: who it was addressed to and how it was framed, never what it
-    said. A page that carried words keeps their length and says they were withheld; `text` stays
-    in the record, always None, so what the API serves keeps its shape."""
+    said. A page that carried words keeps their length and says they were withheld. It has no
+    field for the words: `text` is a fixed None, there so what the API serves keeps its shape."""
 
     baud: int
     address: int | None
     function: int | None
     kind: str                  # alpha | numeric | skyper | tone
-    text: None = None          # always None: the words are dropped before a page is built
     length: int = 0            # characters (or digits) in the message; 0 for a tone-only page
     text_withheld: bool = False
+
+    @property
+    def text(self) -> None:
+        """Always None: a page cannot be built, copied or altered to hold a message's words."""
+        return None
 
     def as_dict(self) -> dict:
         return {
@@ -270,6 +274,9 @@ class PocsagDecoder:
         try:
             for raw in proc.stdout:
                 page = parse_pocsag_line(raw)
+                # The line holds the page's words. Nothing keeps it past the parse, so a quiet
+                # channel does not leave the last page's text sitting in this thread.
+                del raw
                 if page is not None:
                     with self._lock:
                         self._log.add(page)

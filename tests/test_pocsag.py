@@ -1,7 +1,10 @@
 # ABOUTME: Tests the POCSAG backend — multimon-ng pager lines parsed into framing, text withheld on
 # ABOUTME: every frequency. The pipeline is a fake at the boundary; no radio is honest.
 
+import dataclasses
 import inspect
+import sys
+import threading
 
 import pytest
 
@@ -9,6 +12,7 @@ from sigint101.pocsag import (
     DEFAULT_POCSAG_HZ,
     PageLog,
     PocsagDecoder,
+    PocsagPage,
     PocsagUnavailable,
     parse_pocsag_line,
 )
@@ -190,8 +194,8 @@ def test_default_pocsag_frequency_is_an_assigned_paging_channel():
 
 SECRET = "CALL EXT 2210 URGENT"
 
-# Outside 929-932 MHz, where the words used to be kept: Part 22 paging channels on VHF and UHF,
-# amateur POCSAG (DAPNET), the low edge of the rack's pager range, and 1 Hz below 929 MHz.
+# Frequencies outside 929-932 MHz: Part 22 paging channels on VHF and UHF, amateur POCSAG
+# (DAPNET), the low edge of the rack's pager range, and 1 Hz below 929 MHz.
 OFF_THE_929_BAND = [152_840_000, 454_025_000, 439_987_500, 138_000_000, 928_999_999]
 
 
@@ -227,6 +231,52 @@ def test_a_withheld_page_dict_never_carries_the_words():
     assert page["text_withheld"] is True
     assert page["length"] == len(SECRET)
     assert SECRET not in repr(page)
+
+
+def test_a_page_has_nowhere_to_carry_words():
+    # No page can be built, copied or altered into one that holds a message's text, so the
+    # record serves `text` as None whatever a caller tries.
+    framing = {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha",
+               "length": len(SECRET), "text_withheld": True}
+    with pytest.raises(TypeError):
+        PocsagPage(text=SECRET, **framing)
+    page = PocsagPage(**framing)
+    with pytest.raises(TypeError):
+        dataclasses.replace(page, text=SECRET)
+    with pytest.raises(AttributeError):
+        page.text = SECRET
+    with pytest.raises(AttributeError):
+        object.__setattr__(page, "text", SECRET)
+    assert page.text is None
+    assert page.as_dict()["text"] is None
+
+
+def test_the_reader_holds_no_decoder_line_while_the_channel_is_quiet():
+    # A page's words exist only in the line multimon-ng printed. Once that line is parsed the
+    # reader thread keeps no reference to it, however long the channel then stays quiet.
+    quiet, resume = threading.Event(), threading.Event()
+
+    def stdout():
+        yield ALPHA
+        quiet.set()                          # the reader is back, waiting for the next line
+        resume.wait(5)
+
+    pipeline = FakePipeline([])
+    pipeline.stdout = stdout()
+    dec = PocsagDecoder(spawn=lambda freq, device: pipeline, radio_present=lambda: True,
+                        which=lambda name: "/usr/bin/" + name)
+    dec.start()
+    try:
+        assert quiet.wait(5)
+        frame = sys._current_frames()[dec._thread.ident]
+        while frame is not None and frame.f_code.co_name != "_read":
+            frame = frame.f_back
+        assert frame is not None, "the reader thread is not inside PocsagDecoder._read"
+        assert SECRET not in repr(dict(frame.f_locals))
+    finally:
+        resume.set()
+        dec.drain()
+    assert dec.pages()[0]["length"] == len(SECRET)
 
 
 def test_the_decoder_never_stores_text_on_the_commercial_band():

@@ -56,6 +56,7 @@ from .operate import (
     reception_record,
     tunable,
     validate_decoder_hz,
+    without_page_words,
 )
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
@@ -1653,10 +1654,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return hook
 
     def _recent_receptions() -> list:
-        """The newest receptions, oldest first, read in from the log the first time asked."""
+        """The newest receptions, oldest first, read in from the log the first time asked.
+
+        The log is a file and can hold a pager reception that carries a page's words. Each one
+        is read in through without_page_words, so whatever is stored, none of it reaches a
+        response or the rack's LOG line; the file itself is never rewritten.
+        """
         with reception_lock:
             if app.state.receptions is None:
-                logged = (e for e in read_events(app.state.events_path)
+                logged = (without_page_words(e) for e in read_events(app.state.events_path)
                           if e.get("kind") == "reception")
                 app.state.receptions = deque(logged, maxlen=RECEPTION_MEMORY)
             return list(app.state.receptions)
