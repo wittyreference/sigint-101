@@ -7,7 +7,8 @@ from array import array
 
 import pytest
 
-from sigint101 import ppm
+from sigint101 import childproc, ppm
+from tests.child_fakes import Child
 
 
 def synth_stream(ppm_error, seconds=20.0, pilot_amp=4000.0, rate=ppm.DEMOD_RATE, noise=1500.0):
@@ -224,3 +225,37 @@ def test_two_references_that_disagree_are_reported_as_disagreeing_not_averaged()
 
 def test_a_comparison_with_only_one_reference_is_not_an_agreement():
     assert ppm.compare_references(164.53, None, agree_within_ppm=10.0)["agree"] is None
+
+
+# --- T-07: rtl_fm runs like every other tool, and a missing one is a refusal, not a crash -----
+
+
+def test_capture_launches_rtl_fm_through_spawn_on_the_given_index(monkeypatch):
+    seen = {}
+
+    def fake_spawn(argv, **kw):
+        seen["argv"] = argv
+        return Child(argv, code=0)
+
+    monkeypatch.setattr(ppm, "spawn", fake_spawn)
+    ppm._default_capture(hz=98_100_000, seconds=1, gain=40, device=1)
+    argv = seen["argv"]
+    assert argv[0] == "rtl_fm"
+    assert argv[argv.index("-d") + 1] == "1"
+
+
+def test_capture_without_rtl_fm_is_a_refusal(monkeypatch):
+    def missing(argv, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "rtl_fm")
+
+    monkeypatch.setattr(ppm, "spawn", missing)
+    with pytest.raises(ppm.PpmUnavailable, match="rtl_fm"):
+        ppm._default_capture(hz=98_100_000, seconds=1, gain=40)
+
+
+def test_closing_a_capture_kills_an_rtl_fm_that_ignores_sigterm(monkeypatch):
+    monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.01)
+    proc = Child(["rtl_fm"], stubborn=True)
+    proc.stdout = io.BytesIO(b"")
+    ppm._CaptureStream(proc).close()
+    assert proc.sent == ["TERM", "KILL"]

@@ -5,25 +5,62 @@ import io
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from sigint101.spectrum import (
+    MAX_BINS,
+    SPAN_GUARD_BINS,
+    TUNER_MAX_HZ,
+    TUNER_MIN_HZ,
     SpectrumUnavailable,
     Sweeper,
+    SweepRow,
     TuneError,
+    hop_plan,
     merge_chunks,
     parse_line,
+    target_span,
     validate_gain,
     validate_span,
 )
 
-# A real line off the Nomad's RTL2838: 88.0–90.5 MHz in 78125 Hz bins.
-# Note 33 power columns for a 32-step span — rtl_power reports both edges.
+# Real rtl_power output, captured on nomad-b (Debian rtl-sdr 0.6.0-4, R828D) on 2026-11-01:
+#   fm-88-108-125k.csv          rtl_power -f 88000000:108000000:125000 -i 1 -e 3   (8 hops x 32)
+#   adsb-1089-1091-31k.csv      rtl_power -f 1089000000:1091000000:31250 -i 1 -1   (1 hop x 64)
+#   fm-narrow-95.9-96.3-10k.csv rtl_power -f 95900000:96300000:10000 -i 1 -1       (1 hop x 64,
+#                               the downsampled path: a 400 kHz span decimated by 7)
+CAPTURES = Path(__file__).resolve().parent / "fixtures" / "rtl_power"
+
+
+def _capture(name):
+    """The non-blank lines of one real rtl_power capture."""
+    return [line for line in (CAPTURES / name).read_text().splitlines() if line.strip()]
+
+
+def _raw_values(line):
+    """The power columns of an rtl_power line exactly as printed, before any parsing."""
+    return [float(v) for v in line.split(",")[6:]]
+
+
+FM_LINES = _capture("fm-88-108-125k.csv")
+
+# Shaped like rtl_power 0.6.0's csv_dbm(): one 88.0-90.5 MHz hop in 78125 Hz bins prints its 32
+# bins, then the last bin a second time (33 values). Its DC bin, printed at index 16, is a copy of
+# index 17 ("nuke DC component": avg[0] = avg[1], before the 180-degree rotation).
 _HEAD = "2026-08-24, 02:40:17, 88000000, 90500000, 78125.00, 768, "
-LINE_A = _HEAD + ", ".join(f"{-10.0 - i / 100:.2f}" for i in range(33))
+
+
+def _hop_values(base):
+    values = [base - i / 100 for i in range(32)]
+    values[16] = values[17]           # rtl_power's DC copy
+    return values + [values[-1]]      # rtl_power's trailing duplicate
+
+
+LINE_A = _HEAD + ", ".join(f"{v:.2f}" for v in _hop_values(-10.0))
 LINE_B = ("2026-08-24, 02:40:17, 90500000, 93000000, 78125.00, 768, "
-          + ", ".join(f"{-20.0 - i / 100:.2f}" for i in range(33)))
+          + ", ".join(f"{v:.2f}" for v in _hop_values(-20.0)))
 
 
 def test_parse_line_reads_header_and_powers():
@@ -32,13 +69,13 @@ def test_parse_line_reads_header_and_powers():
     assert row.freq_low == 88_000_000
     assert row.freq_high == 90_500_000
     assert row.freq_step == 78125.0
-    assert len(row.dbm) == 33
+    assert len(row.dbm) == 32
     assert row.dbm[0] == -10.0
 
 
 def test_parse_line_tolerates_whitespace_and_trailing_comma():
     row = parse_line("  " + LINE_A + " ,  \n")
-    assert len(row.dbm) == 33
+    assert len(row.dbm) == 32
 
 
 @pytest.mark.parametrize("junk", ["", "   ", "\n", "not,enough,fields", "# comment"])
@@ -46,25 +83,129 @@ def test_parse_line_rejects_junk(junk):
     assert parse_line(junk) is None
 
 
-def test_frequencies_span_low_to_high_inclusive():
-    row = parse_line(LINE_A)
+# --- every bin a measurement (T-03) -------------------------------------------------------
+# rtl_power 0.6.0 prints len+1 values per hop: its loop prints bins 0..len-1, then prints the
+# last bin again on its own. It also overwrites each hop's DC bin with its neighbour before
+# printing. Neither copy is a measurement at the frequency it would be drawn at.
+
+
+def test_the_real_capture_has_the_two_copies_this_parser_removes():
+    # The premise, checked against real output rather than a reading of the C: every line ends
+    # on a repeated value, and every hop's centre value equals the one above it.
+    for line in FM_LINES:
+        raw = _raw_values(line)
+        assert len(raw) == 33
+        assert raw[-1] == raw[-2]
+        assert raw[16] == raw[17]
+
+
+def test_parse_line_drops_rtl_powers_trailing_duplicate():
+    raw = _raw_values(FM_LINES[0])
+    row = parse_line(FM_LINES[0])
+    assert len(row.dbm) == 32
+    assert row.dbm[-1] == raw[31]
+
+
+def test_each_bin_sits_at_its_fft_bin_centre():
+    # FFT bin k of a hop is centred at low + k*step, so the first lands on the low edge and the
+    # last a step short of the high edge, where the next hop's first bin is measured.
+    row = parse_line(FM_LINES[0])
     freqs = row.frequencies()
-    assert len(freqs) == len(row.dbm)
+    assert len(freqs) == len(row.dbm) == 32
     assert freqs[0] == 88_000_000
-    assert freqs[-1] == 90_500_000
+    assert freqs[-1] == 90_500_000 - 78125
 
 
-def test_merge_chunks_drops_the_shared_boundary_bin():
+def test_the_dc_copy_at_each_hop_centre_is_marked_unmeasured():
+    for line in FM_LINES:
+        row = parse_line(line)
+        assert row.dbm[16] is None
+        assert sum(v is None for v in row.dbm) == 1
+        assert row.frequencies()[16] == (row.freq_low + row.freq_high) / 2
+
+
+@pytest.mark.parametrize("name", ["adsb-1089-1091-31k.csv", "fm-narrow-95.9-96.3-10k.csv"])
+def test_the_dc_copy_is_found_in_a_single_hop_capture_too(name):
+    # The narrow capture takes rtl_power's downsampling path; the DC bin is still the hop centre.
+    line = _capture(name)[0]
+    raw = _raw_values(line)
+    row = parse_line(line)
+    assert len(row.dbm) == 64
+    assert raw[32] == raw[33]
+    assert row.dbm[32] is None
+    assert [v for i, v in enumerate(row.dbm) if i != 32] == raw[:32] + raw[33:64]
+
+
+def test_a_single_bin_hop_has_no_dc_copy():
+    # rtl_power's "giant bins" mode (a bin of 1 MHz or more) prints one bin per hop, then the same
+    # value again; with one bin there is no DC neighbour to copy, so nothing is marked.
+    row = parse_line("2026-08-24, 02:40:17, 100000000, 102000000, 2000000.00, 4, -5.00, -5.00")
+    assert row.dbm == (-5.0,)
+
+
+def test_merge_keeps_every_hops_first_bin():
+    chunks = [parse_line(line) for line in FM_LINES[:8]]
+    merged = merge_chunks(chunks)
+    assert len(merged.dbm) == 256
+    assert merged.freq_low == 88_000_000
+    assert merged.freq_high == 108_000_000
+    # Hop 2's first bin is the only measurement at 90.5 MHz, so it is the one kept.
+    assert merged.dbm[32] == chunks[1].dbm[0] == _raw_values(FM_LINES[1])[0]
+    freqs = merged.frequencies()
+    assert freqs[32] == 90_500_000
+    assert freqs[-1] == 108_000_000 - 78125
+
+
+def test_merge_leaves_the_eight_dc_bins_unmeasured_and_nothing_else():
+    merged = merge_chunks([parse_line(line) for line in FM_LINES[:8]])
+    assert [i for i, v in enumerate(merged.dbm) if v is None] == [16 + 32 * h for h in range(8)]
+
+
+def test_merge_leaves_a_gap_between_hops_unmeasured_rather_than_closing_it():
+    # Concatenating across a gap would slide every later bin onto the wrong frequency. A gap is
+    # held open with unmeasured bins so each value stays at the frequency it was measured at.
+    a = SweepRow(ts="t", freq_low=100.0, freq_high=104.0, freq_step=1.0,
+                 dbm=(-1.0, -2.0, -3.0, -4.0))
+    b = SweepRow(ts="t", freq_low=106.0, freq_high=108.0, freq_step=1.0,
+                 dbm=(-5.0, -6.0))
+    merged = merge_chunks([a, b])
+    assert merged.dbm == (-1.0, -2.0, -3.0, -4.0, None, None, -5.0, -6.0)
+    assert merged.frequencies()[6] == 106.0
+
+
+def test_the_readout_ignores_unmeasured_bins():
+    row = SweepRow(ts="t", freq_low=100.0, freq_high=105.0, freq_step=1.0,
+                   dbm=(-30.0, -10.0, None, -31.0, -29.0))
+    assert row.noise_floor_db() == -29.5
+    assert row.peak() == (101.0, -10.0)
+
+
+def test_as_dict_sends_an_unmeasured_bin_as_null():
+    row = parse_line(FM_LINES[0])
+    flat = row.as_dict()
+    assert flat["dbm"][16] is None
+    assert len(flat["dbm"]) == 32
+
+
+def test_the_sweeper_publishes_real_rows_of_measured_bins():
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc(FM_LINES), radio_present=lambda: True)
+    sweeper.start()
+    sweeper.drain()
+    rows = sweeper.rows()
+    assert len(rows) == 3
+    assert all(len(row.dbm) == 256 for row in rows)
+    assert all(sum(v is None for v in row.dbm) == 8 for row in rows)
+
+
+def test_merge_chunks_joins_hops_without_losing_or_repeating_a_bin():
     a, b = parse_line(LINE_A), parse_line(LINE_B)
     merged = merge_chunks([a, b])
-    # 33 + 33 would double-count the bin at 90.5 MHz; correct is 33 + 32.
-    assert len(merged.dbm) == 65
+    assert len(merged.dbm) == 64
     assert merged.freq_low == 88_000_000
     assert merged.freq_high == 93_000_000
-    assert merged.frequencies()[-1] == 93_000_000
-    # The boundary bin kept is the first chunk's last value, not the second's first.
-    assert merged.dbm[32] == a.dbm[32]
-    assert merged.dbm[33] == b.dbm[1]
+    assert merged.frequencies()[-1] == 93_000_000 - 78125
+    assert merged.dbm[31] == a.dbm[31]
+    assert merged.dbm[32] == b.dbm[0]
 
 
 def test_merge_chunks_sorts_out_of_order_chunks():
@@ -105,7 +246,7 @@ def test_sweeper_assembles_chunks_sharing_a_timestamp_into_one_row():
     sweeper.drain()
     rows = sweeper.rows()
     assert len(rows) == 1
-    assert len(rows[0].dbm) == 65
+    assert len(rows[0].dbm) == 64
 
 
 def test_sweeper_starts_a_new_row_on_a_new_timestamp():
@@ -299,9 +440,12 @@ def test_the_reason_is_reported_once_and_then_the_sweep_is_retried():
         spawned.append(proc)
         return proc
 
-    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True)
+    clock = _Clock()
+    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True, clock=clock)
     sweeper.start()
     sweeper.drain()
+    # The poll that reports the death lands once the back-off has run out.
+    clock.now += sweeper.retry_in()
     with pytest.raises(SpectrumUnavailable):
         sweeper.start()
     # A death must not wedge the console permanently: the poll after the report tries
@@ -422,7 +566,7 @@ def test_sweeper_splits_sweeps_that_share_a_timestamp():
     sweeper.drain()
     rows = sweeper.rows()
     assert len(rows) == 2
-    assert all(len(row.dbm) == 65 for row in rows)
+    assert all(len(row.dbm) == 64 for row in rows)
 
 
 @pytest.mark.parametrize("limit", [0, -5])
@@ -475,6 +619,20 @@ def test_span_too_wide_to_stay_a_waterfall_is_refused():
 def test_bin_size_beyond_what_rtl_power_accepts_is_refused():
     with pytest.raises(TuneError):
         validate_span(88_000_000, 108_000_000, 5_000_000)
+
+
+@pytest.mark.parametrize("low,high,bin_size", [
+    (95_000_000, 97_000_000, 100),           # 20,000 bins in a 2 MHz span
+    (24_000_000, 124_000_000, 1),            # 10^8 bins
+])
+def test_a_span_asking_for_more_bins_than_a_row_can_hold_is_refused(low, high, bin_size):
+    with pytest.raises(TuneError) as exc:
+        validate_span(low, high, bin_size)
+    assert "bins" in str(exc.value)
+
+
+def test_a_span_at_the_bin_limit_is_accepted():
+    assert validate_span(88_000_000, 88_000_000 + MAX_BINS * 1_000, 1_000)
 
 
 @pytest.mark.parametrize("bad", ["abc", None, float("nan"), float("inf")])
@@ -728,31 +886,198 @@ def test_an_invalid_gain_leaves_the_sweep_untouched():
 
 # --- the readout numbers -------------------------------------------------
 
+def _row(*dbm, low=88_000_000.0, step=78125.0):
+    """A sweep row built directly, for the readout arithmetic alone."""
+    return SweepRow(ts="2026-08-24 02:40:17", freq_low=low, freq_high=low + len(dbm) * step,
+                    freq_step=step, dbm=tuple(dbm))
+
+
 def test_row_noise_floor_is_the_median_of_its_bins():
-    row = parse_line(_HEAD + "-30, -10, -31, -29, -32")
+    row = _row(-30.0, -10.0, -31.0, -29.0, -32.0)
     assert row.noise_floor_db() == -30.0
 
 
 def test_row_peak_names_the_strongest_bin_and_its_frequency():
-    row = parse_line("2026-08-24, 02:40:17, 100000000, 100000200, 100.00, 768, -30, -5, -31")
+    row = _row(-30.0, -5.0, -31.0, low=100_000_000.0, step=100.0)
     hz, db = row.peak()
     assert (hz, db) == (100000100.0, -5.0)
 
 
 def test_row_peak_tie_goes_to_the_first_bin():
-    row = parse_line("2026-08-24, 02:40:17, 100000000, 100000200, 100.00, 768, -5, -31, -5")
+    row = _row(-5.0, -31.0, -5.0, low=100_000_000.0, step=100.0)
     assert row.peak()[0] == 100000000.0
 
 
 def test_row_snr_is_peak_over_floor():
-    row = parse_line(_HEAD + "-30, -10, -31, -29, -32")
+    row = _row(-30.0, -10.0, -31.0, -29.0, -32.0)
     assert row.snr_db() == 20.0
 
 
 def test_as_dict_carries_the_readout_fields():
-    row = parse_line(_HEAD + "-30, -10, -31, -29, -32")
+    row = _row(-30.0, -10.0, -31.0, -29.0, -32.0)
     flat = row.as_dict()
     assert flat["floor_db"] == -30.0
     assert flat["peak_db"] == -10.0
     assert flat["snr_db"] == 20.0
     assert flat["peak_hz"] == 88_000_000 + 78125.0
+
+
+# --- a span built around a target: keep the target off every hop's unmeasured centre ----------
+# rtl_power cannot measure the bin at each hop's centre (its DC copy, kept as None). A span built
+# straight around a target puts the target exactly there on a single-hop span (M9's 433.92 carrier
+# vanished into it), and on a hop edge for an even hop count. The sweep is offset instead, so the
+# target sits a few measured bins from the centre of the hop that holds it.
+
+def _hops_in_capture(name):
+    """(hop centres, bin step) of one real capture, read off its first pass."""
+    centres, step, seen = [], None, set()
+    for line in _capture(name):
+        fields = [f.strip() for f in line.split(",")]
+        low, high, step = int(fields[2]), int(fields[3]), float(fields[4])
+        if low in seen:
+            break
+        seen.add(low)
+        centres.append((low + high) // 2)
+    return centres, step
+
+
+@pytest.mark.parametrize("name, low, high, bin_size", [
+    ("fm-88-108-125k.csv", 88_000_000, 108_000_000, 125_000),
+    ("adsb-1089-1091-31k.csv", 1_089_000_000, 1_091_000_000, 31_250),
+    ("fm-narrow-95.9-96.3-10k.csv", 95_900_000, 96_300_000, 10_000),
+])
+def test_the_hop_plan_matches_what_rtl_power_really_swept(name, low, high, bin_size):
+    centres, step = _hops_in_capture(name)
+    plan = hop_plan(low, high, bin_size)
+    assert plan.centres == centres
+    assert plan.step == step
+
+
+def _clearances(low, high, bin_size, target):
+    """How far the target sits from the nearest hop centre and from the edges of its own hop."""
+    plan = hop_plan(low, high, bin_size)
+    nearest = min(plan.centres, key=lambda c: abs(c - target))
+    to_centre = abs(target - nearest)
+    to_edge = plan.hop_width / 2 - to_centre
+    return to_centre, to_edge, plan.step
+
+
+def test_a_target_on_a_single_hop_centre_moves_a_few_bins_off_it():
+    # M9's band: one 2 MHz hop, centred where the carrier is.
+    low, high, bin_size = target_span(433_920_000, 2_000_000, 15_625)
+    assert high - low == 2_000_000
+    to_centre, to_edge, step = _clearances(low, high, bin_size, 433_920_000)
+    assert to_centre == SPAN_GUARD_BINS * step
+    assert to_edge > SPAN_GUARD_BINS * step
+
+
+def test_a_target_on_a_hop_edge_moves_near_the_centre_of_a_hop():
+    # The FM default: eight 2.5 MHz hops, and 98.0 MHz is the edge between the 4th and 5th.
+    low, high, bin_size = target_span(98_000_000, 20_000_000, 125_000)
+    assert high - low == 20_000_000
+    to_centre, to_edge, step = _clearances(low, high, bin_size, 98_000_000)
+    assert to_centre == SPAN_GUARD_BINS * step
+    assert to_edge > SPAN_GUARD_BINS * step
+
+
+def test_a_target_already_clear_of_the_centre_still_lands_the_same_way():
+    # A target anywhere is placed the same few bins from the centre of its hop, so a tap on a
+    # station always lands it where the hop measures best, not on a roll-off at the hop edge.
+    for target in (433_000_000, 433_455_000, 434_010_000):
+        low, high, bin_size = target_span(target, 2_000_000, 15_625)
+        to_centre, _, step = _clearances(low, high, bin_size, target)
+        assert to_centre == SPAN_GUARD_BINS * step
+
+
+def test_the_offset_span_stays_inside_the_tuner():
+    low, high, _ = target_span(25_000_000, 2_000_000, 15_625)
+    assert low >= TUNER_MIN_HZ
+    low, high, _ = target_span(1_765_000_000, 2_000_000, 15_625)
+    assert high <= TUNER_MAX_HZ
+
+
+def test_giant_bins_have_no_centre_gap_so_the_span_stays_centred():
+    # One bin per hop prints no DC copy, so there is nothing to step around.
+    assert target_span(100_000_000, 10_000_000, 1_000_000) == (95_000_000, 105_000_000, 1_000_000)
+
+
+def test_a_span_with_too_few_bins_per_hop_to_offset_stays_centred():
+    # Two bins a hop leave no measured bin a guard away from the centre that is not an edge.
+    assert target_span(100_000_000, 200_000, 100_000) == (99_900_000, 100_100_000, 100_000)
+
+
+def test_retune_to_a_target_offsets_the_sweep_and_remembers_the_target():
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc([LINE_A]), radio_present=lambda: True)
+    sweeper.retune_to(433_920_000, 2_000_000, 15_625)
+    assert sweeper.target == 433_920_000
+    assert (sweeper.low, sweeper.high, sweeper.bin_size) == target_span(
+        433_920_000, 2_000_000, 15_625)
+    assert (sweeper.low + sweeper.high) // 2 != 433_920_000
+
+
+def test_a_span_given_by_its_edges_has_no_target():
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc([LINE_A]), radio_present=lambda: True)
+    sweeper.retune_to(433_920_000, 2_000_000, 15_625)
+    sweeper.retune(144_000_000, 148_000_000, 25_000)
+    assert sweeper.target is None
+
+
+def test_retune_to_refuses_a_target_whose_span_the_radio_cannot_reach():
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc([LINE_A]), radio_present=lambda: True)
+    with pytest.raises(TuneError):
+        sweeper.retune_to(10_000_000, 2_000_000, 15_625)
+    assert sweeper.target is None
+
+
+# --- a sweep that keeps dying backs off, like every other radio tool ---------------------------
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_sweep_that_keeps_dying_is_not_respawned_on_every_poll():
+    spawned = []
+
+    def spawn(cmd):
+        proc = DeadProc([], stderr=BAD_DEVICE_STDERR)
+        spawned.append(proc)
+        return proc
+
+    clock = _Clock()
+    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True, clock=clock)
+    sweeper.start()
+    sweeper.drain()
+    for _ in range(5):
+        with pytest.raises(SpectrumUnavailable, match="No matching devices found."):
+            sweeper.start()
+    assert len(spawned) == 1
+    assert sweeper.retry_in() > 0
+
+
+def test_the_back_off_grows_while_the_deaths_keep_coming():
+    def spawn(cmd):
+        return DeadProc([], stderr=BAD_DEVICE_STDERR)
+
+    clock = _Clock()
+    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True, clock=clock)
+    waits = []
+    for _ in range(3):
+        sweeper.start()
+        sweeper.drain()
+        waits.append(sweeper.retry_in())
+        clock.now += sweeper.retry_in()
+        with pytest.raises(SpectrumUnavailable):
+            sweeper.start()           # the reason is reported once the wait is over, then retried
+    assert waits == sorted(waits) and waits[0] < waits[-1]
+
+
+def test_a_deliberate_stop_starts_no_back_off():
+    sweeper = Sweeper(spawn=lambda cmd: BlockingProc([LINE_A], returncode=-15),
+                      radio_present=lambda: True, clock=_Clock())
+    sweeper.start()
+    sweeper.stop()
+    assert sweeper.retry_in() is None

@@ -12,6 +12,7 @@ from sigint101.ais import (
     AisReport,
     AisUnavailable,
     VesselRoster,
+    _Feed,
     decode_payload,
     parse_ais_sentence,
 )
@@ -268,3 +269,96 @@ def test_default_ais_channels_and_port():
     assert AIS_CHANNEL_A_HZ == 161_975_000
     assert AIS_CHANNEL_B_HZ == 162_025_000
     assert DEFAULT_AIS_PORT == 10110
+
+
+# --- T-16: the feed lets go on stop, and a half message never pairs with a stranger -----------
+
+
+def test_assembler_discards_a_stale_fragment():
+    # A part 1 whose part 2 never came must not be glued to whatever arrives much later.
+    now = [0.0]
+    asm = AisAssembler(clock=lambda: now[0])
+    assert asm.push(TYPE5_FRAG1) is None
+    now[0] = 10.0                                 # long after any real part 2 would have come
+    assert asm.push(TYPE5_FRAG2) is None          # its partner is gone, so nothing decodes
+
+
+def test_assembler_starts_afresh_on_a_new_first_fragment():
+    # rtl_ais reuses sequence ids, so an orphan part 2 must not complete the next message early.
+    asm = AisAssembler()
+    assert asm.push(TYPE5_FRAG2) is None          # an orphan from an earlier message
+    assert asm.push(TYPE5_FRAG1) is None          # a new message begins; the orphan is dropped
+    report = asm.push(TYPE5_FRAG2)
+    assert report.name == "EVER DIADEM"
+
+
+class _RtlAis:
+    """rtl_ais at the process boundary: alive until told otherwise."""
+
+    args = ["rtl_ais", "-d", "0", "-h", "127.0.0.1", "-P", "10110"]
+
+    def __init__(self):
+        self.code = None
+
+    def poll(self):
+        return self.code
+
+    def terminate(self):
+        self.code = -15
+
+    def kill(self):
+        self.code = -9
+
+    def wait(self, timeout=None):
+        return self.code
+
+
+def _udp():
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    return sock
+
+
+def _reading(feed):
+    import threading
+    got = []
+    reader = threading.Thread(target=lambda: got.extend(feed.stdout), daemon=True)
+    reader.start()
+    return reader, got
+
+
+def test_ais_feed_reads_the_datagrams_rtl_ais_sends():
+    import socket
+    sock = _udp()
+    feed = _Feed(_RtlAis(), sock)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+        sender.sendto((TYPE1 + "\n").encode(), sock.getsockname())
+    assert next(feed.stdout) == TYPE1
+    feed.terminate()
+
+
+def test_ais_feed_terminate_unblocks_its_reader():
+    # The audit found the reader still parked in recvfrom on a closed socket after stop, and the
+    # next route waited out a 3 s join for it.
+    import time
+    feed = _Feed(_RtlAis(), _udp())
+    reader, _ = _reading(feed)
+    time.sleep(0.1)                               # let it block in recv
+    started = time.monotonic()
+    feed.terminate()
+    reader.join(timeout=2.0)
+    assert not reader.is_alive()
+    assert time.monotonic() - started < 1.5
+
+
+def test_ais_feed_ends_when_rtl_ais_dies():
+    # UDP has no end-of-stream: without this the reader would wait for datagrams forever and the
+    # panel would never learn rtl_ais had gone.
+    proc = _RtlAis()
+    feed = _Feed(proc, _udp())
+    reader, _ = _reading(feed)
+    proc.code = 1
+    reader.join(timeout=2.0)
+    assert not reader.is_alive()
+    feed.terminate()

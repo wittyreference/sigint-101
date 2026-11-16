@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
+from sigint101.pocsag import DEFAULT_POCSAG_HZ
 
 PACK = Path(__file__).resolve().parent.parent / "lesson_packs" / "15-pocsag.yaml"
 
@@ -38,6 +39,23 @@ def test_m15_tunes_to_the_pager_band():
     lesson = load_lesson_file(PACK)
     assert lesson.tune is not None, "M15 must name the pager band"
     assert 928_000_000 <= lesson.tune["center_hz"] <= 932_000_000
+
+
+def test_m15_teaches_the_statute_that_keeps_the_words_out_of_reach():
+    # MC's call (2026-11-02): framing live, text hidden, and teach the statute. Audit X1: the old
+    # copy called receiving pages "legal almost everywhere", which on a carrier's band is false.
+    lesson = load_lesson_file(PACK)
+    explain = lesson.stages["explain"]
+    for cite in ("2510(16)(D)", "2510(12)(B)", "2511(1)(a)"):
+        assert cite in explain, f"M15 explain must cite 18 USC {cite}"
+    for stage in lesson.stage_order:
+        assert "legal almost everywhere" not in lesson.stages[stage]
+    assert lesson.answer == ("law",)
+
+
+def test_m15_dial_reads_the_channel_the_decoder_listens_on():
+    # The dial shows the pack's band; the decoder runs DEFAULT_POCSAG_HZ. They must agree.
+    assert load_lesson_file(PACK).tune["center_hz"] == DEFAULT_POCSAG_HZ
 
 
 def test_m15_predict_choices_are_well_formed_string_key_label():

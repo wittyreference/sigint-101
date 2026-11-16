@@ -18,9 +18,23 @@ test("the address is the cap code, or a dash when none decoded", () => {
   assert.equal(panel.addr(null), "—");
 });
 
-test("a page summary is its message, with a note for a tone-only page", () => {
-  assert.equal(panel.summary({ kind: "alpha", text: "CALL EXT 2210" }), "CALL EXT 2210");
-  assert.equal(panel.summary({ kind: "numeric", text: "1234567890" }), "1234567890");
+test("a page summary never prints a page's words; a tone-only page gets a note", () => {
+  // The server drops the words on every frequency; were a page ever to carry some, the panel
+  // still has no line that shows them.
+  assert.equal(panel.summary({ kind: "alpha", text: "CALL EXT 2210" }), "");
+  assert.equal(panel.summary({ kind: "numeric", text: "1234567890" }), "");
   assert.equal(panel.summary({ kind: "tone", text: null }), "(tone only)");
   assert.equal(panel.summary(null), "");
+});
+
+test("a withheld page shows its length, never words (M15: framing live, text hidden)", () => {
+  assert.equal(
+    panel.summary({ kind: "alpha", text: null, length: 20, text_withheld: true }),
+    "text withheld · 20 chars");
+  assert.equal(
+    panel.summary({ kind: "numeric", text: null, length: 10, text_withheld: true }),
+    "digits withheld · 10");
+  assert.equal(
+    panel.summary({ kind: "alpha", text: null, length: 1, text_withheld: true }),
+    "text withheld · 1 char");
 });

@@ -14,52 +14,64 @@ panels: [provenance]
 
 stages:
   frame: >-
-    Tonight, comrade, you learn the most unsettling thing a radio can do — fail so quietly that a broken
-    receiver and an empty sky look exactly alike on the screen — and the one plain habit that
-    catches it.
+    Tonight, comrade, you learn the most unsettling way a radio can fail — quietly — and the one
+    plain habit that catches it.
   demo: >-
-    Watch — hands off for now. The boring move here is actually the whole job: write down the
-    state of the instrument itself. Open the provenance panel — it isn't showing a signal, it's
-    showing the radio: which radio this is, its gain, its chip temperature, whether its power is
-    clean, and the reading that matters most, the level of a known reference — the strong local
-    FM station from Lesson 1. It's always on, always in the same place, so you can hold the radio
-    against its level. I capture it all now as tonight's baseline: a dated snapshot of a healthy
-    radio hearing what it should. That snapshot is what will one day tell you the truth.
+    Watch — hands off for now. The boring move is the whole job: record the instrument itself.
+    The provenance panel shows the radio, not a signal: its gain, chip temperature, whether its
+    power is clean, and the level of a known reference — a steady FM station the console watches,
+    set for your area. Capture it: that's tonight's baseline.
   try: >-
-    Now you capture yours, comrade. Aim at that same reference station and tap capture — that
-    stamps tonight's baseline with today's date: the radio, its settings, its temperature, the
-    reference level, one record. The lesson is in the repeat: do it again tomorrow, and the night
-    after. You're not waiting for something to happen — you're building the record that lets you
-    notice when it does.
+    Now you capture yours, comrade. Tap Capture baseline — that stamps tonight's record: the
+    radio, its settings, its temperature, the reference level. The lesson is in the repeat: do
+    it again tomorrow, and the night after.
   predict: >-
-    You've saved a baseline against a known reference. The call: weeks from now this receiver
-    slowly goes deaf — corroded connector, dying front end — and you aim it at empty band. Next
-    to a band merely quiet tonight, would the broken-radio picture look IDENTICAL, a LITTLE
-    different, or OBVIOUSLY different? Lock it in — the rest stays hidden until you do.
+    Two pictures of the same empty stretch of band, comrade: one from a healthy radio, one from a
+    radio whose antenna cable has corroded through. From the pictures alone, could you tell which
+    radio is deaf? Lock it in.
   observe: >-
-    Put your empty-band waterfall beside your captured baseline and look hard. From the empty
-    waterfall alone — grass, dark, flat floor — can you tell whether the radio is working or
-    stone deaf? If the band can't answer that, what one thing on your screen can?
+    Imagine this radio goes deaf tonight. From the waterfall alone — grass, dark, flat floor —
+    could you tell? Which number on the provenance panel would tell you?
   explain: >-
-    Here's the hard truth you just reasoned your way toward. A dead front end and an empty sky draw
-    the same waterfall — flat floor, no stripes, nothing at all. "Quiet band" and "deaf radio" are
-    indistinguishable from the picture alone, which means a blank waterfall never, on its own,
-    proves that nothing is on the air; it can just as easily mean this radio has stopped hearing.
-    The only thing that resolves it is the reading you captured tonight: the reference. If your
-    known station still sits at the level your baseline recorded, the radio is healthy and the band
-    is genuinely quiet. If that reference has dropped or vanished while nothing else changed, the
-    radio has gone deaf — and you would never have known without the baseline to compare against.
-    That is why you logged the radio, the gain, the temperature, the power: that context is
-    provenance, and provenance is what makes one reading comparable to the next. A number on the
-    screen is not ground truth; a number sitting beside the known-good baseline that produced it is.
-    Keep the baseline, trust the reference, and the instrument cannot go deaf on you without getting
-    caught.
+    They look alike: this screen rescales its colours to whatever noise reaches it, so a deaf
+    radio and an empty sky both paint plain grass. A blank waterfall alone never proves the air is
+    empty. Your reference settles it. If your known station holds its baseline level, the radio is
+    healthy and the band is quiet; if it has dropped or vanished while nothing else changed, the
+    radio has gone deaf. That's why you logged radio, gain, temperature and power: that context is
+    provenance, making one reading comparable to the next. Carry this out the door: a number on
+    the screen is not ground truth; a number beside its known-good baseline is — keep the
+    baseline, trust the reference.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
 # learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
-  - {key: identical, label: Identical}
-  - {key: little, label: A little different}
-  - {key: obvious, label: Obviously different}
+  - {key: glance, label: "Yes, at a glance"}
+  - {key: dimming, label: Only by a faint dimming}
+  - {key: alike, label: "No, they look alike"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [alike]
+verdict: >-
+  They look alike: the screen rescales its colours to whatever noise it gets, so a deaf radio
+  paints the same grass. Only your reference tells.
+
+# The post-lesson check: one new situation on this lesson's idea (only the reference against your
+# baseline tells a deaf radio from a quiet band), scored after the explain. Each chip's `why` is the
+# feedback for choosing it.
+check:
+  prompt: >-
+    Your target band looks empty tonight. Your FM reference sits 15 dB under its baseline, same
+    gain, same temperature. Likeliest verdict?
+  choices:
+    - key: deaf
+      label: Your radio went deaf
+      why: A steady station 15 dB down, with gain and temperature unchanged, puts the loss in your radio.
+    - key: quiet
+      label: The band is just quiet
+      why: A quiet band leaves your reference at baseline; yours dropped 15 dB.
+    - key: unknown
+      label: Can't tell from this
+      why: The picture alone can't, but your reference can; 15 dB under baseline is the tell.
+  answer: deaf

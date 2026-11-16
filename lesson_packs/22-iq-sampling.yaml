@@ -34,12 +34,18 @@ stages:
   explain: >-
     2.4 MHz, comrade — the full rate, not half. A plain stream folds half back as a mirror, giving
     only 1.2 MHz; your complex I/Q pair resolves that mirror. So the slice runs the full 2.4 MHz, 1.2
-    above your tuning and 1.2 below — the waterfall's width.
+    above your tuning and 1.2 below — one dongle's view. (The console's 20 MHz waterfall stitches
+    many such slices.)
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}; keys are quoted so a YAML-boolean word stays text, and so
 # the 1.2-vs-2.4 trap is settled by a tap, never a typed number.
 choices:
-  - {key: "half", label: "1.2 MHz — half the rate"}
-  - {key: "full", label: "2.4 MHz — the full rate"}
-  - {key: "point", label: "Only 100 MHz itself"}
+  - {key: "half", label: "1.2 MHz"}
+  - {key: "full", label: "2.4 MHz"}
+  - {key: "double", label: "4.8 MHz"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["full"]
+verdict: >-
+  2.4 MHz: complex I/Q keeps both halves, 1.2 MHz above your tuning and 1.2 below.

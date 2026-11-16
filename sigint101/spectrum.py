@@ -7,9 +7,11 @@ import statistics
 import subprocess
 import tempfile
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 
+from .childproc import FIRST_RETRY_S, MAX_RETRY_S, STABLE_AFTER_S, spawn
 from .hardware import (
     RTL_POWER,
     DeviceSelectionError,
@@ -39,11 +41,26 @@ MAX_SPAN_HZ = 100_000_000
 MIN_BIN_HZ = 1
 MAX_BIN_HZ = 2_800_000
 
+# How many bins one row may ask for: about the waterfall's width in pixels. rtl_power splits each
+# hop into a power-of-two count of bins no wider than the request, so it can deliver up to twice
+# this. Unbounded, a 1 Hz bin over 100 MHz asks for 10^8 values per row, every poll.
+MAX_BINS = 1024
+
 # What an R828D's input amplifier can do. rtl_power snaps a request to the tuner's
 # nearest supported step (asking for 30 gets ~29.7), so the range is checked here
 # but the step table is the tuner's business.
 MIN_GAIN_DB = 0.0
 MAX_GAIN_DB = 49.6
+
+# rtl_power's own hop arithmetic (frequency_range() in rtl_power.c): a span is cut into the fewest
+# equal hops no wider than this, and a bin this wide or wider is a "giant bin", one per hop.
+RTL_POWER_MAX_HOP_HZ = 2_800_000
+RTL_POWER_GIANT_BIN_HZ = 1_000_000
+
+# How many measured bins a tuned-to target is kept from the centre of the hop that holds it. The
+# centre bin itself is rtl_power's DC copy (unmeasured), and its neighbours carry the DC spike's
+# skirt; a few bins out is clean, and still far from the roll-off at the hop's edges.
+SPAN_GUARD_BINS = 4
 
 
 class SpectrumUnavailable(RuntimeError):
@@ -109,6 +126,10 @@ def validate_span(low=None, high=None, bin_size=None) -> tuple:
         raise TuneError(
             f"span {span / 1e6:.1f} MHz is wider than {MAX_SPAN_HZ // 1_000_000} MHz; "
             "a sweep that wide takes minutes per row")
+    if span / bin_size > MAX_BINS:
+        raise TuneError(
+            f"{span / 1e6:.3f} MHz in {bin_size} Hz bins is {span // bin_size} bins per row; "
+            f"the waterfall holds at most {MAX_BINS}")
 
     return low, high, bin_size
 
@@ -136,8 +157,92 @@ def validate_gain(gain):
 
 
 @dataclass(frozen=True)
+class HopPlan:
+    """How rtl_power will cut a span: each hop's centre, the hops' width, and the bin it delivers.
+
+    A hop's centre frequency is its DC bin, which rtl_power cannot measure (parse_line keeps it
+    as None). `bins` is the count per hop; `step` is the bin width rtl_power prints.
+    """
+
+    centres: list
+    hop_width: int
+    bins: int
+    step: float
+
+
+def hop_plan(low, high, bin_size) -> HopPlan:
+    """Predict rtl_power's hops for a span, the way frequency_range() in rtl_power.c lays them.
+
+    The fewest equal hops no wider than 2.8 MHz, each centred half a hop in; the bins per hop the
+    smallest power of two that keeps a bin no wider than asked. A giant bin (1 MHz or more) is one
+    bin a hop, as wide as asked. Checked against real captures from nomad-b, including the
+    downsampled path a span under 1 MHz takes.
+    """
+    low, high, bin_size = int(low), int(high), int(bin_size)
+    span = high - low
+    if bin_size >= RTL_POWER_GIANT_BIN_HZ:
+        count = max(span // bin_size, 1)
+        return HopPlan(centres=[low + i * bin_size + bin_size // 2 for i in range(count)],
+                       hop_width=bin_size, bins=1, step=float(bin_size))
+    # The smallest count whose (integer) hop width is within the limit, as rtl_power's loop finds.
+    count = span // (RTL_POWER_MAX_HOP_HZ + 1) + 1
+    width = span // count
+    bins = 2
+    while width / bins > bin_size and bins < 2 ** 21:
+        bins *= 2
+    return HopPlan(centres=[low + i * width + width // 2 for i in range(count)],
+                   hop_width=width, bins=bins, step=width / bins)
+
+
+def target_span(center, width, bin_size=None) -> tuple:
+    """A span `width` wide around a target, offset so the target sits on measured bins.
+
+    Centred exactly, a single-hop span puts its target on the hop's unmeasured centre bin (M9's
+    433.92 MHz carrier disappeared into it), and an even hop count puts it on a hop edge, where
+    the dongle's filter rolls off. So the span is shifted, by as little as it takes, until the
+    target is SPAN_GUARD_BINS measured bins from the centre of the hop that holds it. The span
+    keeps its width and bin size; the target, not the span's middle, is what the dial reads. A
+    span with giant bins has no centre gap and stays centred; so does one with too few bins a hop
+    to step aside, and one that no offset keeps inside the tuner (the span gate then decides).
+    """
+    bin_size = DEFAULT_BIN if bin_size is None else int(bin_size)
+    center, width = int(center), int(width)
+    low = center - width // 2
+    high = low + width
+    plan = hop_plan(low, high, bin_size)
+    guard_bins = min(SPAN_GUARD_BINS, plan.bins // 4)
+    if plan.bins < 2 or guard_bins < 1:
+        return low, high, bin_size
+    guard = guard_bins * plan.step
+    shifts = sorted({round(center - hop - side * guard)
+                     for hop in plan.centres for side in (1, -1)},
+                    key=lambda d: (abs(d), -d))
+    for shift in shifts:
+        if low + shift >= TUNER_MIN_HZ and high + shift <= TUNER_MAX_HZ:
+            return low + shift, high + shift, bin_size
+    return low, high, bin_size
+
+
+def validate_target_span(center, width, bin_size=None) -> tuple:
+    """Check a target-centred request and build its offset span, refusing what cannot be swept.
+
+    Fails closed like validate_span: the span centred on the target must pass its gate before any
+    offset is worked out, and the offset span must pass it too.
+    """
+    center = _hz(center, "centre")
+    width = _hz(width, "span")
+    low = center - width // 2
+    _, _, bin_size = validate_span(low, low + width, bin_size)
+    return validate_span(*target_span(center, width, bin_size))
+
+
+@dataclass(frozen=True)
 class SweepRow:
-    """One full-band sweep: the power across every bin at a single moment."""
+    """One full-band sweep: the power across every bin at a single moment.
+
+    A bin rtl_power did not measure is None in `dbm`, never a borrowed neighbour's value, so
+    every number in a row is a measurement at the frequency it is drawn at.
+    """
 
     ts: str
     freq_low: float
@@ -149,25 +254,30 @@ class SweepRow:
         """Where each power reading sits in frequency, in Hz. Pairs one-to-one with `dbm`.
 
         A "bin" is one slice of spectrum the receiver measured power in — the finest
-        detail this sweep can show. These are the bins' *edges*, not their centres:
-        rtl_power reports both edges of the span, so value i sits at low + i*step and
-        the last lands exactly on freq_high.
+        detail this sweep can show. These are the bins' *centres*: FFT bin k of a hop is
+        centred at low + k*step, so the first sits on freq_low and the last a step short
+        of freq_high, where the next hop's first bin is measured.
         """
         return tuple(self.freq_low + i * self.freq_step for i in range(len(self.dbm)))
+
+    def measured(self) -> list:
+        """The power readings rtl_power actually measured, without the unmeasured bins."""
+        return [v for v in self.dbm if v is not None]
 
     def noise_floor_db(self) -> float:
         """The power of the quiet bins — what the receiver hears when nobody transmits.
 
         The median across bins, because stations occupy a minority of any real span:
         the middle value lands in the noise however bright the few busy bins are.
-        Rows always carry at least one bin (parse_line refuses anything shorter).
+        Rows always carry at least one measured bin (each hop prints at least one).
         """
-        return statistics.median(self.dbm)
+        return statistics.median(self.measured())
 
     def peak(self) -> tuple:
         """The strongest bin, as (frequency in Hz, power in dB). First bin wins a tie."""
-        index = self.dbm.index(max(self.dbm))
-        return (self.freq_low + index * self.freq_step, self.dbm[index])
+        strongest = max(self.measured())
+        index = self.dbm.index(strongest)
+        return (self.freq_low + index * self.freq_step, strongest)
 
     def snr_db(self) -> float:
         """Signal-to-noise ratio: how far the strongest bin stands above the floor.
@@ -205,6 +315,16 @@ def parse_line(line) -> SweepRow | None:
     """Parse one rtl_power CSV line, or return None if it isn't one.
 
     Columns: date, time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
+
+    rtl_power 0.6.0 (the Debian build on the Nomad) prints two values that are not
+    measurements, and both are taken out here (csv_dbm() in rtl_power.c):
+    - The trailing duplicate. Its loop prints bins 0..len-1, then prints the last bin a
+      second time, so a line carries len+1 values and the last two are always equal. That
+      extra value would be drawn at freq_high, which is the next hop's first bin.
+    - The DC copy. Before printing, it overwrites the hop's DC bin with its neighbour
+      ("nuke DC component"). After its 180-degree rotation that bin sits at the hop centre.
+      It is kept in place as None, so the bins either side stay at their own frequencies and
+      the waterfall can show the gap honestly instead of a borrowed value.
     """
     if not line:
         return None
@@ -228,33 +348,34 @@ def parse_line(line) -> SweepRow | None:
         step = float(fields[4])
         # Everything after the header is power in dB: a logarithmic scale, so a reading
         # 10 higher is ten times the power, not ten units more of it.
-        dbm = tuple(float(x) for x in fields[6:])
+        printed = [float(x) for x in fields[6:]]
     except ValueError:
         # A partially written line is normal when the process is killed mid-sweep.
         return None
 
+    # The trailing duplicate needs a value before it to duplicate; a lone value is a line cut
+    # short, not a hop.
+    if len(printed) < 2:
+        return None
+    dbm = printed[:-1]
+    # One bin per hop ("giant bins") has no neighbour, so rtl_power copies nothing into it.
+    dc = round((high - low) / (2 * step)) if step > 0 else -1
+    if len(dbm) > 1 and 0 <= dc < len(dbm):
+        dbm[dc] = None
+
     return SweepRow(ts=f"{fields[0]} {fields[1]}", freq_low=low, freq_high=high,
-                    freq_step=step, dbm=dbm)
-
-
-def _adjacent(left: SweepRow, right: SweepRow) -> bool:
-    """Do these two chunks meet, so that they share the bin at their boundary?
-
-    Compared with a tolerance rather than for equality because the frequencies are
-    floats and rarely land exactly equal. Half a bin is the natural tolerance: two
-    edges closer together than that cannot be different measurement points. The
-    `or 1` covers a chunk reporting a step of zero — a zero tolerance would mean no
-    two edges could ever read as adjacent, so it falls back to 1 Hz.
-    """
-    return abs(left.freq_high - right.freq_low) < (left.freq_step / 2 or 1)
+                    freq_step=step, dbm=tuple(dbm))
 
 
 def merge_chunks(chunks) -> SweepRow:
     """Join the per-chunk lines of one sweep into a single full-band row.
 
-    rtl_power splits a span wider than the dongle's bandwidth into chunks and
-    reports both edges of each, so neighbouring chunks repeat the bin they share.
-    Keeping both would double-count it and skew the frequency axis.
+    rtl_power splits a span wider than the dongle's bandwidth into chunks (hops) that
+    abut: each hop's bins run from its low edge up to a step short of its high edge,
+    which is where the next hop's first bin is measured. So the hops simply join end to
+    end. A gap between two hops is held open with unmeasured bins rather than closed,
+    because closing it would slide every later value onto a frequency it was not
+    measured at.
     """
     chunks = sorted(chunks, key=lambda c: c.freq_low)
     if not chunks:
@@ -262,12 +383,17 @@ def merge_chunks(chunks) -> SweepRow:
     if len(chunks) == 1:
         return chunks[0]
 
+    step = chunks[0].freq_step
     dbm = list(chunks[0].dbm)
     for previous, chunk in zip(chunks, chunks[1:]):
-        dbm.extend(chunk.dbm[1:] if _adjacent(previous, chunk) else chunk.dbm)
+        # Rounded rather than compared exactly: the edges are floats, and rtl_power's own
+        # integer edge arithmetic can land a hop a hertz short of its neighbour.
+        missing = round((chunk.freq_low - previous.freq_high) / step) if step > 0 else 0
+        dbm.extend([None] * max(missing, 0))
+        dbm.extend(chunk.dbm)
 
     return SweepRow(ts=chunks[0].ts, freq_low=chunks[0].freq_low,
-                    freq_high=chunks[-1].freq_high, freq_step=chunks[0].freq_step,
+                    freq_high=chunks[-1].freq_high, freq_step=step,
                     dbm=tuple(dbm))
 
 
@@ -288,7 +414,9 @@ def _popen(cmd):
     a pipe would very likely survive; a file removes the question, and costs nothing.
     """
     scratch = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=scratch, text=True)
+    # spawn() gives rtl_power its own session and ties it to the console's life, so a console
+    # killed outright does not leave it holding the dongle.
+    proc = spawn(cmd, stdout=subprocess.PIPE, stderr=scratch, text=True)
     # Popen leaves .stderr as None when handed a file, so the handle is reattached
     # here: it gives the reader one place to look, real process or injected fake.
     proc.stderr = scratch
@@ -305,10 +433,14 @@ class Sweeper:
     def __init__(self, *, low=DEFAULT_LOW, high=DEFAULT_HIGH, bin_size=DEFAULT_BIN,
                  integration=DEFAULT_INTEGRATION, device=0, history=DEFAULT_HISTORY,
                  spawn=_popen, radio_present=None, gain=None,
-                 serial=None, list_devices=None):
+                 serial=None, list_devices=None, clock=time.monotonic):
         self.low = int(low)
         self.high = int(high)
         self.bin_size = int(bin_size)
+        # The frequency the learner tuned to, when the span was built around one (target_span
+        # offsets the sweep off it). None when the span was given by its edges, as the FM default
+        # is: the dial then reads the span's middle.
+        self.target = None
         self.integration = int(integration)
         # Deliberately not int(): a serial is text, and "00000001" coerced to a number
         # becomes the index 1, which on a bus shared with a KrakenSDR is a different radio.
@@ -334,6 +466,12 @@ class Sweeper:
         self._released = False
         self._interrupted = False
         self.error = None
+        # The respawn back-off the decoders get from childproc.ChildWatch: an rtl_power that dies
+        # on its own is not relaunched on every poll, and each quick death doubles the wait.
+        self._clock = clock
+        self._started_at = None
+        self._deaths = 0
+        self._retry_at = None
 
     @property
     def running(self) -> bool:
@@ -435,16 +573,19 @@ class Sweeper:
         # A sweep that died since the last poll is reported before another is launched.
         # Without this the console would respawn a doomed rtl_power on every poll and
         # keep answering 200 with an empty row list — a waterfall that is blank because
-        # nothing works, presented exactly like a band that is quiet. The reason is
-        # cleared as it is raised, so a dongle that comes back is picked up on the very
-        # next poll instead of the console staying wedged on an old failure.
+        # nothing works, presented exactly like a band that is quiet. While the back-off
+        # runs the reason stands; once it has run out the reason is reported one last time
+        # and cleared, so a dongle that comes back is picked up on the next poll instead of
+        # the console staying wedged on an old failure.
         # Read-and-clear is not atomic against the reader thread, which writes `error`
         # as a process dies. A write lost in that window is self-correcting rather than
         # silent: the sweep it described is dead, so the next spawn dies the same way and
         # records the same reason. Taking `_life` here instead would deadlock — stop()
         # joins the reader while holding it, which is why the two locks exist at all.
         if self.error:
-            reason, self.error = self.error, None
+            reason = self.error
+            if self.retry_in() is None:
+                self.error = None
             raise SpectrumUnavailable(reason)
         self.device = self._choose_device()
         # OSError is rtl_power not installed; ValueError is a malformed command. Both
@@ -457,6 +598,7 @@ class Sweeper:
 
         self.error = None
         self._interrupted = False
+        self._started_at = self._clock()
         # A daemon thread, so a wedged rtl_power cannot keep the whole console alive
         # after shutdown — the dongle must come free when the service stops.
         self._thread = threading.Thread(target=self._read, name="sigint101-sweeper", daemon=True)
@@ -514,6 +656,12 @@ class Sweeper:
         else:
             self.error = (f"the sweep was killed mid-pass (signal {-code})"
                           f"{self._stderr_tail(proc)}")
+        # The same back-off ChildWatch gives the decoders: a sweep that ran a while was working,
+        # so its wait starts afresh; each quick death after it doubles the wait, up to the cap.
+        now = self._clock()
+        lived = now - self._started_at if self._started_at is not None else 0.0
+        self._deaths = 1 if lived >= STABLE_AFTER_S else self._deaths + 1
+        self._retry_at = now + min(FIRST_RETRY_S * 2 ** (self._deaths - 1), MAX_RETRY_S)
         # Nothing more will be written: the process is reaped. Closing here frees the
         # handle now rather than at the next start(), and the temporary file with it.
         self._close_stderr(proc)
@@ -608,20 +756,38 @@ class Sweeper:
             self.stop()
             self.gain = gain
 
-    def retune(self, low, high, bin_size=None) -> None:
+    def retry_in(self) -> float | None:
+        """Seconds until a sweep that died on its own may be launched again, or None if it may."""
+        if self._retry_at is None:
+            return None
+        left = self._retry_at - self._clock()
+        return left if left > 0 else None
+
+    def retune(self, low, high, bin_size=None, *, target=None) -> None:
         """Point the sweep at a new span and stand down.
 
         Rows carry their own frequency axis, so those from the old span are dropped —
         painting two bands onto one waterfall would be a lie about what was received.
-        The next poll restarts the sweep on the new range.
+        The next poll restarts the sweep on the new range. `target` is the frequency the
+        span was built around (see retune_to); a span given only by its edges has none.
         """
         low, high, bin_size = validate_span(low, high, bin_size)
         with self._life:
             self.stop()
             self.low, self.high, self.bin_size = low, high, bin_size
+            self.target = None if target is None else int(target)
             self._pending = []
             with self._lock:
                 self._rows.clear()
+
+    def retune_to(self, center, width, bin_size=None) -> None:
+        """Tune to a frequency: a span `width` wide, offset so the target lands on measured bins.
+
+        The sweep's own span then sits a little off the target (target_span says why); the
+        target is kept so the dial reads where the learner tuned, not the span's middle.
+        """
+        low, high, bin_size = validate_target_span(center, width, bin_size)
+        self.retune(low, high, bin_size, target=center)
 
     def stop(self) -> None:
         """End the sweep and let go of the dongle."""

@@ -40,7 +40,8 @@
     var empty = panel.querySelector("[data-sstv-empty]");
     var badge = panel.querySelector("[data-sstv-badge]");
     var images = body.images || [];
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
+    DecoderPanel.showCommand(panel, body.command);
     if (images.length) {
       if (img) { img.src = src(images[0]); img.hidden = false; }
       if (cap) cap.textContent = label(images[0]);
@@ -52,15 +53,14 @@
     }
   }
 
-  function showEmpty(panel, reason) {
+  function showEmpty(panel, body) {
     var img = panel.querySelector("[data-sstv-img]");
     var cap = panel.querySelector("[data-sstv-cap]");
     var empty = panel.querySelector("[data-sstv-empty]");
     var badge = panel.querySelector("[data-sstv-badge]");
     if (img) { img.hidden = true; img.removeAttribute("src"); }
     if (cap) cap.textContent = "";
-    if (badge) { badge.textContent = "NO RADIO"; badge.className = "decoder__status decoder__status--empty"; }
-    if (empty) { empty.hidden = false; empty.textContent = reason || "no radio to decode SSTV"; }
+    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode SSTV");
   }
 
   function tick() {
@@ -69,8 +69,7 @@
       .then(function (res) {
         var waiting = false;
         if (!res.ok || res.body.available === false) {
-          var reason = (res.body && res.body.reason) || "no radio to decode SSTV";
-          panels.forEach(function (p) { showEmpty(p, reason); });
+          panels.forEach(function (p) { showEmpty(p, res.body); });
           waiting = true;
         } else {
           panels.forEach(function (p) { render(p, res.body); });

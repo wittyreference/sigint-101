@@ -382,3 +382,106 @@ def test_sim_survives_a_reopen(tmp_path):
     first.close()
     second = exam.ExamStore(db)
     assert second.sim()["answers"] == {"T1A01": "D"}
+
+
+def test_sim_answer_cannot_change_after_review(tmp_path):
+    # Commit-before-reveal: once a sim answer is in (and the review has shown the right one), a
+    # second answer for that question must neither overwrite it nor count as recorded.
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.start_sim(["T1A01", "T2B02"])
+    assert store.record_sim_answer("T1A01", "B") is True
+    assert store.record_sim_answer("T1A01", "C") is False
+    assert store.sim()["answers"] == {"T1A01": "B"}
+
+
+def test_sim_answer_off_the_sheet_or_with_no_sim_is_not_recorded(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    assert store.record_sim_answer("T1A01", "A") is False      # no sim in progress
+    store.start_sim(["T1A01"])
+    assert store.record_sim_answer("T9Z99", "A") is False      # not on the drawn sheet
+
+
+# ------------------------------------------------------- practice-exam skip
+
+def test_next_sim_question_is_the_first_unanswered():
+    assert exam.next_sim_question(["A1", "B2", "C3"], {"A1": "B"}, []) == "B2"
+
+
+def test_next_sim_question_is_none_once_every_question_is_answered():
+    assert exam.next_sim_question(["A1", "B2"], {"A1": "B", "B2": "C"}, []) is None
+
+
+def test_next_sim_question_passes_over_a_skipped_one():
+    assert exam.next_sim_question(["A1", "B2", "C3"], {}, ["A1"]) == "B2"
+
+
+def test_a_skipped_question_comes_back_once_the_rest_are_answered():
+    # Skip defers, never discards: with everything else answered the skipped one is served again.
+    assert exam.next_sim_question(["A1", "B2", "C3"], {"B2": "A", "C3": "D"}, ["A1"]) == "A1"
+
+
+def test_skipped_questions_come_back_in_the_order_they_were_skipped():
+    ids = ["A1", "B2", "C3"]
+    assert exam.next_sim_question(ids, {"B2": "A"}, ["C3", "A1"]) == "C3"
+
+
+def test_an_answered_question_left_in_the_skip_list_is_never_served_again():
+    assert exam.next_sim_question(["A1", "B2"], {"A1": "C"}, ["A1"]) == "B2"
+
+
+def test_skip_records_the_question_as_deferred(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.start_sim(["T1A01", "T2B02", "T3C03"])
+    store.skip_sim_question("T1A01")
+    s = store.sim()
+    assert s["skipped"] == ["T1A01"]
+    assert s["answers"] == {}                       # skipping is not answering
+    assert exam.next_sim_question(s["question_ids"], s["answers"], s["skipped"]) == "T2B02"
+
+
+def test_skipping_again_sends_a_question_to_the_back(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.start_sim(["T1A01", "T2B02"])
+    store.skip_sim_question("T1A01")
+    store.skip_sim_question("T2B02")
+    store.skip_sim_question("T1A01")
+    assert store.sim()["skipped"] == ["T2B02", "T1A01"]
+
+
+def test_skip_ignores_a_question_off_the_sheet_or_already_answered(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.skip_sim_question("T1A01")                # no sim: nothing to defer, no error
+    store.start_sim(["T1A01", "T2B02"])
+    store.record_sim_answer("T1A01", "A")
+    store.skip_sim_question("T1A01")
+    store.skip_sim_question("T9Z99")
+    assert store.sim()["skipped"] == []
+
+
+def test_a_fresh_sim_has_nothing_skipped(tmp_path):
+    store = exam.ExamStore(tmp_path / "exam.db")
+    store.start_sim(["T1A01", "T2B02"])
+    store.skip_sim_question("T1A01")
+    store.start_sim(["T3C03"])
+    assert store.sim()["skipped"] == []
+
+
+def test_a_sim_saved_before_skip_existed_still_opens(tmp_path):
+    # The kiosk's exam.db predates the skip list: opening it must add the column, keep the sim in
+    # progress, and read it as nothing skipped.
+    import sqlite3
+    db = tmp_path / "exam.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE sim (id INTEGER PRIMARY KEY CHECK (id = 1), question_ids TEXT NOT NULL, "
+        "answers TEXT NOT NULL DEFAULT '{}', created REAL);"
+        "INSERT INTO sim VALUES (1, '[\"T1A01\", \"T2B02\"]', '{\"T1A01\": \"C\"}', 0);"
+    )
+    conn.commit()
+    conn.close()
+    store = exam.ExamStore(db)
+    s = store.sim()
+    assert s["answers"] == {"T1A01": "C"}
+    assert s["skipped"] == []
+    store.skip_sim_question("T2B02")
+    assert store.sim()["skipped"] == ["T2B02"]

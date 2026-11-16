@@ -1,0 +1,19 @@
+# ABOUTME: labwc window and menu colours for the SIGINT 101 desktop: green on black, green frames.
+# ABOUTME: Installed as ~/.config/labwc/themerc-override; labwc layers it over the Pi's theme.
+border.width: 2
+window.active.border.color: #2ee66a
+window.inactive.border.color: #0f3d22
+window.active.title.bg.color: #000000
+window.inactive.title.bg.color: #000000
+window.active.label.text.color: #2ee66a
+window.inactive.label.text.color: #1d7a3f
+window.active.button.unpressed.image.color: #2ee66a
+window.inactive.button.unpressed.image.color: #1d7a3f
+menu.items.bg.color: #040806
+menu.items.text.color: #2ee66a
+menu.items.active.bg.color: #2ee66a
+menu.items.active.text.color: #000000
+menu.border.color: #2ee66a
+osd.bg.color: #000000
+osd.border.color: #2ee66a
+osd.label.text.color: #2ee66a

@@ -10,6 +10,7 @@ import re
 import subprocess
 from array import array
 
+from .childproc import spawn, stop_process
 from .provenance import read_soc_temp_c
 
 # The reference tone. Every stereo FM broadcast carries a 19 kHz pilot, and 47 CFR 73.322 holds
@@ -50,6 +51,10 @@ _STA_UNSYNC = 0x0040
 
 class PpmError(ValueError):
     """The requested measurement is not one this instrument can honestly make."""
+
+
+class PpmUnavailable(PpmError):
+    """The capture cannot run at all — rtl_fm is missing, or the radio cannot be had."""
 
 
 def goertzel(samples, k, n) -> complex:
@@ -191,7 +196,12 @@ def _default_capture(*, hz, seconds, gain, device=None):
     cmd = ["rtl_fm", "-f", str(int(hz)), "-M", "fm", "-s", str(DEMOD_RATE), "-g", str(gain), "-"]
     if device is not None:
         cmd[1:1] = ["-d", str(device)]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # A missing rtl_fm is a refusal the panel can show, not an exception that escapes the route
+    # as a bare 500 the learner reads as "lost contact with the console".
+    try:
+        proc = spawn(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise PpmUnavailable(f"cannot run rtl_fm, so the pilot cannot be captured: {exc}") from exc
     return _CaptureStream(proc)
 
 
@@ -213,11 +223,7 @@ class _CaptureStream:
     def close(self):
         """Stop rtl_fm and release the dongle, whatever the measurement decided."""
         if self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
+            stop_process(self._proc)
         if self._proc.stdout:
             self._proc.stdout.close()
 

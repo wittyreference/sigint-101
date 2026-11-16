@@ -3,7 +3,9 @@
 
 from sigint101.provenance import (
     REFERENCE_HZ,
+    REFERENCE_HZ_ENV,
     compare_to_baseline,
+    configured_reference_hz,
     gather_provenance,
     read_baseline,
     read_soc_temp_c,
@@ -79,6 +81,23 @@ def test_reference_level_reads_the_bin_at_the_reference_frequency():
 def test_reference_level_is_in_band_for_the_default_reference():
     # 106.5 MHz sits inside 88-108, so the default reference resolves to a real bin.
     assert reference_level_db(_row(), hz=REFERENCE_HZ) is not None
+
+
+def test_the_reference_station_is_set_at_provisioning_by_environment():
+    # 106.5 MHz was the steady station at the box this course was built on; a recipient's site
+    # needs its own, so the provisioner sets it. Unset or not an FM channel keeps the default.
+    assert configured_reference_hz({REFERENCE_HZ_ENV: "94700000"}) == 94_700_000
+    assert configured_reference_hz({}) == REFERENCE_HZ
+    assert configured_reference_hz({REFERENCE_HZ_ENV: "96000000"}) == REFERENCE_HZ
+    assert configured_reference_hz({REFERENCE_HZ_ENV: "106.5"}) == REFERENCE_HZ
+
+
+def test_gather_provenance_reads_the_provisioned_reference(monkeypatch):
+    monkeypatch.setenv(REFERENCE_HZ_ENV, "94700000")
+    snapshot = gather_provenance(serial=None, gain=None, row=_row(),
+                                 temp=lambda: None, throttled=lambda: None)
+    assert snapshot["ref_hz"] == 94_700_000
+    assert snapshot["ref_db"] == reference_level_db(_row(), hz=94_700_000)
 
 
 def test_reference_level_is_none_outside_the_band():

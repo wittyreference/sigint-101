@@ -1,0 +1,58 @@
+/* SIGINT 101 desktop theme: the Pi's own PiXflat widgets, recoloured as a phosphor terminal. */
+/* Installed as ~/.themes/SIGINT101; deploy/desktop/apply-theme.sh selects it with gsettings.  */
+
+/* Widgets and the dark colour set come from the stock themes, so menus, dialogs and the panel
+   keep working exactly as the Pi ships them; only the colours below change. */
+@import url("/usr/share/themes/PiXflat/gtk-3.0/gtk-contained.css");
+@import url("/usr/share/themes/PiXnoir/gtk-3.0/gtk-colours.css");
+
+/* The console's own palette: dark-theme phosphor #2ee66a on black. */
+@define-color bar_bg_color #000000;
+@define-color bar_fg_color #2ee66a;
+@define-color bar_hover_color #0b3d1f;
+@define-color bar_checked_color #0f5a2c;
+@define-color theme_bg_color #040806;
+@define-color theme_fg_color #c8f5d6;
+@define-color theme_base_color #000000;
+@define-color theme_text_color #c8f5d6;
+@define-color theme_selected_bg_color #2ee66a;
+@define-color theme_selected_fg_color #000000;
+@define-color theme_unfocused_bg_color #040806;
+@define-color theme_unfocused_fg_color #7fa58c;
+@define-color theme_unfocused_base_color #000000;
+@define-color theme_unfocused_text_color #7fa58c;
+@define-color borders #1d7a3f;
+
+/* The top bar: black, with a bright green rule along its bottom edge and a faint glow. */
+#PanelToplevel {
+  background-color: #000000;
+  border-bottom: 2px solid #2ee66a;
+  box-shadow: 0 0 8px rgba(46, 230, 106, 0.55);
+}
+#PanelToplevel label {
+  color: #2ee66a;
+  font-family: "PT Mono", monospace;
+}
+/* The stock theme paints every bar button in the bar colour, and the buttons reach the bottom
+   edge, so they cover the green rule. Clear, they let it run the full width; hover and checked
+   keep their stock colours (their selectors are more specific). */
+#PanelToplevel button,
+#PanelToplevel:backdrop button > box > label {
+  background-color: transparent;
+}
+
+/* The bar's pop-ups and every menu: a black panel in a green frame, inverted on hover. */
+#panelpopup, #panelpopup scrolledwindow,
+menu, .menu, .context-menu {
+  background-color: #040806;
+  border: 1px solid #2ee66a;
+}
+#panelpopup label, menu menuitem label {
+  color: #c8f5d6;
+}
+menu menuitem:hover, #panelmenu menuitem:hover {
+  background-color: #2ee66a;
+}
+menu menuitem:hover label, #panelmenu menuitem:hover label {
+  color: #000000;
+}

@@ -440,3 +440,207 @@ A third trap only showed up after several minutes:
   its requirements.
 - `git --no-optional-locks status` reads status without rewriting the index.
 - `fc-list ':charset=262d' family` lists the fonts that carry a glyph.
+
+## 2026-11-02: a scrolling CSS grid never grows `minmax(N, auto)` rows
+**Finding.** The home tiles used `grid-auto-rows: minmax(124px, auto)` to let a two-line tile
+grow, yet every tile measured exactly 124px: the glyph was squashed to 38x13 (U7's to 0) and U7
+clipped by 10px. In track sizing an `auto` maximum only grows into *free space*, and a grid that
+overflows its scroll container has none, so rows stay at the 124px base. `max-content` rows with
+`min-height` on the item fix it, and a flex-column child that must keep its size needs
+`flex: none` or it absorbs the squeeze silently.
+**How to apply.** In any grid that can overflow (home, unit pages, exam lists), size rows with
+`max-content` or a fixed height, never `minmax(..., auto)`. Measure the item boxes (not the
+screenshot) after any tile change.
+
+## 2026-11-02: the lesson shell's vertical budget at 800x480 (where the pixels go)
+**Finding.** Content below the 66px bar and 40px rail is 374px, and the stage panel pads 12px top
+and bottom. On an instrument stage a separate eyebrow line plus the 30px title cost about 69px.
+Moving the eyebrow onto the title's row (`.stage-panel--instrument` grid) and a 124px decoder
+gave the narration about 90px (3 lines) instead of 35. A square instrument (the ADS-B radar)
+can't shrink usefully; it goes beside the narration instead. Prev rides the existing Next row,
+because a 72px-tall rail would eat the narration band.
+**How to apply.** Before adding anything to a lesson stage, take its height from this budget.
+Re-measure with `.instrument > .stage-panel__body` clientHeight at a forced 800x480; a band under
+about 58px (2 lines) is a regression.
+
+## 2026-11-02: a header above a scrolling body steals its height; scored gates leak by position
+**Finding.** The explain verdict ("You said X · Answer: Y" plus a line) first went between the
+title and the explain body as a `flex: none` block. At 800x480 it took ~100px, and under a long
+eyebrow it squeezed the reading to 0px (M15) and 7px (M24/M27): the page "fit" because the body
+had nothing left to show. Inside the scrolling body, as its first child, the reading kept 195px.
+Separately, scoring exposed a pattern: with chip A committed everywhere, 14 of 28 lessons scored
+RIGHT, because authors put the right answer first.
+**How to apply.** Anything added to a reading stage goes inside `.stage-panel__body`, not beside
+it. Measure the body's clientHeight, not only the button bottom. Keep answer positions spread
+(`test_lesson_answers` caps any one chip at 40%). The YAML reloads only on a server restart, so
+restart before re-rendering a pack change.
+
+## 2026-11-02: PR_SET_PDEATHSIG fires when the forking *thread* exits, not the process
+**Finding.** The parent-death signal is tied to the thread that called fork. FastAPI runs sync
+routes on a pooled anyio worker that expires after ~10 s idle, so a tool forked from a request
+thread with `preexec_fn=prctl(PR_SET_PDEATHSIG)` would be SIGKILLed seconds into a lesson.
+`sigint101/childproc.py` forks every tool from one long-lived spawner thread instead;
+`test_a_child_outlives_the_request_thread_that_started_it` fails if that is undone.
+**How to apply.** Never Popen a radio tool directly: use `childproc.spawn` (own session,
+parent-death SIGKILL) and `childproc.stop_process` (terminate, wait, kill the session, wait).
+
+## 2026-11-02: a socket timeout is not end-of-stream
+**Finding.** `socket.create_connection(..., timeout=1.0)` leaves that timeout on the socket, and
+`TimeoutError` is an `OSError`, so the ADS-B reader's `except OSError: return` ended the feed
+after one quiet second while dump1090 ran on: a LIVE panel with a dead reader. UDP (AIS) has no
+end-of-stream at all, and `close()` from another thread does not wake a blocked `recv`.
+**How to apply.** Feed readers catch `TimeoutError` first and keep reading while the process
+lives; stop paths `shutdown(SHUT_RDWR)` before `close()`.
+
+## 2026-11-02: a span centred on a target puts the target on rtl_power's one unmeasured bin
+**Finding.** rtl_power cuts a span into the fewest equal hops <= 2.8 MHz and each hop's centre bin
+is its DC copy (kept as None). Centred on 433.92 MHz, M9's 2 MHz span is one hop, so the carrier
+sat exactly on the gap: measured on nomad-b, the 433.92 bin read None with -17.9/-18.2 dB either
+side. An even hop count (the 20 MHz FM default) puts a tap on a hop edge instead, in the roll-off.
+`spectrum.hop_plan` reproduces the hop/bin arithmetic (checked against the three real captures,
+including the downsampled <1 MHz path: bins = smallest power of two with hop/bins <= bin), and
+`target_span` shifts the span until the target is 4 bins from its hop's centre. Live: offset
+span 432.9825-434.9825, 433.92 bin measured (-18.43 dB), the gap moved to 433.9825.
+**How to apply.** Never build a sweep span by centring it on a frequency you want to see: tune
+by `{center, span}` through /api/tune (or `Sweeper.retune_to`) and read the dial from the
+response's `center`. A pack's default 125 kHz bin makes the 4-bin guard 500 kHz; give a narrow
+pack a fine `bin_hz` (M9 uses 15625) so the offset stays a sliver of the span.
+
+## 2026-11-02: an ssh-launched server outlives the ssh; Acurite sends each reading three times
+**Finding.** A HIL server run as `ssh host 'exec flock … uvicorn …'` (no tty) did not get SIGHUP
+when the local ssh was stopped: uvicorn, its flock and its rtl_433 child kept the dongle until the
+uvicorn PID was killed by hand. Separately, rtl_433 decodes the Acurite-Tower's three repeats of
+each transmission as three decodes, so the reception log gains three events per reading.
+**How to apply.** After a HIL session, `pgrep -af` for your port and the rtl_* tools and kill your
+own uvicorn PID (SIGTERM lets the lifespan stop the radio tool), then `rtl_test -t` in the flock.
+Expect reception counts in threes from that sensor; deduplicating repeats is a follow-up.
+
+## 2026-11-02: the RTL8821CU in monitor mode browns out the Nomad's USB
+**Finding.**
+- On nomad-b, `provision.sh` brought wlan1 (RTL8821CU, `rtw_8821cu`) up in monitor mode at
+  10:26:27. Within two minutes `dmesg` showed 192 `usb 1-1-port3: over-current change` events.
+- Each event reset the adapter: it came back in "Driver CDROM Mode" `0bda:1a2b` and then
+  re-enumerated, 34 times.
+- Each event also reset the touch panel's controller (MPI5001 `0484:5750`, on the same hub), 23
+  times. Touch input dropped on the kiosk.
+- While wlan1 sat DOWN (the state before provisioning), the bus was stable. With the radio up,
+  the adapter draws more than the port supplies.
+- Taking it down stopped the events: 0 in 30 s, with 0 touch resets.
+**How to apply.**
+- The Flock adapter needs a **self-powered USB hub** on a Nomad.
+- `provision.sh` makes monitor mode opt-in (`--with-flock-adapter`), and the quick-start says
+  to use the hub.
+- On nomad-b, the udev rule is parked at
+  `/etc/udev/rules.d/70-sigint101-monitor.rules.disabled` until a hub is in place.
+- After any USB or radio change, grep `dmesg` for `over-current` before calling it done.
+
+## 2026-11-03: course on the Pi desktop — Chromium retitles itself; pcmanfm trusts only /usr/share
+**Finding.**
+- **Chromium rewrites its process title.** On nomad-b, `/proc/<pid>/cmdline` for every kiosk
+  Chromium process is ONE space-joined string with a single trailing NUL, not one element per
+  flag. `pgrep -f` still matches (it searches the joined line). A test double that served neat
+  argv lists passed, but an exact argv-element match found nothing on the real box. Only a dry
+  run of `request_exit` against nomad-b's real `/proc`, with signals recorded rather than sent,
+  caught it.
+- **pcmanfm prompts before running a desktop entry.** On a double-tap of a `Type=Application`
+  `.desktop` in `~/Desktop`, libfm 1.3.2 (rpt18) treats any readable desktop entry as executable.
+  It then asks "This text file seems to be an executable script. Execute / Execute in Terminal?"
+  unless the global `quick_exec` is set. Neither the exec bit nor `gio` metadata helps: there is no
+  trust attribute in this libfm.
+  - The one prompt-free path is a `Type=Link` whose `URL` is a plain path (not `file://`) to an
+    entry under `/usr/share/` or `/usr/local/share/`.
+  - So the menu entry lives in `/usr/local/share/applications`, and the desktop icon links to it.
+- **raspi-config B4 also writes the tty1 getty autologin.** The desktop boots and tty1 logs in too,
+  so a leftover `~/.profile` kiosk hook would start a second compositor there. `install.sh`
+  removes the hook by its markers.
+**How to apply.**
+- Match a Chromium process by a whole flag in the joined command line, never by argv element.
+- Dry-run anything that picks processes to kill against the real target's `/proc`, recording
+  signals instead of sending them.
+- For a tap-to-launch desktop icon on Pi OS, use a Link to a `/usr/local/share/applications`
+  entry; don't flip `quick_exec`, which changes every script on the desktop.
+- Exit order matters: write the flag, then SIGTERM. The watchdog checks the browser first and the
+  flag second, so it can never see "no browser" from an Exit without also seeing the flag.
+
+## 2026-11-03: the instrument narration band shows ~30 words; a 120-word explain is ~3-4 screens
+**Finding.** A render sweep of every lesson's demo/try/observe/explain at a forced 800x480 (dark
+and red-night) measured the reading space. Under a live instrument the narration is a 90-94 px band
+(224 px beside the M13 radar): three lines, about 30 words. A 60-word narration still scrolls
+84-113 px in it. The explain body is 195 px tall; at 120 words its scrollHeight runs 550-980 px,
+because the verdict box and the concept paragraph ride in the same scroll.
+**How to apply.**
+- Narration stays at 60 words or fewer and the explain at 120 or fewer.
+  `tests/test_lesson_reading_load.py` enforces both, with a named allowance for M5/M15's law.
+- Put the one thing the learner must do in a narration's first ~30 words, where it shows without
+  scrolling.
+
+## 2026-11-03: theming the Pi desktop — where each setting actually lives
+**Finding.**
+- **`/usr/bin/labwc-pi` runs `rm ~/.config/gtk-3.0/gtk.css` at every login.** A user gtk.css
+  disappears on the next boot. A named theme in `~/.themes/<name>/gtk-3.0/gtk.css`, selected with
+  `gsettings set org.gnome.desktop.interface gtk-theme`, survives.
+- **On Wayland pcmanfm reads one desktop file per screen.** On nomad-b that file is
+  `~/.config/pcmanfm/LXDE-pi/desktop-items-HDMI-A-1.conf`. A wallpaper written only to
+  `desktop-items-0.conf` never shows. `apply-theme.sh` sets the keys in every
+  `desktop-items-*.conf`.
+- **wf-panel-pi is a GTK window named `PanelToplevel`.** Style it with `#PanelToplevel` in the GTK
+  theme. Killing it is safe because `lwrespawn` restarts it with the new style.
+- **`cmd | grep -q` fails under `set -o pipefail`.** grep exits on its first match, the writer
+  takes SIGPIPE, and the pipeline returns non-zero even though the text was there. Capture the
+  output first (`x="$(cmd || true)"`) and match it with `case`.
+**How to apply.** Put desktop styling in a named theme rather than `~/.config/gtk-3.0`. Write
+pcmanfm keys to every per-screen file. Check a `grep -q` pipeline under pipefail against the real
+command, not a stub that prints one line.
+
+## 2026-11-02: the ESP32-S2 Wi-Fi devboard — download mode needs a hand on RESET
+**Finding.**
+- The board on its own USB enumerates as `303a:0002 Espressif ESP32-S2`, which is the ROM
+  download mode reached through its GPIO0 strap.
+- esptool flashed Marauder and verified every region's hash. Its "hard reset" cannot leave ROM
+  download mode over the S2's native USB, so the board stays in the bootloader until someone
+  presses its RESET button.
+- A full-flash read for a backup (`read_flash 0 ALL`) stalled at byte 159744 on every attempt,
+  chunked reads included. The same run showed over-current events climbing on nomad-b's bus
+  (`overcurrent=177`), so power is a suspect, not proven.
+- The official rollback image is the stock Blackmagic firmware from lab.flipper.net, used instead
+  of a local backup.
+- With the board on the Flipper's GPIO and the Flipper's USB-UART bridge on channel 1, nomad-b has
+  not yet shown the second CDC port.
+**How to apply.**
+- Budget one physical RESET press after any devboard flash.
+- Take a devboard backup on a powered hub, or rely on the official image as the rollback.
+- Prove the bridge's second CDC port (`ls /dev/ttyACM*` shows two) before building on it.
+
+## 2026-11-03: the post-lesson check stage, and what fits beside it
+**Finding.**
+- A seventh rail pip (an intro lesson with a `check:`) squeezes "Locked until you predict" to two
+  lines, 47px tall in the 37px rail, clipped top and bottom. `.rail--long` tightens its line height
+  so both lines sit inside (measured 68–101px in the 66–103px rail).
+- The check fits 800x480 with no scroll only if the prompt is 2 title lines, every chip label is
+  2 lines or fewer, and the "Not yet" result (the chosen why plus the key's) is 4 lines or fewer.
+  One 3-line chip pushed Complete to 481px; a 3-line prompt pushed it to 528px.
+- A `why:` written as a plain YAML scalar must not contain ": " — the pack fails to parse and the
+  whole server refuses to start.
+**How to apply.** Keep check labels near 20 characters, each why near 90 with its label, and
+re-run the 800x480 render (before and after commit, wrong answer) on any check copy change.
+
+## 2026-11-15: deleting a PATH stub doesn't uninstall the tool; node's piped report isn't always TAP
+**Finding.** On WSL (Ubuntu 26.04, node 26.13) the suite had two failures with no defect behind
+either. Each test leaned on something its host supplied.
+- **A `Box` stub can add a tool or stand in front of one, but deleting the stub only hands the
+  name back to the host.** A box searches `/usr/bin` after its stubs. The no-fontconfig theme
+  test deleted the `fc-cache` and `fc-list` stubs; where fontconfig is installed the real
+  `fc-list` answered, found PT Mono in the box's own home (`apply-theme.sh` had just installed it
+  there) and the script chose the font.
+- **`node --test` has no one default report.** Up to node 22 a piped run prints TAP
+  (`# fail 0`). From node 23 it prints the spec report (`ℹ fail 0`), piped or not. The wrapper in
+  `tests/test_js_panels.py` read the default, so it failed with all 127 panel tests passing.
+- **A `*.test.js` with no tests in it is reported as one passing test** (`# tests 1`,
+  `# pass 1`, exit 0; seen on node 26.13). The wrapper's "discovered nothing" guard fires only
+  when node runs no file at all, so an empty test file still reads as covered. Not fixed.
+**How to apply.**
+- To stage "tool X is not installed", build a PATH with no X on it (`_path_without_fontconfig` in
+  `tests/test_desktop_theme.py`) and assert X is absent before the run. Never rely on the dev
+  host lacking it.
+- Ask a tool for its machine-readable output by name (`--test-reporter=tap`) and read numbers
+  from it. The default report is written for people and changes between versions.

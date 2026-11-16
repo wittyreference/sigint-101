@@ -10,6 +10,8 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import Pipeline as _Pipeline
 from .hardware import (
     MULTIMON,
     RTL_FM,
@@ -152,9 +154,10 @@ class StationRoster:
     def __init__(self):
         self._by_source: dict[str, Station] = {}
 
-    def absorb(self, packet: AprsPacket | None, now: float) -> None:
+    def absorb(self, packet: AprsPacket | None, now: float) -> Station | None:
+        """Fold one packet into its sender's entry, and return that station as it now stands."""
         if packet is None:
-            return
+            return None
         station = self._by_source.get(packet.source)
         if station is None:
             station = Station(source=packet.source, packet=packet)
@@ -162,48 +165,43 @@ class StationRoster:
         station.packet = packet
         station.packet_count += 1
         station.last_seen = now
+        return station
 
     def stations(self, now: float) -> list:
         """Every station heard, freshest first."""
         return sorted(self._by_source.values(), key=lambda s: s.last_seen, reverse=True)
 
 
-class _Pipeline:
-    """The rtl_fm|multimon-ng pair as one object: multimon-ng's stdout to read, both to reap."""
-
-    def __init__(self, rtl_fm, multimon):
-        self._rtl_fm = rtl_fm
-        self._multimon = multimon
-        self.stdout = multimon.stdout
-
-    def poll(self):
-        return self._multimon.poll()
-
-    def terminate(self):
-        for proc in (self._multimon, self._rtl_fm):
-            try:
-                proc.terminate()
-            except (OSError, subprocess.SubprocessError):
-                pass
-
-    def wait(self, timeout=None):
-        for proc in (self._rtl_fm, self._multimon):
-            try:
-                proc.wait(timeout=timeout)
-            except (OSError, subprocess.SubprocessError):
-                pass
-        return 0
+def _station_dict(s: Station) -> dict:
+    """One station as the API hands it out: its latest packet's meaning and how often it spoke."""
+    p = s.packet
+    return {
+        "source": s.source,
+        "dest": p.dest,
+        "path": list(p.path),
+        "kind": p.kind,
+        "lat": p.lat,
+        "lon": p.lon,
+        "text": p.text,
+        "addressee": p.addressee,
+        "packet_count": s.packet_count,
+    }
 
 
 def _popen(freq_hz: int, device: int):
-    """Launch rtl_fm demodulating the 2m channel into multimon-ng, which prints APRS frames."""
-    rtl_fm = subprocess.Popen(
+    """Launch rtl_fm demodulating the 2m channel into multimon-ng, which prints APRS frames.
+
+    Both halves run in their own sessions and die with the console; their stderr is kept for the
+    reason the panel shows if either one dies. The pair is one Pipeline, so it reads as down the
+    moment either half is.
+    """
+    rtl_fm = spawn(
         [RTL_FM, "-M", "fm", "-f", str(freq_hz), "-s", str(APRS_SAMPLE_RATE),
          "-g", "49.6", "-l", "0", "-d", str(device)],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    multimon = subprocess.Popen(
+        stdout=subprocess.PIPE)
+    multimon = spawn(
         [MULTIMON, "-t", "raw", "-a", "AFSK1200", "-A", "-"],
-        stdin=rtl_fm.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        stdin=rtl_fm.stdout, stdout=subprocess.PIPE, text=True)
     # Let rtl_fm see SIGPIPE if multimon-ng dies, rather than fill a pipe nobody drains.
     if rtl_fm.stdout is not None:
         rtl_fm.stdout.close()
@@ -220,6 +218,8 @@ class AprsDecoder:
     def __init__(self, *, freq_hz=DEFAULT_APRS_HZ, device=0, spawn=_popen,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None):
         self.freq_hz = int(freq_hz)
+        # The frequency this decoder was built for; the console tunes a lesson back to it.
+        self.home_hz = self.freq_hz
         self.device = device
         self.serial = serial or None
         self._list_devices = list_devices
@@ -227,17 +227,27 @@ class AprsDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._roster = StationRoster()
+        # Called with the sender's updated station dict after each decoded packet, from the reader
+        # thread only and outside the roster lock. The console's hook logs it as a reception and
+        # never raises, so the call is made directly: it cannot end the decode.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
         self._released = False
         self.error = None
+        # Who ended the child, and when the console may launch it again after it died on its own.
+        self.watch = ChildWatch(RTL_FM)
 
     @property
     def running(self) -> bool:
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the live process; None when nothing runs."""
+        return running_command(self._proc)
 
     @property
     def released(self) -> bool:
@@ -263,6 +273,20 @@ class AprsDecoder:
         with self._life:
             self._released = False
 
+    def retune(self, freq_hz) -> None:
+        """Move to another frequency: the running pipeline stops, and the next start() spawns there.
+
+        The stations heard on the old frequency are cleared as release() clears them, but the
+        dongle is not handed away. Tuning to where the decoder already is changes nothing.
+        """
+        with self._life:
+            if int(freq_hz) == self.freq_hz:
+                return
+            self._stop_locked()
+            self.freq_hz = int(freq_hz)
+            with self._lock:
+                self._roster = StationRoster()
+
     def start(self) -> None:
         """Begin decoding APRS, unless the radio is absent, a tool is missing, or released."""
         with self._life:
@@ -271,6 +295,7 @@ class AprsDecoder:
     def _start_locked(self) -> None:
         if self.running:
             return
+        self._settle()
         if self._released:
             raise AprsUnavailable(
                 "the radio was released to another program; resume APRS to take it back")
@@ -282,26 +307,50 @@ class AprsDecoder:
         if self.error:
             reason, self.error = self.error, None
             raise AprsUnavailable(reason)
+        # A child that died on its own is not relaunched on every poll: the reason stands, and the
+        # console waits out a back-off that grows while the deaths keep coming.
+        blocked = self.watch.blocked()
+        if blocked:
+            raise AprsUnavailable(blocked)
         self.device = self._choose_device()
         try:
             self._proc = self._spawn(self.freq_hz, self.device)
         except (OSError, ValueError) as exc:
             self._proc = None
             raise AprsUnavailable(f"cannot run the APRS pipeline: {exc}") from exc
+        self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, name="sigint101-aprs", daemon=True)
+        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+                                        name="sigint101-aprs", daemon=True)
         self._thread.start()
 
-    def _read(self) -> None:
+    def _read(self, proc) -> None:
         """Consume multimon-ng's output on a background thread, building the roster till it ends."""
         try:
-            for raw in self._proc.stdout:
+            for raw in proc.stdout:
                 packet = parse_aprs_frame(parse_aprs_line(raw))
                 if packet is not None:
                     with self._lock:
-                        self._roster.absorb(packet, now=time.time())
+                        station = _station_dict(self._roster.absorb(packet, now=time.time()))
+                    report = self.on_reception
+                    if report is not None:
+                        report(station)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
+        finally:
+            self._note_end(proc)
+
+    def _note_end(self, proc) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+        reason = self.watch.ended(proc)
+        if reason and self.error is None:
+            self.error = reason
+
+    def _settle(self) -> None:
+        """Account for a child that ended since the last poll, then clear away what it left."""
+        if self._proc is not None:
+            self._note_end(self._proc)
+            self._stop_locked()
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -309,15 +358,11 @@ class AprsDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        # Marked first, so the reader seeing the output end never reports our stop as a death.
+        self.watch.stopping()
         proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.error = "the APRS pipeline did not stop; the dongle may still be held"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        if proc is not None and not stop_process(proc):
+            self.error = "the APRS pipeline survived kill; the dongle may still be held"
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None
@@ -332,18 +377,4 @@ class AprsDecoder:
         now = time.time()
         with self._lock:
             rows = self._roster.stations(now=now)
-        out = []
-        for s in rows:
-            p = s.packet
-            out.append({
-                "source": s.source,
-                "dest": p.dest,
-                "path": list(p.path),
-                "kind": p.kind,
-                "lat": p.lat,
-                "lon": p.lon,
-                "text": p.text,
-                "addressee": p.addressee,
-                "packet_count": s.packet_count,
-            })
-        return out
+        return [_station_dict(s) for s in rows]

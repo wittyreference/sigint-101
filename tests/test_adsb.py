@@ -249,3 +249,73 @@ def test_a_reader_error_is_recorded_not_swallowed():
 
 def test_default_adsb_frequency_is_1090_mhz():
     assert DEFAULT_ADSB_HZ == 1_090_000_000
+
+
+# --- the SBS feed survives a quiet sky, and ends when dump1090 does ---------------------------
+
+
+class _Dump1090:
+    """dump1090 at the process boundary: alive until told otherwise."""
+
+    args = ["dump1090-fa", "--device-index", "0", "--net"]
+
+    def __init__(self):
+        self.code = None
+
+    def poll(self):
+        return self.code
+
+    def terminate(self):
+        self.code = -15
+
+    def kill(self):
+        self.code = -9
+
+    def wait(self, timeout=None):
+        return self.code
+
+
+def _feed_pair(timeout=0.2):
+    import socket
+
+    from sigint101.adsb import _Feed
+    ours, theirs = socket.socketpair()
+    ours.settimeout(timeout)                      # as create_connection(timeout=...) leaves it
+    proc = _Dump1090()
+    return _Feed(proc, ours), theirs, proc
+
+
+def _reading(feed):
+    import threading
+    got = []
+    reader = threading.Thread(target=lambda: got.extend(feed.stdout), daemon=True)
+    reader.start()
+    return reader, got
+
+
+def test_sbs_feed_keeps_reading_through_a_quiet_spell():
+    # No aircraft for a second is an empty sky, not an ended feed. The reader used to take the
+    # socket's 1 s timeout as end-of-stream and stop for good while dump1090 ran on.
+    import time
+    feed, theirs, _ = _feed_pair()
+    reader, got = _reading(feed)
+    time.sleep(0.7)                               # several timeouts with nothing to read
+    theirs.sendall((POSITION + "\n").encode())
+    deadline = time.monotonic() + 2.0
+    while not got and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert got == [POSITION]
+    feed.terminate()
+    theirs.close()
+    reader.join(timeout=2.0)
+    assert not reader.is_alive()
+
+
+def test_sbs_feed_ends_when_dump1090_dies():
+    feed, theirs, proc = _feed_pair()
+    reader, _ = _reading(feed)
+    proc.code = 1
+    reader.join(timeout=2.0)
+    assert not reader.is_alive()
+    feed.terminate()
+    theirs.close()

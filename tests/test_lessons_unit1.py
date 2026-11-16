@@ -38,10 +38,12 @@ def test_unit1_has_all_four_lessons(unit1_lessons):
 def test_each_unit1_lesson_is_a_six_stage_intro(unit1_lessons):
     # Every Unit 1 pack teaches a concept from a blank slate, so it is an intro lesson and the
     # console walks all six stages in order; any blank stage would strand a beginner mid-lesson.
+    # Unit 1 pilots the post-lesson check, which walks last, after the six.
     for lesson_id in (1, 2, 3, 4):
         lesson = unit1_lessons[lesson_id]
         assert lesson.type == "intro", f"lesson {lesson_id} must be an intro lesson"
-        assert lesson.stage_order == ("frame", "demo", "try", "predict", "observe", "explain")
+        assert lesson.stage_order == ("frame", "demo", "try", "predict", "observe", "explain",
+                                      "check")
         for stage in REQUIRED_STAGES["intro"]:
             assert lesson.stages[stage].strip(), (
                 f"lesson {lesson_id} stage {stage!r} must carry real teaching text"

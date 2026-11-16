@@ -2,12 +2,15 @@
 # ABOUTME: Turns a stock SpecFive Nomad 2 Recon into a SIGINT 101 course box: apt tools, pinned
 # ABOUTME: source builds, the course + venv, tcpdump caps, wlan1 monitor mode, kiosk. --check only reports.
 #
-# Run it as the user tty1 logs in as (the panel's user), never as root; it asks sudo for the
-# system steps. Idempotent: every step checks first, then acts or says why it skipped.
+# Run it as the user the desktop logs in as (the panel's user), never as root; it asks sudo for
+# the system steps. Idempotent: every step checks first, then acts or says why it skipped.
 #
 #   deploy/provision.sh                  provision (or re-run to update)
 #   deploy/provision.sh --check          report what would change; changes nothing
 #   deploy/provision.sh --with-optional  also build dsd-fme, satdump and sstv (slow; see below)
+#   deploy/provision.sh --with-flock-adapter
+#                                        monitor mode at boot for the RTL8821CU Wi-Fi adapter;
+#                                        only behind a self-powered USB hub (see step_monitor_mode)
 #   deploy/provision.sh --branch NAME    follow a course branch other than main
 #
 # Nothing personal goes on the box: the course comes from the public repo over HTTPS, with no
@@ -25,6 +28,7 @@ SRC_DIR="$HOME/.cache/sigint101-src"
 STAMP_DIR="/usr/local/share/sigint101/builds"
 CHECK=0
 OPTIONAL=0
+FLOCK_ADAPTER=0
 
 # --- Source builds, pinned --------------------------------------------------------------------
 # Core decoders. Each pin is the commit nomad-b (the reference Recon) runs, read from its build
@@ -136,18 +140,19 @@ step_preflight() {
   fi
 }
 
-step_console_autologin() {
-  step "Boot to the console with tty1 autologin (the kiosk starts from that login)"
-  local target conf="/etc/systemd/system/getty@tty1.service.d/autologin.conf"
+step_desktop_autologin() {
+  step "Boot to the desktop with autologin (the course opens full-screen on top of it)"
+  local target conf="/etc/lightdm/lightdm.conf"
   target="$(systemctl get-default)"
-  if [ "$target" = multi-user.target ] && grep -qF -- "--autologin $USER " "$conf" 2>/dev/null; then
-    ok "boots to $target; tty1 logs in as $USER"
+  if [ "$target" = graphical.target ] && grep -qx "autologin-user=$USER" "$conf" 2>/dev/null; then
+    ok "boots to $target; the desktop logs in as $USER"
     return 0
   fi
   command -v raspi-config >/dev/null || die "raspi-config is missing; it sets the boot behaviour"
-  # B2 is raspi-config's "console, autologin": it is what nomad-b runs.
-  apply "set console autologin as $USER (was $target)" \
-    sudo raspi-config nonint do_boot_behaviour B2
+  # B4 is raspi-config's "desktop, autologin" (MC's call, 2026-11-03: desktop + course on top).
+  # It also logs tty1 in, so install.sh removes the old console kiosk's ~/.profile hook.
+  apply "set desktop autologin as $USER (was $target)" \
+    sudo raspi-config nonint do_boot_behaviour B4
 }
 
 step_user_groups() {
@@ -429,6 +434,14 @@ monitor_adapters() {
 
 step_monitor_mode() {
   step "Monitor mode for the RTL8821CU adapter at boot (Flock, M18)"
+  # Opt-in, because of power. On nomad-b, bringing the adapter up in monitor mode on the Nomad's
+  # own USB port drew more than the port supplies: 192 over-current events in two minutes, each
+  # resetting the adapter and the touch panel that shares the hub. It needs a self-powered USB
+  # hub, so only a box that has one asks for it with --with-flock-adapter.
+  if [ "$FLOCK_ADAPTER" != 1 ]; then
+    skip "not enabled: the adapter needs a powered USB hub (--with-flock-adapter turns it on)"
+    return 0
+  fi
   FILE_CHANGED=0
   put_file /etc/NetworkManager/conf.d/50-sigint101-monitor.conf 0644 "$MONITOR_NM_CONF"
   put_file /etc/udev/rules.d/70-sigint101-monitor.rules 0644 "$MONITOR_UDEV_RULE"
@@ -477,10 +490,10 @@ step_glyph_font() {
   fi
 }
 
-# install.sh owns the boot service, the tty1 kiosk hook and the journal; this only decides
+# install.sh owns the boot service, the course on the desktop and the journal; this only decides
 # whether to call it, by comparing what it installs with the checkout's copies.
 step_kiosk() {
-  step "Boot service, tty1 kiosk and persistent journal (deploy/install.sh)"
+  step "Boot service, the course on the desktop and persistent journal (deploy/install.sh)"
   local d="$COURSE_DIR/deploy"
   if [ ! -f "$d/install.sh" ]; then
     if [ "$CHECK" = 1 ] && [ ! -d "$COURSE_DIR/.git" ]; then
@@ -494,14 +507,27 @@ step_kiosk() {
   local stale=()
   cmp -s "$d/kiosk/sigint101.service" "$HOME/.config/systemd/user/sigint101.service" ||
     stale+=("server unit")
-  cmp -s "$d/kiosk/start-kiosk.sh" "$HOME/.local/bin/sigint101-kiosk" || stale+=("kiosk launcher")
+  cmp -s "$d/kiosk/start-kiosk.sh" /usr/local/bin/sigint101-course || stale+=("course launcher")
+  cmp -s "$d/kiosk/sigint101.desktop" /usr/local/share/applications/sigint101.desktop ||
+    stale+=("menu entry")
+  cmp -s "$d/kiosk/sigint101.svg" /usr/local/share/icons/hicolor/scalable/apps/sigint101.svg ||
+    stale+=("icon")
+  cmp -s "$d/kiosk/sigint101-autostart.desktop" "$HOME/.config/autostart/sigint101.desktop" ||
+    stale+=("autostart entry")
+  cmp -s "$d/kiosk/sigint101-link.desktop" "$HOME/Desktop/sigint101.desktop" ||
+    stale+=("desktop icon")
   cmp -s "$d/system/journald-sigint101.conf" /etc/systemd/journald.conf.d/50-sigint101.conf ||
     stale+=("journald drop-in")
-  grep -qF "# >>> sigint101 kiosk >>>" "$HOME/.profile" 2>/dev/null || stale+=("tty1 hook")
+  # The console kiosk's pieces must be gone, or desktop autologin's tty1 login starts a second
+  # compositor.
+  if grep -qF "# >>> sigint101 kiosk >>>" "$HOME/.profile" 2>/dev/null; then
+    stale+=("old tty1 hook")
+  fi
+  [ ! -e "$HOME/.local/bin/sigint101-kiosk" ] || stale+=("old tty1 launcher")
   [ -e "/var/lib/systemd/linger/$USER" ] || stale+=("linger")
   systemctl --user --quiet is-enabled sigint101.service 2>/dev/null || stale+=("service enabled")
   if [ ${#stale[@]} -eq 0 ]; then
-    ok "server unit, kiosk launcher, tty1 hook, linger and journal match the checkout"
+    ok "server unit, course launcher, desktop entries, linger and journal match the checkout"
     return 0
   fi
   apply "run deploy/install.sh (differs: ${stale[*]})" "$d/install.sh"
@@ -565,10 +591,11 @@ step_handover_report() {
 
 usage() {
   cat <<'U'
-usage: provision.sh [--check] [--with-optional] [--branch NAME]
-  --check          report what would change; change nothing
-  --with-optional  also build dsd-fme, satdump and sstv (hours on a Pi 4)
-  --branch NAME    follow a course branch other than main
+usage: provision.sh [--check] [--with-optional] [--with-flock-adapter] [--branch NAME]
+  --check               report what would change; change nothing
+  --with-optional       also build dsd-fme, satdump and sstv (hours on a Pi 4)
+  --with-flock-adapter  monitor mode at boot for the RTL8821CU adapter (needs a powered USB hub)
+  --branch NAME         follow a course branch other than main
 U
 }
 
@@ -577,6 +604,7 @@ main() {
     case "$1" in
       --check) CHECK=1 ;;
       --with-optional) OPTIONAL=1 ;;
+      --with-flock-adapter) FLOCK_ADAPTER=1 ;;
       --branch)
         [ $# -ge 2 ] || die "--branch needs a name"
         COURSE_BRANCH="$2"
@@ -589,7 +617,7 @@ main() {
   done
 
   step_preflight
-  step_console_autologin
+  step_desktop_autologin
   step_user_groups
   step_apt
   step_course

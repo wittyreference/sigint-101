@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
 
+from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import Pipeline as _Pipeline
 from .hardware import (
     REDSEA,
     RTL_FM,
@@ -17,8 +20,44 @@ from .hardware import (
 )
 
 # Where the RDS lesson listens. RDS rides a 57 kHz subcarrier on an ordinary FM broadcast station,
-# so this is an FM-band frequency; a pack points it at the strongest local station via tune.
-DEFAULT_RDS_HZ = 96_000_000
+# so this must be a real FM channel, and the best one is the learner's strongest local station —
+# which only the site knows. The provisioner sets it in this environment variable (Hz); without
+# one, the console falls back to 106.5 MHz, the steady station at the box this course was built on.
+RDS_HZ_ENV = "SIGINT101_RDS_HZ"
+DEFAULT_RDS_HZ = 106_500_000
+
+# 47 CFR 73.201: US FM broadcast channels are centred on the odd tenths from 88.1 to 107.9 MHz,
+# 200 kHz apart. A frequency off that raster is not a station (96.0 MHz was a spur comb).
+FM_FIRST_CHANNEL_HZ = 88_100_000
+FM_LAST_CHANNEL_HZ = 107_900_000
+FM_CHANNEL_SPACING_HZ = 200_000
+
+
+def is_fm_channel(hz: int) -> bool:
+    """Is this the centre of a US FM broadcast channel (88.1-107.9 MHz, odd tenths)?"""
+    return (FM_FIRST_CHANNEL_HZ <= hz <= FM_LAST_CHANNEL_HZ
+            and (hz - FM_FIRST_CHANNEL_HZ) % FM_CHANNEL_SPACING_HZ == 0)
+
+
+def configured_fm_hz(name: str, default: int, environ=None) -> int:
+    """An FM station set at provisioning in environment variable `name`, in Hz, or `default`.
+
+    A value that is not an integer FM channel centre falls back to the default rather than taking
+    the kiosk down at boot; the console reports the frequency it actually used, so a bad setting
+    shows on the dial instead of hiding.
+    """
+    env = os.environ if environ is None else environ
+    raw = (env.get(name) or "").strip()
+    try:
+        hz = int(raw)
+    except ValueError:
+        return default
+    return hz if is_fm_channel(hz) else default
+
+
+def configured_rds_hz(environ=None) -> int:
+    """The station RDS decodes: SIGINT101_RDS_HZ when it names an FM channel, else the default."""
+    return configured_fm_hz(RDS_HZ_ENV, DEFAULT_RDS_HZ, environ)
 
 # rtl_fm's FM-multiplex rate. 171 kHz = 9 x 19 kHz keeps the whole baseband through the 57 kHz
 # RDS subcarrier, and is the rate redsea is told to expect.
@@ -86,42 +125,15 @@ class RDSStation:
         }
 
 
-class _Pipeline:
-    """The live rtl_fm|redsea pair as one object: redsea's stdout to read, both to tear down."""
-
-    def __init__(self, rtl_fm, redsea):
-        self._rtl_fm = rtl_fm
-        self._redsea = redsea
-        self.stdout = redsea.stdout
-
-    def poll(self):
-        return self._redsea.poll()
-
-    def terminate(self):
-        for proc in (self._redsea, self._rtl_fm):
-            try:
-                proc.terminate()
-            except (OSError, subprocess.SubprocessError):
-                pass
-
-    def wait(self, timeout=None):
-        for proc in (self._rtl_fm, self._redsea):
-            try:
-                proc.wait(timeout=timeout)
-            except (OSError, subprocess.SubprocessError):
-                pass
-        return 0
-
-
 def _popen(freq_hz: int, device: int):
     """Launch rtl_fm demodulating the FM multiplex into redsea, which prints RDS groups as JSON."""
-    rtl_fm = subprocess.Popen(
+    rtl_fm = spawn(
         [RTL_FM, "-M", "fm", "-l", "0", "-A", "std", "-p", "0", "-s", "171k",
          "-g", "49", "-F", "9", "-d", str(device), "-f", str(freq_hz)],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    redsea = subprocess.Popen(
+        stdout=subprocess.PIPE)
+    redsea = spawn(
         [REDSEA, "-r", str(REDSEA_SAMPLE_RATE)],
-        stdin=rtl_fm.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        stdin=rtl_fm.stdout, stdout=subprocess.PIPE, text=True)
     # Let rtl_fm see SIGPIPE if redsea dies, rather than fill a pipe nobody drains.
     if rtl_fm.stdout is not None:
         rtl_fm.stdout.close()
@@ -135,9 +147,12 @@ class RDSDecoder:
     path and release/resume so it takes turns with the waterfall on the one dongle.
     """
 
-    def __init__(self, *, freq_hz=DEFAULT_RDS_HZ, device=0, spawn=_popen,
+    def __init__(self, *, freq_hz=None, device=0, spawn=_popen,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None):
-        self.freq_hz = int(freq_hz)
+        # No frequency given means the site's provisioned station (SIGINT101_RDS_HZ).
+        self.freq_hz = int(freq_hz) if freq_hz is not None else configured_rds_hz()
+        # The frequency this decoder was built for; the console tunes a lesson back to it.
+        self.home_hz = self.freq_hz
         self.device = device
         self.serial = serial or None
         self._list_devices = list_devices
@@ -145,18 +160,29 @@ class RDSDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._station = RDSStation()
+        # Called with the station dict when its identity is learned or changes (a new PI, or a new
+        # non-empty PS name) — not once per group, which arrive about eleven a second. From the
+        # reader thread only and outside the station lock. The console's hook logs it as a
+        # reception and never raises, so the call is made directly: it cannot end the decode.
+        self.on_reception = None
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
         self._released = False
         self.error = None
+        # Who ended the child, and when the console may launch it again after it died on its own.
+        self.watch = ChildWatch(RTL_FM)
 
     @property
     def running(self) -> bool:
         """True while the pipeline is alive and holding the dongle."""
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the live process; None when nothing runs."""
+        return running_command(self._proc)
 
     @property
     def released(self) -> bool:
@@ -182,6 +208,20 @@ class RDSDecoder:
         with self._life:
             self._released = False
 
+    def retune(self, freq_hz) -> None:
+        """Move to another station: the running pipeline stops, and the next start() spawns there.
+
+        The station assembled on the old frequency is cleared as release() clears it, but the
+        dongle is not handed away. Tuning to where the decoder already is changes nothing.
+        """
+        with self._life:
+            if int(freq_hz) == self.freq_hz:
+                return
+            self._stop_locked()
+            self.freq_hz = int(freq_hz)
+            with self._lock:
+                self._station = RDSStation()
+
     def start(self) -> None:
         """Begin decoding RDS, unless the radio is absent, a tool is missing, or released."""
         with self._life:
@@ -190,6 +230,7 @@ class RDSDecoder:
     def _start_locked(self) -> None:
         if self.running:
             return
+        self._settle()
         if self._released:
             raise RDSUnavailable(
                 "the radio was released to another program; resume RDS to take it back")
@@ -201,26 +242,62 @@ class RDSDecoder:
         if self.error:
             reason, self.error = self.error, None
             raise RDSUnavailable(reason)
+        # A child that died on its own is not relaunched on every poll: the reason stands, and the
+        # console waits out a back-off that grows while the deaths keep coming.
+        blocked = self.watch.blocked()
+        if blocked:
+            raise RDSUnavailable(blocked)
         self.device = self._choose_device()
         try:
             self._proc = self._spawn(self.freq_hz, self.device)
         except (OSError, ValueError) as exc:
             self._proc = None
             raise RDSUnavailable(f"cannot run the RDS pipeline: {exc}") from exc
+        self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, name="sigint101-rds", daemon=True)
+        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+                                        name="sigint101-rds", daemon=True)
         self._thread.start()
 
-    def _read(self) -> None:
+    def _read(self, proc) -> None:
         """Consume redsea's JSON on a background thread, assembling the station until it ends."""
+        named = False   # whether the station on this PI has had its PS name reported yet
         try:
-            for raw in self._proc.stdout:
+            for raw in proc.stdout:
                 group = parse_rds_group(raw)
                 if group is not None:
                     with self._lock:
-                        self._station.absorb(group)
+                        station = self._station
+                        known_pi = station.pi
+                        station.absorb(group)
+                        new_pi = station.pi is not None and station.pi != known_pi
+                        if new_pi:
+                            named = False
+                        # Only the first PS name per PI: many stations scroll song titles through
+                        # the PS field, and that is one station, not a new one every few seconds.
+                        first_name = bool(station.ps) and not named
+                        if first_name:
+                            named = True
+                        identity = station.as_dict() if (new_pi or first_name) else None
+                    report = self.on_reception
+                    if identity is not None and report is not None:
+                        report(identity)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
+        finally:
+            self._note_end(proc)
+
+    def _note_end(self, proc) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+        reason = self.watch.ended(proc)
+        if reason and self.error is None:
+            self.error = reason
+
+    def _settle(self) -> None:
+        """Account for a child that ended since the last poll, then clear away what it left."""
+        if self._proc is not None:
+            self._note_end(self._proc)
+            self._stop_locked()
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -228,15 +305,11 @@ class RDSDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
+        # Marked first, so the reader seeing the output end never reports our stop as a death.
+        self.watch.stopping()
         proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.error = "the RDS pipeline did not stop; the dongle may still be held"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        if proc is not None and not stop_process(proc):
+            self.error = "the RDS pipeline survived kill; the dongle may still be held"
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None

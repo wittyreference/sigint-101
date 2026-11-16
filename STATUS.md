@@ -48,6 +48,13 @@
     - gain-meter labels never overlap;
     - rtl_433 repeats collapse to one reception (HIL: 27 decodes became 9 receptions).
   - **Remaining in the cut line:** item 19 (prove provision on a spare SD, then cold boot).
+- **MC's decision, verbatim (2026-11-03): "Desktop + course on top (Recommended)".** The box boots
+  to the Pi desktop (raspi-config B4) with the course auto-opened full-screen. Home's **Exit
+  SIGINT 101** closes it, leaving the desktop: Wi-Fi menu, terminal, files, on-screen keyboard.
+  A **SIGINT 101** desktop icon and menu entry reopen it. The watchdog reopens only after a crash,
+  never after Exit. Built on `desktop-exit` (PR against ux-polish). **Pending: the coordinator's
+  switch on nomad-b, with MC's OK**: pull, `deploy/install.sh`,
+  `sudo raspi-config nonint do_boot_behaviour B4`, reboot.
 - **Since the sprint (2026-11-02/03, also on `ux-polish`, now @989c496):**
   - #29 provision: Flock monitor mode is opt-in (`--with-flock-adapter`). On nomad-b the
     RTL8821CU dongle in monitor mode browned out USB (192 over-current events in 2 min, 23
@@ -164,6 +171,7 @@
   - `flipper-module` (PR #5) is U10 Phase 1 (M29 + the `/api/flipper` live mirror). It is
     parked behind the S0 fixes and needs a rebase after ux-polish lands (both touch `app.css`
     and `console.html`).
+  - `flipper-module-refresh` (PR against ux-polish) merges ux-polish into #5 and supersedes it; HIL waits on the Flipper.
 - **nomad-b health:**
   - No crash since the 11-01 reboot. Configs intact: meshtasticd `config.yaml`, `config.txt`
     (gpio4, pps-gpio 17, miniuart-bt), root fs clean.
@@ -235,6 +243,10 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 - **The panel is self-starting** (`deploy/install.sh`, idempotent; re-run it after changing
   `deploy/`).
   - The lesson server is the user unit `sigint101.service` on 127.0.0.1:8008, with linger.
+  - The kiosk is tty1 autologin → `~/.profile` hook → `~/.local/bin/sigint101-kiosk` (labwc +
+    a looping Chromium). **After the desktop switch** it is lightdm desktop autologin → XDG
+    autostart `~/.config/autostart/sigint101.desktop` → `/usr/local/bin/sigint101-course watch`
+    (no labwc of its own). Exit flag: `/run/user/1000/sigint101-kiosk-exited`.
   - On `ux-polish` (#32, live on nomad-b), the box autologs in to the Pi desktop. The XDG
     autostart runs `/usr/local/bin/sigint101-course watch`, which reopens the kiosk Chromium
     (profile `~/.config/chromium-kiosk`) unless Exit wrote

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sigint101.progress import Progress
+from sigint101.progress import PredictionAlreadyCommitted, Progress
 
 
 def test_open_and_complete(tmp_path):
@@ -67,11 +67,65 @@ def test_a_blank_prediction_is_refused(tmp_path, blank):
     prog.close()
 
 
-def test_a_second_prediction_replaces_the_first(tmp_path):
+def test_a_second_prediction_is_refused_and_the_first_stands(tmp_path):
+    # A committed prediction is the learner's word before the reveal; once the explain has shown
+    # the answer, letting them overwrite it would turn the score into a copy of the reveal.
     prog = Progress(tmp_path / "progress.db")
-    prog.record_prediction(1, "first guess")
-    prog.record_prediction(1, "second guess")
-    assert prog.get_prediction(1) == "second guess"
+    prog.record_prediction(1, "first guess", correct=False)
+    with pytest.raises(PredictionAlreadyCommitted):
+        prog.record_prediction(1, "second guess", correct=True)
+    assert prog.get_prediction(1) == "first guess"
+    assert prog.get_correct(1) is False
+    prog.close()
+
+
+def test_a_prediction_stores_whether_it_was_right(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_prediction(1, "same", correct=True)
+    prog.record_prediction(2, "wider", correct=False)
+    assert prog.get_correct(1) is True
+    assert prog.get_correct(2) is False
+    prog.close()
+
+
+def test_an_unscored_prediction_stores_no_verdict(tmp_path):
+    # A pack with no answer key cannot be scored; the store says "unknown", never a guessed False.
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_prediction(1, "a free answer")
+    assert prog.get_correct(1) is None
+    assert prog.get_correct(9) is None
+    prog.close()
+
+
+def test_correctness_persists_across_connections(tmp_path):
+    db = tmp_path / "progress.db"
+    first = Progress(db)
+    first.record_prediction(4, "bigger", correct=True)
+    first.close()
+    second = Progress(db)
+    assert second.get_correct(4) is True
+    second.close()
+
+
+def test_an_existing_responses_table_gains_the_correct_column(tmp_path):
+    # A box that ran a build before scoring has a responses table with no `correct` column. Opening
+    # it must add the column and keep the predictions already there, not fail or drop them.
+    db = tmp_path / "progress.db"
+    import sqlite3
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE responses (lesson_id INTEGER NOT NULL, kind TEXT NOT NULL, "
+        "body TEXT NOT NULL, updated REAL, PRIMARY KEY (lesson_id, kind));"
+        "INSERT INTO responses(lesson_id, kind, body) VALUES(1, 'prediction', 'old guess');"
+    )
+    conn.commit()
+    conn.close()
+
+    prog = Progress(db)
+    assert prog.get_prediction(1) == "old guess"
+    assert prog.get_correct(1) is None
+    prog.record_prediction(2, "same", correct=True)
+    assert prog.get_correct(2) is True
     prog.close()
 
 
@@ -116,4 +170,114 @@ def test_the_store_defaults_under_data(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     prog = Progress()
     assert Path(DEFAULT_DB_PATH).exists()
+    prog.close()
+
+
+# --- where the learner is inside a lesson (resume after a reload or a power cut) ---------------
+
+
+def test_a_lesson_with_no_stage_recorded_has_none(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    assert prog.get_stage(1) is None
+    prog.close()
+
+
+def test_recording_a_stage_remembers_it_and_how_far_the_learner_got(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_stage(1, "demo", 1)
+    assert prog.get_stage(1) == {"stage": "demo", "furthest": 1}
+    prog.record_stage(1, "try", 2)
+    assert prog.get_stage(1) == {"stage": "try", "furthest": 2}
+    prog.close()
+
+
+def test_stepping_back_keeps_the_furthest_stage_reached(tmp_path):
+    # Re-reading the setup after reaching the explanation must not forget the explanation was
+    # reached: the rail keeps every visited stage tappable.
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_stage(1, "explain", 5)
+    prog.record_stage(1, "frame", 0)
+    assert prog.get_stage(1) == {"stage": "frame", "furthest": 5}
+    prog.close()
+
+
+def test_stages_are_kept_per_lesson(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_stage(1, "try", 2)
+    prog.record_stage(2, "demo", 1)
+    assert prog.get_stage(1)["stage"] == "try"
+    assert prog.get_stage(2)["stage"] == "demo"
+    prog.close()
+
+
+def test_the_stage_survives_a_reopen(tmp_path):
+    # The kiosk loses power in the field; the place in the lesson must survive it.
+    db = tmp_path / "progress.db"
+    first = Progress(db)
+    first.record_stage(3, "predict", 3)
+    first.close()
+    second = Progress(db)
+    assert second.get_stage(3) == {"stage": "predict", "furthest": 3}
+    second.close()
+
+
+@pytest.mark.parametrize("stage, position", [("", 0), ("   ", 1), ("demo", -1)])
+def test_a_blank_stage_or_negative_position_is_refused(tmp_path, stage, position):
+    prog = Progress(tmp_path / "progress.db")
+    with pytest.raises(ValueError):
+        prog.record_stage(1, stage, position)
+    assert prog.get_stage(1) is None
+    prog.close()
+
+
+def test_an_existing_db_from_before_stages_were_kept_still_opens(tmp_path):
+    # A box that ran an earlier build has progress and predictions but no stage table. Opening it
+    # must keep that history and start keeping stages, with no migration step.
+    db = tmp_path / "progress.db"
+    import sqlite3
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE progress (lesson_id INTEGER PRIMARY KEY, opened INTEGER NOT NULL "
+        "DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0, updated REAL);"
+        "CREATE TABLE responses (lesson_id INTEGER NOT NULL, kind TEXT NOT NULL, "
+        "body TEXT NOT NULL, updated REAL, PRIMARY KEY (lesson_id, kind));"
+        "INSERT INTO progress(lesson_id, opened, completed) VALUES(1, 1, 1);"
+        "INSERT INTO responses(lesson_id, kind, body) VALUES(1, 'prediction', 'b');"
+    )
+    conn.commit()
+    conn.close()
+
+    prog = Progress(db)
+    assert prog.get(1)["completed"] == 1
+    assert prog.get_prediction(1) == "b"
+    assert prog.get_stage(1) is None
+    prog.record_stage(1, "observe", 4)
+    assert prog.get_stage(1) == {"stage": "observe", "furthest": 4}
+    prog.close()
+
+
+# --- places outside a lesson: where the rack was left -----------------------------------------
+
+
+def test_a_place_is_none_until_one_is_recorded(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    assert prog.get_place("rack") is None
+    prog.close()
+
+
+def test_the_latest_place_wins_and_survives_a_reopen(tmp_path):
+    db = tmp_path / "progress.db"
+    first = Progress(db)
+    first.record_place("rack", "aprs")
+    first.record_place("rack", "ism")
+    first.close()
+    second = Progress(db)
+    assert second.get_place("rack") == "ism"
+    second.close()
+
+
+def test_a_blank_place_is_refused(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    with pytest.raises(ValueError):
+        prog.record_place("rack", "  ")
     prog.close()

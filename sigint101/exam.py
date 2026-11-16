@@ -207,13 +207,15 @@ class ExamStore:
         correct     INTEGER NOT NULL DEFAULT 0
     );
     -- The single in-progress practice exam (a kiosk has one learner at a time). Its drawn
-    -- question ids and the answers given so far, so a sim survives a power loss mid-exam like
-    -- the Leitner history does. The CHECK pins it to one row.
+    -- question ids, the answers given so far and the questions skipped for later (oldest skip
+    -- first), so a sim survives a power loss mid-exam like the Leitner history does. The CHECK
+    -- pins it to one row.
     CREATE TABLE IF NOT EXISTS sim (
         id           INTEGER PRIMARY KEY CHECK (id = 1),
         question_ids TEXT NOT NULL,
         answers      TEXT NOT NULL DEFAULT '{}',
-        created      REAL
+        created      REAL,
+        skipped      TEXT NOT NULL DEFAULT '[]'
     );
     """
 
@@ -227,6 +229,13 @@ class ExamStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(self.SCHEMA)
+            # A database written before the skip list existed has a sim table without it;
+            # CREATE IF NOT EXISTS leaves that table alone, so add the column in place.
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(sim)")}
+            if "skipped" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE sim ADD COLUMN skipped TEXT NOT NULL DEFAULT '[]'"
+                )
             self._conn.commit()
 
     def record(self, question_id: str, correct: bool, *, clock=time.time) -> int:
@@ -306,41 +315,73 @@ class ExamStore:
         ids = list(question_ids)
         with self._lock:
             self._conn.execute(
-                "INSERT INTO sim(id, question_ids, answers, created) VALUES(1, ?, '{}', ?) "
+                "INSERT INTO sim(id, question_ids, answers, created, skipped) "
+                "VALUES(1, ?, '{}', ?, '[]') "
                 "ON CONFLICT(id) DO UPDATE SET question_ids=excluded.question_ids, "
-                "answers='{}', created=excluded.created",
+                "answers='{}', created=excluded.created, skipped='[]'",
                 (json.dumps(ids), clock()),
             )
             self._conn.commit()
 
     def sim(self):
-        """The active sim as {question_ids, answers}, or None when none is in progress."""
+        """The active sim as {question_ids, answers, skipped}, or None when none is in progress."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT question_ids, answers FROM sim WHERE id=1"
+                "SELECT question_ids, answers, skipped FROM sim WHERE id=1"
             ).fetchone()
         if row is None:
             return None
         return {
             "question_ids": json.loads(row["question_ids"]),
             "answers": json.loads(row["answers"]),
+            "skipped": json.loads(row["skipped"]),
         }
 
-    def record_sim_answer(self, question_id: str, choice: str) -> None:
-        """Store one answer in the active sim. A question not on the drawn sheet is ignored,
-        so only the 35 the sim drew are ever scored."""
+    def record_sim_answer(self, question_id: str, choice: str) -> bool:
+        """Store one answer in the active sim; True only when it was recorded.
+
+        A question not on the drawn sheet is ignored, so only the 35 the sim drew are ever
+        scored. So is a second answer to a question already answered: the review has shown the
+        right option by then, and a re-answer would let the reveal rewrite the score.
+        """
         with self._lock:
             row = self._conn.execute(
                 "SELECT question_ids, answers FROM sim WHERE id=1"
             ).fetchone()
             if row is None:
-                return
+                return False
             if question_id not in json.loads(row["question_ids"]):
-                return
+                return False
             answers = json.loads(row["answers"])
+            if question_id in answers:
+                return False
             answers[question_id] = choice
             self._conn.execute(
                 "UPDATE sim SET answers=? WHERE id=1", (json.dumps(answers),)
+            )
+            self._conn.commit()
+        return True
+
+    def skip_sim_question(self, question_id: str) -> None:
+        """Defer an unanswered sim question to the back of the queue; it stays answerable.
+
+        Skipping a question already skipped moves it behind the others. A question off the
+        sheet, or already answered, is left alone: there is nothing to defer.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT question_ids, answers, skipped FROM sim WHERE id=1"
+            ).fetchone()
+            if row is None:
+                return
+            if question_id not in json.loads(row["question_ids"]):
+                return
+            if question_id in json.loads(row["answers"]):
+                return
+            skipped = [q for q in json.loads(row["skipped"]) if q != question_id]
+            skipped.append(question_id)
+            self._conn.execute(
+                "UPDATE sim SET skipped=? WHERE id=1", (json.dumps(skipped),)
             )
             self._conn.commit()
 
@@ -366,6 +407,22 @@ def build_exam(pool: Pool, *, rng=None) -> list:
     sheet = [rng.choice(pool.by_group(group)) for group in pool.groups()]
     rng.shuffle(sheet)
     return sheet
+
+
+def next_sim_question(question_ids, answers: dict, skipped) -> str | None:
+    """The practice-exam question to serve now, or None once every question is answered.
+
+    Sheet order first, passing over skipped questions; once only skipped ones remain, the one
+    skipped longest ago comes back. A skip only defers a question, so the sheet always ends
+    with every question answered.
+    """
+    unanswered = [qid for qid in question_ids if qid not in answers]
+    if not unanswered:
+        return None
+    fresh = [qid for qid in unanswered if qid not in skipped]
+    if fresh:
+        return fresh[0]
+    return next(qid for qid in skipped if qid in unanswered)
 
 
 @dataclass(frozen=True)

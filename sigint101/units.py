@@ -37,6 +37,10 @@ UNITS: tuple = (
     Unit(7, "counter-surveillance", "Counter-Surveillance", "counter-surv", (17, 18, 19)),
     Unit(8, "images", "Images", "images", (24, 25)),
     Unit(9, "mesh", "Mesh", "mesh", (28,)),
+    # U10 the Flipper unit (2026-10-31): a device-in-hand tour of the base capabilities, with the
+    # nomad console as a live mirror over USB. M29 intro, M30-M36 one per capability, M37 rig
+    # rescue, M38 capstone. Lesson ids are planned; a lesson appears once its pack has loaded.
+    Unit(10, "flipper", "Flipper", "flipper", (29, 30, 31, 32, 33, 34, 35, 36, 37, 38)),
 )
 
 
@@ -54,3 +58,20 @@ def unit_for_lesson(lesson_id: int) -> Unit | None:
         if lesson_id in unit.lesson_ids:
             return unit
     return None
+
+
+def teaching_order() -> tuple:
+    """Every planned lesson id in the order a learner meets them: unit by unit, as displayed.
+
+    Ids were handed out as lessons were built, so they are not this order (AIS, id 26, is the 17th
+    lesson taught). Ids stay the storage keys and the URLs; this order is what the learner is shown.
+    """
+    return tuple(lesson_id for unit in UNITS for lesson_id in unit.lesson_ids)
+
+
+def teaching_position(lesson_id: int) -> int | None:
+    """Where a lesson falls in the teaching order, counting from 1; None if it is in no unit."""
+    order = teaching_order()
+    if lesson_id not in order:
+        return None
+    return order.index(lesson_id) + 1

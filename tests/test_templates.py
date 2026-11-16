@@ -130,6 +130,126 @@ def test_the_waterfall_canvas_is_scaled_without_smoothing():
     assert "image-rendering: pixelated" in rule
 
 
+APP_CSS = TEMPLATES_DIR.parent / "static" / "app.css"
+THEMES = ("dark", "sunlight", "red-night")
+
+
+def _css_rule(selector):
+    """The body of the first top-level rule for exactly this selector in app.css."""
+    css = APP_CSS.read_text()
+    match = re.search(r"\n" + re.escape(selector) + r" \{(.*?)\}", css, re.S)
+    assert match, f"no {selector} rule in app.css"
+    return match.group(1)
+
+
+def _theme_tokens(theme):
+    """Every custom property a theme defines, merged across its .app[data-theme] blocks."""
+    css = APP_CSS.read_text()
+    tokens = {}
+    block_re = r'\.app\[data-theme="' + re.escape(theme) + r'"\] \{(.*?)\}'
+    for block in re.findall(block_re, css, re.S):
+        tokens.update(dict(re.findall(r"(--[\w-]+):\s*([^;]+);", block)))
+    return tokens
+
+
+def _contrast(fg, bg):
+    """WCAG 2 contrast ratio between two #rrggbb colours."""
+    def luminance(hex_colour):
+        channels = [int(hex_colour.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    hi, lo = sorted((luminance(fg), luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _font_px(rule):
+    return int(re.search(r"font-size:\s*(\d+)px", rule).group(1))
+
+
+def test_the_no_radio_reason_is_page_text_over_the_canvas_not_canvas_pixels():
+    # Text drawn into the canvas is squashed with the bitmap (~7 px tall on the panel), so the
+    # reason rides in a DOM slot over the canvas instead; the canvas holds only real bins.
+    html = _console(prediction_committed=True, current_stage="operate")
+    wrap = re.search(r'class="waterfall-wrap">(.*?)</div>\s*</div>', html, re.S).group(1)
+    assert "data-wf-reason" in wrap
+
+
+def test_the_no_radio_reason_is_large_and_readable_in_every_theme():
+    rule = _css_rule(".waterfall__reason")
+    assert _font_px(rule) >= 18
+    assert "var(--wf-ink)" in rule
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        assert _contrast(tokens["--wf-ink"], tokens["--wf-bg"]) >= 4.5, theme
+
+
+def test_the_waterfall_axis_reads_on_the_dark_band_in_every_theme():
+    # The axis labels ride the waterfall, which stays dark in every theme. In sunlight the page's
+    # dark-green ink measured about 2.1:1 there, so the axis takes the waterfall's own ink tokens.
+    assert "var(--wf-axis)" in _css_rule(".waterfall__axis")
+    assert "var(--wf-ink)" in _css_rule(".waterfall__axis b")
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        for ink in ("--wf-axis", "--wf-ink"):
+            assert _contrast(tokens[ink], tokens["--wf-bg"]) >= 4.5, (theme, ink)
+
+
+def test_honest_empty_states_are_large_and_readable_in_every_theme():
+    # "listening…" / "no radio" is the honest state a learner sees most: read it at a glance.
+    for selector in (".decoder__empty", ".gain-meter__empty"):
+        rule = _css_rule(selector)
+        assert _font_px(rule) >= 18, selector
+        assert "var(--fg-dim)" in rule, selector
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        assert _contrast(tokens["--fg-dim"], tokens["--surface"]) >= 4.5, theme
+
+
+def _hex_rgb(colour):
+    return tuple(int(colour.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def test_red_night_paints_the_waterfall_from_a_red_only_ramp():
+    # Red-night keeps night vision: the waterfall's levels are shades of red alone, never the
+    # blue-to-yellow rainbow. Each stop has no more green or blue than a dim red tint.
+    stops = _theme_tokens("red-night")["--wf-ramp"].split()
+    assert len(stops) >= 2
+    for stop in stops:
+        r, g, b = _hex_rgb(stop)
+        assert g == b and g <= r * 0.35, stop
+    # Brighter is stronger: the ramp climbs from floor to peak.
+    assert _hex_rgb(stops[-1])[0] > _hex_rgb(stops[0])[0]
+
+
+def test_the_other_themes_keep_the_conventional_waterfall_map():
+    assert "--wf-ramp" not in _theme_tokens("dark")
+    assert "--wf-ramp" not in _theme_tokens("sunlight")
+
+
+def _apt_lesson():
+    return parse_lesson({
+        "id": 24, "slug": "apt", "title": "APT", "type": "intro", "concept": "c",
+        "panels": ["apt"], "hardware": ["rtl-sdr"],
+        "stages": {"frame": "f", "demo": "d", "try": "t", "predict": "p", "observe": "o",
+                   "explain": "e"},
+    })
+
+
+def test_a_decoded_picture_is_re_inked_red_in_red_night():
+    # A decoded weather picture or SSTV frame is full colour; red-night maps its brightness onto red
+    # alone with an SVG colour matrix (the technique the exam figures use), so no other hue shows.
+    html = _console(lesson=_apt_lesson(), current_stage="demo")
+    matrix = re.search(r'<filter id="gallery-ink-red"[^>]*>\s*<feColorMatrix type="matrix" '
+                       r'values="([^"]+)"', html)
+    assert matrix, "no red-night filter for the decoded picture"
+    rows = [matrix.group(1).split()[i:i + 5] for i in range(0, 20, 5)]
+    assert all(float(v) == 0 for v in rows[1] + rows[2])   # nothing reaches green or blue
+    assert html.count('id="gallery-ink-red"') == 1
+    css = APP_CSS.read_text()
+    assert re.search(r'\.app\[data-theme="red-night"\] \.gallery__img \{[^}]*'
+                     r'filter: url\(#gallery-ink-red\)', css)
+
+
 def _env():
     return Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
@@ -159,9 +279,12 @@ def _console(lesson=None, **ctx):
 
 
 def _eyebrow_for(html, stage):
-    """The eyebrow text of one stage's panel (the first eyebrow after its section opens)."""
+    """The eyebrow text of one stage's panel (the first eyebrow after its section opens).
+
+    Anchored on the panel's <section>: the rail's pips carry data-stage too.
+    """
     m = re.search(
-        r'data-stage="' + re.escape(stage) + r'".*?stage-panel__eyebrow">(.*?)</div>',
+        r'<section[^>]*data-stage="' + re.escape(stage) + r'".*?stage-panel__eyebrow">(.*?)</div>',
         html,
         re.S,
     )
@@ -295,6 +418,84 @@ def test_a_sealed_stage_requested_without_a_commit_stays_sealed():
     assert "OBSERVE_BODY_marker" not in leaked
 
 
+# --- the explain verdict (a scored predict gate) ------------------------------
+
+
+def _scored_lesson(**overrides):
+    data = {
+        "id": 1, "slug": "gain-snr", "title": "Gain and SNR", "type": "intro",
+        "concept": "the gap over the noise floor is the signal",
+        "hardware": [],
+        "stages": {"frame": "f", "demo": "d", "try": "t",
+                   "predict": "Turn the gain up. What happens to the gap over the floor?",
+                   "observe": "o", "explain": "EXPLAIN_SCORED_marker"},
+        "choices": CHOICES,
+        "answer": ["b", "c"],
+        "verdict": "VERDICT_marker the gap holds, then shrinks at the top.",
+    }
+    data.update(overrides)
+    return parse_lesson(data)
+
+
+def _verdict_block(html):
+    m = re.search(r'data-stage="explain".*?(<div class="verdict.*?</div>\s*</div>)', html, re.S)
+    return m.group(1) if m else ""
+
+
+def test_explain_header_sets_your_call_beside_what_the_radio_does():
+    # A predict about the instrument (a radio lesson) reveals what the radio does.
+    html = _console(lesson=_scored_lesson(hardware=["rtl-sdr"]), prediction_committed=True,
+                    current_stage="explain", committed_choice="a")
+    block = _verdict_block(html)
+    assert f"Your call: <b>{CHOICES[0]['label']}</b>" in block
+    assert (f"What the radio does: <b>{CHOICES[1]['label']} or {CHOICES[2]['label']}</b>"
+            in block)
+    assert "VERDICT_marker" in block
+    # The header rides at the top of the explain's scrolling body, so a long eyebrow can never
+    # squeeze the reading itself to nothing on the fixed 800x480 panel.
+    assert re.search(r'<div class="stage-panel__body">\s*<div class="verdict', html)
+    assert "EXPLAIN_SCORED_marker" in html
+
+
+@pytest.mark.parametrize("lesson", [
+    _scored_lesson(),                                            # no radio: the rules, theory
+    _scored_lesson(hardware=["rtl-sdr"], predict_kind="knowledge"),  # a radio lesson's fact
+])
+def test_a_knowledge_predict_reveals_in_fact(lesson):
+    # A predict about what is true (the law, what a detection proves) is not something the radio
+    # does, so its reveal reads "In fact".
+    block = _verdict_block(_console(lesson=lesson, prediction_committed=True,
+                                    current_stage="explain", committed_choice="a"))
+    assert f"Your call: <b>{CHOICES[0]['label']}</b>" in block
+    assert f"In fact: <b>{CHOICES[1]['label']} or {CHOICES[2]['label']}</b>" in block
+    assert "What the radio does" not in block
+
+
+@pytest.mark.parametrize("choice", ["a", "c"])
+def test_the_predict_reveal_never_scores_the_guess(choice):
+    # A predict is a guess made before the teaching, so the reveal reads it as a call, not a
+    # result: no RIGHT/MISSED tag and no hit/miss styling, whichever chip was committed. The
+    # stored `correct` is item-analysis data for the author, never shown to the learner.
+    block = _verdict_block(_console(lesson=_scored_lesson(), prediction_committed=True,
+                                    current_stage="explain", committed_choice=choice))
+    assert block
+    for score_word in ("RIGHT", "MISSED", "Answer:", "verdict--hit", "verdict--miss",
+                       "verdict__tag"):
+        assert score_word not in block
+
+
+def test_the_verdict_stays_sealed_until_a_commit():
+    html = _console(lesson=_scored_lesson(), prediction_committed=False)
+    assert "VERDICT_marker" not in html
+    assert 'class="verdict' not in html
+
+
+def test_an_unscored_lesson_renders_no_verdict_header():
+    html = _console(lesson=_intro_lesson(), prediction_committed=True,
+                    current_stage="explain", committed_choice="a")
+    assert 'class="verdict' not in html
+
+
 # --- no-hardware (knowledge) lessons: no radio chrome -------------------------
 
 
@@ -333,36 +534,70 @@ def test_a_hardware_lesson_still_renders_the_radio():
     assert "SIGNAL HIDDEN" in html
 
 
-def test_instrument_stage_eyebrow_drops_the_repeated_concept():
-    # The instrument stages (demo/try/observe) have a tight scrolling narration band at 800x480,
-    # so their eyebrow carries only the step + stage label; the concept already rode the frame
-    # stage and must not eat that band again here.
+def _section(html, stage):
+    """One stage panel's whole <section>, by its data-stage."""
+    m = re.search(r'<section[^>]*data-stage="' + re.escape(stage) + r'".*?</section>', html, re.S)
+    return m.group(0) if m else ""
+
+
+@pytest.mark.parametrize("lesson_fn", [_intro_lesson, _rules_lesson])
+def test_every_eyebrow_is_the_step_and_stage_only(lesson_fn):
+    # The eyebrow once reprinted the whole concept in 13px caps on frame and explain, squeezing the
+    # L11-L28 bodies to 7-82px (UX S0-2). It now reads "Step n of 6 · STAGE" on every stage, radio
+    # lesson or not.
+    lesson = lesson_fn()
+    html = _console(lesson=lesson, current_stage="frame", prediction_committed=True)
+    for n, stage in enumerate(lesson.stage_order, start=1):
+        eyebrow = " ".join(_eyebrow_for(html, stage).split())
+        assert eyebrow == f"Step {n} of {len(lesson.stage_order)} &middot; {stage.upper()}"
+
+
+def test_the_concept_never_shows_before_the_commit():
+    # On most lessons the concept states the predict answer (curriculum verify §6a), so nothing
+    # before the gate may carry it — not the frame, not an eyebrow.
     lesson = _intro_lesson()
-    html = _console(lesson=lesson, current_stage="demo", prediction_committed=False)
-    demo_eyebrow = _eyebrow_for(html, "demo")
-    assert "DEMO" in demo_eyebrow
-    assert lesson.concept not in demo_eyebrow
-    # The frame still carries the lesson's thesis.
-    assert lesson.concept in _eyebrow_for(html, "frame")
+    html = _console(lesson=lesson, current_stage="frame", prediction_committed=False)
+    assert lesson.concept not in html
 
 
-def test_the_predict_eyebrow_drops_the_repeated_concept():
-    # Predict is the tightest screen (prompt + frozen frame + chips + Commit all on 800x480), so its
-    # eyebrow carries only the step + stage label; the concept already rode the frame stage.
+def test_the_explain_stage_carries_the_concept_once_inside_its_scrolling_body():
+    # After the reveal the concept is the lesson's takeaway: once, in the explain body that scrolls
+    # (the Complete button stays pinned in the footer), after the explanation it sums up.
     lesson = _intro_lesson()
-    html = _console(lesson=lesson, current_stage="predict", prediction_committed=False)
-    predict_eyebrow = _eyebrow_for(html, "predict")
-    assert "PREDICT" in predict_eyebrow
-    assert lesson.concept not in predict_eyebrow
-    assert lesson.concept in _eyebrow_for(html, "frame")
+    html = _console(lesson=lesson, current_stage="explain", prediction_committed=True)
+    assert html.count(lesson.concept) == 1
+    explain = _section(html, "explain")
+    body = re.search(r'<div class="stage-panel__body">(.*?)</div>', explain, re.S).group(1)
+    assert body.index("EXPLAIN_INTRO_marker") < body.index(lesson.concept)
+    assert "stage-foot" in explain and "data-complete" in explain
 
 
-def test_a_no_hardware_instrument_stage_keeps_the_concept_in_its_eyebrow():
-    # A no-radio lesson's demo renders as plain text (no tight waterfall band), so it is not an
-    # instrument stage and keeps the concept in its eyebrow like any text stage.
-    lesson = _rules_lesson()
-    html = _console(lesson=lesson, current_stage="demo")
-    assert lesson.concept in _eyebrow_for(html, "demo")
+def test_every_stage_but_the_first_offers_a_previous_step():
+    lesson = _intro_lesson()
+    html = _console(lesson=lesson, current_stage="frame", prediction_committed=True)
+    for stage in lesson.stage_order:
+        assert ('data-nav="prev"' in _section(html, stage)) == (stage != "frame"), stage
+
+
+def test_a_committed_predict_screen_steps_on_instead_of_committing_again():
+    # Going back to predict after the commit shows the locked-in choice; Next carries on from it.
+    html = _console(lesson=_intro_lesson(), current_stage="predict", prediction_committed=True,
+                    committed_choice="a")
+    predict = _section(html, "predict")
+    assert 'data-nav="next"' in predict
+    assert "btn-commit" not in predict
+
+
+def test_only_a_radio_lessons_hands_on_stages_are_instrument_panels():
+    # The instrument layout (title and eyebrow on one row, narration band under the radio) applies
+    # to the stages that draw the radio, and to nothing else.
+    html = _console(lesson=_intro_lesson(), current_stage="frame", prediction_committed=True)
+    for stage in ("demo", "try", "observe"):
+        assert "stage-panel--instrument" in _section(html, stage).split(">", 1)[0]
+    for stage in ("frame", "predict", "explain"):
+        assert "stage-panel--instrument" not in _section(html, stage).split(">", 1)[0]
+    rules = _console(lesson=_rules_lesson(), current_stage="demo")
+    assert "stage-panel--instrument" not in rules
 
 
 def _gain_intro_lesson():
@@ -382,6 +617,22 @@ def test_a_gain_lesson_shows_the_gain_meter_beside_the_waterfall():
     html = _console(lesson=_gain_intro_lesson(), current_stage="demo")
     assert "gain-meter" in html
     assert "data-gain-gap" in html and "data-gain-floor" in html
+
+
+def test_the_gain_panel_carries_a_real_gain_stepper_and_its_value():
+    # M2's try stage is "step the gain from the bottom up": the panel has - and + that drive
+    # /api/gain, and the gain the radio is on is shown beside them (unknown until it reports).
+    html = _console(lesson=_gain_intro_lesson(), current_stage="demo")
+    demo = re.search(r'<section class="stage-panel[^"]*" data-stage="demo"(.*?)</section>',
+                     html, re.S).group(1)
+    meter = re.search(r'<aside class="gain-meter"(.*?)</aside>', demo, re.S).group(1)
+    assert 'data-gain-step="-1"' in meter and 'data-gain-step="1"' in meter
+    assert re.search(r"data-gain-value[^>]*>&mdash;<", meter)
+
+
+def test_the_gain_stepper_buttons_are_full_touch_targets():
+    rule = _css_rule(".gain-meter .gain-meter__btn")
+    assert re.search(r"width:\s*72px", rule) and re.search(r"height:\s*72px", rule)
 
 
 def test_a_lesson_without_the_gain_panel_has_no_gain_meter():
@@ -549,27 +800,54 @@ def _pocsag_intro_lesson():
         "id": 15, "slug": "pocsag", "title": "Not Meant for You", "type": "intro",
         "concept": "POCSAG sends pager messages in the clear, addressed to one cap code",
         "panels": ["pocsag"], "hardware": ["rtl-sdr"],
-        "tune": {"center_hz": 929_600_000, "span_hz": 200_000},
+        "tune": {"center_hz": 929_612_500, "span_hz": 200_000},
         "stages": {"frame": "f", "demo": "DEMO watch the pages arrive", "try": "t",
                    "predict": "p", "observe": "o", "explain": "e"},
     })
 
 
 def test_a_pocsag_lesson_shows_the_page_log_not_a_waterfall():
-    html = _console(lesson=_pocsag_intro_lesson(), current_stage="demo", tuned_hz=929_600_000)
+    html = _console(lesson=_pocsag_intro_lesson(), current_stage="demo", tuned_hz=929_612_500)
     assert "data-pocsag-panel" in html
     assert "data-pocsag-list" in html
     assert "multimon-ng" in html
-    assert "929.6" in html
+    assert "929.6125" in html
+    # MC's call for M15: framing live, text hidden; the instrument says so on its dial.
+    assert "text withheld" in html
     assert "canvas class=\"waterfall\"" not in html
     assert "data-aprs-panel" not in html
 
 
 def test_a_pocsag_lessons_predict_frame_seals_the_log():
     html = _console(lesson=_pocsag_intro_lesson(), current_stage="predict",
-                    prediction_committed=False, tuned_hz=929_600_000)
+                    prediction_committed=False, tuned_hz=929_612_500)
     assert "PAGES HIDDEN" in html
+    assert "POCSAG on 929.6125 MHz" in html
     assert "waterfall-wrap--frozen" not in html
+
+
+def _sstv_intro_lesson():
+    """An intro lesson whose instrument is the SSTV decoder (M25's), on the ISS downlink."""
+    return parse_lesson({
+        "id": 25, "slug": "sstv", "title": "A Picture in the Air", "type": "intro",
+        "concept": "SSTV paints a picture in pitch",
+        "panels": ["sstv"], "hardware": ["rtl-sdr"],
+        "tune": {"center_hz": 437_550_000, "span_hz": 200_000},
+        "stages": {"frame": "f", "demo": "d", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_an_sstv_lesson_names_the_frequency_its_pack_tunes():
+    # The ISS SSTV downlink moved to 437.550 MHz in 2026; the dial and the waiting note read the
+    # pack's band rather than a frequency baked into the template.
+    demo = _console(lesson=_sstv_intro_lesson(), current_stage="demo", tuned_hz=437_550_000)
+    assert "data-sstv-panel" in demo
+    assert "437.550" in demo
+    assert "145.8" not in demo
+    sealed = _console(lesson=_sstv_intro_lesson(), current_stage="predict",
+                      prediction_committed=False, tuned_hz=437_550_000)
+    assert "SSTV on 437.550 MHz" in sealed
 
 
 def _acars_intro_lesson():
@@ -626,6 +904,54 @@ def test_a_flock_lessons_predict_frame_seals_the_list():
                     prediction_committed=False)
     assert "DEVICES HIDDEN" in html
     assert "waterfall-wrap--frozen" not in html
+
+
+def _flipper_intro_lesson():
+    """An intro lesson whose instrument is the attached Flipper (M29's), read over its USB CLI."""
+    return parse_lesson({
+        "id": 29, "slug": "meet-flipper", "title": "Meet the Flipper", "type": "intro",
+        "concept": "plugged into the nomad the Flipper gains a bench, not radios",
+        "panels": ["flipper"], "hardware": ["flipper"],
+        "stages": {"frame": "f", "demo": "DEMO watch the device answer", "try": "t",
+                   "predict": "p", "observe": "o", "explain": "e"},
+    })
+
+
+def test_a_flipper_lesson_shows_the_device_panel_not_a_waterfall():
+    html = _console(lesson=_flipper_intro_lesson(), current_stage="demo")
+    demo = _section(html, "demo")
+    assert "data-flipper-panel" in demo
+    assert "canvas class=\"waterfall\"" not in html
+    # The honest states every panel has: a badge that is not LIVE until the device answers, the
+    # device card hidden, and the empty line at the readable size, never a device line up front.
+    assert re.search(r"data-flipper-badge[^>]*>SAMPLE &middot; NOT LIVE<", demo)
+    assert re.search(r"<div[^>]*data-flipper-card[^>]*\shidden", demo)
+    assert re.search(r'class="decoder__empty" data-flipper-empty', demo)
+    # Back a step rides the fixed dial beside Next, as on every other panel's stages.
+    assert 'data-nav="prev"' in demo and 'data-nav="next"' in demo
+
+
+def test_a_flipper_lessons_predict_frame_seals_the_device():
+    html = _console(lesson=_flipper_intro_lesson(), current_stage="predict",
+                    prediction_committed=False)
+    assert "DEVICE HIDDEN" in html
+    assert "data-flipper-panel" not in _section(html, "predict")
+    assert "waterfall-wrap--frozen" not in html
+
+
+def test_the_flipper_panel_is_the_shared_macro_not_lesson_markup():
+    # The rack draws the same panel a lesson does, so its markup lives once, in _panels.html.
+    assert "{% macro flipper() %}" in (TEMPLATES_DIR / "_panels.html").read_text()
+    console = (TEMPLATES_DIR / "console.html").read_text()
+    assert "{{ panels.flipper() }}" in console
+    assert "data-flipper-panel" not in console
+
+
+def test_the_flipper_device_card_reads_at_the_body_text_floor():
+    for selector in (".flipper__line", ".flipper__radio"):
+        assert _font_px(_css_rule(selector)) >= 18, selector
+    # The card is a flex column, which would beat the UA [hidden] rule and show an empty card.
+    assert "display: none" in _css_rule(".flipper[hidden]")
 
 
 def _provenance_lesson():
@@ -701,6 +1027,61 @@ def test_an_untuned_lesson_carries_no_band_to_retune_to():
     assert "data-tune-low" not in html
 
 
+def _live_instrument(html):
+    """The live (operate) instrument's markup: its waterfall wrap and tune strip."""
+    return re.search(r'<section class="stage-panel[^"]*" data-stage="operate".*?'
+                     r'<div class="instrument(?: instrument--gain)?">(.*?)'
+                     r'<p class="stage-panel__body">', html, re.S).group(1)
+
+
+def test_a_tuned_lesson_names_its_bin_size_and_step_for_the_live_tune():
+    lesson = parse_lesson({
+        "id": 6, "slug": "res", "title": "Res", "concept": "c", "hardware": ["rtlsdr"],
+        "tune": {"center_hz": 1_090_000_000, "span_hz": 2_000_000, "step_hz": 1_000_000,
+                 "bin_hz": 31_250},
+        "stages": {"predict": "p", "operate": "o", "observe": "ob", "explain": "e"},
+    })
+    html = _live_instrument(_console(
+        lesson=lesson, current_stage="operate", prediction_committed=True,
+        tuned_hz=lesson.tune["center_hz"], step_hz=lesson.tune["step_hz"],
+        tune_band=lesson.tune))
+    assert 'data-tune-bin="31250"' in html
+    assert 'data-step-hz="1000000"' in html
+
+
+def test_the_tune_strip_steps_by_the_default_when_a_lesson_names_none():
+    html = _live_instrument(_console(lesson=_consolidation_lesson(), current_stage="operate",
+                                     prediction_committed=True))
+    assert 'data-step-hz="100000"' in html
+    assert "data-tune-bin" not in html
+
+
+def test_the_dial_is_not_shown_as_tuned_until_the_radio_confirms_it():
+    # The readout only reads as tuned once the server has confirmed a span; until then it is the
+    # lesson's target, marked pending, so a dead radio never looks tuned.
+    html = _live_instrument(_console(current_stage="operate", prediction_committed=True))
+    assert "tune__freq--pending" in html
+
+
+def test_the_instrument_axis_never_labels_a_span_nobody_tuned():
+    # The default sweep is 88-108 MHz; an axis drawn as dial +/- 1.3 MHz labelled a span that was
+    # never swept. Until the radio reports its span the axis carries no numbers.
+    html = _live_instrument(_console(lesson=_consolidation_lesson(), current_stage="operate",
+                                     prediction_committed=True))
+    axis = re.search(r'class="waterfall__axis"[^>]*>(.*?)</div>', html, re.S).group(1)
+    assert not re.search(r"\d", axis)
+
+
+def test_a_tuned_lesson_axis_starts_on_its_own_band_edges():
+    lesson = _tuned_lesson()
+    html = _live_instrument(_console(
+        lesson=lesson, current_stage="operate", prediction_committed=True,
+        tuned_hz=lesson.tune["center_hz"], step_hz=lesson.tune["step_hz"],
+        tune_band=lesson.tune))
+    axis = re.search(r'class="waterfall__axis"[^>]*>(.*?)</div>', html, re.S).group(1)
+    assert "432.9" in axis and "434.9" in axis
+
+
 # --- the home / tile screen ---------------------------------------------------
 
 
@@ -734,6 +1115,16 @@ def test_home_offers_the_licence_exam_trainer_apart_from_the_units():
     assert "Licence" in html
     # It is not dressed as a unit tile.
     assert 'class="tile exam-cta"' not in html
+
+
+def test_home_puts_the_exam_and_operator_bars_side_by_side_in_one_row():
+    # MC's call 2026-11-02 ("Bars side by side"): the two cross-cutting tracks share one row under
+    # the grid, so the unit tiles keep two full rows on the 800x480 screen instead of one.
+    html = _render("home.html", **_status(), tiles=UNITS)
+    row = re.search(r'<div class="home-tracks">(.*?</a>.*?</a>)\s*</div>', html, re.S)
+    assert row, "the two track bars sit in one .home-tracks row"
+    inside = row.group(1)
+    assert 'href="/exam"' in inside and 'href="/operate"' in inside
 
 
 def test_every_screen_has_no_horizontal_overflow_affordance():
@@ -789,6 +1180,64 @@ def test_a_figure_question_shows_its_diagram_behind_a_tap(template):
     assert 'id="figure-T-1"' in html
     assert 'src="/static/exam/T-1.jpg"' in html
     assert "not shown here yet" not in html
+
+
+def _pinned(html, button):
+    """True when `button` sits in the exam's pinned footer, after the scrolling body that holds
+    the question and the chips — so a long question can never push it off the 800x480 screen."""
+    body = html.index('class="exam__body"')
+    foot = html.index('class="exam__foot')
+    return body < html.index('class="exam__question"') < foot and html.index(button) > foot
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_exam_card_pins_commit_below_a_scrolling_body(template):
+    q = exam.load_pool().get("T1D01")
+    html = _render(template, **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False,
+        position=1, total=35, score=0, answered=0, pass_mark=26))
+    assert _pinned(html, "Commit answer")
+    assert html.index('name="choice"') < html.index('class="exam__foot')
+    # Commit lives outside the form's markup, so it names the form it submits.
+    assert 'form="exam-answer"' in html and 'id="exam-answer"' in html
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_exam_review_pins_next_below_a_scrolling_body(template):
+    q = exam.load_pool().get("T1D01")
+    html = _render(template, **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=True,
+        chosen="A", correct=False, position=1, total=35, score=0, answered=1, pass_mark=26,
+        next_href="/exam/sim", last=False))
+    assert _pinned(html, "exam-reveal")
+    assert 'class="exam__question"' in html          # the question is never dropped on review
+
+
+def test_exam_study_card_offers_the_practice_exam_from_its_footer():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam.html", **_exam_ctx(
+        title="Exam", back_href="/", back_label="Home", question=q, reviewed=False))
+    assert _pinned(html, 'href="/exam/sim"')
+
+
+def test_exam_sim_card_offers_skip_while_another_question_waits():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam_sim.html", **_exam_ctx(
+        title="Practice Exam", back_href="/exam", back_label="Exam", question=q, reviewed=False,
+        position=4, total=35, score=1, answered=2, pass_mark=26, skipped=1, can_skip=True))
+    # Skip submits the same form to the skip endpoint, without needing a choice tapped first.
+    assert 'formaction="/api/exam/sim/skip?question_id=T1A01"' in html
+    assert "formnovalidate" in html
+    assert _pinned(html, ">Skip<")
+    assert "1 skipped" in html
+
+
+def test_exam_sim_card_has_no_skip_on_the_last_question_left():
+    q = exam.load_pool().get("T1A01")
+    html = _render("exam_sim.html", **_exam_ctx(
+        title="Practice Exam", back_href="/exam", back_label="Exam", question=q, reviewed=False,
+        position=1, total=35, score=30, answered=34, pass_mark=26, skipped=1, can_skip=False))
+    assert "/api/exam/sim/skip" not in html
 
 
 def test_a_question_without_a_figure_offers_no_diagram():

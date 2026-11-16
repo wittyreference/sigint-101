@@ -52,3 +52,15 @@ def test_every_unit3_choice_has_a_key_and_a_label(unit3_lessons):
         for choice in lesson.choices:
             assert choice.get("key"), f"lesson {lesson_id} has a choice missing 'key'"
             assert choice.get("label"), f"lesson {lesson_id} has a choice missing 'label'"
+
+
+def test_both_antenna_lessons_put_the_instrument_on_1090_mhz(unit3_lessons):
+    # The demo and try stages are "the radio on 1090": without a tune band the sweep stays on FM
+    # and the learner shortens the dipole against a band nobody is looking at.
+    for lesson_id in UNIT3_IDS:
+        tune = unit3_lessons[lesson_id].tune
+        assert tune is not None, f"lesson {lesson_id} must declare its band"
+        assert tune["low_hz"] < 1_090_000_000 < tune["high_hz"]
+        # ADS-B replies are about 2 MHz wide, so tens of bins across the span show the hump at
+        # its real width; the bin is named so the sweep does not fall back to 16 FM-sized bins.
+        assert tune["bin_hz"] and tune["span_hz"] // tune["bin_hz"] >= 32

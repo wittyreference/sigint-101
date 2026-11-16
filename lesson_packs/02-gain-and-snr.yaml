@@ -17,43 +17,59 @@ stages:
     gap between it and the noise — and why the knob everyone reaches for first, gain, is not
     that number.
   demo: >-
-    Watch — hands off the gain for now. At 0 dB the whole picture sits low: that grassy band
-    along the bottom is the noise floor, and the station's stripe pokes up just above it. The
-    gap between them — peak minus floor — is the SNR, the one number worth chasing. Now I raise
-    the gain: the floor and the peak climb together, so the gap opens, then stalls, and near the
-    top it can even close.
+    Watch — hands off the gain for now. Decibels first: a dB is a ratio, and every 10 dB is ten
+    times the power. The grassy band along the bottom is the noise floor; the station pokes up
+    above it. The meter reads both. Peak minus floor is the SNR — the one number worth chasing.
   try: >-
-    Now you drive, comrade. Step the gain from the bottom up and stop at three settings — low,
-    middle, maximum. At each, read the floor, the peak, and the gap off the meter and jot them
-    down. Don't chase the tallest peak — just record what you see.
+    Now you drive, comrade. Step the gain with its − and + from the bottom up, and stop at two
+    settings — low, then middle. At each, read the floor, the peak and the gap off the meter
+    and note them. Don't chase the tallest peak — just record what you see.
   predict: >-
-    You've watched that gap open up and then stall. Before you push to the very top, make the
-    call: going from your middle setting to maximum gain, will the gap get WIDER, stay about the
-    SAME, or get NARROWER? Lock in your answer — the rest of the lesson stays hidden until you do.
+    You've read the meter at low and middle gain. Next you'll push to maximum and the station's
+    peak will climb. Watch the grassy noise floor: will it RISE with the peak, STAY PUT, or SINK?
+    Lock it in.
   observe: >-
     Take the gain to maximum and hold it against your middle setting. Tell me what actually
     happened: did the floor and the peak move together or apart — and did the gap grow, hold, or
     close as you reached the top?
   explain: >-
-    Here's what you were looking at. Gain is just an amplifier, and an amplifier cannot tell
-    signal from noise — it multiplies both at once. So when you turned it up, the station's peak
-    and the noise floor rose together, and past the middle the gap barely moved; at the very top
-    it often shrinks, because the radio starts adding hiss of its own. That gap is SNR, and the
-    gap — not the height of the peak — is what decides whether you can actually hear something.
-    Picture one friend talking in a loud restaurant: what matters isn't how loudly they talk,
-    it's how far their voice rises above the room. Turning up a hearing aid lifts your friend and
-    the whole room together, so past a point it stops helping — that is gain. The way to a bigger
-    gap is a better or better-placed antenna, or getting closer to the signal, not more gain. One
-    last handle: these numbers are in decibels, which measure a ratio — every 10 dB is ten times
-    the power — so SNR is simply a subtraction, the gap you read straight off the screen. The
-    best gain setting is the one where that gap is widest, which is almost always somewhere in the
-    middle, not pinned at the top.
+    The floor rose with the peak. Gain is an amplifier — a hearing aid in a loud restaurant that
+    lifts your friend and the room alike — and it can't tell signal from noise. Read your own
+    meter: the floor climbed nearly as far as the peak, so the gap moved far less than either. At
+    the very top it can even shrink, as strong stations overload the receiver. That gap is SNR: it
+    decides what you can hear, not the peak's height. Carry this out the door: set gain where the
+    gap is widest, usually mid-scale; a bigger gap comes from a better or better-placed antenna,
+    or getting closer, never more gain.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
 # learner reads. They stay neutral on purpose — the correct answer lives in `explain`, sealed
 # behind the predict commit, so showing the choices never spoils the reveal.
 choices:
-  - {key: wider, label: Wider}
-  - {key: same, label: About the same}
-  - {key: narrower, label: Narrower}
+  - {key: rises, label: Rises with it}
+  - {key: stays, label: Stays put}
+  - {key: sinks, label: Sinks lower}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [rises]
+verdict: >-
+  Rises with it: gain can't tell signal from noise, so it lifts both, and the gap between them,
+  your SNR, barely moves.
+
+# The post-lesson check: one new situation on this lesson's idea (gain is not signal; the gap is),
+# scored after the explain. Each chip's `why` is the feedback for choosing it.
+check:
+  prompt: >-
+    A weak station sits 6 dB over the floor, and your gain is already where the gap was widest.
+    Which change is most likely to widen the gap?
+  choices:
+    - key: gain
+      label: Turning the gain up
+      why: Gain lifts the floor with the station, so the gap barely moves; at the top it can shrink.
+    - key: contrast
+      label: More screen contrast
+      why: Contrast changes how the gap is painted, not its size; the meter's dB stay the same.
+    - key: antenna
+      label: A better antenna spot
+      why: More signal at the antenna, from a better spot or getting closer, widens the gap; gain can't.
+  answer: antenna

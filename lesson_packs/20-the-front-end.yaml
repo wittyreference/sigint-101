@@ -13,7 +13,7 @@ panels: []
 
 stages:
   frame: >-
-    Tonight, comrade, we lift the lid. Every lesson so far you worked the radio from outside. Now we
+    Tonight, comrade, we lift the lid. So far you mostly worked the radio from outside. Now we
     go inside, to the first inch between antenna and everything else — pure theory, but the inch that
     decides how faint a signal you can ever hear.
   demo: >-
@@ -42,3 +42,8 @@ choices:
   - {key: "quiet-first", label: "The quiet one first"}
   - {key: "quiet-last", label: "The quiet one last"}
   - {key: "no-difference", label: "Order makes no difference"}
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: ["quiet-first"]
+verdict: >-
+  The quiet one first: its hiss lands on the bare whisper, and no later stage can take it back out.

@@ -18,34 +18,28 @@ stages:
     is seeing a real signal as a shape on the screen, and every lesson after this one is just
     learning to read more shapes.
   demo: >-
-    Watch — hands off for now. I sweep the FM band, 88 to 108 MHz, and tune the strongest
-    station near you. There — that bright vertical stripe, about 200 kHz wide, is a radio
-    station arriving right now. You are seeing radio. This picture is a waterfall, and it has
-    three directions: left-to-right is frequency; top-to-bottom is time, the newest sliver at
-    the top, scrolling down; brightness is power. That's the whole alphabet — frequency across,
-    time down, brightness is power.
+    Watch — hands off for now. The screen sweeps the whole FM band, 88 to 108 MHz. That bright
+    vertical stripe, about 200 kHz wide, is a radio station arriving right now. You are seeing
+    radio. This picture is a waterfall: left-to-right is frequency; top-to-bottom is time, the
+    newest sliver at the top; brightness is power. That's the whole alphabet.
   try: >-
-    Now it's your turn, comrade. From the stations I just scanned, tap a different strong one —
-    any other bright stripe on the list. Watch the screen jump to it and a fresh stripe bloom
-    where that station lives. That's it — you just tuned a radio. The only goal: make a station
-    appear and put your finger on its stripe.
+    Now it's your turn, comrade. Tap a different bright stripe and the dial jumps to it, or step
+    there with − and +. Read its frequency off the dial. That's it — you just tuned a radio.
   predict: >-
-    Next you'll tune two notches up the dial, to the station above the one you're on. First,
-    commit to a guess: will that station's bright stripe be WIDER, NARROWER, or the SAME
-    width as this one? Lock it in — the rest of the lesson stays hidden until you do.
+    Next you'll tune to the next bright stripe to the right and hold the two side by side. On this
+    screen, will the dimmer of the two look NARROWER, the SAME width, or WIDER? Lock it in.
   observe: >-
-    Now tune two notches up the dial and hold the two stations side by side. Tell me what you
-    actually see, not what you expected: which stripe is BRIGHTER — the stronger signal — and
-    which is WIDER, or do the two look the same?
+    Now tune to the next bright stripe to the right and hold the two stations side by side. Tell
+    me what you actually see, not what you expected: which stripe is BRIGHTER — the stronger
+    signal — and which is WIDER, or do the two look the same?
   explain: >-
-    Here's what you were looking at. Every broadcast FM station is handed the same slice of
-    the dial — about 200 kHz wide — so from one station to the next the stripe is the same
-    width. That width is fidelity: a fat 200 kHz channel is what gives FM the room for full,
-    stereo music, where a skinny voice channel would sound like a phone call. So width tells
-    you the kind of signal, not which station it is. Brightness was still power — a closer or
-    stronger transmitter paints a brighter stripe — and the vertical axis was still time, the
-    signal scrolling downward as the seconds passed. Three axes, and you just read all three
-    off a real station: frequency across, brightness is power, time goes down.
+    Narrower. Broadcast FM hands every station the same slice of the dial, about 200 kHz, but
+    this screen paints only the power that clears the noise floor. A strong station lifts its
+    whole slice, skirts and all, well above the grass; a weak one clears it only at its core, so
+    its stripe draws thinner. The slice is fixed; the stripe you see is not. A few stripes look
+    twice as wide: HD Radio digital sidebands sit either side of the analog block. Why 200 kHz?
+    Room for stereo music; a skinny voice channel sounds like a phone call. Carry this out the
+    door: three axes off a real station — frequency across, time down, brightness is power.
 
 # The predict stage offers three keyboard-free, tap-to-choose answers (no on-screen keyboard
 # at the predict gate). The loader parses and validates `choices` (key and label, fail-closed); it is carried here for the
@@ -54,7 +48,31 @@ stages:
 choices:
   - label: Wider
     key: wider
+  - label: Same width
+    key: same
   - label: Narrower
     key: narrower
-  - label: Same
-    key: same
+
+# The scored gate: the chip that matches the explain, and the one line the explain header prints.
+answer: [narrower]
+verdict: >-
+  Narrower: every FM station gets the same 200 kHz slice, but this screen paints only what clears
+  the noise floor, so a weak one shows just its core.
+
+# The post-lesson check: one new situation on this lesson's idea (a signal's shape names what it
+# is), scored after the explain. Each chip's `why` is the feedback for choosing it.
+check:
+  prompt: >-
+    One FM stripe is twice as wide as its neighbours: a bright core with a dimmer band hugging each
+    side. What is it most likely?
+  choices:
+    - key: power
+      label: A stronger station
+      why: More power paints a brighter, slightly fuller stripe, never a dim band on each side.
+    - key: hd
+      label: An HD Radio station
+      why: HD Radio adds digital sidebands either side of the analog core, doubling its width.
+    - key: two
+      label: Two stations side by side
+      why: Two stations would show two bright cores, not one core with dim edges.
+  answer: hd

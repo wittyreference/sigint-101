@@ -20,9 +20,11 @@ def test_m1_has_all_six_intro_stages_non_empty():
     # An intro lesson teaches from a blank slate, so the console walks all six stages in
     # order (frame -> demo -> try -> predict -> observe -> explain); any one of them blank
     # would strand a true beginner mid-lesson, which is the one failure the loader exists to
-    # catch at load rather than in front of the learner.
+    # catch at load rather than in front of the learner. Unit 1 pilots the post-lesson check,
+    # which walks last, after the six.
     lesson = load_lesson_file(PACK)
-    assert lesson.stage_order == ("frame", "demo", "try", "predict", "observe", "explain")
+    assert lesson.stage_order == ("frame", "demo", "try", "predict", "observe", "explain",
+                                  "check")
     for stage in REQUIRED_STAGES["intro"]:
         assert lesson.stages[stage].strip(), f"stage {stage!r} must carry real teaching text"
 
