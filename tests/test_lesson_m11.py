@@ -1,6 +1,7 @@
 # ABOUTME: Tests the M11 "Below the Noise Floor" LoRa lesson pack loads as a valid six-stage intro —
 # ABOUTME: id 11, every stage non-empty, string choices, the LoRa (meshtastic) decode instrument.
 
+import re
 from pathlib import Path
 
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
@@ -44,3 +45,43 @@ def test_m11_predict_choices_are_well_formed_string_key_label():
         label = choice.get("label")
         assert isinstance(key, str) and key, f"choice {choice!r} needs a non-empty string key"
         assert isinstance(label, str) and label, f"choice {choice!r} needs a non-empty string label"
+
+
+def test_m11_try_keeps_the_second_nodes_antenna_on():
+    # The try asks for a transmission from a second node. A LoRa radio powered with no antenna on
+    # its jack can be damaged, so the try keeps the antenna on. Any of three wordings will do:
+    # "antenna always on", "antenna ... before ... power", or Meshtastic's own "never power ...
+    # without ... antenna".
+    lesson = load_lesson_file(PACK)
+    ask = lesson.stages["try"].lower()
+    assert re.search(r"\bantenna always on\b"
+                     r"|\bantenna\b[^.?!]*\bbefore\b[^.?!]*\bpower"
+                     r"|\bnever power\b[^.?!]*\bwithout\b[^.?!]*\bantenna\b", ask), (
+        "the try must keep the second node's antenna on: 'antenna always on', "
+        "'antenna ... before ... power' or 'never power ... without ... antenna'")
+
+
+def test_m11_try_names_the_region_and_preset_the_second_node_shares_with_the_box():
+    # A Meshtastic node sends nothing until its region is set, and nodes need the same region and
+    # modem preset to communicate. Left unsaid, a mismatch is an empty list with no reason given.
+    lesson = load_lesson_file(PACK)
+    ask = lesson.stages["try"].lower()
+    assert "region" in ask, "the try must name the region"
+    assert "longfast" in ask, "the try must name the LongFast preset"
+
+
+def test_m11_try_keeps_its_distance_and_the_path_with_no_second_node():
+    # Fitting the try into its 60 words must not cost the half metre between the two radios, or
+    # the line that tells a learner with no second node that an empty list is a result.
+    lesson = load_lesson_file(PACK)
+    ask = lesson.stages["try"]
+    assert "50 cm" in ask
+    assert "an empty list is the honest answer" in ask
+
+
+def test_m11_try_measures_the_50_cm_from_the_nomad():
+    # The half metre keeps a close transmitter from overloading the Nomad's own LoRa receiver, so
+    # it is measured from the Nomad, and the try says so.
+    lesson = load_lesson_file(PACK)
+    assert "50 cm from the Nomad" in lesson.stages["try"], (
+        "the try must measure the distance from the Nomad: '50 cm from the Nomad'")

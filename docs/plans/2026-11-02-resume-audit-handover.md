@@ -8,7 +8,7 @@ field). **Hand-over is fixed at 2026-11-08, six days out.** Recon (3 read-only a
 already shows hand-over-level problems, so the audits feed a triage → fix sprint → hand-over, and
 Flipper Phase 2 waits behind them (recommendation below).
 
-## Live state (observed 2026-11-02 04:12 UTC, ssh spec5@100.108.20.20)
+## Live state (observed 2026-11-02 04:12 UTC, ssh to nomad-b as `spec5`)
 - **nomad-b healthy, no repeat crash:** up ~5.5 h, 32.6 °C, throttled=0x0, root ext4 clean, dmesg
   errors = one benign hid-multitouch line. The crash itself left **no log** (journal is volatile);
   the Oct 9 boot has no shutdown record → it died between Oct 31 and Nov 1 01:16.

@@ -4,7 +4,7 @@ A self-contained, touch-screen, learn-by-doing SIGINT course that takes a beginn
 signals-intelligence fundamentals by driving the real radios of a SpecFive Nomad 2 Recon paired
 with a Flipper Zero.
 
-Authoritative detail lives in the plan (`/home/mc/.claude/plans/eager-spinning-frost.md`) and
+Authoritative detail lives in the plan (`~/.claude/plans/eager-spinning-frost.md`) and
 `STATUS.md` (living state). This file is the lean agreement; when they disagree, the plan wins.
 
 ## Dev pipeline
@@ -86,9 +86,9 @@ capable instrument, not a locked toy.
 ## Project facts
 
 - **Repo:** github.com/wittyreference/sigint-101 (public, MIT). Nothing personal to MC committed.
-- **Git identity:** Michael Carpenter <mc8805@outlook.com>. Check `git config user.email` before
+- **Git identity:** wittyreference <mc8805@outlook.com>. Check `git config user.email` before
   your first commit each session; if it differs, stop and say so.
-- **Plan:** `/home/mc/.claude/plans/eager-spinning-frost.md` (authoritative detail).
+- **Plan:** `~/.claude/plans/eager-spinning-frost.md` (authoritative detail).
 - **Living state:** `STATUS.md` (NEXT ACTION first, then done, blockers). Keep it true after every
   merge or push.
 - **Stack:** FastAPI + Jinja2 + polling JS + offline CSS + SQLite progress + append-only JSONL
@@ -106,8 +106,8 @@ capable instrument, not a locked toy.
     go?" — just do it and report. Default to **subagent-heavy** execution: fan research and
     independent chunks out to subagents. Ending a turn with "Want me to go?" is the exact ping-pong
     MC called out. One unavoidable tap remains (EnterWorktree); flag it, then stay heads-down.
-- **nomad-b (user `spec5` @ 100.108.20.20, host `spec5b`) is the WORKING HIL target**; spec5
-  (100.90.68.20) is the deaf one (busted RX antenna). Don't conflate them. (Session 2026-10-26.)
+- **nomad-b (user `spec5`, host `spec5b`) is the WORKING HIL target**; spec5
+  is the deaf one (busted RX antenna). Don't conflate them. (Session 2026-10-26.)
 - **Lesson copy ALWAYS shrinks to fit the fixed 800x480 — never scroll, never ask.** When a stage
   overflows (the Next/Commit button pushed past 480px), trim the prose and the concept banner until
   it fits; do not add scrolling and do not ask scroll-vs-trim — the answer is always trim. Fit at

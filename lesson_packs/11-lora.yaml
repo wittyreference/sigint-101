@@ -27,10 +27,10 @@ stages:
     than the noise, yet the packet decoded whole. Ten dB under the noise a plain data signal is
     gone; a LoRa chirp is a packet.
   try: >-
-    Your turn, comrade. If a second Meshtastic node is in reach, send from it, at least 50 cm from
-    the Nomad, and read the SNR on the line that lands. Send a few: how far below zero can it go yet
-    arrive whole? No second node? Neighbours' nodes may land here too, and an empty list is the
-    honest answer.
+    Your turn, comrade. With a second Meshtastic node (antenna always on, same region, LongFast
+    preset), send from it, at least 50 cm from the Nomad, and read the line's SNR. Send a few: how
+    far below zero can it go yet arrive whole? No second node? Neighbours' nodes may land here too,
+    and an empty list is the honest answer.
   predict: >-
     A LoRa packet arrives twelve dB below the noise floor — weaker than the very noise around it. Does
     it decode cleanly, arrive garbled, or fail outright? Lock it in.

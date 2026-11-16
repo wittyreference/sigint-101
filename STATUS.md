@@ -180,7 +180,7 @@
 
 ## Unfinished-work register (found 2026-11-02; disposition set at triage)
 These are plan deliverables that were promised but never built, and mostly never mentioned
-again. Sources: `/home/mc/.claude/plans/eager-spinning-frost.md`, CLAUDE.md, the transcripts.
+again. Sources: `~/.claude/plans/eager-spinning-frost.md`, CLAUDE.md, the transcripts.
 
 | Item | Where promised | State | Disposition |
 |---|---|---|---|
@@ -238,8 +238,8 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 | Platform | — | `a8bfef8` Phosphor restyle, `0e2fc54` units nav, `6b23996` `claim()` arbitration, `11defa4` kiosk autostart |
 
 ## nomad-b / kiosk operations
-- **Access:** `ssh spec5@100.108.20.20`. Login user is `spec5`, host `spec5b`. Registry:
-  `/home/mc/workspaces/machines/hosts/nomad-b.md`.
+- **Access:** `ssh spec5@<nomad-b tailnet address>`. Login user is `spec5`, host `spec5b`. Registry:
+  the private `machines` repository, `hosts/nomad-b.md`.
 - **The panel is self-starting** (`deploy/install.sh`, idempotent; re-run it after changing
   `deploy/`).
   - The lesson server is the user unit `sigint101.service` on 127.0.0.1:8008, with linger.
@@ -274,13 +274,13 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
   - Set `CDP_PORT` to the Chrome DevTools port.
 - **Recipe:**
   1. Run the server from the worktree with the harness background runner (a `nohup` from a
-     tool call dies when the call returns): `--host 100.92.112.54 --port 80xx`.
+     tool call dies when the call returns): `--host <droplet tailnet address> --port 80xx`.
   2. On nomad-b, start a separate headless Chromium:
      `--headless=new --no-sandbox --disable-gpu --password-store=basic --remote-allow-origins=*
      --remote-debugging-port=93xx --user-data-dir=/tmp/<you>-prof --disk-cache-size=1`.
      **`--password-store=basic` is mandatory.** Without it the kiosk session's GNOME keyring
      blocks the first http page forever (see learnings).
-  3. scp the scripts over and run them there against `http://100.92.112.54:80xx/...`.
+  3. scp the scripts over and run them there against `http://<droplet tailnet address>:80xx/...`.
   4. Kill your Chromium by PID. Never `pkill chromium`: that kills the kiosk.
 - **Always force the viewport** (`Emulation.setDeviceMetricsOverride` 800x480): a plain
   `--window-size` lays out at ~337px.
@@ -291,19 +291,19 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
   capture recipe in `.claude/learnings.md`. `--virtual-time-budget` snapshots an empty panel.
 
 ## HIL targets
-- **nomad-b** (`spec5b`, 100.108.20.20, user `spec5`) is PRIMARY. It is a stock Nomad 2 Recon
+- **nomad-b** (`spec5b`, user `spec5`) is PRIMARY. It is a stock Nomad 2 Recon
   twin: RTL2832U (now on the ANT500; deaf at 1090 and 2m), MeshAdv HAT (`/dev/ttyAMA0`) with a
   915 MHz whip on the LoRa jack, and the Flipper (fw 1.5.1, Marauder devboard on its GPIO) on
   `/dev/ttyACM0` when plugged in. The RTL8821CU dongle is unplugged: it browns out USB without a
   powered hub.
-- **spec5** (100.90.68.20) is the deaf secondary: busted RX antenna, dead LoRa jack. Useful as
+- **spec5** is the deaf secondary: busted RX antenna, dead LoRa jack. Useful as
   a deaf-receiver fixture.
-- **pi5** (100.126.132.9, user `mc`) has an ESP32 on `/dev/ttyACM1`. No Flipper.
+- **pi5** (user `mc`) has an ESP32 on `/dev/ttyACM1`. No Flipper.
 
 ## Gotchas (durable)
 - All `sigint101/` edits go through a worktree. Merge with `--squash`, passing
   `--author-email mc8805@outlook.com`. Stage files by name. Never `--no-verify`.
-- Worktree setup: `ln -s /home/mc/workspaces/sigint-101/.venv <wt>/.venv && mkdir <wt>/data`.
+- Worktree setup: `ln -s <main checkout>/.venv <wt>/.venv && mkdir <wt>/data`.
   `pytest.ini` has `pythonpath = .`. Never `git add` the symlink.
 - Shell is zsh: unquoted `$var` does not word-split.
 - `pkill -f`/`pgrep -f` over ssh match the ssh command's own argv. Kill by PID, or use the

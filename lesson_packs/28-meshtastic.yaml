@@ -31,8 +31,8 @@ stages:
   try: >-
     Your turn, comrade — reading, not keying. Walk the list: text means the node shares LongFast,
     our default channel with a public key; "(encrypted — not on our channel)" is a real reception
-    from another channel. The list stays empty until a second node sends on LongFast; add one
-    when you can. How would a far node's text reach here?
+    from another channel. Empty until a second node sends on LongFast. Adding one? Antenna always
+    on, same region. How would a far node's text reach here?
   predict: >-
     A node too far to hear you directly, one node between. Does your text reach it, or die at your
     edge? Lock it in.
