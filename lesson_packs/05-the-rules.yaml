@@ -27,8 +27,8 @@ stages:
     Transmitting is the other power, and it is the licensed one: keying up on the amateur bands
     needs an amateur licence, and every band has its own rule for who may talk and how loud. Some
     bands — the 915 MHz band your LoRa and Meshtastic use — allow licence-free transmitting under
-    FCC Part 15, inside set power limits. So the line is simple: listen within those limits,
-    transmit only where you are authorised.
+    FCC Part 15, for compliant equipment inside its power, antenna and no-interference conditions.
+    So the line is simple: listen within those limits, transmit only where you are authorised.
   try: >-
     Your turn, comrade — sort these four in your head before the next screen. One: you watch an
     unencrypted aircraft channel scroll by. Two: you record a neighbour's encrypted phone call and
@@ -48,8 +48,9 @@ stages:
     carrier's call, which is the offence in itself, recorded or not, passed on or not — not fine.
     (The scanner rule you may hear of, 47 CFR 15.121, governs which scanners may be certified and
     sold, not owning a receiver like this one.) The ham repeater is transmitting unlicensed — not
-    fine. The Meshtastic text is transmitting too, but on a band that allows licence-free use
-    under Part 15, so it is fine inside its power limits. Carry this out the door: receiving is
+    fine. The Meshtastic text is transmitting too, but licence-free under FCC Part 15:
+    fine on compliant equipment set to the right region, inside its power, antenna and
+    no-interference conditions. Carry this out the door: receiving is
     broad and mostly lawful, transmitting is licensed; the exam trainer is your on-ramp to a
     licence, not a lock. Specifics vary by country and, for listening, by state — treat this as
     the shape of the law, and check your local rules before you rely on it.

@@ -50,3 +50,31 @@ def test_m5_offers_well_formed_predict_choices(lessons):
 
 def test_m5_belongs_to_unit_2(lessons):
     assert unit_for_lesson(5).id == 2
+
+
+# FCC Part 15 lets equipment transmit with no individual licence only on its conditions. M5 names
+# three of them wherever it names Part 15: the power limit and the antenna rule (47 CFR 15.247(b),
+# 15.204(c)) and the rule against harmful interference (47 CFR 15.5(b)).
+PART_15_CONDITIONS = ("power", "antenna", "interference")
+
+
+@pytest.mark.parametrize("stage", ["demo", "explain"])
+def test_m5_names_part_15_together_with_its_conditions(lessons, stage):
+    # An outside review found both stages naming Part 15 but giving power as the only condition
+    # for sending the Meshtastic text without a licence. A sentence that names Part 15 must carry
+    # all three conditions, so the learner never reads a power limit as the whole of the rule.
+    sentences = [s for s in lessons[5].stages[stage].split(". ") if "Part 15" in s]
+    assert sentences, f"M5 {stage} must name FCC Part 15 as the source of licence-free transmitting"
+    for sentence in sentences:
+        missing = [word for word in PART_15_CONDITIONS if word not in sentence]
+        assert not missing, f"M5 {stage} names Part 15 without its {missing} conditions"
+
+
+def test_m5_does_not_make_power_the_only_condition(lessons):
+    # The two wordings that did: licence-free "inside set power limits" (demo) and "fine inside
+    # its power limits" (explain), as if staying under a power limit were all Part 15 asks.
+    lesson = lessons[5]
+    for stage in lesson.stage_order:
+        for phrase in ("inside set power limits", "inside its power limits"):
+            assert phrase not in lesson.stages[stage], (
+                f"M5 {stage} still reads as if power were the only Part 15 condition: {phrase!r}")
