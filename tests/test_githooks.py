@@ -1,5 +1,5 @@
-# ABOUTME: Tests the pre-commit identity guard (githooks/pre-commit) in throwaway git repos.
-# ABOUTME: A commit is made only when author and committer are wittyreference <mc8805@outlook.com>.
+# ABOUTME: Tests the identity guard (githooks/pre-commit, pre-merge-commit) in throwaway git repos.
+# ABOUTME: Commits and merges are made only when author and committer are the required identity.
 
 import os
 import subprocess
@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-HOOK = REPO / "githooks" / "pre-commit"
+HOOKS = REPO / "githooks"
 NAME = "wittyreference"
 EMAIL = "mc8805@outlook.com"
 REQUIRED = f"{NAME} <{EMAIL}> | {NAME} <{EMAIL}>"
@@ -20,7 +20,7 @@ OTHER_EMAIL = "x@example.com"
 
 @dataclass
 class Outcome:
-    """What one `git commit` did, as booleans only, so a failing assert never prints an identity."""
+    """A commit or merge outcome, booleans only, so a failing assert never prints an identity."""
 
     made: bool  # HEAD moved: the commit exists
     by_hook: bool  # the guard's own refusal is on stderr
@@ -53,7 +53,7 @@ class Sandbox:
 
     def arm(self):
         """Point git at the guard, as bootstrap.sh does."""
-        self.config("core.hooksPath", str(HOOK.parent))
+        self.config("core.hooksPath", str(HOOKS))
 
     def head(self):
         out = self.git("rev-parse", "-q", "--verify", "HEAD")
@@ -67,6 +67,12 @@ class Sandbox:
         assert self.git("add", name).returncode == 0
         before = self.head()
         run = self.git("commit", "-q", "-m", f"change {self.files}", *args, **env)
+        return Outcome(made=self.head() != before, by_hook="sigint101: refusing" in run.stderr)
+
+    def merge(self, branch, **env) -> Outcome:
+        """Merge `branch` with a merge commit git makes by itself, as git merge and git pull do."""
+        before = self.head()
+        run = self.git("merge", "-q", "--no-ff", "-m", f"merge {branch}", branch, **env)
         return Outcome(made=self.head() != before, by_hook="sigint101: refusing" in run.stderr)
 
     def identities(self):
@@ -97,10 +103,12 @@ def test_the_email_may_differ_in_case(repo):
     assert repo.commit().made
 
 
-def test_the_guard_is_executable_bash():
+@pytest.mark.parametrize("hook", ["pre-commit", "pre-merge-commit"])
+def test_the_guard_is_executable_bash(hook):
     # git skips a hook that is not executable, which would disarm the guard without a word.
-    assert os.access(HOOK, os.X_OK)
-    run = subprocess.run(["bash", "-n", str(HOOK)], capture_output=True, text=True, timeout=20)
+    path = HOOKS / hook
+    assert os.access(path, os.X_OK)
+    run = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, timeout=20)
     assert run.returncode == 0, run.stderr
 
 
@@ -137,6 +145,47 @@ def test_a_wrong_author_name_in_the_environment_is_refused(repo):
     assert out.by_hook
 
 
+# The committer is checked on its own: in these three only the committer name is wrong, so the
+# author check, which runs first, cannot be what refuses them.
+
+
+def test_a_wrong_committer_name_in_the_environment_is_refused(repo):
+    out = repo.commit(GIT_COMMITTER_NAME=OTHER_NAME)
+    assert not out.made
+    assert out.by_hook
+
+
+def test_a_committer_name_in_config_over_user_name_is_refused(repo):
+    repo.config("committer.name", OTHER_NAME)
+    out = repo.commit()
+    assert not out.made
+    assert out.by_hook
+
+
+def test_a_handle_author_does_not_cover_a_wrong_committer_name(repo):
+    # The leak's own shape: a person's name as user.name, and the handle given only as the author.
+    repo.config("user.name", OTHER_NAME)
+    out = repo.commit(f"--author={NAME} <{EMAIL}>")
+    assert not out.made
+    assert out.by_hook
+
+
+@pytest.mark.parametrize("name", [NAME + "2", "x " + NAME])
+def test_a_name_that_only_contains_the_handle_is_refused(repo, name):
+    repo.config("user.name", name)
+    out = repo.commit()
+    assert not out.made
+    assert out.by_hook
+
+
+def test_an_inherited_nocasematch_does_not_loosen_the_name(repo):
+    # An exported BASHOPTS turns shell options on as bash starts, and nocasematch makes [[ == ]]
+    # ignore case. The author is checked first, so the case variant goes there.
+    out = repo.commit(f"--author=WittyReference <{EMAIL}>", BASHOPTS="nocasematch")
+    assert not out.made
+    assert out.by_hook
+
+
 def test_no_name_set_is_refused(tmp_path):
     box = Sandbox(tmp_path)
     box.config("user.email", EMAIL)
@@ -158,6 +207,21 @@ def test_the_right_name_with_a_wrong_email_is_refused(repo):
 
 def test_a_wrong_committer_email_in_the_environment_is_refused(repo):
     out = repo.commit(GIT_COMMITTER_EMAIL=OTHER_EMAIL)
+    assert not out.made
+    assert out.by_hook
+
+
+def test_a_wrong_author_email_in_the_environment_is_refused(repo):
+    # Only the author's address is wrong; the committer's is right, so this pins the author's.
+    out = repo.commit(GIT_AUTHOR_EMAIL=OTHER_EMAIL)
+    assert not out.made
+    assert out.by_hook
+
+
+@pytest.mark.parametrize("email", [EMAIL + ".example", "x" + EMAIL])
+def test_an_email_that_only_contains_the_address_is_refused(repo, email):
+    repo.config("user.email", email)
+    out = repo.commit()
     assert not out.made
     assert out.by_hook
 
@@ -207,3 +271,29 @@ def test_amending_someone_elses_commit_is_refused_until_the_author_is_reset(tmp_
     assert kept.by_hook
     assert box.commit("--amend", "--reset-author").made
     assert box.identities() == REQUIRED
+
+
+# --- merges: a merge git makes by itself runs pre-merge-commit, never pre-commit --------
+
+
+def _diverge(box):
+    """main and a side branch one commit apart each, so merging side needs a merge commit."""
+    assert box.commit().made
+    assert box.git("checkout", "-q", "-b", "side").returncode == 0
+    assert box.commit().made
+    assert box.git("checkout", "-q", "main").returncode == 0
+    assert box.commit().made
+
+
+def test_a_clean_merge_under_a_wrong_name_is_refused(repo):
+    _diverge(repo)
+    repo.config("user.name", OTHER_NAME)
+    out = repo.merge("side")
+    assert not out.made
+    assert out.by_hook
+
+
+def test_a_clean_merge_under_the_required_identity_is_made(repo):
+    _diverge(repo)
+    assert repo.merge("side").made
+    assert repo.identities() == REQUIRED

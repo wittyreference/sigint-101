@@ -1,35 +1,50 @@
 #!/usr/bin/env bash
-# ABOUTME: Pre-commit git-identity guard — fails closed unless author and committer both carry the
-# ABOUTME: name wittyreference and the expected e-mail, so no commit carries another identity.
+# ABOUTME: Pre-commit git-identity guard — refuses a commit unless author and committer both carry
+# ABOUTME: the name wittyreference and the expected e-mail; the notes below say what it cannot see.
 
 set -euo pipefail
+# An exported BASHOPTS can turn nocasematch on as bash starts, and the name comparison below
+# would then ignore case. The name must match exactly, so the option goes off first.
+shopt -u nocasematch
 
 # SIGINT 101 is personal work on a personal machine, and the work/personal split is
 # deliberate. An identity is baked into the commit and only history rewriting takes it back
 # out, so this is cheaper to catch here than to undo later. The repository is public, so the
 # name counts as much as the address: it must be the handle, never a person's own name, which
-# is what a global user.name usually holds. The guard fails closed: an identity git would
-# have to guess, or any other name or address, blocks the commit.
+# is what a global user.name usually holds. The guard fails closed: an identity it cannot
+# read, or any other name or address, blocks the commit.
 REQUIRED_NAME="wittyreference"
 REQUIRED_EMAIL="mc8805@outlook.com"
 
 # `git var` answers with the identity the commit will carry, not with one config key: it
 # folds in the GIT_AUTHOR_* and GIT_COMMITTER_* variables, author.* and committer.* config,
 # and user.*. git commit exports the author it settled on before this hook runs, so the
-# author of --author, and the one an --amend keeps, are checked here too. useConfigOnly
-# stops git guessing a missing name or address from the login and host; the guess fails,
-# and so does the guard.
+# author of --author, and the one an --amend keeps, are what is checked. useConfigOnly stops
+# `git var` guessing a committer name or address from the login and host, so an unset
+# committer identity fails here. The author is settled already, by a guess if git had to
+# make one, and a guessed author fails only because it is not the handle.
 #
-# What this guard cannot see: git runs pre-commit for `git commit` (and a rebase reword)
-# only. cherry-pick, rebase picks and am keep the author they were given, and revert and
-# merge use the configured identity, all without this check; a merge made on GitHub never
-# runs a local hook at all.
+# What runs this check: pre-commit runs for every `git commit` (--author, --amend and -C
+# included), for the `git commit` or --continue that finishes a merge, cherry-pick or revert
+# a conflict stopped, and for a rebase -i reword. A merge git completes by itself (git merge,
+# or the merge git pull makes) runs githooks/pre-merge-commit, which runs this same file.
+#
+# What it cannot see: a cherry-pick no conflict stops, every rebase pick but a reword
+# (squash, fixup and --continue after a conflict included) and am keep the author they were
+# given and write the configured identity as committer; a revert no conflict stops writes it
+# as both. None of these runs either hook. Stash commits and an annotated tag's tagger line
+# carry the configured identity unchecked too, and a merge made on GitHub runs no local hook.
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 refuse() {
-    echo "sigint101: refusing to commit: $1" >&2
-    echo "           git config user.name $REQUIRED_NAME" >&2
-    echo "           git config user.email $REQUIRED_EMAIL" >&2
-    echo "           (check: git var GIT_AUTHOR_IDENT; git var GIT_COMMITTER_IDENT)" >&2
+    cat >&2 <<EOF
+sigint101: refusing to commit: $1
+           git config user.name $REQUIRED_NAME
+           git config user.email $REQUIRED_EMAIL
+           and no author.* or committer.* config, GIT_AUTHOR_* or GIT_COMMITTER_* variable,
+           or --author naming anyone else; amend another's commit only with --reset-author.
+EOF
     exit 1
 }
 
@@ -43,12 +58,9 @@ check() {  # $1: author or committer, $2: the git var that names it
     name="${BASH_REMATCH[1]}"
     email="${BASH_REMATCH[2]}"
     [[ "$name" == "$REQUIRED_NAME" ]] || refuse "the $role name is not $REQUIRED_NAME."
-    shopt -s nocasematch
-    if [[ "$email" != "$REQUIRED_EMAIL" ]]; then
-        shopt -u nocasematch
+    # Only the address ignores case, by lowering both sides rather than by a shell option.
+    [[ "$(lower "$email")" == "$(lower "$REQUIRED_EMAIL")" ]] ||
         refuse "the $role e-mail is not $REQUIRED_EMAIL."
-    fi
-    shopt -u nocasematch
 }
 
 check author GIT_AUTHOR_IDENT
