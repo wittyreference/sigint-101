@@ -247,10 +247,10 @@ the title at the 18px floor (predict-scoped font-size), and reclaim chrome heigh
 ## 2026-10-26: HIL render recipe for a LIVE panel (server on nomad-b, not the droplet)
 **Finding.** The waterfall and the gain meter are LIVE (poll `/api/spectrum`). A droplet-served
 render shows the honest "no radio" state — the droplet has no SDR. To see a live panel with real
-data the server must run ON nomad-b (its checkout is `/home/spec5/sigint-101`, has a `.venv` and
+data the server must run ON nomad-b (its checkout is `~/sigint-101`, has a `.venv` and
 `rtl_power`). Recipe that worked: (1) on nomad-b `git fetch origin <branch> && git checkout -b
 <branch> FETCH_HEAD`; (2) hold the server open as a droplet background task:
-`ssh spec5@100.108.20.20 'cd /home/spec5/sigint-101 && exec .venv/bin/uvicorn sigint101.app:app
+`ssh spec5@<nomad-b tailnet address> 'cd ~/sigint-101 && exec .venv/bin/uvicorn sigint101.app:app
 --host 127.0.0.1 --port 8008'` (backgrounding uvicorn *inside* a one-shot ssh fails with exit 255 —
 hold the connection open instead); (3) warm the sweep: `curl /api/spectrum` then wait ~8s for real
 rows; (4) to show a hidden instrument stage, POST a prediction (`/api/predict?lesson_id=N`) so the

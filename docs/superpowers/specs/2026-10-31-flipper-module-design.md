@@ -51,7 +51,7 @@ FAP in the core; that is a possible later extension, explicitly out of scope her
   `edge_count`, `width_histogram()`). **Nothing is wired to the kiosk yet.** So the transport and
   M30's Sub-GHz parsing already exist; this module adds the product layer on top and reuses
   `FlipperError` (no new exception type).
-- Access: the droplet reaches nomad-b directly as user **`spec5`** (`ssh spec5@100.108.20.20`);
+- Access: the droplet reaches nomad-b directly as user **`spec5`** (`ssh spec5@<nomad-b tailnet address>`);
   the `spec5->claude-factory` key in nomad-b's `authorized_keys` is the droplet's. `spec5` is in
   `dialout`, so it can open `/dev/ttyACM0`. (Registry: `machines/hosts/nomad-b.md`.)
 
