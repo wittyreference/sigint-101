@@ -1,10 +1,11 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**First, once nomad-b is back online** (it dropped off Tailscale about 03:50 UTC on 11-03, in the field):
+**First, on nomad-b** (reachable again as of 2026-11-16, as reported):
 1. Clear the scratch (see follow-ups).
-2. Deploy `main` to nomad-b. It runs @3b96cf0, so it is missing #36–#53. Deploying restarts
-   the server, so only when MC isn't using the panel.
+2. Deploy `main` to nomad-b. As reported on 2026-11-16, it runs 4ac1e67 (ux-polish's tip, the
+   same tree as #15's `02c2095`), so it has everything up to #46 and is missing #47–#53.
+   Deploying restarts the server, so only when MC isn't using the panel.
 3. Run the L1, L2 and L8 key captures (`docs/audit/captures/2026-11-03/`), with the course closed
    and inside the SDR flock.
 4. Re-render L2, L7 and L8 at 800x480.
@@ -161,8 +162,8 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
 3. Extend the ANT500 fully. Claude then re-measures FM SNR.
 4. One look at the panel, to confirm #15's work there. It was PR #15's gate, in the PR's
    words "Draft until MC confirms on the panel (MC's gate)"; #15 merged to main on 2026-11-16
-   (UTC) with no look recorded on the PR. nomad-b runs @3b96cf0, which already has the
-   completable lessons and the whole sprint; #36–#53 are not deployed there yet.
+   (UTC) with no look recorded on the PR. As reported on 2026-11-16, nomad-b runs 4ac1e67, so it
+   has everything up to #46, #15's work included; #47–#53 are not deployed there yet.
 5. Battery on the gift box: ship nomad-b's daemon, or read the INA219 directly (read-only).
 6. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
    triage item 19.
