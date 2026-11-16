@@ -52,10 +52,19 @@ def test_m5_belongs_to_unit_2(lessons):
     assert unit_for_lesson(5).id == 2
 
 
-# FCC Part 15 lets equipment transmit with no individual licence only on its conditions. M5 names
-# three of them wherever it names Part 15: the power limit and the antenna rule (47 CFR 15.247(b),
-# 15.204(c)) and the rule against harmful interference (47 CFR 15.5(b)).
+# FCC Part 15 lets equipment that complies with it transmit with no individual licence (47 CFR
+# 15.1(b), 15.201(b)), and only on its conditions. Wherever M5 names Part 15 it speaks of that
+# equipment and names three of the conditions: the power limit and the antenna rule (47 CFR
+# 15.247(b), 15.204(c)) and the rule against harmful interference (47 CFR 15.5(b)). The explain
+# rules on the Meshtastic text, so it also names the region, Meshtastic's own setting.
 PART_15_CONDITIONS = ("power", "antenna", "interference")
+
+
+def _part_15_sentences(lesson, stage):
+    """The sentences of a stage that name Part 15; the stage must have at least one."""
+    sentences = [s for s in lesson.stages[stage].split(". ") if "Part 15" in s]
+    assert sentences, f"M5 {stage} must name FCC Part 15 as the source of licence-free transmitting"
+    return sentences
 
 
 @pytest.mark.parametrize("stage", ["demo", "explain"])
@@ -63,11 +72,21 @@ def test_m5_names_part_15_together_with_its_conditions(lessons, stage):
     # An outside review found both stages naming Part 15 but giving power as the only condition
     # for sending the Meshtastic text without a licence. A sentence that names Part 15 must carry
     # all three conditions, so the learner never reads a power limit as the whole of the rule.
-    sentences = [s for s in lessons[5].stages[stage].split(". ") if "Part 15" in s]
-    assert sentences, f"M5 {stage} must name FCC Part 15 as the source of licence-free transmitting"
-    for sentence in sentences:
+    for sentence in _part_15_sentences(lessons[5], stage):
         missing = [word for word in PART_15_CONDITIONS if word not in sentence]
         assert not missing, f"M5 {stage} names Part 15 without its {missing} conditions"
+
+
+@pytest.mark.parametrize("stage,words", [("demo", ("equipment",)),
+                                         ("explain", ("equipment", "region"))],
+                         ids=["demo", "explain"])
+def test_m5_ties_part_15_to_the_equipment_and_the_region(lessons, stage, words):
+    # The licence-free sentence must say whose transmitting it is: the equipment's in both stages,
+    # and in the explain a node set to its region. Only these two words are held, so the wording
+    # around them stays free to change.
+    for sentence in _part_15_sentences(lessons[5], stage):
+        missing = [word for word in words if word not in sentence]
+        assert not missing, f"M5 {stage} names Part 15 without speaking of the {missing}"
 
 
 def test_m5_does_not_make_power_the_only_condition(lessons):
