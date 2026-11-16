@@ -50,7 +50,10 @@ still +6 (floored); antenna removed + end of hall → RSSI -91, SNR +1.25 (SNR f
 floor); **antenna off + around a corner + held in a fist (body absorption at 900 MHz is ~10-20 dB)
 → RSSI -98, SNR -4.75 to -5.25 dB — four packets decoded cleanly BELOW the noise floor.** The fist
 was the last ~10-15 dB that tipped it. Lowering tx_power alone could not (max ~39 dB, not enough and
-awkward on the Cardputer UI); removing the antenna + losing line-of-sight + body absorption did. One HIL fix the render caught:
+awkward on the Cardputer UI); removing the antenna + losing line-of-sight + body absorption did.
+**Do not repeat the antenna-off step on a node that can transmit:** keep an antenna or a 50-ohm load
+on every LoRa jack, and weaken the link with distance, lower power or an attenuator.
+One HIL fix the render caught:
 the panel was listing the node's OWN telemetry (sender present, no `rxSnr`) — a no-rxSnr packet is
 locally originated, not an air reception, so `parse_lora_packet` now skips it.
 **How to apply.** For a meshtasticd feature, read its 4403 API with the `meshtastic` lib; a real air
