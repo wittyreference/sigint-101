@@ -32,7 +32,9 @@ MC put the rack in the 11-08 cut line: **"1–19 plus operator mode"**.
   - Single-channel decoders (APRS, POCSAG framing, RDS, DMR, ACARS, AIS) accept a frequency
     override: `POST /api/<decoder>/tune` restarts the child on the new frequency, within band
     sanity limits per decoder.
-  - The M15 rule still holds in the rack: on 929–932 MHz POCSAG text is withheld (MC's call).
+  - The M15 rule still holds in the rack: POCSAG text is withheld (MC's call), wherever the pager
+    is tuned. Amended 2026-11-15: v1 withheld it on 929–932 MHz only and showed the words on the
+    rest of the pager's range, but carriers also page on VHF and UHF (47 CFR 22.531, 22.561).
 - **SDR arbitration.** Switching instruments claims the dongle through `_claim_sdr`, exactly as
   lessons do. LoRa, Flock and Rayhunter use their own radios.
 - **Reception log.** Every decode the rack shows is appended to `events` with its provenance:

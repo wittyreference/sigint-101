@@ -76,12 +76,12 @@ test("a refused retune is reported and the dial stays where the console has it",
   assert.equal(h.pending[h.pending.length - 1], null);
 });
 
-test("the pager caption says the text is withheld inside the paging band only", () => {
-  const strip = { bandName: "the VHF, UHF and 900 MHz paging bands",
-                  withheldLow: 929000000, withheldHigh: 932000000 };
-  assert.equal(rack.tuneCaption(929612500, strip), "framing only · text withheld");
-  assert.equal(rack.tuneCaption(152007500, strip), "the VHF, UHF and 900 MHz paging bands");
-  assert.equal(rack.tuneCaption(144390000, { bandName: "the 2 m band" }), "the 2 m band");
+test("the pager caption says the text is withheld, wherever the dial is", () => {
+  // No frequency goes in: the pager shows framing only on every one, so the caption cannot vary.
+  const pager = { bandName: "the VHF, UHF and 900 MHz paging bands", textWithheld: true };
+  assert.equal(rack.tuneCaption(pager), "framing only · text withheld");
+  assert.equal(rack.tuneCaption({ bandName: "the 2 m band", textWithheld: false }),
+               "the 2 m band");
 });
 
 test("a decoder dial reads MHz, the pager to the 100 Hz its channels need", () => {

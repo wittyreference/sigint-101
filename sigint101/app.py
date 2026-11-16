@@ -56,9 +56,10 @@ from .operate import (
     reception_record,
     tunable,
     validate_decoder_hz,
+    without_page_words,
 )
 from .operate import instrument as rack_instrument
-from .pocsag import PocsagDecoder, PocsagUnavailable, on_commercial_paging_band
+from .pocsag import PocsagDecoder, PocsagUnavailable
 from .ppm import PpmUnavailable, measure_pilot_ppm
 from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress
 from .provenance import (
@@ -1653,10 +1654,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return hook
 
     def _recent_receptions() -> list:
-        """The newest receptions, oldest first, read in from the log the first time asked."""
+        """The newest receptions, oldest first, read in from the log the first time asked.
+
+        The log is a file and can hold a pager reception that carries a page's words. Each one
+        is read in through without_page_words, so whatever is stored, none of it reaches a
+        response or the rack's LOG line; the file itself is never rewritten.
+        """
         with reception_lock:
             if app.state.receptions is None:
-                logged = (e for e in read_events(app.state.events_path)
+                logged = (without_page_words(e) for e in read_events(app.state.events_path)
                           if e.get("kind") == "reception")
                 app.state.receptions = deque(logged, maxlen=RECEPTION_MEMORY)
             return list(app.state.receptions)
@@ -1701,8 +1707,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             name="operate.html",
             context={"title": "Operator mode", "back_href": "/", "back_label": "Home",
                      "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
-                     "text_withheld": (inst.key == "pager" and freq_hz is not None
-                                       and on_commercial_paging_band(freq_hz))},
+                     # The pager shows framing only wherever it is tuned; its dial says so.
+                     "text_withheld": inst.key == "pager"},
         )
 
     @app.post("/api/{api}/tune")
@@ -1711,8 +1717,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
         Refused (400) with the reason outside the decoder's band, and (503) with no radio to
         drive, changing nothing either way — like /api/tune. Otherwise the running child stops
-        and the panel's next poll restarts it on the new frequency. The pager band's text rule
-        stays the decoder's own: tuned into 929-932 MHz it shows framing only.
+        and the panel's next poll restarts it on the new frequency. The pager's text rule stays
+        the decoder's own: wherever it is tuned it shows framing only.
         """
         inst = tunable(api)
         if inst is None:

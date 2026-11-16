@@ -1,6 +1,9 @@
 # ABOUTME: Tests operator mode's own rules: the rack's instruments, each decoder's band limits,
 # ABOUTME: and the provenance-stamped reception record a live decode is logged as.
 
+import copy
+import json
+
 import pytest
 
 from sigint101.operate import (
@@ -12,6 +15,7 @@ from sigint101.operate import (
     reception_summary,
     tunable,
     validate_decoder_hz,
+    without_page_words,
 )
 from sigint101.spectrum import TuneError
 
@@ -81,9 +85,10 @@ def test_a_frequency_given_as_a_numeric_string_is_read():
 
 
 def test_the_paging_band_stays_tunable_and_its_text_rule_is_the_decoders():
-    # The rack may tune into 929-932 MHz; what it may show there is the decoder's business
-    # (framing only), not a lockout here.
+    # The rack may tune into 929-932 MHz and anywhere else in the pager's range; what it shows
+    # is the decoder's business (framing only, on every frequency), not a lockout here.
     assert validate_decoder_hz(tunable("pocsag"), 929_612_500) == 929_612_500
+    assert validate_decoder_hz(tunable("pocsag"), 152_840_000) == 152_840_000
 
 
 def test_every_tunable_instrument_names_its_steps():
@@ -120,11 +125,21 @@ def test_an_ism_reception_reads_the_sensor_and_its_reading():
     assert line == "Acurite-Tower · 18.0 °C · 51% RH"
 
 
-def test_a_pager_reception_on_the_commercial_band_carries_framing_only():
+def test_a_pager_reception_carries_framing_only():
     page = {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha", "text": None,
             "length": 20, "text_withheld": True}
     line = reception_summary("pager", page)
     assert "1234567" in line and "20" in line and "withheld" in line
+
+
+def test_a_pager_reception_line_has_no_place_for_a_pages_words():
+    # The decoder never hands the words over; if an item ever carried some, the line would still
+    # not print them.
+    page = {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha",
+            "text": "CALL EXT 2210 URGENT", "length": 20, "text_withheld": False}
+    line = reception_summary("pager", page)
+    assert "CALL EXT" not in line
+    assert "1234567" in line and "20" in line
 
 
 @pytest.mark.parametrize("key, item, expect", [
@@ -165,3 +180,71 @@ def test_a_reception_record_carries_its_provenance():
     assert record["command"].startswith("rtl_fm")
     assert record["summary"].startswith("KD2ABC-9")
     assert record["item"]["source"] == "KD2ABC-9"
+
+
+# --- a stored pager reception is read in without its page's words -----------------------------
+
+PAGER_COMMAND = ("rtl_fm -M fm -f 152840000 -s 22050 -g 49.6 -l 0 -d 0 | "
+                 "multimon-ng -t raw -a POCSAG512 -a POCSAG1200 -a POCSAG2400 -")
+
+# A pager reception as an event log can hold it: the item carries the page's words, and so does
+# the line that was built from that item.
+STORED_PAGE = {
+    "ts": 1794800000.0,
+    "kind": "reception",
+    "payload": {
+        "instrument": "pager", "tool": "multimon-ng", "freq_hz": 152_840_000, "gain": "49.6",
+        "ppm": {"correction": "raw", "measured_ppm": None},
+        "radio": {"kind": "rtl-sdr", "serial": None, "index": 0},
+        "command": PAGER_COMMAND,
+        "summary": "cap 1234567 · alpha · 20 chars · CALL EXT 2210 URGENT",
+        "item": {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha",
+                 "text": "CALL EXT 2210 URGENT", "length": 20, "text_withheld": False},
+    },
+}
+
+
+def test_a_stored_pager_reception_is_read_without_its_pages_words():
+    stored = copy.deepcopy(STORED_PAGE)
+    served = without_page_words(stored)
+    assert "CALL EXT" not in json.dumps(served)
+    payload = served["payload"]
+    assert payload["item"] == {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha",
+                               "text": None, "length": 20, "text_withheld": True}
+    assert payload["summary"] == "cap 1234567 · alpha · 20 chars · text withheld"
+    # The provenance is read as it was logged.
+    for key in ("instrument", "tool", "freq_hz", "gain", "ppm", "radio", "command"):
+        assert payload[key] == STORED_PAGE["payload"][key]
+    assert (served["ts"], served["kind"]) == (STORED_PAGE["ts"], "reception")
+    # The stored event itself is copied, never changed.
+    assert stored == STORED_PAGE
+
+
+def test_a_pager_reception_stored_without_words_reads_back_the_same():
+    item = {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha", "text": None,
+            "length": 20, "text_withheld": True}
+    record = reception_record(instrument("pager"), item, freq_hz=929_612_500,
+                              command=PAGER_COMMAND, ppm={"correction": "raw"},
+                              radio={"kind": "rtl-sdr", "serial": None, "index": 0})
+    event = {"ts": 1.0, "kind": "reception", "payload": record}
+    assert without_page_words(copy.deepcopy(event)) == event
+
+
+def test_only_a_pager_reception_is_read_differently_from_how_it_was_logged():
+    # An APRS status is the station's own public text: it is read exactly as it was logged.
+    aprs = {"ts": 1.0, "kind": "reception",
+            "payload": {"instrument": "aprs", "summary": "KD2ABC-9 · hi",
+                        "item": {"source": "KD2ABC-9", "kind": "status", "text": "hi"}}}
+    assert without_page_words(aprs) is aprs
+
+
+@pytest.mark.parametrize("payload", [
+    None,
+    {"instrument": "pager"},
+    {"instrument": "pager", "item": None, "summary": "cap 1 · alpha · CALL EXT 2210 URGENT"},
+    {"instrument": "pager", "item": "CALL EXT 2210 URGENT"},
+    {"instrument": "pager", "item": {"text": "CALL EXT 2210 URGENT"}},
+])
+def test_a_damaged_stored_reception_is_read_without_failing_or_leaking(payload):
+    served = without_page_words({"ts": 1.0, "kind": "reception", "payload": payload})
+    assert "CALL EXT" not in json.dumps(served)

@@ -96,7 +96,7 @@
     <div class="tune rack__tune" data-decoder-tune="{{ inst.api }}" data-freq-hz="{{ freq_hz }}"
          data-band-low="{{ inst.band.low_hz }}" data-band-high="{{ inst.band.high_hz }}"
          data-step-hz="{{ inst.steps[0] }}"
-         {% if inst.key == 'pager' %}data-withheld-low="929000000" data-withheld-high="932000000"{% endif %}>
+         {% if text_withheld %}data-text-withheld{% endif %}>
       <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
       <div class="tune__dial">
         <div class="tune__freq" data-decoder-freq>{{ ("%.4f" if inst.key == 'pager' else "%.3f")|format(freq_hz / 1000000) }}<span>MHz</span></div>

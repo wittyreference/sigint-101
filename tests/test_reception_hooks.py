@@ -256,7 +256,7 @@ def test_retune_clears_what_was_heard_on_the_old_frequency(name):
     assert len(hook.calls) == reported       # clearing the history reports nothing
 
 
-# --- POCSAG: the words' fate is bound to the band the child was spawned on (M15) ----------------
+# --- POCSAG: the words are withheld wherever the child is spawned or the dial moves (M15) -------
 
 
 def _pocsag(freq_hz, stdout=None, lines=()):
@@ -272,19 +272,22 @@ def _pocsag(freq_hz, stdout=None, lines=()):
     return pocsag.PocsagDecoder(freq_hz=freq_hz, spawn=spawn, **_common())
 
 
-def test_a_child_spawned_off_the_paging_band_keeps_the_words():
+def test_a_child_spawned_off_the_paging_band_withholds_the_words_too():
     dec = _pocsag(152_000_000, lines=[POCSAG_ALPHA])
     dec.start()
     dec.drain()
-    assert dec.pages()[0]["text"] == SECRET
+    page = dec.pages()[0]
+    assert page["text"] is None
+    assert page["text_withheld"] is True
+    assert SECRET not in repr(dec.pages())
     dec.stop()
 
 
-@pytest.mark.parametrize("spawned_hz,moved_to_hz,text", [
-    (929_612_500, 152_000_000, None),        # heard on the paging band: withheld, always
-    (152_000_000, 929_612_500, SECRET),      # heard off it: the dial moving later changes nothing
+@pytest.mark.parametrize("spawned_hz,moved_to_hz", [
+    (929_612_500, 152_000_000),              # heard on the 929 MHz paging band
+    (152_000_000, 929_612_500),              # heard off it
 ])
-def test_the_band_rule_is_the_one_the_child_was_spawned_under(spawned_hz, moved_to_hz, text):
+def test_the_dial_moving_mid_stream_never_lets_the_words_through(spawned_hz, moved_to_hz):
     dec = None
 
     def stream():
@@ -295,17 +298,21 @@ def test_the_band_rule_is_the_one_the_child_was_spawned_under(spawned_hz, moved_
     dec = _pocsag(spawned_hz, stdout=stream)
     dec.start()
     dec.drain()
-    assert [p["text"] for p in dec.pages()] == [text, text]
-    assert all(p["text_withheld"] is (text is None) for p in dec.pages())
+    assert [p["text"] for p in dec.pages()] == [None, None]
+    assert all(p["text_withheld"] is True for p in dec.pages())
     dec.stop()
 
 
-def test_after_a_retune_onto_the_paging_band_the_next_child_withholds():
-    dec = _pocsag(152_000_000, lines=[POCSAG_ALPHA])
+@pytest.mark.parametrize("first_hz,then_hz", [
+    (152_000_000, 930_000_000),              # onto the 929 MHz paging band
+    (929_612_500, 152_840_000),              # and off it
+])
+def test_before_and_after_a_retune_the_child_withholds(first_hz, then_hz):
+    dec = _pocsag(first_hz, lines=[POCSAG_ALPHA])
     dec.start()
     dec.drain()
-    assert dec.pages()[0]["text"] == SECRET
-    dec.retune(930_000_000)
+    assert dec.pages()[0]["text"] is None
+    dec.retune(then_hz)
     assert dec.pages() == []
     dec.start()
     dec.drain()
@@ -354,8 +361,10 @@ def test_aprs_reports_the_updated_station_for_each_packet():
     assert len(hook.calls) == 3
 
 
-def test_pocsag_reports_each_page_with_the_words_already_withheld():
-    dec = _decoder_with(pocsag.PocsagDecoder, [POCSAG_ALPHA, "noise", POCSAG_TONE])
+@pytest.mark.parametrize("freq_hz", [929_612_500, 152_840_000])
+def test_pocsag_reports_each_page_with_the_words_already_withheld(freq_hz):
+    dec = _decoder_with(pocsag.PocsagDecoder, [POCSAG_ALPHA, "noise", POCSAG_TONE],
+                        freq_hz=freq_hz)
     hook = _hook(dec)
     dec.start()
     dec.drain()

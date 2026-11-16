@@ -12,7 +12,7 @@ from sigint101 import childproc
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder
-from sigint101.events import read_events
+from sigint101.events import log_event, read_events
 from sigint101.hardware import RadioProbe
 from sigint101.operate import INSTRUMENTS
 from sigint101.pocsag import PocsagDecoder
@@ -163,6 +163,25 @@ def test_the_pager_view_says_its_text_is_withheld_on_the_paging_band(tmp_path):
     assert "text withheld" in html.lower()
 
 
+@pytest.mark.parametrize("freq_hz, dial", [
+    (152_840_000, "152.8400"),               # a carrier paging channel on VHF (47 CFR 22.531)
+    (454_025_000, "454.0250"),               # a Part 22 channel on UHF (47 CFR 22.561)
+    (138_000_000, "138.0000"),               # the low edge of the pager's range
+])
+def test_the_pager_view_says_its_text_is_withheld_off_the_paging_band_too(tmp_path, freq_hz, dial):
+    def factory():
+        return PocsagDecoder(freq_hz=freq_hz, **_tools())
+
+    with _client(tmp_path, pocsag_factory=factory) as client:
+        html = client.get("/operate/pager").text
+    assert dial in html
+    caption = re.search(r'<div class="tune__caption" data-tune-caption[^>]*>([^<]*)</div>', html)
+    assert caption and caption.group(1) == "framing only &middot; text withheld"
+    # The dial carries no band inside which the text is withheld: it is withheld everywhere.
+    assert "data-text-withheld" in html
+    assert "data-withheld-low" not in html and "data-withheld-high" not in html
+
+
 def test_home_has_the_operator_mode_bar(tmp_path):
     with _client(tmp_path) as client:
         html = client.get("/").text
@@ -280,6 +299,34 @@ def test_the_pager_text_stays_withheld_when_the_rack_tunes_into_the_paging_band(
     assert "CALL EXT" not in (tmp_path / "events.jsonl").read_text()
 
 
+def test_the_pager_text_stays_withheld_when_the_rack_tunes_out_of_the_paging_band(tmp_path):
+    # 152.840 MHz is a carrier paging channel on VHF: the framing is served and logged there, and
+    # the words reach neither the API, the reception log nor the event file.
+    def factory():
+        def spawn(freq_hz, device):
+            return Child(["rtl_fm", "-f", str(freq_hz)], said=POCSAG_ALPHA)
+        return PocsagDecoder(spawn=spawn, **_tools())
+
+    with _client(tmp_path, probe=_present, pocsag_factory=factory) as client:
+        assert client.app.state.pocsag.freq_hz == 929_612_500
+        assert client.post("/api/pocsag/tune", json={"freq_hz": 152_840_000}).status_code == 200
+        client.get("/api/pocsag")
+        client.app.state.pocsag.drain()
+        resp = client.get("/api/pocsag")
+        log = client.get("/api/receptions?instrument=pager")
+    body = resp.json()
+    assert body["freq_hz"] == 152_840_000
+    [page] = body["pages"]
+    assert page["text"] is None and page["text_withheld"] is True
+    assert (page["address"], page["function"], page["baud"], page["kind"], page["length"]) == (
+        1234567, 3, 1200, "alpha", 20)
+    [reception] = log.json()["receptions"]
+    assert reception["payload"]["freq_hz"] == 152_840_000
+    assert "text withheld" in reception["payload"]["summary"]
+    for served in (resp.text, log.text, (tmp_path / "events.jsonl").read_text()):
+        assert "CALL EXT" not in served
+
+
 def test_opening_a_lesson_tunes_a_decoder_back_to_its_own_frequency(tmp_path):
     spawned = []
     with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned)) as client:
@@ -358,6 +405,38 @@ def test_the_reception_log_reads_back_what_an_earlier_run_logged(tmp_path):
     with _client(tmp_path) as client:
         recent = client.get("/api/receptions").json()["receptions"]
     assert [e["payload"]["instrument"] for e in recent] == ["aprs"]
+
+
+def test_a_stored_pager_reception_is_served_without_its_pages_words(tmp_path):
+    # An event log can hold a pager reception that carries a page's words, in its item and in
+    # its line. The file is the owner's and stays as it is; nothing read in from it has them.
+    log = tmp_path / "events.jsonl"
+    log_event(log, "reception", {
+        "instrument": "pager", "tool": "multimon-ng", "freq_hz": 152_840_000, "gain": "49.6",
+        "ppm": {"correction": "raw", "measured_ppm": None},
+        "radio": {"kind": "rtl-sdr", "serial": None, "index": 0},
+        "command": "rtl_fm -M fm -f 152840000 -s 22050 -g 49.6 -l 0 -d 0",
+        "summary": "cap 1234567 · alpha · 20 chars · CALL EXT 2210 URGENT",
+        "item": {"baud": 1200, "address": 1234567, "function": 3, "kind": "alpha",
+                 "text": "CALL EXT 2210 URGENT", "length": 20, "text_withheld": False},
+    })
+    on_disk = log.read_bytes()
+    assert b"CALL EXT" in on_disk
+    with _client(tmp_path) as client:
+        everything = client.get("/api/receptions")
+        newest = client.get("/api/receptions?limit=1&instrument=pager")   # the rack's LOG line
+    for resp in (everything, newest):
+        assert resp.status_code == 200
+        assert "CALL EXT" not in resp.text
+    [event] = newest.json()["receptions"]
+    payload = event["payload"]
+    assert payload["item"]["text"] is None
+    assert payload["item"]["text_withheld"] is True
+    assert payload["summary"] == "cap 1234567 · alpha · 20 chars · text withheld"
+    # The framing and the provenance are served as they were logged.
+    assert (payload["item"]["address"], payload["item"]["length"], payload["freq_hz"]) == (
+        1234567, 20, 152_840_000)
+    assert log.read_bytes() == on_disk
 
 
 def test_with_nothing_received_the_log_is_honestly_empty(tmp_path):

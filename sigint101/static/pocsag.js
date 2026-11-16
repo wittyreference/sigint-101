@@ -17,12 +17,11 @@
     return (page && page.address != null) ? String(page.address) : "—";
   }
 
-  // The one line a learner reads for a page: its message where the words are lawfully ours, its
-  // length where the server withheld them (the commercial paging band: framing live, text hidden),
-  // or a note for a tone-only page. The words never reach the browser on that band at all.
+  // The one line a learner reads for a page: its length where it carried words (framing live, text
+  // hidden: the server withholds them on every frequency), or a note for a tone-only page. The
+  // words never reach the browser, and nothing here would print them.
   function summary(page) {
     page = page || {};
-    if (page.text) return page.text;
     if (page.text_withheld) {
       var n = page.length || 0;
       if (page.kind === "numeric") return "digits withheld · " + n;
