@@ -2,6 +2,9 @@
 # ABOUTME: Pre-commit git-identity guard — refuses a commit unless author and committer both carry
 # ABOUTME: the name wittyreference and the expected e-mail; the notes below say what it cannot see.
 
+# An exported SHELLOPTS can turn xtrace on as bash starts, and the trace would print every
+# identity this hook reads. It goes off before anything is read.
+set +x
 set -euo pipefail
 # An exported BASHOPTS can turn nocasematch on as bash starts, and the name comparison below
 # would then ignore case. The name must match exactly, so the option goes off first.
@@ -15,6 +18,10 @@ shopt -u nocasematch
 # read, or any other name or address, blocks the commit.
 REQUIRED_NAME="wittyreference"
 REQUIRED_EMAIL="mc8805@outlook.com"
+
+# git runs this hook with no arguments; githooks/pre-merge-commit runs it with --merge.
+what="commit"
+if [ "${1:-}" = --merge ]; then what="commit the merge"; fi
 
 # `git var` answers with the identity the commit will carry, not with one config key: it
 # folds in the GIT_AUTHOR_* and GIT_COMMITTER_* variables, author.* and committer.* config,
@@ -35,21 +42,23 @@ REQUIRED_EMAIL="mc8805@outlook.com"
 # as both. None of these runs either hook. Stash commits and an annotated tag's tagger line
 # carry the configured identity unchecked too, and a merge made on GitHub runs no local hook.
 
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-
+# Below, only git and bash's own builtins run: no outside tool, so none can go missing and let a
+# wrong identity through, and the refusal is printed by the printf builtin for the same reason.
 refuse() {
-    cat >&2 <<EOF
-sigint101: refusing to commit: $1
-           git config user.name $REQUIRED_NAME
-           git config user.email $REQUIRED_EMAIL
-           and no author.* or committer.* config, GIT_AUTHOR_* or GIT_COMMITTER_* variable,
-           or --author naming anyone else; amend another's commit only with --reset-author.
-EOF
+    printf 'sigint101: refusing to %s: %s\n' "$what" "$1" >&2
+    printf '           %s\n' \
+        "git config user.name $REQUIRED_NAME" \
+        "git config user.email $REQUIRED_EMAIL" \
+        "and no author.* or committer.* config, GIT_AUTHOR_* or GIT_COMMITTER_* variable," \
+        "or --author naming anyone else; amend another's commit only with --reset-author." >&2
+    if [ "$what" != commit ]; then
+        printf '           %s\n' "git merge --abort returns to a clean tree." >&2
+    fi
     exit 1
 }
 
 check() {  # $1: author or committer, $2: the git var that names it
-    local role="$1" ident name email
+    local role="$1" ident name email same=no
     ident="$(git -c user.useConfigOnly=true var "$2" 2>/dev/null)" ||
         refuse "the $role name or e-mail is not set."
     # "Name <email> epoch tz": git keeps '<' and '>' out of both the name and the address.
@@ -58,9 +67,11 @@ check() {  # $1: author or committer, $2: the git var that names it
     name="${BASH_REMATCH[1]}"
     email="${BASH_REMATCH[2]}"
     [[ "$name" == "$REQUIRED_NAME" ]] || refuse "the $role name is not $REQUIRED_NAME."
-    # Only the address ignores case, by lowering both sides rather than by a shell option.
-    [[ "$(lower "$email")" == "$(lower "$REQUIRED_EMAIL")" ]] ||
-        refuse "the $role e-mail is not $REQUIRED_EMAIL."
+    # Only the address ignores case: nocasematch is on for this one comparison and no other.
+    shopt -s nocasematch
+    [[ "$email" == "$REQUIRED_EMAIL" ]] && same=yes
+    shopt -u nocasematch
+    [ "$same" = yes ] || refuse "the $role e-mail is not $REQUIRED_EMAIL."
 }
 
 check author GIT_AUTHOR_IDENT

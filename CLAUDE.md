@@ -86,8 +86,8 @@ capable instrument, not a locked toy.
 ## Project facts
 
 - **Repo:** github.com/wittyreference/sigint-101 (public, MIT). Nothing personal to MC committed.
-- **Git identity:** wittyreference <mc8805@outlook.com>. Check `git config user.name` and `git config user.email` before
-  your first commit each session; if it differs, stop and say so.
+- **Git identity:** wittyreference <mc8805@outlook.com>. Check `git config user.name` and
+  `git config user.email` before your first commit each session; if it differs, stop and say so.
 - **Plan:** `~/.claude/plans/eager-spinning-frost.md` (authoritative detail).
 - **Living state:** `STATUS.md` (NEXT ACTION first, then done, blockers). Keep it true after every
   merge or push.

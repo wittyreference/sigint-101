@@ -2,6 +2,7 @@
 # ABOUTME: Commits and merges are made only when author and committer are the required identity.
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,8 @@ class Outcome:
 
     made: bool  # HEAD moved: the commit exists
     by_hook: bool  # the guard's own refusal is on stderr
+    quiet: bool  # neither invented wrong value is anywhere in stdout or stderr
+    abort_hint: bool  # stderr says how to back out of a refused merge
 
 
 class Sandbox:
@@ -31,14 +34,16 @@ class Sandbox:
 
     Git reads no global or system config here (HOME and XDG_CONFIG_HOME are tmp_path and
     GIT_CONFIG_NOSYSTEM is set) and inherits no GIT_* or EMAIL variable, so the identity of
-    whoever runs the suite can never stand in for the one a test sets.
+    whoever runs the suite can never stand in for the one a test sets. Nor does it inherit the
+    variables that change how bash starts (BASHOPTS, SHELLOPTS, BASH_ENV); a test sets them.
     """
 
     def __init__(self, tmp_path: Path):
         self.path = tmp_path / "repo"
         self.path.mkdir()
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith("GIT_") and k != "EMAIL"}
+                    if not k.startswith("GIT_")
+                    and k not in ("EMAIL", "BASHOPTS", "SHELLOPTS", "BASH_ENV")}
         self.env.update(HOME=str(tmp_path), XDG_CONFIG_HOME=str(tmp_path),
                         GIT_CONFIG_NOSYSTEM="1")
         self.files = 0
@@ -52,7 +57,8 @@ class Sandbox:
         assert self.git("config", key, value).returncode == 0
 
     def arm(self):
-        """Point git at the guard, as bootstrap.sh does."""
+        """Point git at this repository's githooks/ by its absolute path. bootstrap.sh sets the
+        relative path githooks instead, which names the same directory from a checkout's top."""
         self.config("core.hooksPath", str(HOOKS))
 
     def head(self):
@@ -67,13 +73,20 @@ class Sandbox:
         assert self.git("add", name).returncode == 0
         before = self.head()
         run = self.git("commit", "-q", "-m", f"change {self.files}", *args, **env)
-        return Outcome(made=self.head() != before, by_hook="sigint101: refusing" in run.stderr)
+        return self.outcome(before, run)
 
     def merge(self, branch, **env) -> Outcome:
         """Merge `branch` with a merge commit git makes by itself, as git merge and git pull do."""
         before = self.head()
         run = self.git("merge", "-q", "--no-ff", "-m", f"merge {branch}", branch, **env)
-        return Outcome(made=self.head() != before, by_hook="sigint101: refusing" in run.stderr)
+        return self.outcome(before, run)
+
+    def outcome(self, before, run) -> Outcome:
+        said = run.stdout + run.stderr
+        return Outcome(made=self.head() != before,
+                       by_hook="sigint101: refusing" in run.stderr,
+                       quiet=OTHER_NAME not in said and OTHER_EMAIL not in said,
+                       abort_hint="git merge --abort" in run.stderr)
 
     def identities(self):
         """The last commit's author and committer."""
@@ -297,3 +310,82 @@ def test_a_clean_merge_under_the_required_identity_is_made(repo):
     _diverge(repo)
     assert repo.merge("side").made
     assert repo.identities() == REQUIRED
+
+
+# --- what a refusal needs, and what it says --------------------------------------------
+
+
+def _path_without(tmp_path, *missing):
+    """A PATH holding every tool beside git and bash except `missing`.
+
+    Built as tests/test_desktop_theme.py builds one without fontconfig: every tool in git's and
+    bash's own directories is linked into one directory, leaving out the missing ones, and that
+    directory is the whole PATH. Whatever the host has installed, the missing tools are gone.
+    """
+    tools = tmp_path / ("without-" + "-".join(missing))
+    tools.mkdir()
+    for directory in dict.fromkeys(Path(shutil.which(t)).parent for t in ("git", "bash")):
+        for tool in directory.iterdir():
+            link = tools / tool.name
+            # The first directory to name a tool wins, as in a PATH lookup.
+            if tool.name not in missing and not link.is_symlink():
+                link.symlink_to(tool)
+    for tool in missing:
+        assert shutil.which(tool, path=str(tools)) is None, f"{tool} is still on the PATH"
+    return str(tools)
+
+
+@pytest.mark.parametrize("tool", ["tr", "cat"])
+def test_a_missing_tool_never_lets_a_wrong_email_through(repo, tmp_path, tool):
+    # A missing tool must leave the guard refusing, and still able to say why.
+    repo.config("user.email", OTHER_EMAIL)
+    out = repo.commit(PATH=_path_without(tmp_path, tool))
+    assert not out.made
+    assert out.by_hook
+
+
+def test_without_tr_the_required_identity_still_commits(repo, tmp_path):
+    assert repo.commit(PATH=_path_without(tmp_path, "tr")).made
+
+
+def _shellopts(value):
+    """An exported SHELLOPTS turns these options on in every bash that starts, the hook's too."""
+    return {"SHELLOPTS": value} if value else {}
+
+
+WRONG_VALUES = [("user.name", OTHER_NAME), ("user.email", OTHER_EMAIL)]
+
+
+@pytest.mark.parametrize("shellopts", [None, "xtrace"])
+@pytest.mark.parametrize("key, value", WRONG_VALUES)
+def test_a_refused_commit_never_prints_the_wrong_value(repo, key, value, shellopts):
+    # The wrong value may be a person's own name, and a refusal lands in terminals and transcripts.
+    repo.config(key, value)
+    out = repo.commit(**_shellopts(shellopts))
+    assert not out.made
+    assert out.by_hook
+    assert out.quiet
+
+
+@pytest.mark.parametrize("shellopts", [None, "xtrace"])
+@pytest.mark.parametrize("key, value", WRONG_VALUES)
+def test_a_refused_merge_never_prints_the_wrong_value(repo, key, value, shellopts):
+    _diverge(repo)
+    repo.config(key, value)
+    out = repo.merge("side", **_shellopts(shellopts))
+    assert not out.made
+    assert out.by_hook
+    assert out.quiet
+
+
+def test_a_refused_merge_says_how_to_return_to_a_clean_tree(repo):
+    _diverge(repo)
+    before = repo.head()
+    repo.config("user.name", OTHER_NAME)
+    out = repo.merge("side")
+    assert not out.made
+    assert out.abort_hint
+    # git leaves a refused merge staged, and the advice must be true.
+    assert repo.git("merge", "--abort").returncode == 0
+    assert repo.git("status", "--porcelain").stdout == ""
+    assert repo.head() == before
