@@ -3,11 +3,18 @@
 ## NEXT ACTION (resume here)
 **First, once nomad-b is back online** (it dropped off Tailscale about 03:50 UTC on 11-03, in the field):
 1. Clear the scratch (see follow-ups).
-2. Deploy `ux-polish` to nomad-b. It runs @3b96cf0, so it is missing #36–#43. Deploying restarts
+2. Deploy `main` to nomad-b. It runs @3b96cf0, so it is missing #36–#51. Deploying restarts
    the server, so only when MC isn't using the panel.
 3. Run the L1, L2 and L8 key captures (`docs/audit/captures/2026-11-03/`), with the course closed
    and inside the SDR flock.
 4. Re-render L2, L7 and L8 at 800x480.
+
+**Outside review of main (2026-11-15): ruled on; its fixes merge to main as small pull requests.**
+Merged 2026-11-16: #47 (lesson 5: Part 15 asks more than a power limit), #48 (a caution on the
+ledger's antenna-off record), #49 (lessons 11 and 28: what a second node needs before it sends),
+#50 (the owner's name, tailnet addresses and home paths out of the tree, with a guard test) and
+#51 (the write hook's password and API-key checks now fire). Further items follow as their own
+pull requests.
 
 **Phase 3: fix sprint against MC's cut line (2026-11-02).** Plan of record:
 `docs/plans/2026-11-02-resume-audit-handover.md`.
@@ -19,8 +26,9 @@
     on 929–932, mask the text, teach the statute.
   - Cut line: **"1–19 plus operator mode"**. That is triage items 1–19 (all S0 plus the cheap
     S1s, item 8 being real tuning and gain) plus `/operate` v1, all before 11-08.
-- **Sprint base:** `ux-polish` with main merged in. Sprint branches stack on it. ux-polish itself
-  merges to main only after MC's panel look (MC's gate; draft PR #15).
+- **Sprint base:** `ux-polish` with main merged in. Sprint branches stacked on it. ux-polish
+  itself merged to main on 2026-11-16 (UTC): PR #15, squash `02c2095`. Its last merges were #45
+  (two environment-dependent tests fixed) and #46 (a page's words withheld on every frequency).
 - **The sprint is complete on `ux-polish` @494e268, deployed to the nomad-b kiosk.** All of the
   cut line except item 19:
   - #18 exam: 0 hidden Commit/Next across all 409 questions, plus Skip and answers that are final.
@@ -55,7 +63,7 @@
   never after Exit. Built on `desktop-exit` (PR against ux-polish). **Pending: the coordinator's
   switch on nomad-b, with MC's OK**: pull, `deploy/install.sh`,
   `sudo raspi-config nonint do_boot_behaviour B4`, reboot.
-- **Since the sprint (2026-11-02/03, also on `ux-polish`, now @989c496):**
+- **Since the sprint (2026-11-02/03, also on `ux-polish`, in main since #15):**
   - #29 provision: Flock monitor mode is opt-in (`--with-flock-adapter`). On nomad-b the
     RTL8821CU dongle in monitor mode browned out USB (192 over-current events in 2 min, 23
     touch-panel resets). It needs a powered hub; MC unplugged it.
@@ -147,7 +155,7 @@
 2. Check Marauder answers: in the Flipper's WiFi Marauder app, Scan APs. Then put GPIO →
    USB-UART Bridge on channel 1, so Claude can prove the `-if02` port and live Flock frames.
 3. Extend the ANT500 fully. Claude then re-measures FM SNR.
-4. One look at the panel, then an OK to merge `ux-polish` to main (PR #15). nomad-b runs
+4. One look at the panel. `ux-polish` is merged to main (PR #15, 2026-11-16). nomad-b runs
    @3b96cf0; the ux-polish merges since then are not deployed there yet.
 5. Battery on the gift box: ship nomad-b's daemon, or read the INA219 directly (read-only).
 6. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
@@ -165,13 +173,12 @@
   up with the server service and labwc, ran one kiosk browser, and showed the course home on
   the panel (grim screenshot). The persistent journal kept the previous boot.
 - **Open branches:**
-  - `ux-polish` (@345fbfb, no PR yet) makes lessons completable and makes the reading stages
-    and home grid scroll. **On main a learner still cannot complete a lesson.** It merges once
-    MC has looked at the panel.
+  - `ux-polish` (PR #15) makes lessons completable and makes the reading stages and home grid
+    scroll. It merged to main on 2026-11-16: **on main a learner can now complete a lesson.**
   - `flipper-module` (PR #5) is U10 Phase 1 (M29 + the `/api/flipper` live mirror). It is
-    parked behind the S0 fixes and needs a rebase after ux-polish lands (both touch `app.css`
-    and `console.html`).
-  - `flipper-module-refresh` (PR against ux-polish) merges ux-polish into #5 and supersedes it; HIL waits on the Flipper.
+    closed: #38 superseded it.
+  - `flipper-module-refresh` (#38, merged into ux-polish 11-03, so in main since #15) merges
+    ux-polish into #5 and supersedes it; HIL waits on the Flipper.
 - **nomad-b health:**
   - No crash since the 11-01 reboot. Configs intact: meshtasticd `config.yaml`, `config.txt`
     (gpio4, pps-gpio 17, miniuart-bt), root fs clean.
@@ -184,11 +191,11 @@ again. Sources: `~/.claude/plans/eager-spinning-frost.md`, CLAUDE.md, the transc
 
 | Item | Where promised | State | Disposition |
 |---|---|---|---|
-| Lesson completion | plan core | only on unmerged `ux-polish` | land (S0) |
+| Lesson completion | plan core | on main since #15 (2026-11-16) | land (S0) |
 | Kiosk autostart | P0 DoD | **done** (#7, #9); cold boot passed 2026-11-02 | — |
 | Provisioning + scrub of MC's data + recipient quick-start | P5/P6 | nothing exists | build (hand-over) |
 | Updater (atomic apply, rollback, migrations) | P5 | nothing exists | triage |
-| Safe-shutdown + real battery readout | plan arch | #12 shows "—" (no invented 100%); UPS INA219 readout in flight | battery: building; shutdown: triage |
+| Safe-shutdown + real battery readout | plan arch | #12 shows "—" (no invented 100%); UPS INA219 readout (#37, via the battery daemon) on main since #15 | battery: building; shutdown: triage |
 | `safety.py` antenna-before-TX guard + any TX path | D16, CLAUDE.md | never existed; no TX route | triage |
 | Reception badges / replay marks | CLAUDE.md invariant | no code; `events.py` logs only | triage |
 | SigMF recorded walkthroughs R1–R6, sample recording | plan curriculum | none | triage |
@@ -236,6 +243,12 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 | U9 Mesh | M28 | `2602469` |
 | Exam trainer | — | `aa2cc5a` card, `32ec4a0` sim, `84bd0b1` home CTA, `71ad24a` diagrams |
 | Platform | — | `a8bfef8` Phosphor restyle, `0e2fc54` units nav, `6b23996` `claim()` arbitration, `11defa4` kiosk autostart |
+| ux-polish sprint | M1–M29 | `02c2095` #15 (squash-merged 11-16) |
+| Review burn-down | M5 | `e6b77c3` #47 Part 15 conditions |
+| Review burn-down | — | `dc9a2c6` #48 ledger caution on the antenna-off record |
+| Review burn-down | M11, M28 | `b2beb4e` #49 what a second node needs |
+| Review burn-down | — | `a78e45a` #50 owner's name, tailnet addresses, home paths out; guard test |
+| Review burn-down | — | `d21d620` #51 write hook's password and API-key checks |
 
 ## nomad-b / kiosk operations
 - **Access:** `ssh spec5@<nomad-b tailnet address>`. Login user is `spec5`, host `spec5b`. Registry:
@@ -254,8 +267,8 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
   - **Restart the course browser:** kill the kiosk Chromium by PID and the watchdog reopens it.
     Never kill `labwc` (that ends the whole desktop session) and never restart `getty@tty1`
     (duplicate sessions, see learnings).
-  - On `main` the kiosk is still the old tty1 autologin → `~/.profile` hook, until ux-polish
-    lands.
+  - Since #15 (2026-11-16) `main` has the desktop model too: its `deploy/install.sh` retires the
+    old tty1 `~/.profile` hook.
   - **Restart the server:** `systemctl --user restart sigint101`, which also reloads lesson
     YAML.
   - **Manual server on 8008:** `systemctl --user stop sigint101` first.
@@ -312,4 +325,4 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 - ☭ (U+262D) renders via a system-font fallback (DejaVu on nomad-b), not our bundled fonts.
   Confirm it on the recipient image or bundle an SVG.
 - Predict is the tightest screen at 800x480: keep prompts to ~35–40 words. Reading stages
-  scroll (on `ux-polish`); instrument stages must fit (CLAUDE.md Corrections).
+  scroll (on main since #15); instrument stages must fit (CLAUDE.md Corrections).
