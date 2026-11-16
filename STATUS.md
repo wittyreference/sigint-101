@@ -17,7 +17,7 @@ the ledger's antenna-off record) and #49 (lessons 11 and 28: what a second node 
 sends). Also merged that day, as separate requests rather than review findings: #50 (the owner's
 name, tailnet addresses and home paths out of the tree; its guard test covers the addresses and
 home paths, not the name), #51 (the write hook's password and API-key checks now fire), #52 (the
-identity guard checks the name too, on commits and merges) and #53 (the Wi-Fi capture,
+identity guard checks the name too, on local commits and merges) and #53 (the Wi-Fi capture,
 weather-sensor ID and Flipper name in the test fixtures are made up).
 
 **Phase 3: fix sprint against MC's cut line (2026-11-02).** Plan of record:
@@ -159,7 +159,7 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
 2. Check Marauder answers: in the Flipper's WiFi Marauder app, Scan APs. Then put GPIO →
    USB-UART Bridge on channel 1, so Claude can prove the `-if02` port and live Flock frames.
 3. Extend the ANT500 fully. Claude then re-measures FM SNR.
-4. One look at the panel, to confirm the sprint's work there. It was PR #15's gate, in the PR's
+4. One look at the panel, to confirm #15's work there. It was PR #15's gate, in the PR's
    words "Draft until MC confirms on the panel (MC's gate)"; #15 merged to main on 2026-11-16
    (UTC) with no look recorded on the PR. nomad-b runs @3b96cf0, which already has the
    completable lessons and the whole sprint; #36–#53 are not deployed there yet.
@@ -318,9 +318,9 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
   915 MHz whip on the LoRa jack, and the Flipper (fw 1.5.1, Marauder devboard on its GPIO) on
   `/dev/ttyACM0` when plugged in. The RTL8821CU dongle is unplugged: it browns out USB without a
   powered hub.
-- **spec5** is the secondary. Its LoRa jack is not dead: the antenna broke, not the jack, and it
-  has been replaced (MC, 2026-11-16). Transmit is off and meshtasticd is disabled until MC
-  re-enables them. Its reception since the new antenna is not tested.
+- **spec5** is the secondary. Its LoRa jack is not dead, and its broken antenna has been replaced
+  (MC, 2026-11-16). Transmit is off and meshtasticd is disabled until MC re-enables them. Its
+  reception since the new antenna is not tested.
 - **pi5** (user `mc`) has an ESP32 on `/dev/ttyACM1`. No Flipper.
 
 ## Gotchas (durable)
