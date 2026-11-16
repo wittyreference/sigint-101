@@ -3,7 +3,7 @@
 ## NEXT ACTION (resume here)
 **First, once nomad-b is back online** (it dropped off Tailscale about 03:50 UTC on 11-03, in the field):
 1. Clear the scratch (see follow-ups).
-2. Deploy `main` to nomad-b. It runs @3b96cf0, so it is missing #36–#52. Deploying restarts
+2. Deploy `main` to nomad-b. It runs @3b96cf0, so it is missing #36–#53. Deploying restarts
    the server, so only when MC isn't using the panel.
 3. Run the L1, L2 and L8 key captures (`docs/audit/captures/2026-11-03/`), with the course closed
    and inside the SDR flock.
@@ -13,10 +13,12 @@
 the 67 that could be ruled on were already fixed on ux-polish, by the verifiers' reading of the
 code, and reached main with it. The remaining fixes are being merged as small pull requests.
 Merged 2026-11-16 (UTC): #47 (lesson 5: Part 15 asks more than a power limit), #48 (a caution on
-the ledger's antenna-off record), #49 (lessons 11 and 28: what a second node needs before it
-sends), #50 (the owner's name, tailnet addresses and home paths out of the tree; its guard test
-covers the addresses and home paths, not the name), #51 (the write hook's password and API-key
-checks now fire) and #52 (the identity guard checks the name too, on commits and merges).
+the ledger's antenna-off record) and #49 (lessons 11 and 28: what a second node needs before it
+sends). Also merged that day, as separate requests rather than review findings: #50 (the owner's
+name, tailnet addresses and home paths out of the tree; its guard test covers the addresses and
+home paths, not the name), #51 (the write hook's password and API-key checks now fire), #52 (the
+identity guard checks the name too, on commits and merges) and #53 (the Wi-Fi capture,
+weather-sensor ID and Flipper name in the test fixtures are made up).
 
 **Phase 3: fix sprint against MC's cut line (2026-11-02).** Plan of record:
 `docs/plans/2026-11-02-resume-audit-handover.md`.
@@ -160,7 +162,7 @@ checks now fire) and #52 (the identity guard checks the name too, on commits and
 4. One look at the panel, to confirm the sprint's work there. It was PR #15's gate, in the PR's
    words "Draft until MC confirms on the panel (MC's gate)"; #15 merged to main on 2026-11-16
    (UTC) with no look recorded on the PR. nomad-b runs @3b96cf0, which already has the
-   completable lessons and the whole sprint; #36–#52 are not deployed there yet.
+   completable lessons and the whole sprint; #36–#53 are not deployed there yet.
 5. Battery on the gift box: ship nomad-b's daemon, or read the INA219 directly (read-only).
 6. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
    triage item 19.
@@ -252,9 +254,10 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 | Review burn-down | M5 | `e6b77c3` #47 Part 15 conditions |
 | Review burn-down | — | `dc9a2c6` #48 ledger caution on the antenna-off record |
 | Review burn-down | M11, M28 | `b2beb4e` #49 what a second node needs |
-| Review burn-down | — | `a78e45a` #50 owner's name, tailnet addresses, home paths out; guard test (addresses, home paths) |
-| Review burn-down | — | `d21d620` #51 write hook's password and API-key checks |
-| Review burn-down | — | `63eb64c` #52 identity guard checks the name too |
+| Separate request | — | `a78e45a` #50 owner's name, tailnet addresses, home paths out; guard test (addresses, home paths) |
+| Separate request | — | `d21d620` #51 write hook's password and API-key checks |
+| Separate request | — | `63eb64c` #52 identity guard checks the name too |
+| Separate request | — | `545a207` #53 Wi-Fi capture, weather-sensor ID and Flipper name in the test fixtures made up |
 
 ## nomad-b / kiosk operations
 - **Access:** `ssh spec5@<nomad-b tailnet address>`. Login user is `spec5`, host `spec5b`. Registry:
