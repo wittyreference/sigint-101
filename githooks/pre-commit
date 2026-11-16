@@ -1,27 +1,55 @@
 #!/usr/bin/env bash
-# ABOUTME: Pre-commit git-identity guard — fails closed unless the author email is the
-# ABOUTME: expected personal address, so no commit is ever stamped with the wrong identity.
+# ABOUTME: Pre-commit git-identity guard — fails closed unless author and committer both carry the
+# ABOUTME: name wittyreference and the expected e-mail, so no commit carries another identity.
 
 set -euo pipefail
 
 # SIGINT 101 is personal work on a personal machine, and the work/personal split is
-# deliberate. An author line is baked into the commit and only history rewriting takes it
-# back out, so this is cheaper to catch here than to undo later. The guard fails closed:
-# an unset identity or any address other than the expected one blocks the commit.
-REQUIRED="mc8805@outlook.com"
+# deliberate. An identity is baked into the commit and only history rewriting takes it back
+# out, so this is cheaper to catch here than to undo later. The repository is public, so the
+# name counts as much as the address: it must be the handle, never a person's own name, which
+# is what a global user.name usually holds. The guard fails closed: an identity git would
+# have to guess, or any other name or address, blocks the commit.
+REQUIRED_NAME="wittyreference"
+REQUIRED_EMAIL="mc8805@outlook.com"
 
-email="$(git config user.email 2>/dev/null || true)"
+# `git var` answers with the identity the commit will carry, not with one config key: it
+# folds in the GIT_AUTHOR_* and GIT_COMMITTER_* variables, author.* and committer.* config,
+# and user.*. git commit exports the author it settled on before this hook runs, so the
+# author of --author, and the one an --amend keeps, are checked here too. useConfigOnly
+# stops git guessing a missing name or address from the login and host; the guess fails,
+# and so does the guard.
+#
+# What this guard cannot see: git runs pre-commit for `git commit` (and a rebase reword)
+# only. cherry-pick, rebase picks and am keep the author they were given, and revert and
+# merge use the configured identity, all without this check; a merge made on GitHub never
+# runs a local hook at all.
 
-if [ -z "$email" ]; then
-    echo "sigint101: refusing to commit with no git identity set." >&2
-    echo "           git config user.email '$REQUIRED'" >&2
+refuse() {
+    echo "sigint101: refusing to commit: $1" >&2
+    echo "           git config user.name $REQUIRED_NAME" >&2
+    echo "           git config user.email $REQUIRED_EMAIL" >&2
+    echo "           (check: git var GIT_AUTHOR_IDENT; git var GIT_COMMITTER_IDENT)" >&2
     exit 1
-fi
+}
 
-shopt -s nocasematch
-if [[ "$email" != "$REQUIRED" ]]; then
-    echo "sigint101: refusing to commit as <$email>." >&2
-    echo "           this repo requires the personal identity <$REQUIRED>." >&2
-    echo "           git config user.email '$REQUIRED'" >&2
-    exit 1
-fi
+check() {  # $1: author or committer, $2: the git var that names it
+    local role="$1" ident name email
+    ident="$(git -c user.useConfigOnly=true var "$2" 2>/dev/null)" ||
+        refuse "the $role name or e-mail is not set."
+    # "Name <email> epoch tz": git keeps '<' and '>' out of both the name and the address.
+    local re='^(.*) <([^<>]*)> '
+    [[ "$ident" =~ $re ]] || refuse "git gave an unreadable $role identity."
+    name="${BASH_REMATCH[1]}"
+    email="${BASH_REMATCH[2]}"
+    [[ "$name" == "$REQUIRED_NAME" ]] || refuse "the $role name is not $REQUIRED_NAME."
+    shopt -s nocasematch
+    if [[ "$email" != "$REQUIRED_EMAIL" ]]; then
+        shopt -u nocasematch
+        refuse "the $role e-mail is not $REQUIRED_EMAIL."
+    fi
+    shopt -u nocasematch
+}
+
+check author GIT_AUTHOR_IDENT
+check committer GIT_COMMITTER_IDENT
