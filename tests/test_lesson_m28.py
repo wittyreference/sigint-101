@@ -1,6 +1,7 @@
 # ABOUTME: Tests the M28 "A Message That Hops" pack loads as a valid six-stage intro — id 28, the
 # ABOUTME: mesh layer read off the reused LoRa panel, and the relayed-onward answer at predict.
 
+import re
 from pathlib import Path
 
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
@@ -55,3 +56,21 @@ def test_m28_keeps_the_honest_encrypted_note_in_the_copy():
     """The lesson teaches the encrypted-channel case the LoRa panel already shows honestly."""
     lesson = load_lesson_file(PACK)
     assert "encrypted" in lesson.stages["demo"].lower()
+
+
+def test_m28_try_puts_the_second_nodes_antenna_on_before_power():
+    # The try invites the learner to add a second node. A LoRa radio powered with no antenna on
+    # its jack can be damaged, so the try says the antenna goes on first.
+    lesson = load_lesson_file(PACK)
+    ask = lesson.stages["try"].lower()
+    assert re.search(r"\bantenna\b[^.?!]*\bbefore\b[^.?!]*\bpower", ask), (
+        "the try must put the second node's antenna on before power")
+
+
+def test_m28_try_names_the_region_and_preset_the_second_node_shares_with_the_box():
+    # A Meshtastic node sends nothing until its region is set, and nodes need the same region and
+    # modem preset to communicate. Left unsaid, a mismatch is an empty list with no reason given.
+    lesson = load_lesson_file(PACK)
+    ask = lesson.stages["try"].lower()
+    assert "region" in ask, "the try must name the region"
+    assert "longfast" in ask, "the try must name the LongFast preset"

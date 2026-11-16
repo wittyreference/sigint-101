@@ -1,6 +1,7 @@
 # ABOUTME: Tests the M11 "Below the Noise Floor" LoRa lesson pack loads as a valid six-stage intro —
 # ABOUTME: id 11, every stage non-empty, string choices, the LoRa (meshtastic) decode instrument.
 
+import re
 from pathlib import Path
 
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
@@ -44,3 +45,30 @@ def test_m11_predict_choices_are_well_formed_string_key_label():
         label = choice.get("label")
         assert isinstance(key, str) and key, f"choice {choice!r} needs a non-empty string key"
         assert isinstance(label, str) and label, f"choice {choice!r} needs a non-empty string label"
+
+
+def test_m11_try_puts_the_second_nodes_antenna_on_before_power():
+    # The try asks for a transmission from a second node. A LoRa radio powered with no antenna on
+    # its jack can be damaged, so the try says the antenna goes on first.
+    lesson = load_lesson_file(PACK)
+    ask = lesson.stages["try"].lower()
+    assert re.search(r"\bantenna\b[^.?!]*\bbefore\b[^.?!]*\bpower", ask), (
+        "the try must put the second node's antenna on before power")
+
+
+def test_m11_try_names_the_region_and_preset_the_second_node_shares_with_the_box():
+    # A Meshtastic node sends nothing until its region is set, and nodes need the same region and
+    # modem preset to communicate. Left unsaid, a mismatch is an empty list with no reason given.
+    lesson = load_lesson_file(PACK)
+    ask = lesson.stages["try"].lower()
+    assert "region" in ask, "the try must name the region"
+    assert "longfast" in ask, "the try must name the LongFast preset"
+
+
+def test_m11_try_keeps_its_distance_and_the_path_with_no_second_node():
+    # Fitting the try into its 60 words must not cost the half metre between the two radios, or
+    # the line that tells a learner with no second node that an empty list is a result.
+    lesson = load_lesson_file(PACK)
+    ask = lesson.stages["try"]
+    assert "50 cm" in ask
+    assert "an empty list is the honest answer" in ask
