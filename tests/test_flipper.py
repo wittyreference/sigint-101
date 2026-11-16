@@ -11,7 +11,7 @@ from sigint101.flipper import (
     probe_flipper,
 )
 
-BY_ID = "/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_Lle0zik_flip_Lle0zik-if00"
+BY_ID = "/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_Ex4mple_flip_Ex4mple-if00"
 SECOND = "/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_Zzz9xyz_flip_Zzz9xyz-if00"
 
 # A representative `info device` reply — a block of `key : value` lines. The transport tests only
@@ -91,7 +91,7 @@ def test_the_refusal_names_every_candidate():
         find_flipper_port(glob=_globber(BY_ID, SECOND))
     message = str(caught.value)
     # A refusal the operator cannot act on is just a failure. Name both.
-    assert "Lle0zik" in message and "Zzz9xyz" in message
+    assert "Ex4mple" in message and "Zzz9xyz" in message
 
 
 def test_probe_reports_how_it_knows():

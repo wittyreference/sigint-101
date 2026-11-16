@@ -24,7 +24,7 @@ FAP in the core; that is a possible later extension, explicitly out of scope her
 
 ## 2. Ground truth (observed 2026-10-31, nomad-b)
 
-- Flipper Zero on nomad-b (`spec5b`), `/dev/ttyACM0`, USB id `0483:5740`, hardware name `Lle0zik`.
+- Flipper Zero on nomad-b (`spec5b`), `/dev/ttyACM0`, USB id `0483:5740`.
 - **Official firmware 1.4.3** (build 05-12-2025), US region, BLE radio alive. Stock firmware,
   not a custom distro — the restore/update section targets official-firmware paths.
 - Text CLI reachable over the serial port (115200, USB-CDC). Command surface includes:

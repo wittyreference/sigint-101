@@ -30,7 +30,7 @@ from tests.child_fakes import Child
 # --- real-shaped tool output, copied from each module's own tests ------------------------------
 
 # rtl_433 -F json: an ASK weather sensor and an FSK one (tests/test_decode.py).
-RTL433_ASK = ('{"time" : "2026-10-27 13:04:11", "model" : "Acurite-Tower", "id" : 16262, '
+RTL433_ASK = ('{"time" : "2026-10-27 13:04:11", "model" : "Acurite-Tower", "id" : 12345, '
               '"channel" : "A", "battery_ok" : 1, "temperature_C" : 18.000, "humidity" : 51, '
               '"mic" : "CHECKSUM", "mod" : "ASK", "freq" : 433.950, "rssi" : -1.112, '
               '"snr" : 36.261, "noise" : -37.373}')

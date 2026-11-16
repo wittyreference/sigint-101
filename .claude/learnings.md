@@ -103,7 +103,7 @@ real FSK source — ambient ISM here won't oblige.
 ## 2026-10-27: the Flipper CLI drives sub-GHz TX from the droplet — it WAS the charge-only cable
 **Finding.** Swapping the Flipper's USB cable for a data cable made it enumerate on nomad-b exactly
 as predicted: `0483:5740` in `lsusb`, `/dev/ttyACM0` (root:dialout 660; `spec5` is in `dialout`),
-a clean `cdc_acm` attach in `dmesg`, product "Flipper Lle0zik". System `python3` has `pyserial`
+a clean `cdc_acm` attach in `dmesg`, product "Flipper <the Flipper's device name>". System `python3` has `pyserial`
 3.5 (the `.venv` does NOT — use system python for serial). Full CLI works over 115200: `device_info`
 (Flipper Zero, official fw 1.4.3, region US, `radio_alive: true`) and, crucially, `subghz tx <3-byte
 key hex> <freq Hz> <te us> <repeat> <device: 0=CC1101_INT>` — e.g. `subghz tx 0x00F7F7F7 433920000

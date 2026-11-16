@@ -23,7 +23,7 @@ FIXTURE_PACKS = Path(__file__).resolve().parent / "fixtures" / "lesson_packs"
 
 APRS_POS = "APRS: KD2ABC-9>APU25N,WIDE1-1,WIDE2-1:!4042.00N/07400.00W>Test de KD2ABC"
 POCSAG_ALPHA = "POCSAG1200: Address: 1234567  Function: 3  Alpha:   CALL EXT 2210 URGENT"
-RTL433_ASK = ('{"time" : "2026-10-27 13:04:11", "model" : "Acurite-Tower", "id" : 16262, '
+RTL433_ASK = ('{"time" : "2026-10-27 13:04:11", "model" : "Acurite-Tower", "id" : 12345, '
               '"channel" : "A", "battery_ok" : 1, "temperature_C" : 18.000, "humidity" : 51, '
               '"mod" : "ASK", "freq" : 433.920, "snr" : 36.261}')
 

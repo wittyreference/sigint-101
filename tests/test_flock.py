@@ -33,7 +33,10 @@ from sigint101.flock import (
 from tests.test_app import _client
 
 # A real off-air capture: tcpdump -i wlan1 -s 512 -w off wlan1 in monitor mode, 2026-10-29.
-# 207 management frames, 63 of them probe requests (random_eero, Fellow_OTA, DIRECT-MBUX, ...).
+# Its network and device names, serial number, LAN address and hardware addresses were then
+# replaced by made-up ones (locally administered MACs), keeping each frame's kind, order,
+# timestamp and length, and recomputing its FCS. 207 management frames, 63 of them probe
+# requests (example_one, Gadget_OTA, DIRECT-Auto, ...).
 # No Flock ALPR camera was in range when it was taken, so every frame here is a true negative —
 # the honest baseline a detector must not turn into a false alarm.
 FIXTURE = Path(__file__).parent / "fixtures" / "flock_ch1.pcap"
@@ -42,7 +45,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "flock_ch1.pcap"
 FLOCK_OUI = bytes.fromhex("b41e52")          # Flock's own IEEE block
 FLOCK_OUI_LOCALLY_ADMIN = bytes.fromhex("826bf2")   # has the LA bit set — must still match
 BROADCAST = b"\xff\xff\xff\xff\xff\xff"
-NON_FLOCK = bytes.fromhex("ac:f1:08".replace(":", ""))   # a real eero OUI from the fixture
+NON_FLOCK = bytes.fromhex("ac:f1:08".replace(":", ""))   # a registered vendor prefix, not Flock's
 
 # The exact Flock probe-request IE sequence, per the upstream fingerprint. Built by hand so that
 # walking its TLVs (skipping the SSID) serialises to FLOCK_IE_SIGNATURE. No real camera was in
@@ -99,7 +102,7 @@ def test_iter_pcap_frames_reads_every_record_from_the_real_capture():
 # The 802.11 bytes iter_pcap_frames yielded for flock_ch1.pcap before it read the linktype: each
 # frame's length (little-endian uint32) then its bytes, hashed in order. The tcpdump path must
 # keep yielding exactly these bytes.
-FIXTURE_FRAMES_SHA256 = "2669ae276fbd22965c6f398c1da9c4347851d0f3bb5d3e094d313909915a7a99"
+FIXTURE_FRAMES_SHA256 = "1eb96fe4a9d21fd48fba419d8c67c578380ab1148915998f40ff0afc984d66de"
 
 
 def test_iter_pcap_frames_keeps_the_real_radiotap_capture_byte_for_byte():
@@ -142,17 +145,17 @@ def test_parses_real_probe_requests_with_sane_macs_and_signatures():
     assert len(probes) == 63
 
     srcs = {p.src for p in probes}
-    assert "ac:f1:08:70:a3:ea" in srcs          # a real randomised eero MAC
-    assert "60:ab:14:30:8a:47" in srcs
+    assert "02:00:00:00:04:20" in srcs          # made up, locally administered
+    assert "02:00:00:00:07:10" in srcs
     assert all(MAC_RE.match(s) for s in srcs)
 
-    # The randomised eero probes all carry supported-rates (1) + extended rates (50); their third
-    # element is a truncated tag whose id the fingerprint emits verbatim, so they share the 1,50
-    # prefix. The documented example 1,50,71 is one of them.
-    eero = [p for p in probes if p.ssid == "random_eero"]
-    assert len(eero) > 40
-    assert all(p.ie_signature.startswith("1,50") for p in eero)
-    assert any(p.ie_signature == "1,50,71" for p in eero)
+    # The example_one probes all carry supported-rates (1) + extended rates (50); their third
+    # element is a truncated tag whose id the fingerprint emits verbatim (the frame's FCS, read as
+    # one), so they share the 1,50 prefix. 1,50,230 is one of them.
+    example_one = [p for p in probes if p.ssid == "example_one"]
+    assert len(example_one) > 40
+    assert all(p.ie_signature.startswith("1,50") for p in example_one)
+    assert any(p.ie_signature == "1,50,230" for p in example_one)
 
 
 def test_parse_rejects_short_and_non_management_frames():
