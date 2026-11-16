@@ -12,7 +12,7 @@ def test_parse_device_info_reads_core_fields():
     info = parse_device_info(FIXTURE)
     assert isinstance(info, DeviceInfo)
     assert info.model == "Flipper Zero"
-    assert info.name == "Lle0zik"
+    assert info.name == "Ex4mple"
     assert info.firmware == "1.4.3"
     assert info.region == "US"  # from hardware_region_provisioned, not the numeric hardware_region
     assert info.radio_alive is True
@@ -30,7 +30,7 @@ def test_as_dict_is_the_panel_payload():
     d = parse_device_info(FIXTURE).as_dict()
     assert d == {
         "model": "Flipper Zero",
-        "name": "Lle0zik",
+        "name": "Ex4mple",
         "firmware": "1.4.3",
         "region": "US",
         "radio_alive": True,

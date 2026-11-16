@@ -1,7 +1,7 @@
 # Flipper Zero apps: installed set
 
 The seven apps MC approved on 2026-10-31, built from source and installed on 2026-11-02 to the
-Flipper "Lle0zik" (official firmware 1.5.1, API 88.2), attached to nomad-b at `/dev/ttyACM0`.
+Flipper (official firmware 1.5.1, API 88.2), attached to nomad-b at `/dev/ttyACM0`.
 
 Source of truth: the official catalog,
 [flipperdevices/flipper-application-catalog](https://github.com/flipperdevices/flipper-application-catalog)
