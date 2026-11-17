@@ -98,7 +98,7 @@ def ssid_ies(name):
 # --------------------------------------------------------------------------- pcap + parser
 
 
-def test_iter_pcap_frames_reads_every_record_from_the_real_capture():
+def test_iter_pcap_frames_reads_every_record_from_the_capture_fixture():
     with open(FIXTURE, "rb") as fh:
         frames = list(iter_pcap_frames(fh))
     assert len(frames) == 207
