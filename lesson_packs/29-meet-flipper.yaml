@@ -24,7 +24,7 @@ stages:
   demo: >-
     Watch, hands off. The Flipper is plugged in by USB and speaks a plain-text command line. The
     nomad asks it to describe itself and shows the answer: model, firmware, region, and whether
-    its sub-GHz radio is alive. Reading it never disturbs a sweep or a decode. No Flipper
+    its Bluetooth radio is alive. Reading it never disturbs a sweep or a decode. No Flipper
     attached? The panel says so and invents nothing.
   try: >-
     Your turn, comrade. The panel names the device and its radio state in words, so it reads the
