@@ -192,6 +192,26 @@ def test_a_missing_tool_is_logged_once_not_every_poll(tmp_path):
     assert _kinds(tmp_path).count("decode_blocked") == 1
 
 
+@pytest.mark.parametrize("manifest,report,starts", [
+    ((200, b'{"entries": [], "current_entry": {"name": "1730300000"}}'), (500, b"error"), 1),
+    ((200, b"<html><title>Router login</title></html>"), (404, b""), 0),
+], ids=["report-unreadable", "not-rayhunter"])
+def test_an_unreadable_rayhunter_is_logged_once_not_every_poll(tmp_path, manifest, report, starts):
+    # An Orbic whose answers cannot be read refuses every poll; like a missing tool, that is one
+    # line, not a start and a refusal per poll.
+    from sigint101.rayhunter import RayhunterMonitor
+
+    def fetch(url, timeout):
+        return manifest if url.endswith("/api/qmdl-manifest") else report
+
+    with _client(tmp_path, rayhunter_factory=lambda: RayhunterMonitor(fetch=fetch)) as client:
+        for _ in range(5):
+            assert client.get("/api/rayhunter").status_code == 503
+    kinds = _kinds(tmp_path)
+    assert kinds.count("rayhunter_blocked") == 1
+    assert kinds.count("rayhunter_start") == starts
+
+
 def test_a_refusal_is_logged_again_after_a_start(tmp_path):
     # The dedupe is per episode: after the tool ran again, a new refusal is news.
     which = {"ok": False}

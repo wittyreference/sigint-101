@@ -18,3 +18,9 @@ test("the line class carries the state by more than colour", () => {
   assert.equal(panel.lineClass("off"), "rayhunter__line");
   assert.equal(panel.lineClass(undefined), "rayhunter__line");
 });
+
+test("recording with no analysis report yet reads as recording, never as clean", () => {
+  // No report has been read to call clean, so the line says so and stays out of the green.
+  assert.equal(panel.lineText("no-report"), "recording · no report yet");
+  assert.equal(panel.lineClass("no-report"), "rayhunter__line");
+});

@@ -2,6 +2,7 @@
 # ABOUTME: The HTTP fetch is a fake at the boundary; an unreachable Orbic is an honest refusal.
 
 import json
+import urllib.error
 
 import pytest
 
@@ -260,11 +261,13 @@ def test_status_is_clean_when_recording_with_no_finding():
     assert mon.status() == "clean"
 
 
-def test_status_is_clean_when_recording_has_no_report_yet():
-    # The active recording's analysis report does not exist yet (404): recording, nothing flagged.
+def test_status_is_no_report_when_recording_has_no_report_yet():
+    # The active recording's analysis report does not exist yet (404): recording, but nothing has
+    # been read. "clean" would claim an analysis the console never saw.
     mon = RayhunterMonitor(fetch=_fetch(reports={}))
     mon.start()
-    assert mon.status() == "clean"
+    assert mon.status() == "no-report"
+    assert mon.warnings() == []                # still no finding, and no refusal either
 
 
 def test_status_is_off_when_not_recording():
@@ -328,3 +331,132 @@ def test_an_orbic_that_goes_away_is_no_longer_running():
     with pytest.raises(RayhunterUnavailable):
         mon.status()
     assert mon.running is False
+
+
+# --------------------------------------------------------------------------- non-Rayhunter answers
+
+
+def _answers(manifest=(200, MANIFEST_RECORDING), report=(404, b"Analysis file not found")):
+    """A fake HTTP GET at the boundary: each manifest and report request answered as given."""
+
+    def fetch(url, timeout):
+        if url.endswith("/api/qmdl-manifest"):
+            return manifest
+        return report
+
+    return fetch
+
+
+# What else can answer at 192.168.1.1:8080: an HTTP error, or a home router's or captive portal's
+# own page. None of them is an Orbic that is not recording.
+@pytest.mark.parametrize("manifest", [
+    (500, b"Internal Server Error"),
+    (404, b"Not Found"),
+    (200, b"<!DOCTYPE html><html><head><title>Router login</title></head></html>"),
+    (200, json.dumps({"entries": []}).encode()),
+    (200, json.dumps({"current_entry": None}).encode()),
+    (200, json.dumps([PAST]).encode()),
+    (500, MANIFEST_STOPPED),
+], ids=["http-500", "http-404", "html-200", "no-current_entry", "no-entries", "json-list",
+        "manifest-under-500"])
+def test_an_answer_that_is_not_a_rayhunter_manifest_is_unavailable_not_off(manifest):
+    mon = RayhunterMonitor(fetch=_answers(manifest=manifest))
+    with pytest.raises(RayhunterUnavailable):
+        mon.start()
+    assert mon.running is False
+    assert "Rayhunter" in mon.error
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+
+
+def test_a_manifest_that_stops_being_rayhunters_mid_poll_is_no_longer_running():
+    # Reached once, then something else answers at the address (the hotspot's WiFi swapped for a
+    # router's): the next poll refuses, and "running" does not outlive the Orbic.
+    state = {"manifest": (200, MANIFEST_STOPPED)}
+
+    def fetch(url, timeout):
+        return _answers(manifest=state["manifest"])(url, timeout)
+
+    mon = RayhunterMonitor(fetch=fetch)
+    mon.start()
+    assert mon.status() == "off"
+    state["manifest"] = (200, b"<html><title>Captive portal</title></html>")
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+    assert mon.running is False
+
+
+@pytest.mark.parametrize("code", [500, 503])
+def test_an_unreadable_report_for_the_active_recording_is_unavailable_never_clean(code):
+    mon = RayhunterMonitor(fetch=_answers(report=(code, b"Internal Server Error")))
+    mon.start()
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+    assert str(code) in mon.error
+    with pytest.raises(RayhunterUnavailable):
+        mon.warnings()
+    # The Orbic answered its manifest, so it was reached: only its report could not be read.
+    assert mon.running is True
+
+
+# A 200 whose body holds no line the parser reads as a report (no metadata line, no analysis row)
+# is a report the console could not read, not one that found nothing.
+@pytest.mark.parametrize("body", [
+    b"",
+    b"\n   \n",
+    b"<!DOCTYPE html><html><head><title>Router login</title></head></html>",
+    b"Internal Server Error",
+    json.dumps({"error": "analysis busy"}).encode(),
+    json.dumps([None, None, None]).encode(),
+], ids=["empty", "blank-lines", "html", "plain-text", "json-error-object", "json-list"])
+def test_a_200_report_with_nothing_parsable_is_unavailable_never_clean(body):
+    mon = RayhunterMonitor(fetch=_answers(report=(200, body)))
+    mon.start()
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+    assert "analysis report" in mon.error
+    with pytest.raises(RayhunterUnavailable):
+        mon.warnings()
+    assert mon.running is True
+
+
+# A genuine report that parses and holds no finding stays clean: the metadata line Rayhunter
+# writes when a recording starts, with or without rows, or rows alone (the parser reads those too).
+@pytest.mark.parametrize("report", [
+    _report(),
+    REPORT_CLEAN,
+    (json.dumps(CLEAN_ROW) + "\n").encode(),
+    (json.dumps({"analysis": [{"timestamp": "2026-10-29T11:00:01-07:00",
+                               "events": [None]}]}) + "\n").encode(),
+], ids=["metadata-only", "metadata-and-rows", "rows-only", "legacy-row"])
+def test_a_genuine_report_with_no_finding_is_still_clean(report):
+    mon = RayhunterMonitor(fetch=_answers(report=(200, report)))
+    mon.start()
+    assert mon.status() == "clean"
+    assert mon.warnings() == []
+
+
+# What urlopen raises when nothing answers: the cause rides in URLError.reason. The refusal names
+# it when the line still fits, and drops it otherwise: never past the panel's line of 66 characters.
+@pytest.mark.parametrize("exc,cause", [
+    (urllib.error.URLError(OSError(113, "No route to host")), "no route to host"),
+    (urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
+     "connection refused"),
+    (urllib.error.URLError(TimeoutError("timed out")), "timed out"),
+    (TimeoutError("timed out"), "timed out"),
+    (urllib.error.URLError(OSError(110, "Connection timed out")), "connection timed out"),
+    (urllib.error.URLError(OSError(101, "Network is unreachable")), None),
+    (ConnectionResetError(104, "Connection reset by peer"), None),
+], ids=["no-route", "refused", "url-timeout", "read-timeout", "connect-timeout",
+        "network-unreachable", "reset"])
+def test_no_answer_names_its_cause_within_one_panel_line(exc, cause):
+    def fetch(url, timeout):
+        raise exc
+
+    mon = RayhunterMonitor(fetch=fetch)
+    with pytest.raises(RayhunterUnavailable):
+        mon.start()
+    assert "reachable" in mon.error and "192.168.1.1:8080" in mon.error
+    assert len(mon.error) <= 66, (len(mon.error), mon.error)
+    if cause is not None:
+        assert cause in mon.error

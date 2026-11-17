@@ -347,8 +347,8 @@
 
 {# ---- Rayhunter monitor (M19): an Orbic running EFF's Rayhunter, polled receive-only over WiFi.
    rayhunter.js polls /api/rayhunter and shows the recording line (green clean / red warning / grey
-   off) and the heuristic findings. No Orbic reachable shows an honest empty state; a quiet line
-   never proves no catcher — red means look closer, never a verdict. ---- #}
+   off or no report yet) and the heuristic findings. No Orbic reachable shows an honest empty state;
+   a quiet line never proves no catcher — red means look closer, never a verdict. ---- #}
 {% macro rayhunter() %}
               <div class="decoder" data-rayhunter-panel aria-label="Live Rayhunter cell-site-simulator findings">
                 <div class="decoder__head">

@@ -1350,8 +1350,9 @@ button.rail-pip:disabled {
   color: var(--accent);
 }
 /* Rayhunter's recording "line" (M19): the one-glance status the device itself shows — green while
-   it records and nothing is wrong, red when a heuristic fires, grey when it is not recording. State
-   is carried by brightness + the words, never colour alone, so it reads in red-night too. */
+   it records and nothing is wrong, red when a heuristic fires, grey when it is not recording or has
+   no report yet. State is carried by brightness + the words, never colour alone, so it reads in
+   red-night too. */
 .rayhunter__line {
   flex: none;
   padding: 7px 10px;

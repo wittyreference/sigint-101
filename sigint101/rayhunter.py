@@ -33,10 +33,16 @@ _SEVERITY = {"low": "low", "medium": "medium", "high": "high"}
 # per-event offset the row carries, so it is read back out when present.
 _PACKET_RE = re.compile(r"\(packet (\d+)\)")
 
+# Lesson 19's panel shows a refusal's reason on one line; a second line falls below the panel's
+# fixed height and is cut off. At 800x480, 66 characters fit in Chrome on Windows with 1.4 px to
+# spare (11.16 px each). Chromium on Linux at scale 1 may set each glyph on a whole pixel (11.36 px
+# each), where 64 fit, so every reason stays within 64.
+REASON_MAX = 64
+
 
 class RayhunterUnavailable(RuntimeError):
-    """The Orbic's Rayhunter API cannot be reached. Never a reason to invent a finding — the panel
-    says the detector is offline rather than imply the air is clear."""
+    """The Orbic's Rayhunter API cannot be reached or read. Never a reason to invent a finding — the
+    panel says the detector is offline rather than imply the air is clear."""
 
 
 @dataclass(frozen=True)
@@ -113,11 +119,26 @@ def _recording(entry: dict, *, active: bool) -> RayhunterRecording:
     )
 
 
+def _is_manifest(raw: bytes) -> bool:
+    """True when a body is Rayhunter's manifest: a JSON object with entries and current_entry.
+
+    Rayhunter always sends both keys (current_entry is null while it is not recording), so a body
+    without them came from something else at the Orbic's address: an error page, a router's or a
+    captive portal's own page.
+    """
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and "entries" in data and "current_entry" in data
+
+
 def parse_manifest(raw: bytes) -> RayhunterManifest:
     """Parse a /api/qmdl-manifest body (ManifestStats JSON) into a RayhunterManifest.
 
     Rayhunter removes the active recording from `entries` and returns it separately as
-    `current_entry`, so the two never double-count. A malformed body is an honest empty manifest.
+    `current_entry`, so the two never double-count. A malformed body parses as an empty manifest;
+    the monitor refuses such a body before it gets here, since it is not an idle Orbic.
     """
     try:
         data = json.loads(raw)
@@ -173,6 +194,31 @@ def _events_of(row: dict):
                 yield index, event, ts
 
 
+def _report_objects(raw: bytes):
+    """Yield each line of a newline-delimited JSON body that parses to an object; skip the rest."""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def _is_report(raw: bytes) -> bool:
+    """True when a body holds a line parse_analysis reads as part of a Rayhunter analysis report.
+
+    That is the metadata line (its `analyzers` list), which Rayhunter writes as a recording starts,
+    or an analysis row (an `events` list, or the legacy `analysis` list). A report that found
+    nothing still has them; a body with none (empty, a web page, an error object) is no report.
+    """
+    return any(isinstance(obj.get(key), list)
+               for obj in _report_objects(raw) for key in ("analyzers", "events", "analysis"))
+
+
 def parse_analysis(raw: bytes) -> list[RayhunterWarning]:
     """Parse a /api/analysis-report/{name} body (newline-delimited JSON) to warnings, newest first.
 
@@ -184,17 +230,7 @@ def parse_analysis(raw: bytes) -> list[RayhunterWarning]:
     analyzer_names: list[str] = []
     warnings: list[RayhunterWarning] = []
 
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(obj, dict):
-            continue
-
+    for obj in _report_objects(raw):
         # The metadata line carries the analyzer roster; capture the names and move on.
         if isinstance(obj.get("analyzers"), list):
             analyzer_names = [
@@ -238,12 +274,26 @@ def _default_fetch(url: str, timeout: float) -> tuple[int, bytes]:
         return exc.code, exc.read()
 
 
+def _no_answer(where: str, exc: Exception) -> str:
+    """The reason for a fetch that got no answer, naming its cause when that still fits one line.
+
+    urlopen wraps the cause in URLError.reason, an OSError with a strerror or plain text; the raw
+    "<urlopen error [Errno 113] ...>" form ran past the panel's one line.
+    """
+    reason = f"Rayhunter unreachable at {where}"
+    cause = getattr(exc, "reason", exc)
+    detail = str(getattr(cause, "strerror", None) or cause).strip().lower()
+    with_detail = f"{reason} ({detail})"
+    return with_detail if detail and len(with_detail) <= REASON_MAX else reason
+
+
 class RayhunterMonitor:
     """Polls the Orbic's Rayhunter HTTP API for the recording state and its heuristic findings.
 
     Receive-only: it reads the manifest and analysis reports and never controls the Orbic. Being a
     separate radio over WiFi, it takes no turns with the RTL-SDR — there is no release()/resume().
-    An unreachable Orbic raises RayhunterUnavailable rather than inventing a clean or a caught line.
+    An unreachable or unreadable Orbic raises RayhunterUnavailable rather than inventing a clean or
+    a caught line.
     """
 
     def __init__(self, *, host=DEFAULT_RAYHUNTER_HOST, port=DEFAULT_RAYHUNTER_PORT,
@@ -286,16 +336,21 @@ class RayhunterMonitor:
         self._running = False
 
     def status(self) -> str:
-        """The green/red/white line: 'warning', 'clean', or 'off'.
+        """The green/red/white line: 'warning', 'clean', 'no-report' or 'off'.
 
         'off' when the Orbic is not recording; otherwise 'warning' when the active recording's
-        analysis holds any Low/Medium/High finding, else 'clean' (recording, nothing flagged — which
-        never means no catcher, only that no heuristic has fired).
+        analysis holds any Low/Medium/High finding, 'clean' when its analysis was read and holds
+        none (recording, nothing flagged — which never means no catcher, only that no heuristic has
+        fired), and 'no-report' when Rayhunter has no analysis report for it yet: nothing has been
+        read, so there is no clean to show.
         """
         manifest = self._manifest()
         if manifest.current is None:
             return "off"
-        return "warning" if self._warnings_for(manifest.current.name) else "clean"
+        warnings = self._warnings_for(manifest.current.name)
+        if warnings is None:
+            return "no-report"
+        return "warning" if warnings else "clean"
 
     def warnings(self, limit: int | None = None) -> list[dict]:
         """Heuristic findings for the active (or, when stopped, the most recent) recording.
@@ -306,7 +361,7 @@ class RayhunterMonitor:
         recording = self._subject()
         if recording is None:
             return []
-        rows = self._warnings_for(recording.name)
+        rows = self._warnings_for(recording.name) or []
         if limit is not None:
             rows = rows[:limit]
         return [w.as_dict() for w in rows]
@@ -327,18 +382,50 @@ class RayhunterMonitor:
         return None
 
     def _manifest(self) -> RayhunterManifest:
-        """Fetch and parse the qmdl-manifest, or raise RayhunterUnavailable."""
-        _, body = self._get(MANIFEST_PATH)
-        return parse_manifest(body)
+        """Fetch and parse the qmdl-manifest, or raise RayhunterUnavailable.
 
-    def _warnings_for(self, name: str) -> list[RayhunterWarning]:
-        """Fetch and parse one recording's analysis report; a 404 means no report yet (empty)."""
-        status, body = self._get(ANALYSIS_REPORT_PATH.format(name=name))
+        Only a 200 carrying Rayhunter's manifest is read. An HTTP error, or a router or captive
+        portal answering at the Orbic's address, is not an Orbic that is not recording.
+        """
+        status, body = self._get(MANIFEST_PATH)
+        if status == 200 and _is_manifest(body):
+            return parse_manifest(body)
+        # No Rayhunter at the address: as when it is unreachable, "running" must not outlive it.
+        self._running = False
+        where = f"{self.host}:{self.port}"
         if status != 200:
-            return []
+            raise self._unreadable(f"{where} answered HTTP {status}, not Rayhunter's manifest")
+        raise self._unreadable(f"{where} answered with a page that is not Rayhunter's")
+
+    def _warnings_for(self, name: str) -> list[RayhunterWarning] | None:
+        """Fetch and parse one recording's analysis report; None while there is no report (404).
+
+        Any other failed answer, or a 200 whose body holds no report line (_is_report), is an
+        analysis the console could not read, never an empty one, so it raises RayhunterUnavailable
+        rather than let the line read clean. The Orbic itself was reached, so it stays running.
+        """
+        status, body = self._get(ANALYSIS_REPORT_PATH.format(name=name))
+        if status == 404:
+            return None
+        if status != 200:
+            raise self._unreadable(
+                f"Rayhunter answered, but its analysis report gave HTTP {status}")
+        if not _is_report(body):
+            raise self._unreadable("Rayhunter answered, but its analysis report could not be read")
         warnings = parse_analysis(body)
         self._report_new(name, warnings)
         return warnings
+
+    def _unreadable(self, reason: str) -> RayhunterUnavailable:
+        """Note in `error` what was answered instead, and return the refusal to raise.
+
+        The panel keeps its one "unreachable" headline for every refusal and shows this reason
+        under it, so the reason says which it was: an HTTP error, a page that is not Rayhunter's,
+        or a report that could not be read (no answer at all is _no_answer's), each within the
+        panel's one line (REASON_MAX).
+        """
+        self.error = reason
+        return RayhunterUnavailable(reason)
 
     def _report_new(self, name: str, warnings: list[RayhunterWarning]) -> None:
         """Hand each warning not parsed before to on_reception, oldest first, exactly once."""
@@ -360,7 +447,7 @@ class RayhunterMonitor:
         try:
             status, body = self._fetch(url, self.timeout)
         except Exception as exc:  # connection refused, timeout, the Orbic off the WiFi
-            self.error = f"Rayhunter is not reachable at {self.base_url} ({exc})"
+            self.error = _no_answer(f"{self.host}:{self.port}", exc)
             # Not running any more: "running" must not outlive the Orbic it was reached on.
             self._running = False
             raise RayhunterUnavailable(self.error) from exc

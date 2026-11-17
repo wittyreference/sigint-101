@@ -5,9 +5,11 @@
   "use strict";
 
   // The one-glance recording line the device shows: green clean, red warning, grey not-recording.
+  // Recording with no analysis report yet stays grey: nothing has been read to call it clean.
   function lineText(status) {
     if (status === "clean") return "recording · clean";
     if (status === "warning") return "warning · look closer";
+    if (status === "no-report") return "recording · no report yet";
     if (status === "off") return "not recording";
     return "—";
   }
