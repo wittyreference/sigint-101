@@ -1,5 +1,5 @@
 # ABOUTME: Lesson M19 "Catch the Catcher" — the IMSI-catcher/cell-site-simulator detector: an Orbic
-# ABOUTME: running EFF's Rayhunter, polled receive-only; red means look closer, green never proves absence.
+# ABOUTME: running EFF's Rayhunter, polled read-only; red means look closer, green never proves absence.
 
 id: 19
 slug: catch-the-catcher
@@ -28,10 +28,10 @@ stages:
     the tower, before any data rides, and flags what a normal tower has no reason to do: shove you
     down to easily intercepted 2G, or demand your permanent IMSI out of turn.
   try: >-
-    Your watch, comrade. The console joins the Orbic's WiFi and polls its page at 192.168.1.1:8080
-    (recordings, findings as JSON, captures): receive-only, off the tailnet. Its screen's line:
-    green while recording cleanly; yellow, orange, then solid red as a warning grows; white when
-    paused. Warnings come tagged low, medium or high. Red: what have you been handed?
+    Your watch, comrade. Over the Orbic's WiFi, off the tailnet, the console only reads its page at
+    192.168.1.1:8080 (recordings, findings, captures); towers hear the Orbic, never those reads. Its
+    screen's line: green while recording cleanly; yellow, orange, then solid red as a warning grows;
+    white when paused. Warnings come tagged low, medium or high. Red: what have you been handed?
   predict: >-
     Rayhunter's status line snaps to solid red while you ride the bus. Does red prove a cell-site
     simulator is operating nearby? Lock it in.
@@ -48,7 +48,7 @@ stages:
     reads behavior, not intent. So red means look closer — change location, note the time, save the
     capture — never proof. Green all day means only that no known rule fired, on one modem, while
     it recorded; a trick no rule covers, or a strike while paused, stays green. Carry this out the
-    door: no alert never means no catcher — awareness, bounded and receive-only.
+    door: no alert never means no catcher — awareness, bounded and read-only.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:
