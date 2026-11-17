@@ -9,6 +9,7 @@ import select
 import struct
 import subprocess
 import time
+import zlib
 from pathlib import Path
 
 import pytest
@@ -149,13 +150,14 @@ def test_parses_real_probe_requests_with_sane_macs_and_signatures():
     assert "02:00:00:00:07:10" in srcs
     assert all(MAC_RE.match(s) for s in srcs)
 
-    # The example_one probes all carry supported-rates (1) + extended rates (50); their third
-    # element is a truncated tag whose id the fingerprint emits verbatim (the frame's FCS, read as
-    # one), so they share the 1,50 prefix. 1,50,230 is one of them.
+    # The example_one probes all carry supported-rates (1) + extended rates (50) and nothing else.
+    # Each frame here ends in its 4-byte FCS, which the walk over the whole frame reads as one
+    # more, truncated tag, so those fingerprints share only the 1,50 prefix; without the FCS each
+    # one is exactly 1,50.
     example_one = [p for p in probes if p.ssid == "example_one"]
     assert len(example_one) > 40
     assert all(p.ie_signature.startswith("1,50") for p in example_one)
-    assert any(p.ie_signature == "1,50,230" for p in example_one)
+    assert all(p.ie_signature_without_fcs == "1,50" for p in example_one)
 
 
 def test_parse_rejects_short_and_non_management_frames():
@@ -262,12 +264,84 @@ def test_highest_tier_wins_when_several_rules_fire():
     assert match_signatures(parse_management_frame(frame)).tier == 4
 
 
-def test_real_eero_probe_is_not_a_flock_hit():
+def test_no_probe_in_the_real_capture_is_a_flock_hit():
     with open(FIXTURE, "rb") as fh:
         infos = [parse_management_frame(f) for f in iter_pcap_frames(fh)]
     probes = [i for i in infos if i is not None and i.is_probe_request]
     assert probes
     assert all(match_signatures(p, ssid_match_enabled=True) is None for p in probes)
+
+
+# --------------------------------------------------------------------------- trailing FCS
+
+# A capture can keep each frame's 4-byte frame check sequence (FCS) after its last element, and
+# radiotap then sets the FCS bit (0x10) of its Flags field. A capture off wlan1 keeps it on every
+# frame (flock_ch1.pcap: all 207). Upstream retries its fingerprint without the last 4 bytes when
+# the whole body does not match (flock-you @6704f01 main.cpp, fyProbeBodyFlockIeSigPrimary), and
+# reads no flag to decide: its ESP32 sniffer sees no radiotap. The device part of the address is
+# made up and locally administered, behind the Flock prefix 82:6b:f2.
+RADIOTAP_FLAGS_FIELD = 0x00000002      # radiotap present bit 1: the one-octet Flags field
+RADIOTAP_F_FCS = 0x10                  # Flags: the frame ends in its FCS
+FLOCK_CAMERA = FLOCK_OUI_LOCALLY_ADMIN + b"\x00\x00\xfc"
+TIER4 = (4, "probe-request IE fingerprint")
+
+
+def probe_request(transmitter, ies, seq=0):
+    """A broadcast probe request from `transmitter`, sequence number `seq`, carrying `ies`."""
+    return (bytes([0x40, 0x00]) + b"\x00\x00" + BROADCAST + transmitter + BROADCAST
+            + struct.pack("<H", seq << 4) + ies)
+
+
+def fcs(dot11):
+    """A frame's FCS as a capture keeps it: the CRC-32 of its bytes, low octet first."""
+    return struct.pack("<I", zlib.crc32(dot11))
+
+
+def flock_probe_whose_fcs(shape):
+    """The Flock probe (FLOCK_IES) with the first sequence number whose FCS has this shape."""
+    for seq in range(4096):
+        probe = probe_request(FLOCK_CAMERA, FLOCK_IES, seq)
+        if shape(fcs(probe)):
+            return probe
+    raise AssertionError("no sequence number gives an FCS of that shape")
+
+
+def radiotap_record(dot11, flags):
+    """`dot11` behind a radiotap header that carries only the Flags field."""
+    return struct.pack("<BBHIB", 0, 0, 9, RADIOTAP_FLAGS_FIELD, flags) + dot11
+
+
+def tcpdump_hits(*records):
+    """What the tcpdump path makes of radiotap records: the match for each frame, in order."""
+    out = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 512, 127)
+    for rec in records:
+        out += struct.pack("<IIII", 0, 0, len(rec), len(rec)) + rec
+    return [match_signatures(parse_management_frame(f))
+            for f in iter_pcap_frames(io.BytesIO(out))]
+
+
+def test_tier4_matches_with_and_without_a_trailing_fcs():
+    # The usual FCS reads as a tag whose declared length runs past the end of the frame.
+    probe = flock_probe_whose_fcs(lambda f: f[0] != 0 and f[1] > 2)
+    hits = tcpdump_hits(radiotap_record(probe + fcs(probe), RADIOTAP_F_FCS),
+                        radiotap_record(probe, 0))
+    assert [(h.tier, h.rule) for h in hits] == [TIER4, TIER4]
+
+
+def test_tier4_matches_when_the_fcs_reads_as_a_whole_element():
+    # About one frame in 256 ends in an FCS whose second octet is 2: a complete two-byte element.
+    probe = flock_probe_whose_fcs(lambda f: f[0] != 0 and f[1] == 2)
+    (hit,) = tcpdump_hits(radiotap_record(probe + fcs(probe), RADIOTAP_F_FCS))
+    assert (hit.tier, hit.rule) == TIER4
+
+
+def test_the_retry_reads_no_fcs_flag_as_upstream_does():
+    # The same bytes with the flag clear: the elements end exactly at the end of the frame, the
+    # last four bytes a two-byte element of its own. Upstream reads no flag, so its retry drops
+    # them all the same, and the fingerprint still matches.
+    probe = flock_probe_whose_fcs(lambda f: f[0] != 0 and f[1] == 2)
+    (hit,) = tcpdump_hits(radiotap_record(probe + fcs(probe), 0))
+    assert (hit.tier, hit.rule) == TIER4
 
 
 # --------------------------------------------------------------------------- roster

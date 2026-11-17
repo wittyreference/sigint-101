@@ -44,6 +44,13 @@ FRAME_TYPE_MANAGEMENT = 0
 SUBTYPE_PROBE_REQUEST = 4
 MGMT_HEADER_LEN = 24
 
+# A frame ends in a 4-byte frame check sequence (FCS), a CRC-32 of the rest. A capture may keep it
+# after the last element (radiotap's Flags field then carries 0x10; a capture off wlan1 keeps it
+# on every frame), and walked as elements those bytes read as one more tag. So the fingerprint is
+# also taken without the last 4 bytes, and either may match: upstream does the same, reading no
+# flag (flock-you @6704f01 main.cpp, fyProbeBodyFlockIeSigPrimary: whole body, then less 4 bytes).
+FCS_LEN = 4
+
 # The Flock OUI set from colonelpanichacks/flock-you @6704f01 (main.cpp): 32 community-reported
 # plus 2 firmware-extracted (b4:1e:52 is Flock's own IEEE block, 00:03:7f the Qualcomm Atheros
 # chip in the camera). Lowercase, matched against the first three octets of a MAC. The locally-
@@ -79,7 +86,9 @@ class FrameInfo:
     """One parsed 802.11 management frame: its addresses and, for a probe request, its IEs.
 
     `src` is the transmitter (addr2), `dst` the receiver (addr1), `bssid` addr3. `ie_signature` is
-    the probe-request fingerprint described on FLOCK_IE_SIGNATURE, or '' for any other frame.
+    the probe-request fingerprint described on FLOCK_IE_SIGNATURE, or '' for any other frame;
+    `ie_signature_without_fcs` is the same fingerprint taken without the last FCS_LEN bytes,
+    where a kept FCS sits ('' when nothing is left).
     """
 
     src: str
@@ -91,6 +100,7 @@ class FrameInfo:
     ssid: str | None
     ssid_wildcard: bool
     ie_signature: str
+    ie_signature_without_fcs: str
 
 
 @dataclass(frozen=True)
@@ -167,12 +177,15 @@ def parse_management_frame(dot11: bytes) -> FrameInfo | None:
     bssid = _mac(dot11[16:22])
     is_probe_request = subtype == SUBTYPE_PROBE_REQUEST
     if is_probe_request:
-        ssid, ssid_wildcard, ie_signature = _parse_ies(dot11[MGMT_HEADER_LEN:])
+        ies = dot11[MGMT_HEADER_LEN:]
+        ssid, ssid_wildcard, ie_signature = _parse_ies(ies)
+        ie_signature_without_fcs = _parse_ies(ies[:-FCS_LEN])[2]
     else:
-        ssid, ssid_wildcard, ie_signature = None, False, ""
+        ssid, ssid_wildcard, ie_signature, ie_signature_without_fcs = None, False, "", ""
     return FrameInfo(src=src, dst=dst, bssid=bssid, ftype=ftype, subtype=subtype,
                      is_probe_request=is_probe_request, ssid=ssid,
-                     ssid_wildcard=ssid_wildcard, ie_signature=ie_signature)
+                     ssid_wildcard=ssid_wildcard, ie_signature=ie_signature,
+                     ie_signature_without_fcs=ie_signature_without_fcs)
 
 
 def _ssid_keyword(ssid: str | None) -> str | None:
@@ -191,7 +204,8 @@ def match_signatures(
 ) -> FlockHit | None:
     """The best Flock tier a frame earns, or None. Highest tier wins.
 
-    tier 4 probe request from a Flock OUI (transmitter) whose IE fingerprint matches exactly;
+    tier 4 probe request from a Flock OUI (transmitter) whose IE fingerprint matches exactly, over
+           every element or without a trailing FCS (see FCS_LEN);
     tier 3 wildcard-SSID probe request from a Flock OUI but the fingerprint does not match;
     tier 2 a Flock OUI as the transmitter of any management frame;
     tier 1 a Flock OUI as the unicast receiver, or as the BSSID of a management frame;
@@ -201,7 +215,7 @@ def match_signatures(
         return None
     src_oui = _oui(frame.src)
     if frame.is_probe_request and src_oui in FLOCK_OUIS:
-        if frame.ie_signature == FLOCK_IE_SIGNATURE:
+        if FLOCK_IE_SIGNATURE in (frame.ie_signature, frame.ie_signature_without_fcs):
             return FlockHit(4, "probe-request IE fingerprint", frame.src, src_oui, frame.ssid)
         if frame.ssid_wildcard:
             return FlockHit(3, "wildcard probe from Flock OUI", frame.src, src_oui, frame.ssid)
