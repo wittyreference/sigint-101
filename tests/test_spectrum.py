@@ -342,7 +342,8 @@ class BlockingProc(FakeProc):
 
 class FedProc(FakeProc):
     """rtl_power after a (re)start: it prints only what a test feeds it, blocks like a live pipe in
-    between, and ends when stopped or when it dies with a status of its own (a pulled dongle)."""
+    between, and ends when stopped or when it exits with a status of its own, as a pulled dongle is
+    expected to end it."""
 
     def __init__(self):
         super().__init__([])
@@ -421,8 +422,9 @@ def test_a_single_radio_still_needs_no_pinning():
 
 def test_a_sweep_keeps_the_serial_the_bus_survey_listed_for_its_radio():
     # The shipped unit pins no serial. The survey made before the radio is opened lists the serial
-    # string the dongle reports, and a baseline sample records it. Dongles left on the factory
-    # default all report 00000001, so it tells apart only dongles whose strings differ.
+    # string the dongle reports, and a baseline sample records it. Many factory-default dongles
+    # report the same serial (the built-in reports 00000001), so it tells apart only dongles whose
+    # strings differ.
     sweeper = Sweeper(spawn=lambda cmd: FakeProc([]), radio_present=lambda: True,
                       list_devices=_bus("1004"))
     sweeper.start()
@@ -474,8 +476,8 @@ def test_after_a_gain_step_only_a_row_the_restarted_sweep_swept_is_a_reading():
 
 
 def test_rows_a_dead_sweep_left_behind_are_no_reading():
-    # A pulled dongle kills rtl_power and leaves its rows in the buffer. Whatever radio is opened
-    # next, those rows are not a reading through it.
+    # When rtl_power exits, as a pulled dongle is expected to make it, its rows stay in the buffer.
+    # Whatever radio is opened next, those rows are not a reading through it.
     procs = []
     sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, list_devices=_bus("1004"))
     sweeper.start()

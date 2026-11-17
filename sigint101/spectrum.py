@@ -447,9 +447,9 @@ class Sweeper:
         self.device = device
         self.serial = serial or None
         # The serial string the bus survey listed for the radio the sweep opened, as the dongle
-        # reports it; a baseline sample records it. Dongles left on the factory default all
-        # report 00000001, the built-in radio among them, so it tells apart only dongles whose
-        # strings differ. None until a survey has listed one, or when the dongle reports none.
+        # reports it; a baseline sample records it. Many factory-default dongles report the same
+        # serial (the built-in reports 00000001), so it tells apart only dongles whose strings
+        # differ. None until a survey has listed one, or when the dongle reports none.
         self.device_serial = None
         # An enumerator is how the sweeper checks which radio it is about to open. Left
         # unwired, the caller has already decided and `device` is taken at its word — which
@@ -766,7 +766,8 @@ class Sweeper:
         always swept with the settings handed out with it. Rows kept from an earlier start (a
         gain step keeps them, and so does a death) may have been swept at another gain, span or
         radio, so a reading recorded under the current settings never borrows one. Taken under
-        the lifecycle lock, so no gain step, retune or restart lands between the two.
+        the lifecycle lock, so no gain step, retune or restart lands between the two. A row's age
+        is not checked: an rtl_power that hangs without exiting keeps its last row as the reading.
         """
         with self._life:
             with self._lock:

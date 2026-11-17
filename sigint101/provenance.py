@@ -29,8 +29,8 @@ def configured_reference_hz(environ=None) -> int:
 # matched on: the radio's serial string, the tuner gain, the reference station, the bin width, and
 # the sweep's span, which sets where the reference falls in its hop. A change in any of them can
 # move the level further than the deaf threshold, so a sample counts only for the set-up it was
-# taken under. The serial is whatever the dongle reports: dongles left on the factory default all
-# report 00000001, the built-in radio among them, so it does not tell those apart.
+# taken under. The serial is whatever the dongle reports, and many factory-default dongles report
+# the same one (the built-in reports 00000001), so it tells apart only dongles whose strings differ.
 SETUP_KEYS = ("serial", "gain", "ref_hz", "bin_size", "freq_low", "freq_high")
 
 # Where the Pi exposes its SoC temperature, in milli-degrees Celsius.

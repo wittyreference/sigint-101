@@ -2662,9 +2662,9 @@ def test_after_a_gain_step_nothing_is_read_or_captured_until_the_new_gain_has_sw
 
 
 def test_after_a_radio_swap_nothing_is_read_or_captured_until_the_new_radio_has_swept(tmp_path):
-    # Radio AAAA is pulled, which kills its rtl_power, and BBBB is plugged in. AAAA's rows stay in
-    # the buffer, but none may be read, or captured, under BBBB's serial. This is also the old
-    # row served after a replug: the first poll that reopens a radio has no reading yet.
+    # Radio AAAA is pulled and its rtl_power exits (modelled here), and BBBB is plugged in. AAAA's
+    # rows stay in the buffer, but none may be read, or captured, under BBBB's serial. This is
+    # also the old row served after a replug: the first poll that reopens a radio has no reading.
     procs, bus, now = [], ["AAAA"], [1000.0]
     with _client(tmp_path, sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
         sweeper = client.app.state.sweeper
