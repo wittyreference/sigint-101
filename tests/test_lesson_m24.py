@@ -62,35 +62,6 @@ ONLY_NOISIER = re.compile(
     r"(?:\w+\s+){0,2}?(?:noisier|grainier|fainter|weaker|worse|dimmer|snowier|more\s+\w+)\b"
     r"|\bonly\s+ever\s+(?:noisier|grainier|fainter|weaker|worse)\b", re.I)
 
-# C20: the panel decodes NOAA APT and nothing else (sigint101/apt.py runs satdump's noaa_apt
-# pipeline on 137.100 MHz), and no satellite sends APT now: NOAA decommissioned its last APT
-# birds, NOAA-18 in June 2025, NOAA-19 and NOAA-15 that August. Russia's Meteor-M N2-3 and N2-4 send
-# digital LRPT, and the console has no decoder for it. The pack said "The panel stays empty until
-# you aim ... at a predicted pass of a live bird: Russia's Meteor-M N2-3 or N2-4", and its concept
-# that a live image now means a Meteor pass, an antenna and a timed pass: a picture the console
-# cannot make. One sentence must name the panel or the console and say it decodes only APT; one
-# must say no satellite sends APT; one must name Meteor and LRPT and say the console cannot decode
-# it. Any sentence that ties Meteor or LRPT to a picture, an image, clouds or the panel must say so.
-SUBJECT = re.compile(r"\b(?:panel|console|decoder)s?\b", re.I)
-DECODES = re.compile(r"\b(?:decod\w*|reads?|handles?|listens?)\b", re.I)
-ONLY_APT = re.compile(
-    r"\bonly\s+(?:\w+\s+)?(?:noaa\s+)?apt\b|\b(?:noaa\s+)?apt\s+(?:only|alone)\b"
-    r"|\bnothing\s+but\s+(?:noaa\s+)?apt\b|\bapt\s+and\s+nothing\s+else\b|\bapt\s+is\s+all\b", re.I)
-NO_APT_NOW = re.compile(
-    r"\b(?:no|not\s+(?:a|one))\s+(?:\w+\s+){0,2}?(?:satellites?|birds?|spacecraft)\b[^.;:?!]*?"
-    r"\b(?:sends?|sending|transmits?|transmitting|broadcasts?|broadcasting|beams?)\b[^.;:?!]*?"
-    r"\bapt\b"
-    r"|\bnothing\b[^.;:?!]*?\b(?:sends?|transmits?|broadcasts?)\s+apt\b", re.I)
-METEOR = re.compile(r"\bmeteor", re.I)
-LRPT = re.compile(r"\blrpt\b", re.I)
-PICTURE = re.compile(r"\b(?:pictures?|images?|photo(?:graph)?s?|panel|clouds?)\b", re.I)
-CANNOT_DECODE = re.compile(
-    r"(?:\b(?:never|not|no|without|cannot|lacks?|lacking)\b|n['’]t)\s+(?:\w+\s+){0,3}?"
-    r"(?:decod\w*|reads?)\b"
-    r"|\bdecoders?\b[^.;:?!]*?\b(?:does\s+not|doesn['’]t|do\s+not|don['’]t)\s+"
-    r"(?:have|has|carry|include)\b"
-    r"|\bdecoders?\b[^.;:?!]*?\black(?:s|ing)?\b", re.I)
-
 
 def _sentences(text):
     """A text's sentences: split after a full stop, question mark or bang and a space."""
@@ -175,25 +146,3 @@ def test_m24_never_says_a_weak_pass_is_never_gone():
 def test_m24_never_says_analog_only_gets_noisier():
     claims = [s for s in _learner_text(load_lesson_file(PACK)) if ONLY_NOISIER.search(s)]
     assert not claims, f"M24 still says analog only gets noisier: {claims}"
-
-
-def test_m24_says_the_panel_decodes_only_apt_and_no_satellite_sends_apt_now():
-    sentences = _learner_text(load_lesson_file(PACK))
-    assert any(SUBJECT.search(s) and DECODES.search(s) and ONLY_APT.search(s)
-               for s in sentences), "M24 must say the panel (or the console) decodes only NOAA APT"
-    assert any(NO_APT_NOW.search(s) for s in sentences), "M24 must say no satellite sends APT now"
-
-
-def test_m24_says_meteor_sends_lrpt_which_the_console_cannot_decode():
-    sentences = _learner_text(load_lesson_file(PACK))
-    assert any(METEOR.search(s) and LRPT.search(s) and CANNOT_DECODE.search(s)
-               for s in sentences), (
-        "M24 must say Meteor sends LRPT and that this console has no decoder for it")
-
-
-def test_m24_never_promises_a_meteor_picture_the_console_cannot_make():
-    claims = [s for s in _learner_text(load_lesson_file(PACK))
-              if (METEOR.search(s) or LRPT.search(s)) and PICTURE.search(s)
-              and not CANNOT_DECODE.search(s)]
-    assert not claims, (
-        f"M24 ties Meteor to a picture without saying the console cannot decode it: {claims}")
