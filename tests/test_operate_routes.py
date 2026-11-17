@@ -204,13 +204,16 @@ CAPTION = re.compile(r'<div class="tune__caption"[^>]*>([^<]*)</div>')
 # (sigint101/flipper.py), and lesson 29's observe says the cable carries the command line both
 # ways. "Serial, radios receive-only" then claimed a state the console does not set: the Flipper's
 # Bluetooth advertises whenever its own setting is on (firmware 1.4.3, bt.c), and the console
-# sends the Flipper nothing but device_info. So the caption names the serial link and claims
-# nothing about what the Flipper or its radios send: no receive-only label in the words a trim
-# reaches for (lesson 19's set), no "sends nothing", and no radio or radio state named at all.
+# sends the Flipper nothing but device_info. So the caption names the serial link and carries no
+# posture word: no receive-only label in the words a trim reaches for (lesson 19's set), no
+# "read-only" (the console writes CLI commands over that same cable), no "sends nothing", and no
+# radio or radio state named at all.
 SERIAL = re.compile(r"\bserial\b", re.I)
 RECEIVE_ONLY = re.compile(
     r"\breceiv(?:e|es|ing)[\s-]+only\b|\brx[\s-]*only\b|\blisten(?:s|ing)?[\s-]+only\b"
     r"|\b(?:only|just|merely)\s+(?:receiv|listen)\w*|\bpassive(?:ly)?\b|\bone[\s-]way\b", re.I)
+READ_ONLY = re.compile(r"\bread[\s-]*only\b|\breads?\s+only\b|\b(?:only|just|merely)\s+reads?\b",
+                       re.I)
 SENDS_NOTHING = re.compile(
     r"(?:\b(?:never|not|no|nothing|none|without)\b|n't).*?"
     r"\b(?:tx|transmi\w*|send\w*|sent|emit\w*|radiat\w*|broadcast\w*|talk\w*|writ\w*)\b"
@@ -236,8 +239,8 @@ def _captions(pages):
 
 
 def _flipper_postures(caption):
-    """The words of a caption that claim what the Flipper or its radios send, or do not."""
-    return [m.group(0) for pattern in (RECEIVE_ONLY, SENDS_NOTHING, RADIO_STATE)
+    """The posture words in a caption: claims on what the link, Flipper or radios send."""
+    return [m.group(0) for pattern in (RECEIVE_ONLY, READ_ONLY, SENDS_NOTHING, RADIO_STATE)
             for m in pattern.finditer(caption)]
 
 
@@ -251,7 +254,7 @@ def test_the_flipper_caption_names_the_serial_link_and_no_posture(tmp_path):
     unnamed = [f"{where}: {c}" for where, c in found if not SERIAL.search(c)]
     assert not unnamed, f"a Flipper caption does not name the serial link: {unnamed}"
     claims = [f"{where}: {c} {_flipper_postures(c)}" for where, c in found if _flipper_postures(c)]
-    assert not claims, f"a Flipper caption claims what the Flipper or its radios send: {claims}"
+    assert not claims, f"a Flipper caption carries a posture word, not only the link: {claims}"
 
 
 @pytest.mark.parametrize("source, other_source", [
