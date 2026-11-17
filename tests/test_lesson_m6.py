@@ -1,8 +1,10 @@
-# ABOUTME: Tests the M6 "Antennas Are Tuning Forks" pack's resonance claim: an antenna off its
-# ABOUTME: length hears worse, it is never deaf, and too long is never called as bad as too short.
+# ABOUTME: Tests M6 "Antennas Are Tuning Forks" says an antenna off its length hears worse, never
+# ABOUTME: deaf, nor too long as bad as too short; M7 and M13 never call the antenna deaf either.
 
 import re
 from pathlib import Path
+
+import pytest
 
 from sigint101.lessons import load_lesson_file
 
@@ -59,7 +61,7 @@ def _sentences(text):
 
 
 def _learner_text(lesson):
-    """Every sentence the learner reads in M6: title, concept, stages, verdict, chips, any check."""
+    """Every sentence a lesson shows: title, concept, stages, verdict, chips and any check."""
     texts = [lesson.title, lesson.concept, *lesson.stages.values(), lesson.verdict,
              *(choice["label"] for choice in lesson.choices)]
     if lesson.check:
@@ -103,3 +105,36 @@ def test_m6_never_calls_too_long_as_bad_as_too_short():
 def test_m6_says_an_antenna_off_its_length_hears_worse():
     lines = [s for s in _learner_text(load_lesson_file(PACK)) if HEARS_WORSE.search(s)]
     assert lines, "M6 must say an antenna off its length hears worse, not that it hears nothing"
+
+
+# M7 and M13 said it too: "If this antenna stays deaf at 1090" (M7's try) and "If the sky is quiet
+# or the antenna deaf to 1090 MHz" (M13's try). An antenna that hears 1090 poorly still hears it.
+# Those packs use the same words in other senses: M7's strong FM "blinding the radio" swamps the
+# front end, its "dead-looking band" is a band, and "deaf" said of a radio's front end, as in M3,
+# is another claim. So there a clause counts only when it names the antenna (the antenna, the
+# whip, the dipole, a leg, an element or the length) and calls it deaf, blind, dead, silent, mute
+# or useless, or has it hearing, catching, picking up or receiving nothing, or negated with no
+# degree after it.
+OTHER_PACKS = ("07-build-and-aim.yaml", "13-adsb.yaml")
+NAMED_ANTENNA = re.compile(r"\b(?:antennas?|whips?|dipoles?|legs?|elements?|lengths?)\b", re.I)
+NO_HEARING = re.compile(r"\bdeaf\w*|\bblind\w*|\b(?:dead|silent|mute|useless)\b"
+                        rf"|\bnothing\s+at\s+all\b|\b{HEAR}\s+(?:nothing|none|no)\b", re.I)
+
+
+def _named_antenna_deaf_claims(lesson):
+    """Each clause of a lesson that names the antenna and calls it deaf, in a wording above."""
+    claims = []
+    for sentence in _learner_text(lesson):
+        for clause in _clauses(sentence):
+            if not NAMED_ANTENNA.search(clause):
+                continue
+            negated = NEGATED_HEAR.search(clause)
+            if NO_HEARING.search(clause) or (negated and not DEGREE.search(negated.group("rest"))):
+                claims.append(clause)
+    return claims
+
+
+@pytest.mark.parametrize("pack", OTHER_PACKS)
+def test_m7_and_m13_never_call_the_antenna_deaf(pack):
+    claims = _named_antenna_deaf_claims(load_lesson_file(PACK.parent / pack))
+    assert not claims, f"{pack} still calls the antenna deaf: {claims}"
