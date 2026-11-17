@@ -23,7 +23,7 @@ from sigint101.pocsag import PocsagDecoder
 from sigint101.ppm import PpmUnavailable
 from sigint101.provenance import REFERENCE_HZ
 from sigint101.rds import RDSDecoder
-from sigint101.spectrum import DEFAULT_BIN
+from sigint101.spectrum import DEFAULT_BIN, DEFAULT_HIGH, DEFAULT_LOW
 from sigint101.sstv import SstvDecoder
 from tests.child_fakes import USB_BUSY, Child
 from tests.test_app import (
@@ -329,7 +329,8 @@ def test_ppm_measure_refuses_a_pinned_radio_that_is_not_there(tmp_path, monkeypa
 def test_provenance_poll_does_not_reread_the_event_log(tmp_path):
     events = tmp_path / "events.jsonl"
     # Taken under the set-up a console with no radio reports, so every sample counts.
-    setup = {"serial": None, "gain": None, "ref_hz": REFERENCE_HZ, "bin_size": DEFAULT_BIN}
+    setup = {"serial": None, "gain": None, "ref_hz": REFERENCE_HZ, "bin_size": DEFAULT_BIN,
+             "freq_low": DEFAULT_LOW, "freq_high": DEFAULT_HIGH}
     log_event(events, "baseline_sample", {"ref_db": -20.0, **setup})
     log_event(events, "baseline_sample", {"ref_db": -21.0, **setup})
     with _client(tmp_path) as client:

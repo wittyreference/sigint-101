@@ -25,11 +25,13 @@ def configured_reference_hz(environ=None) -> int:
     return configured_fm_hz(REFERENCE_HZ_ENV, REFERENCE_HZ, environ)
 
 
-# What a reference level depends on besides the radio's health: the radio that read it (its serial
-# as the bus survey listed it), the tuner gain, the reference station and the bin width. Another
-# radio or two gain steps move the level further than the deaf threshold, so a baseline sample
-# counts only for the set-up it was taken under.
-SETUP_KEYS = ("serial", "gain", "ref_hz", "bin_size")
+# What a reference level depends on besides the radio's health, so what a baseline sample is
+# matched on: the radio's serial string, the tuner gain, the reference station, the bin width, and
+# the sweep's span, which sets where the reference falls in its hop. A change in any of them can
+# move the level further than the deaf threshold, so a sample counts only for the set-up it was
+# taken under. The serial is whatever the dongle reports: dongles left on the factory default all
+# report 00000001, the built-in radio among them, so it does not tell those apart.
+SETUP_KEYS = ("serial", "gain", "ref_hz", "bin_size", "freq_low", "freq_high")
 
 # Where the Pi exposes its SoC temperature, in milli-degrees Celsius.
 THERMAL_PATH = "/sys/class/thermal/thermal_zone0/temp"
@@ -129,20 +131,22 @@ def reference_level_db(row, hz: int = REFERENCE_HZ):
     return row.dbm[index]
 
 
-def gather_provenance(*, serial, gain, bin_size=None, row=None,
+def gather_provenance(*, serial, gain, bin_size=None, freq_low=None, freq_high=None, row=None,
                       temp=read_soc_temp_c, throttled=read_throttled):
     """Assemble the radio's account of itself into one snapshot.
 
-    Pulls the settings the console already knows (serial, gain, bin size) together with what only
-    the hardware can say right now (temperature, power health, the reference level). Anything that
-    cannot be read is None in the snapshot, so a gap reads as "unknown" rather than a plausible
-    zero that a later comparison would trust.
+    Pulls the settings the console already knows (serial, gain, bin size, span) together with
+    what only the hardware can say right now (temperature, power health, the reference level).
+    Anything that cannot be read is None in the snapshot, so a gap reads as "unknown" rather than
+    a plausible zero that a later comparison would trust.
     """
     ref_hz = configured_reference_hz()
     return {
         "serial": serial or None,
         "gain": gain,
         "bin_size": bin_size,
+        "freq_low": freq_low,
+        "freq_high": freq_high,
         "bias_state": BIAS_STATE,
         "soc_temp_c": temp(),
         "throttled": throttled(),
@@ -194,9 +198,9 @@ def compare_to_baseline(current_ref_db, samples, *, setup=None,
 
     `setup` is the current reading's set-up (its snapshot will do): only samples taken under the
     same one make the baseline, and `n_set_aside` counts the others. A level read through another
-    radio or at another gain says nothing about whether this one has gone deaf, so with no sample
-    from this set-up there is no baseline for it, whatever else was recorded. Without `setup`,
-    every sample counts.
+    radio, at another gain or in another span can differ by more than the threshold with nothing
+    wrong, so with no sample from this set-up there is no baseline for it, whatever else was
+    recorded. Without `setup`, every sample counts.
 
     `drop_threshold_db` is deliberately a parameter, not a constant: the honest threshold is the
     spread the baseline itself shows across its samples (which is why the baseline is taken more

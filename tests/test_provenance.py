@@ -173,9 +173,10 @@ def test_compare_does_not_flag_a_reference_within_the_threshold(tmp_path):
 
 # --- the baseline belongs to one set-up: radio, gain, reference station, bin size ---------------
 
-# Another radio or two gain steps move the reference level further than the 6 dB threshold, so a
-# sample taken under another set-up says nothing about whether this radio has gone deaf.
-_HERE = {"serial": "00000001", "gain": None, "ref_hz": REFERENCE_HZ, "bin_size": 125_000}
+# Another radio, two gain steps or another span can move the reference level further than the
+# 6 dB threshold, so a sample taken under another set-up cannot say whether this radio went deaf.
+_HERE = {"serial": "00000001", "gain": None, "ref_hz": REFERENCE_HZ, "bin_size": 125_000,
+         "freq_low": 88_000_000, "freq_high": 108_000_000}
 
 
 def test_a_snapshot_records_the_bin_size_its_reference_was_read_in():
@@ -185,19 +186,28 @@ def test_a_snapshot_records_the_bin_size_its_reference_was_read_in():
     assert (snapshot["serial"], snapshot["gain"]) == ("00000001", 20.7)
 
 
+def test_a_snapshot_records_the_span_its_reference_was_read_in():
+    # Where the reference falls in its hop follows from the span, and can move its level.
+    snapshot = gather_provenance(serial="00000001", gain=None, bin_size=125_000,
+                                 freq_low=89_037_500, freq_high=109_037_500, row=_row(),
+                                 temp=lambda: None, throttled=lambda: None)
+    assert (snapshot["freq_low"], snapshot["freq_high"]) == (89_037_500, 109_037_500)
+
+
 def test_compare_counts_only_the_samples_taken_under_the_current_set_up():
-    # Pooled, the four samples from other set-ups (15 dB up) would put the median at -27 dB and
+    # Pooled, the five samples from other set-ups (15 dB up) would put the median at -27 dB and
     # call this healthy radio deaf.
     samples = [{**_HERE, "ref_db": -42.0}, {**_HERE, "ref_db": -43.0}, {**_HERE, "ref_db": -41.0},
                {**_HERE, "serial": "00000002", "ref_db": -27.0},
                {**_HERE, "gain": 20.7, "ref_db": -27.0},
                {**_HERE, "bin_size": 62_500, "ref_db": -27.0},
-               {**_HERE, "ref_hz": 94_700_000, "ref_db": -27.0}]
+               {**_HERE, "ref_hz": 94_700_000, "ref_db": -27.0},
+               {**_HERE, "freq_low": 89_037_500, "freq_high": 109_037_500, "ref_db": -27.0}]
     verdict = compare_to_baseline(-42.0, samples, setup=_HERE)
     assert verdict["n_samples"] == 3
     assert verdict["baseline_ref_db"] == -42.0
     assert verdict["degraded"] is False
-    assert verdict["n_set_aside"] == 4
+    assert verdict["n_set_aside"] == 5
 
 
 def test_with_no_sample_from_the_current_set_up_there_is_no_baseline_for_it():

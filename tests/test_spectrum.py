@@ -2,6 +2,7 @@
 # ABOUTME: No radio means no data — the Sweeper reports absence, it never invents a signal.
 
 import io
+import queue
 import subprocess
 import threading
 import time
@@ -339,6 +340,46 @@ class BlockingProc(FakeProc):
         return self.returncode
 
 
+class FedProc(FakeProc):
+    """rtl_power after a (re)start: it prints only what a test feeds it, blocks like a live pipe in
+    between, and ends when stopped or when it dies with a status of its own (a pulled dongle)."""
+
+    def __init__(self):
+        super().__init__([])
+        self._lines = queue.Queue()
+        self.returncode = None
+        self.stdout = iter(self._lines.get, None)
+        self.stderr = io.StringIO("")
+
+    def feed(self, lines):
+        for line in lines:
+            self._lines.put(line)
+
+    def die(self, code):
+        self.returncode = code
+        self._lines.put(None)
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        if self.returncode is None:
+            self.returncode = -15
+        self._lines.put(None)
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def wait_for_rows(sweeper, count, timeout=5.0):
+    """Wait for the sweeper to hold `count` rows: a pass is published when the next one begins."""
+    deadline = time.monotonic() + timeout
+    while len(sweeper.rows()) < count and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(sweeper.rows()) >= count, f"{len(sweeper.rows())} rows after {timeout} s"
+
+
 def _bus(*serials):
     """A stand-in enumerator: the bus as librtlsdr would number it."""
     from sigint101.hardware import RtlSdrDevice
@@ -378,16 +419,17 @@ def test_a_single_radio_still_needs_no_pinning():
     assert sweeper.device == 0
 
 
-def test_a_sweep_names_its_radio_by_the_serial_the_bus_survey_listed():
-    # The shipped unit pins no serial. The survey made before the radio is opened is what names
-    # it, so a baseline sample can say which radio its reference reading came through.
+def test_a_sweep_keeps_the_serial_the_bus_survey_listed_for_its_radio():
+    # The shipped unit pins no serial. The survey made before the radio is opened lists the serial
+    # string the dongle reports, and a baseline sample records it. Dongles left on the factory
+    # default all report 00000001, so it tells apart only dongles whose strings differ.
     sweeper = Sweeper(spawn=lambda cmd: FakeProc([]), radio_present=lambda: True,
                       list_devices=_bus("1004"))
     sweeper.start()
     assert (sweeper.device, sweeper.device_serial) == (0, "1004")
 
 
-def test_a_sweep_that_cannot_name_its_radio_says_none():
+def test_a_sweep_with_no_surveyed_serial_keeps_none():
     # No survey (the caller chose the index), or a radio whose EEPROM holds no serial string:
     # either way the serial is unknown, and unknown is None, never a guess.
     unsurveyed = Sweeper(spawn=lambda cmd: FakeProc([]), radio_present=lambda: True)
@@ -397,6 +439,52 @@ def test_a_sweep_that_cannot_name_its_radio_says_none():
     blank.start()
     assert unsurveyed.device_serial is None
     assert blank.device_serial is None
+
+
+def _fed(procs):
+    """A spawn that starts a FedProc each time, keeping them so a test can feed the newest."""
+    def spawn(cmd):
+        procs.append(FedProc())
+        return procs[-1]
+    return spawn
+
+
+def test_after_a_gain_step_only_a_row_the_restarted_sweep_swept_is_a_reading():
+    # A gain step keeps the old rows for the waterfall (Lesson 2 shows the step), but they were
+    # swept at the old gain. A reading names the settings it was swept under, so until the
+    # restarted rtl_power has finished a pass there is no reading at all.
+    procs = []
+    sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, list_devices=_bus("1004"))
+    sweeper.start()
+    procs[-1].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    row, settings = sweeper.reading()
+    assert row == sweeper.rows()[-1]
+    assert settings == {"serial": "1004", "gain": None, "bin_size": 125_000,
+                        "freq_low": 88_000_000, "freq_high": 108_000_000}
+    sweeper.set_gain(0.0)
+    assert sweeper.reading() == (None, {**settings, "gain": 0.0})
+    sweeper.start()
+    assert sweeper.reading()[0] is None
+    assert len(sweeper.rows()) == 2               # still there for the waterfall
+    procs[-1].feed(FM_LINES)
+    wait_for_rows(sweeper, 4)
+    assert sweeper.reading() == (sweeper.rows()[-1], {**settings, "gain": 0.0})
+    sweeper.stop()
+
+
+def test_rows_a_dead_sweep_left_behind_are_no_reading():
+    # A pulled dongle kills rtl_power and leaves its rows in the buffer. Whatever radio is opened
+    # next, those rows are not a reading through it.
+    procs = []
+    sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, list_devices=_bus("1004"))
+    sweeper.start()
+    procs[-1].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    procs[-1].die(1)
+    sweeper.drain()
+    assert len(sweeper.rows()) == 2
+    assert sweeper.reading()[0] is None
 
 
 def test_a_sweeper_whose_process_exited_is_not_running():

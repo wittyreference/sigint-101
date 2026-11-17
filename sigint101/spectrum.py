@@ -446,8 +446,10 @@ class Sweeper:
         # becomes the index 1, which on a bus shared with a KrakenSDR is a different radio.
         self.device = device
         self.serial = serial or None
-        # The serial the bus survey listed for the radio the sweep opened: what names that radio
-        # in a baseline sample. None until a survey has named one, or when the radio has none.
+        # The serial string the bus survey listed for the radio the sweep opened, as the dongle
+        # reports it; a baseline sample records it. Dongles left on the factory default all
+        # report 00000001, the built-in radio among them, so it tells apart only dongles whose
+        # strings differ. None until a survey has listed one, or when the dongle reports none.
         self.device_serial = None
         # An enumerator is how the sweeper checks which radio it is about to open. Left
         # unwired, the caller has already decided and `device` is taken at its word — which
@@ -456,7 +458,13 @@ class Sweeper:
         self.gain = validate_gain(gain)
         self._spawn = spawn
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
+        # Each row is kept with the number of the rtl_power start that swept it. A gain step, a
+        # retune and a radio swap all take effect only through a new start, and a gain step or a
+        # death keeps the old rows, so a row from an earlier start may have been swept at another
+        # gain, span or radio than the sweeper now names. reading() hands out only the rows of the
+        # start that is running now.
         self._rows = deque(maxlen=history)
+        self._run = 0
         # Two locks on purpose. _lock guards the row buffer and is taken by the reader
         # thread; _life guards start/stop/release so two threadpool routes cannot race
         # over the dongle. Sharing one would deadlock, because stop() joins the reader
@@ -605,22 +613,25 @@ class Sweeper:
         self.error = None
         self._interrupted = False
         self._started_at = self._clock()
+        self._run += 1
         # A daemon thread, so a wedged rtl_power cannot keep the whole console alive
         # after shutdown — the dongle must come free when the service stops.
-        self._thread = threading.Thread(target=self._read, name="sigint101-sweeper", daemon=True)
+        self._thread = threading.Thread(target=self._read, args=(self._run,),
+                                        name="sigint101-sweeper", daemon=True)
         self._thread.start()
 
-    def _read(self) -> None:
+    def _read(self, run: int) -> None:
         """Consume rtl_power's CSV on a background thread until the process ends.
 
         Runs off the request path because a sweep never finishes on its own — reading
-        it inline would block the console forever.
+        it inline would block the console forever. `run` is the start this process belongs
+        to; every row it publishes is kept with it.
         """
         try:
             for raw in self._proc.stdout:
                 chunk = parse_line(raw)
                 if chunk is not None:
-                    self._absorb(chunk)
+                    self._absorb(chunk, run)
         except (OSError, ValueError) as exc:  # loud, never silent
             self.error = str(exc)
         finally:
@@ -639,7 +650,7 @@ class Sweeper:
             else:
                 code = None if self._proc is None else self._proc.poll()
                 if code is None or code == 0:
-                    self._flush()
+                    self._flush(run)
                 else:
                     self._record_abnormal_death(code)
                     self._pending = []
@@ -711,10 +722,10 @@ class Sweeper:
             return ""
         return ": " + " | ".join(lines[-cls.STDERR_LINES:])[:400]
 
-    def _absorb(self, chunk: SweepRow) -> None:
+    def _absorb(self, chunk: SweepRow, run: int) -> None:
         """Collect one chunk, closing off the previous sweep when a new one begins."""
         if self._pending and self._starts_a_new_sweep(chunk):
-            self._flush()
+            self._flush(run)
         self._pending.append(chunk)
 
     def _starts_a_new_sweep(self, chunk: SweepRow) -> bool:
@@ -723,14 +734,14 @@ class Sweeper:
         # The band wrapping back to a lower frequency is the reliable structural signal.
         return chunk.ts != self._pending[0].ts or chunk.freq_low <= self._pending[-1].freq_low
 
-    def _flush(self) -> None:
-        """Turn the collected chunks into one full-band row and publish it."""
+    def _flush(self, run: int) -> None:
+        """Turn the collected chunks into one full-band row and publish it, kept with its run."""
         if not self._pending:
             return
         row = merge_chunks(self._pending)
         self._pending = []
         with self._lock:
-            self._rows.append(row)
+            self._rows.append((run, row))
 
     def drain(self, timeout: float = 5.0) -> None:
         """Wait for a finite source to be fully consumed. Real sweeps never end."""
@@ -743,10 +754,27 @@ class Sweeper:
         Copied under the lock because the reader thread appends while the console reads.
         """
         with self._lock:
-            rows = list(self._rows)
+            rows = [row for _, row in self._rows]
         if limit is None:
             return rows
         return rows[-limit:] if limit > 0 else []
+
+    def reading(self) -> tuple:
+        """The newest row the running rtl_power has swept, or None, and the settings it is on.
+
+        The row is None until the sweep running now has finished a pass, so a row handed out was
+        always swept with the settings handed out with it. Rows kept from an earlier start (a
+        gain step keeps them, and so does a death) may have been swept at another gain, span or
+        radio, so a reading recorded under the current settings never borrows one. Taken under
+        the lifecycle lock, so no gain step, retune or restart lands between the two.
+        """
+        with self._life:
+            with self._lock:
+                run, row = self._rows[-1] if self._rows else (None, None)
+            if run != self._run or not self.running:
+                row = None
+            return row, {"serial": self.device_serial, "gain": self.gain,
+                         "bin_size": self.bin_size, "freq_low": self.low, "freq_high": self.high}
 
     def set_gain(self, gain) -> None:
         """Point the input amplifier at a new gain and stand down; the next poll restarts.

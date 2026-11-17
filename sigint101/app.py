@@ -992,44 +992,40 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.exam_store.clear_sim()
         return RedirectResponse("/exam/sim", status_code=303)
 
-    def _current_row():
-        """The latest real sweep row, lazily starting the sweeper, or None when there is no radio.
+    def _reading():
+        """The sweep's newest row and the settings it was swept under, lazily starting the sweep.
 
         Mirrors /api/spectrum's lazy start so the provenance panel works on its own: a reference
-        level can only be read from a sweep the hardware actually produced, never invented.
+        level can only be read from a sweep the hardware actually produced, never invented. The
+        row is None with no radio, and until the sweep running now has finished a pass: a row kept
+        from before a gain step, a retune or a restart was swept under other settings.
         """
         sweeper = app.state.sweeper
         if not sweeper.running:
             try:
                 sweeper.start()
             except SpectrumUnavailable:
-                return None
-        rows = sweeper.rows(1)
-        return rows[-1] if rows else None
+                pass
+        return sweeper.reading()
 
     def _snapshot():
         """The radio's account of itself now — None fields where the hardware cannot answer.
 
-        The row is read first: starting the sweep is what surveys the bus, so the serial is the
-        one the survey listed for the radio the sweep opened, not an environment setting.
+        The settings come from the sweep with the row they were swept under, so a sample never
+        names one gain, span or radio for a level read at another. The serial is the string the
+        bus survey listed for the radio the sweep opened, not an environment setting.
         """
-        sweeper = app.state.sweeper
-        row = _current_row()
-        return gather_provenance(
-            serial=getattr(sweeper, "device_serial", None),
-            gain=sweeper.gain,
-            bin_size=sweeper.bin_size,
-            row=row,
-        )
+        row, settings = _reading()
+        return gather_provenance(row=row, **settings)
 
     @app.get("/api/provenance")
     def provenance_view():
         """The instrument's state plus how its reference level compares to the captured baseline.
 
         A degraded verdict is the deaf-vs-empty signal of M3: the reference has dropped well below
-        the baseline while nothing else moved. Only samples taken under the current set-up (radio,
-        gain, reference station, bin size) count, since another radio or another gain moves the
-        level by itself. With no baseline for this set-up, the comparison says so rather than
+        the baseline while nothing else moved. Only samples taken under the current set-up (serial,
+        gain, reference station, bin size, span) count, since a change in any of them can move the
+        level on its own. With no baseline for this set-up, the comparison says so rather than
         guessing a verdict.
         """
         snapshot = _snapshot()
@@ -1043,11 +1039,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
         A baseline against a reference the hardware never read would be a number to trust later
         that was never measured; the honest answer is to refuse, the same way the spectrum route
-        refuses to fake a sweep.
+        refuses to fake a sweep. That includes the seconds after a gain step, a retune or a
+        restart, before the sweep has finished a pass under the settings the sample would name.
         """
         snapshot = _snapshot()
         if snapshot["ref_db"] is None:
-            reason = "no reference level — the sweep must cover the reference before a baseline"
+            waiting = app.state.sweeper.running and app.state.sweeper.reading()[0] is None
+            reason = ("no reference yet — the sweep has not finished a pass since it started"
+                      if waiting else
+                      "no reference level — the sweep must cover the reference before a baseline")
             log_event(app.state.events_path, "baseline_refused", {"reason": reason})
             return JSONResponse(status_code=400, content={"recorded": False, "reason": reason})
         record_baseline_sample(app.state.events_path, snapshot)
