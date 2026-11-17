@@ -1,5 +1,5 @@
-# ABOUTME: Lesson M22 "Two Streams" — I/Q (quadrature) sampling (no RF): the dongle hands up two
-# ABOUTME: streams a quarter-cycle apart, carrying phase as well as amplitude; 2.4 MSPS is a 2.4 MHz slice.
+# ABOUTME: Lesson M22 "Two Streams" — I/Q (quadrature) sampling (no RF): the dongle hands up two streams, measured
+# ABOUTME: against references a quarter-cycle apart, carrying phase as well as amplitude; 2.4 MSPS is a 2.4 MHz slice.
 
 id: 22
 slug: iq-sampling
@@ -17,9 +17,9 @@ stages:
     dongle handing up to draw it? Not one stream of numbers. Two. See why there must be two, and the
     waterfall becomes arithmetic.
   demo: >-
-    The radio measures each sample twice, a quarter-cycle apart: I and Q. One gives only amplitude;
-    the pair gives phase. Picture a clock hand — I its shadow on the floor, Q on the wall. One shadow
-    cannot tell which way it spins; two can, telling above from below.
+    The radio measures each sample two ways, against two references a quarter-cycle apart: I and Q.
+    One gives only amplitude; the pair gives phase. Picture a clock hand — I its shadow on the floor,
+    Q on the wall. One shadow cannot tell which way it spins; two can, telling above from below.
   try: >-
     Your turn, comrade. Each complex pair lets the radio separate frequencies above and below where
     you tuned. The dongle takes 2.4 million pairs a second. So how wide a slice can it watch at once —
