@@ -199,15 +199,15 @@ LESSON_PACKS = Path(__file__).resolve().parent.parent / "lesson_packs"
 # The caption under a fixed dial. The rack's dial and the lesson's carry the same line.
 CAPTION = re.compile(r'<div class="tune__caption"[^>]*>([^<]*)</div>')
 
-# Where a caption's clauses break: its middle dots, commas, semicolons, colons, dashes, brackets.
-CLAUSE_BREAK = re.compile(r"[·,;:—–()]")
-
-# The Flipper's caption said "Flipper Zero · serial, receive-only". Read as the cable, that is
-# false: the console types CLI commands down it (sigint101/flipper.py), and lesson 29's observe
-# says the cable carries the command line both ways. What holds is narrower: nothing the console
-# asks of the Flipper keys one of its radios. So a receive-only label, in the words a trim reaches
-# for (lesson 19's set), or a clause that says nothing is sent, passes only in a clause that names
-# the radios and not the link.
+# The Flipper's caption names the link and nothing more: "Flipper Zero · serial". Main's "serial,
+# receive-only" called the cable receive-only, yet the console types CLI commands down it
+# (sigint101/flipper.py), and lesson 29's observe says the cable carries the command line both
+# ways. "Serial, radios receive-only" then claimed a state the console does not set: the Flipper's
+# Bluetooth advertises whenever its own setting is on (firmware 1.4.3, bt.c), and the console
+# sends the Flipper nothing but device_info. So the caption names the serial link and claims
+# nothing about what the Flipper or its radios send: no receive-only label in the words a trim
+# reaches for (lesson 19's set), no "sends nothing", and no radio or radio state named at all.
+SERIAL = re.compile(r"\bserial\b", re.I)
 RECEIVE_ONLY = re.compile(
     r"\breceiv(?:e|es|ing)[\s-]+only\b|\brx[\s-]*only\b|\blisten(?:s|ing)?[\s-]+only\b"
     r"|\b(?:only|just|merely)\s+(?:receiv|listen)\w*|\bpassive(?:ly)?\b|\bone[\s-]way\b", re.I)
@@ -215,8 +215,9 @@ SENDS_NOTHING = re.compile(
     r"(?:\b(?:never|not|no|nothing|none|without)\b|n't).*?"
     r"\b(?:tx|transmi\w*|send\w*|sent|emit\w*|radiat\w*|broadcast\w*|talk\w*|writ\w*)\b"
     r"|\b(?:transmi\w*|send\w*|emit\w*|writ\w*)\s+(?:nothing|none|no)\b", re.I)
-RADIOS = re.compile(r"\bradios?\b|\bsub-?ghz\b|\bantennas?\b", re.I)
-LINK = re.compile(r"\b(?:serial|usb|cli|cable|link|port|uart|bridge|command\w*|wired?)\b", re.I)
+RADIO_STATE = re.compile(
+    r"\bradios?\b|\brf\b|\bbluetooth\b|\bble\b|\bsub-?ghz\b|\bnfc\b|\brfid\b|\binfrared\b"
+    r"|\bantennas?\b|\bsilen\w*|\bquiet\b|\bidle\b|\boff[\s-]air\b|\bmonitor[\s-]+only\b", re.I)
 
 # The Flock caption named wlan1 ("WiFi · wlan1 monitor mode, receive-only") even where the site
 # sets SIGINT101_FLOCK_SOURCE=marauder, whose radio is the Flipper's Wi-Fi devboard read over the
@@ -234,22 +235,23 @@ def _captions(pages):
     return {where: [unescape(c) for c in CAPTION.findall(page)] for where, page in pages.items()}
 
 
-def _labels_off_the_radios(caption):
-    """The clauses of a caption that call anything but the radios receive-only, or silent."""
-    return [clause.strip() for clause in CLAUSE_BREAK.split(caption)
-            if (RECEIVE_ONLY.search(clause) or SENDS_NOTHING.search(clause))
-            and (LINK.search(clause) or not RADIOS.search(clause))]
+def _flipper_postures(caption):
+    """The words of a caption that claim what the Flipper or its radios send, or do not."""
+    return [m.group(0) for pattern in (RECEIVE_ONLY, SENDS_NOTHING, RADIO_STATE)
+            for m in pattern.finditer(caption)]
 
 
-def test_the_flipper_caption_never_calls_its_command_line_receive_only(tmp_path):
+def test_the_flipper_caption_names_the_serial_link_and_no_posture(tmp_path):
     with _client(tmp_path, pack_dir=LESSON_PACKS) as client:
         pages = {"lesson 29": client.get("/lesson/29").text,
                  "the rack": client.get("/operate/flipper").text}
     captions = _captions(pages)
     assert all(captions.values()), f"each page must carry the Flipper dial's caption: {captions}"
-    labelled = [f"{where}: {c}" for where, found in captions.items() for c in found
-                if _labels_off_the_radios(c)]
-    assert not labelled, f"a Flipper caption calls more than its radios receive-only: {labelled}"
+    found = [(where, c) for where, cs in captions.items() for c in cs]
+    unnamed = [f"{where}: {c}" for where, c in found if not SERIAL.search(c)]
+    assert not unnamed, f"a Flipper caption does not name the serial link: {unnamed}"
+    claims = [f"{where}: {c} {_flipper_postures(c)}" for where, c in found if _flipper_postures(c)]
+    assert not claims, f"a Flipper caption claims what the Flipper or its radios send: {claims}"
 
 
 @pytest.mark.parametrize("source, other_source", [

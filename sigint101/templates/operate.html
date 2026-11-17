@@ -16,7 +16,7 @@
   'lora': ('915', 'MHz', 'US LoRa band · meshtastic listening'),
   'flock': ('2.4', 'GHz', 'WiFi · monitor mode, receive-only'),
   'rayhunter': ('ORBIC', '·4G', 'Rayhunter · control plane, read-only'),
-  'flipper': ('USB', '·CLI', 'Flipper Zero · serial, radios receive-only'),
+  'flipper': ('USB', '·CLI', 'Flipper Zero · serial'),
 } %}
 
 {% macro step_label(hz) %}{{ "%g MHz"|format(hz / 1000000) if hz >= 1000000 else "%g kHz"|format(hz / 1000) }}{% endmacro %}
