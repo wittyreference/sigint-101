@@ -80,6 +80,11 @@
     // sweep row) leaves nothing to judge, so no baseline state can turn it into a verdict.
     var hasRef = p.ref_db !== null && p.ref_db !== undefined;
     if (!hasRef) return { text: "NO REFERENCE — can't tell", kind: "na" };
+    // A baseline counts only for the set-up it was taken under (radio, gain, reference, bin), so
+    // samples set aside from other set-ups leave this one without a baseline of its own.
+    if (!b.has_baseline && b.n_set_aside > 0) {
+      return { text: "NO BASELINE — this set-up", kind: "na" };
+    }
     if (!b.has_baseline) return { text: "NO BASELINE — capture one", kind: "na" };
     if (b.degraded) return { text: "▼ DEGRADED — gone deaf", kind: "bad" };
     return { text: "✓ HEALTHY", kind: "ok" };

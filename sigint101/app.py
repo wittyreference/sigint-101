@@ -1008,11 +1008,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return rows[-1] if rows else None
 
     def _snapshot():
-        """The radio's account of itself now — None fields where the hardware cannot answer."""
+        """The radio's account of itself now — None fields where the hardware cannot answer.
+
+        The row is read first: starting the sweep is what surveys the bus, so the serial is the
+        one the survey listed for the radio the sweep opened, not an environment setting.
+        """
+        sweeper = app.state.sweeper
+        row = _current_row()
         return gather_provenance(
-            serial=os.environ.get(RTLSDR_SERIAL_ENV),
-            gain=app.state.sweeper.gain,
-            row=_current_row(),
+            serial=getattr(sweeper, "device_serial", None),
+            gain=sweeper.gain,
+            bin_size=sweeper.bin_size,
+            row=row,
         )
 
     @app.get("/api/provenance")
@@ -1020,11 +1027,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """The instrument's state plus how its reference level compares to the captured baseline.
 
         A degraded verdict is the deaf-vs-empty signal of M3: the reference has dropped well below
-        the baseline while nothing else moved. With no baseline yet, the comparison says so rather
-        than guessing a verdict.
+        the baseline while nothing else moved. Only samples taken under the current set-up (radio,
+        gain, reference station, bin size) count, since another radio or another gain moves the
+        level by itself. With no baseline for this set-up, the comparison says so rather than
+        guessing a verdict.
         """
         snapshot = _snapshot()
-        verdict = compare_to_baseline(snapshot["ref_db"], app.state.baseline.samples())
+        verdict = compare_to_baseline(snapshot["ref_db"], app.state.baseline.samples(),
+                                      setup=snapshot)
         return {"provenance": snapshot, "baseline": verdict}
 
     @app.post("/api/provenance/baseline")

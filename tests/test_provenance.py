@@ -2,6 +2,7 @@
 # ABOUTME: Temp/throttled sources are injected so the readings are deterministic off the Pi.
 
 from sigint101.provenance import (
+    BIAS_STATE,
     REFERENCE_HZ,
     REFERENCE_HZ_ENV,
     compare_to_baseline,
@@ -168,3 +169,51 @@ def test_compare_does_not_flag_a_reference_within_the_threshold(tmp_path):
     samples = [{"ref_db": -42.0}, {"ref_db": -43.0}, {"ref_db": -41.0}]
     verdict = compare_to_baseline(-44.0, samples, drop_threshold_db=6.0)
     assert verdict["degraded"] is False
+
+
+# --- the baseline belongs to one set-up: radio, gain, reference station, bin size ---------------
+
+# Another radio or two gain steps move the reference level further than the 6 dB threshold, so a
+# sample taken under another set-up says nothing about whether this radio has gone deaf.
+_HERE = {"serial": "00000001", "gain": None, "ref_hz": REFERENCE_HZ, "bin_size": 125_000}
+
+
+def test_a_snapshot_records_the_bin_size_its_reference_was_read_in():
+    snapshot = gather_provenance(serial="00000001", gain=20.7, bin_size=62_500, row=_row(),
+                                 temp=lambda: None, throttled=lambda: None)
+    assert snapshot["bin_size"] == 62_500
+    assert (snapshot["serial"], snapshot["gain"]) == ("00000001", 20.7)
+
+
+def test_compare_counts_only_the_samples_taken_under_the_current_set_up():
+    # Pooled, the four samples from other set-ups (15 dB up) would put the median at -27 dB and
+    # call this healthy radio deaf.
+    samples = [{**_HERE, "ref_db": -42.0}, {**_HERE, "ref_db": -43.0}, {**_HERE, "ref_db": -41.0},
+               {**_HERE, "serial": "00000002", "ref_db": -27.0},
+               {**_HERE, "gain": 20.7, "ref_db": -27.0},
+               {**_HERE, "bin_size": 62_500, "ref_db": -27.0},
+               {**_HERE, "ref_hz": 94_700_000, "ref_db": -27.0}]
+    verdict = compare_to_baseline(-42.0, samples, setup=_HERE)
+    assert verdict["n_samples"] == 3
+    assert verdict["baseline_ref_db"] == -42.0
+    assert verdict["degraded"] is False
+    assert verdict["n_set_aside"] == 4
+
+
+def test_with_no_sample_from_the_current_set_up_there_is_no_baseline_for_it():
+    samples = [{**_HERE, "serial": "00000002", "ref_db": -27.0},
+               {**_HERE, "gain": 20.7, "ref_db": -57.0}]
+    verdict = compare_to_baseline(-42.0, samples, setup=_HERE)
+    # No verdict either way: nothing taken through this radio at this gain can judge it.
+    assert verdict == {"has_baseline": False, "n_set_aside": 2}
+
+
+def test_a_sample_logged_before_set_ups_were_recorded_matches_no_set_up():
+    # Learners' logs already hold samples from before the set-up was recorded: no bin size, and
+    # the serial an unset environment gave them (null). Which radio and which bin read them is
+    # unknown, so they match nothing, even a set-up every field they do record agrees with, and
+    # the learner captures a fresh baseline instead of being judged against them.
+    old = {"serial": None, "gain": None, "bias_state": BIAS_STATE, "soc_temp_c": 41.0,
+           "throttled": None, "ref_hz": REFERENCE_HZ, "ref_db": -27.0}
+    verdict = compare_to_baseline(-42.0, [old, old], setup={**_HERE, "serial": None})
+    assert verdict == {"has_baseline": False, "n_set_aside": 2}

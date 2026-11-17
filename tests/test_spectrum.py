@@ -378,6 +378,27 @@ def test_a_single_radio_still_needs_no_pinning():
     assert sweeper.device == 0
 
 
+def test_a_sweep_names_its_radio_by_the_serial_the_bus_survey_listed():
+    # The shipped unit pins no serial. The survey made before the radio is opened is what names
+    # it, so a baseline sample can say which radio its reference reading came through.
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc([]), radio_present=lambda: True,
+                      list_devices=_bus("1004"))
+    sweeper.start()
+    assert (sweeper.device, sweeper.device_serial) == (0, "1004")
+
+
+def test_a_sweep_that_cannot_name_its_radio_says_none():
+    # No survey (the caller chose the index), or a radio whose EEPROM holds no serial string:
+    # either way the serial is unknown, and unknown is None, never a guess.
+    unsurveyed = Sweeper(spawn=lambda cmd: FakeProc([]), radio_present=lambda: True)
+    blank = Sweeper(spawn=lambda cmd: FakeProc([]), radio_present=lambda: True,
+                    list_devices=_bus(""))
+    unsurveyed.start()
+    blank.start()
+    assert unsurveyed.device_serial is None
+    assert blank.device_serial is None
+
+
 def test_a_sweeper_whose_process_exited_is_not_running():
     sweeper = Sweeper(spawn=lambda cmd: DeadProc([]), radio_present=lambda: True)
     sweeper.start()

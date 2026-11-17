@@ -17,14 +17,17 @@ from sigint101.apt import AptDecoder
 from sigint101.childproc import ChildWatch
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.dmr import DmrDecoder
+from sigint101.events import log_event
 from sigint101.flock import FlockDetector
-from sigint101.hardware import RadioProbe
+from sigint101.hardware import RadioProbe, RtlSdrDevice
 from sigint101.lora import LoRaListener, parse_lora_packet
 from sigint101.pocsag import PocsagDecoder
+from sigint101.provenance import BIAS_STATE, REFERENCE_HZ, read_baseline
 from sigint101.rayhunter import RayhunterMonitor
 from sigint101.rds import RDSDecoder, RDSStation, parse_rds_group
-from sigint101.spectrum import Sweeper, SweepRow, validate_span
+from sigint101.spectrum import DEFAULT_BIN, Sweeper, SweepRow, validate_span
 from sigint101.sstv import SstvDecoder
+from tests.test_spectrum import FM_LINES
 
 # The suite owns its lesson content: the real lesson_packs/ are authored in parallel, so a test
 # that read them would go red on someone else's unfinished pack. These fixtures are stable.
@@ -2507,6 +2510,93 @@ def test_baseline_capture_without_a_reference_is_refused(tmp_path):
         resp = client.post("/api/provenance/baseline")
     assert resp.status_code == 400
     assert resp.json()["recorded"] is False
+
+
+class _FmSweep(_IdleProc):
+    """A launched rtl_power at the process boundary, printing a real capture of the FM band."""
+
+    def __init__(self):
+        self.stdout = iter(FM_LINES)
+
+
+def _surveyed_sweeper(serial):
+    """A real Sweeper on a bus holding one radio with this serial, sweeping the captured band."""
+    return Sweeper(spawn=lambda cmd: _FmSweep(), radio_present=lambda: True,
+                   list_devices=lambda: (RtlSdrDevice(0, serial),))
+
+
+def _read_with_rows(client):
+    """Start the sweep, let its captured rows land, and read the provenance again."""
+    client.get("/api/provenance")
+    client.app.state.sweeper.drain()
+    return client.get("/api/provenance").json()
+
+
+def _setup(**changes):
+    """The set-up a baseline sample counts for: radio, gain, reference station, bin size."""
+    return {"serial": "AAAA", "gain": None, "ref_hz": REFERENCE_HZ, "bin_size": DEFAULT_BIN,
+            **changes}
+
+
+def test_the_baseline_is_only_the_samples_taken_under_the_current_set_up(tmp_path):
+    # Another radio, two gain steps, another bin or another station moves the reference level
+    # past the threshold. Pooled, these samples 15 dB up would call this healthy radio deaf.
+    with _client(tmp_path, sweeper_factory=lambda: _surveyed_sweeper("AAAA")) as client:
+        level = _read_with_rows(client)["provenance"]["ref_db"]
+        events = tmp_path / "events.jsonl"
+        for _ in range(2):
+            log_event(events, "baseline_sample", {**_setup(), "ref_db": level})
+        for other in (_setup(serial="BBBB"), _setup(gain=20.7), _setup(bin_size=62_500),
+                      _setup(ref_hz=94_700_000)):
+            log_event(events, "baseline_sample", {**other, "ref_db": level + 15})
+        baseline = client.get("/api/provenance").json()["baseline"]
+    assert baseline["n_samples"] == 2
+    assert baseline["baseline_ref_db"] == level
+    assert baseline["degraded"] is False
+    assert baseline["n_set_aside"] == 4
+
+
+def test_a_sample_logged_before_set_ups_were_recorded_counts_for_no_set_up(tmp_path):
+    # The shape every sample had before: no bin size, and the serial an unset environment gave
+    # (null). Every field it records agrees with this radio-less stand-in's set-up, yet which
+    # radio read it is unknown, so it is set aside and the learner captures a fresh baseline.
+    old = {"serial": None, "gain": None, "bias_state": BIAS_STATE, "soc_temp_c": 41.0,
+           "throttled": None, "ref_hz": REFERENCE_HZ}
+    with _client(tmp_path, sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        level = client.get("/api/provenance").json()["provenance"]["ref_db"]
+        for _ in range(2):
+            log_event(tmp_path / "events.jsonl", "baseline_sample", {**old, "ref_db": level + 15})
+        baseline = client.get("/api/provenance").json()["baseline"]
+    assert baseline == {"has_baseline": False, "n_set_aside": 2}
+
+
+def test_a_captured_sample_names_the_radio_the_sweep_opened_and_the_bin_size(tmp_path,
+                                                                             monkeypatch):
+    # The shipped unit sets no serial in its environment: the radio is named by the bus survey
+    # the sweep made before opening it.
+    monkeypatch.delenv("SIGINT101_RTLSDR_SERIAL", raising=False)
+    with _client(tmp_path, sweeper_factory=lambda: _surveyed_sweeper("AAAA")) as client:
+        _read_with_rows(client)
+        assert client.post("/api/provenance/baseline").json()["recorded"] is True
+    [sample] = read_baseline(tmp_path / "events.jsonl")
+    assert sample["serial"] == "AAAA"
+    assert sample["bin_size"] == DEFAULT_BIN
+    assert (sample["gain"], sample["ref_hz"]) == (None, REFERENCE_HZ)
+
+
+def test_a_gain_step_after_a_capture_is_no_baseline_until_the_gain_comes_back(tmp_path):
+    # The gain keys move the level 4 to 8 dB a step: a baseline captured at one gain is none for
+    # another, and counts again once the gain it was captured at is back.
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _surveyed_sweeper("AAAA")) as client:
+        _read_with_rows(client)
+        client.post("/api/provenance/baseline")
+        assert client.post("/api/gain", json={"gain": 20.7}).json()["set"] is True
+        stepped = client.get("/api/provenance").json()["baseline"]
+        client.post("/api/gain", json={"gain": None})
+        back = client.get("/api/provenance").json()["baseline"]
+    assert stepped == {"has_baseline": False, "n_set_aside": 1}
+    assert (back["has_baseline"], back["n_samples"], back["degraded"]) == (True, 1, False)
 
 
 # --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------

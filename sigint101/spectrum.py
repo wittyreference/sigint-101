@@ -446,6 +446,9 @@ class Sweeper:
         # becomes the index 1, which on a bus shared with a KrakenSDR is a different radio.
         self.device = device
         self.serial = serial or None
+        # The serial the bus survey listed for the radio the sweep opened: what names that radio
+        # in a baseline sample. None until a survey has named one, or when the radio has none.
+        self.device_serial = None
         # An enumerator is how the sweeper checks which radio it is about to open. Left
         # unwired, the caller has already decided and `device` is taken at its word — which
         # is what a test injecting its own process has done. app.py wires the real one.
@@ -502,9 +505,12 @@ class Sweeper:
         if self._list_devices is None:
             return self.device
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            devices = self._list_devices()
+            index = select_rtlsdr_index(self.serial, devices=devices)
         except DeviceSelectionError as exc:
             raise SpectrumUnavailable(str(exc)) from exc
+        self.device_serial = next((d.serial for d in devices if d.index == index), None) or None
+        return index
 
     def command(self) -> list:
         """The rtl_power invocation for the current span.
