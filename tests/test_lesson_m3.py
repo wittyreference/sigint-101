@@ -1,5 +1,5 @@
-# ABOUTME: Tests what the M3 "Know Your Instrument" pack says a known station at its baseline shows:
-# ABOUTME: the radio hears strong signals at that frequency, so a quiet band is likelier real.
+# ABOUTME: Tests what the M3 "Know Your Instrument" pack says a known station's level shows: held,
+# ABOUTME: strong signals heard there and a likelier quiet band; dropped, never a deaf radio.
 
 import re
 from pathlib import Path
@@ -155,3 +155,72 @@ def test_m3_explain_keeps_a_steady_reference_to_strong_signals():
     assert any(_keeps_to_strong_signals(s) for i in hearing for s in sentences[i:i + 2]), (
         "the explain must say a held reference shows the radio hears strong signals at that "
         "frequency, or that weaker signals stay unproven")
+
+
+# The explain went on: if the known station "has dropped or vanished while nothing else changed,
+# the radio has gone deaf". The panel calls the reference dropped once it is more than 6 dB under
+# its baseline median (sigint101/provenance.py, compare_to_baseline). A level 6 dB down is a
+# quarter of the power and half the amplitude: a power level is 10 lg(P/P0) dB and a field level
+# 20 lg(F/F0) dB (NIST Special Publication 811, §8.7), and 10 lg 0.25 = 20 lg 0.5 = -6.02. A
+# radio that still hears the station at a quarter of its power hears worse there; it has not
+# gone deaf, and a drop alone does not say how far its hearing fell.
+#
+# So a sentence of the explain that speaks of the reference dropping (it dropped, fell, sank,
+# slipped, dipped, sagged, faded, vanished or lost; it is lower, weaker, fainter or down; it sits
+# under or below its baseline), and the sentence after one, must not call the radio deaf: deaf or
+# blind in any form; hearing, catching, picking up or receiving nothing (or next to nothing);
+# losing its hearing; a radio, receiver, front end, antenna, cable or chain that is dead, silent,
+# mute or useless; or a hearing verb negated with no degree after it ("can't hear there" fails,
+# "can't hear it as well" passes). A clause with a negation before or within those words ("a drop
+# is not deafness", "the radio is not dead") passes, and so does one that only supposes deafness
+# ahead of any drop it names ("if the radio goes deaf, ...").
+DROP = re.compile(r"\b(?:drop(?:s|ped|ping)?|fall(?:s|en|ing)?|fell|sinks?|sank|sunk"
+                  r"|slip(?:s|ped|ping)?|dip(?:s|ped|ping)?|sag(?:s|ged|ging)?"
+                  r"|fad(?:e|es|ed|ing)|vanish(?:es|ed|ing)?|disappear(?:s|ed|ing)?"
+                  r"|los(?:t|es?|ing)|lower|weaker|fainter|down)\b"
+                  r"|\b(?:under|below)\s+(?:its|the|your)\s+baseline\b", re.I)
+HEAR = r"(?:hear\w*|catch\w*|caught|pick\w*\s+up|receiv\w*)"
+NONE_HEARD = (r"(?:(?:almost|next\s+to|nearly)\s+)?"
+              r"(?:nothing|none|no(?!\s+(?:better|more|worse|less|louder|clearer)\b))")
+CHAIN = r"(?:radio|receiver|front\s+end|instrument|antenna|cable|chain|tuner|dongle)"
+NO_USE = r"(?:dead|silent|mute|useless)"
+DEAF = re.compile(rf"\bdeaf\w*|\bblind\w*|\b{HEAR}\s+{NONE_HEARD}\b"
+                  r"|\blos(?:t|es?|ing)\s+(?:all\s+)?(?:its\s+|your\s+|the\s+)?hearing\b"
+                  rf"|\b{CHAIN}\b.*\b{NO_USE}\b|\b{NO_USE}\s+{CHAIN}\b", re.I)
+NEGATED_HEAR = re.compile(r"(?:\b(?:cannot|never|not|no\s+longer|unable\s+to)|n['’]t)"
+                          rf"\s+(?:\w+\s+)?{HEAR}(?P<rest>.*)", re.I)
+DEGREE = re.compile(r"\b(?:as|so|well|much|clearly|nearly|quite|very|weak\w*|faint\w*"
+                    r"|strong\w*|full\w*|better|more|worse|less|louder|clearer)\b", re.I)
+NOT = re.compile(r"\b(?:not|never|nor|neither|cannot)\b|n['’]t\b", re.I)
+
+
+def _about_a_drop(text):
+    """A text's sentences that speak of the reference dropping, and each sentence after one."""
+    sentences = _sentences(text)
+    return [s for i, s in enumerate(sentences)
+            if DROP.search(s) or (i > 0 and DROP.search(sentences[i - 1]))]
+
+
+def _calls_the_radio_deaf(clause):
+    """Whether a clause calls the radio deaf in a wording above, with no negation before or within
+    the words, unless it only supposes deafness ahead of any drop it names."""
+    negated = NEGATED_HEAR.search(clause)
+    if negated and not DEGREE.search(negated.group("rest")):
+        at = negated.start()
+    else:
+        deaf = DEAF.search(clause)
+        if not deaf or NOT.search(clause, 0, deaf.end()):
+            return False
+        at = deaf.start()
+    if SUPPOSES.search(clause):
+        drop = DROP.search(clause)
+        return bool(drop) and drop.start() < at
+    return True
+
+
+def test_m3_explain_never_calls_a_dropped_reference_a_deaf_radio():
+    about_a_drop = _about_a_drop(load_lesson_file(PACK).stages["explain"])
+    assert about_a_drop, "the explain must still speak of a reference that has dropped"
+    claims = [clause for sentence in about_a_drop for clause in _clauses(sentence)
+              if _calls_the_radio_deaf(clause)]
+    assert not claims, f"M3's explain calls a dropped reference a deaf radio: {claims}"
