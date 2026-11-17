@@ -1,14 +1,14 @@
-# ABOUTME: Lesson pack M4 "The Number on the Dial" — the ppm-error intro; the built-in radio has a
-# ABOUTME: large known frequency error, measured off a station's pilot, and cured by telling each tool.
+# ABOUTME: Lesson pack M4 "The Number on the Dial" — the ppm-error intro; the panel measures the
+# ABOUTME: clock that times the samples against a station's pilot, and the dial has its own error.
 
 id: 4
 slug: ppm-error
 title: "The Number on the Dial"
 type: intro
 concept: >-
-  The built-in radio has a large, known frequency error that drifts as
-  the Pi warms; you measure it against a broadcaster's 19 kHz pilot, and the cure is telling each
-  tool its error with -p or --ppm.
+  The built-in radio's sampling clock has a large, known error that drifts as the Pi warms; you
+  measure it against a broadcaster's 19 kHz pilot, and the dial (the tuner) has its own, separate
+  error.
 requires_tx: false
 hardware: [rtl-sdr]
 panels: [ppm]
@@ -21,13 +21,11 @@ stages:
   demo: >-
     Watch — hands off for now. Every stereo FM station hides a steady 19 kHz tone, the pilot,
     inside its audio, held to within 2 Hz by FCC rule. The ppm panel times that tone against this
-    radio's clock. The radio this course was built on read about +164 ppm: 164 Hz of error for
-    every MHz you tune.
+    radio's sampling clock. The radio this course was built on read about +164 ppm: that clock's
+    error, not the dial's.
   try: >-
     Your turn. Step the dial to your strongest station with − and +, then tap Measure ppm. Use the
-    number your panel shows, not ours. At +164, 100 MHz lands about 16 kHz high — nothing inside a
-    200 kHz FM channel, which is why you never noticed. "No pilot" means mono or too weak: pick a
-    stronger station.
+    number your panel shows, not ours. "No pilot" means mono or too weak: pick a stronger station.
   predict: >-
     Say your radio sits about 16 kHz high at 100 MHz. Up at 1090 MHz — where aircraft report their
     positions — will its error in kHz be BIGGER, about the SAME, or SMALLER? Lock it in — the rest
@@ -37,14 +35,12 @@ stages:
     times higher than that FM station — how far off would the built-in radio land, and would that
     error still tuck inside a channel or throw you clean off the signal?
   explain: >-
-    Bigger, about elevenfold: the ppm holds everywhere
-    and the kHz grow with it. Width decides if it hurts. ADS-B, 2 MHz wide, shrugs it off — its
-    transmitters may sit 1–3 MHz off, and dump1090 samples 2.4 MHz — but at 162 MHz it's 27 kHz,
-    past an AIS channel; at 450 MHz, 74 kHz, several DMR channels. Narrow signal off its listed
-    frequency? Suspect this, not yourself or the device. Carry this out the door: tell each tool
-    your measured number — `rtl_fm -p 164`, `rtl_433 -p 164`, `dump1090-fa --ppm 164`. This
-    console doesn't apply it yet; its PPM RAW chip says so. The kit's 1 ppm V3 would read near
-    zero only against a pilot close to exact.
+    Bigger, about elevenfold: the dial's ppm holds everywhere and the kHz grow with it. Width
+    decides if it hurts. ADS-B, 2 MHz wide, shrugs it off — its transmitters may sit 1–3 MHz off,
+    and dump1090 samples 2.4 MHz. Narrow signal off its listed frequency? Suspect this, not
+    yourself or the device. Carry this out the door: your panel's number is the error of the clock
+    that times the samples, not the dial's. The dial (the tuner) has its own error, separate and,
+    on ours, smaller. The kit's 1 ppm V3 would read near zero only against a pilot close to exact.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
@@ -58,22 +54,23 @@ choices:
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: [bigger]
 verdict: >-
-  Bigger: ppm scales with frequency, so +16 kHz at 100 MHz is about +179 kHz at 1090 MHz.
+  Bigger: the dial's error holds in ppm, so its kHz grow with the frequency you tune.
 
-# The post-lesson check: one new situation on this lesson's idea (the ppm holds, so the error in kHz
-# grows with frequency), scored after the explain. Each chip's `why` is the feedback for choosing it.
+# The post-lesson check: one situation on this lesson's idea (the panel's number is the sampling
+# clock's error, not the dial's), scored after the explain. Each chip's `why` is the feedback for
+# choosing it.
 check:
   prompt: >-
-    Say your radio reads +164 ppm. You tune to 315 MHz, where car key fobs talk. About how far off
-    frequency does it land?
+    You tap Measure ppm on a strong stereo station, and your panel shows a number. Whose error is
+    that number?
   choices:
-    - key: five
-      label: About 5 kHz
-      why: That's a tenth of it; 164 Hz for every MHz, times 315 MHz, is about 52,000 Hz.
-    - key: sixteen
-      label: About 16 kHz
-      why: 16 kHz was the error at 100 MHz; the ppm holds, so the kHz grow with the frequency.
-    - key: fiftytwo
-      label: About 52 kHz
-      why: 164 Hz for every MHz, times 315 MHz, is about 52 kHz, three times the FM error.
-  answer: fiftytwo
+    - key: dial
+      label: The dial (tuner)
+      why: The dial has its own error, separate from this one; on ours it was smaller.
+    - key: clock
+      label: The sampling clock
+      why: The panel times the pilot against the clock that times the samples, so it reads that clock's error.
+    - key: station
+      label: The station's pilot
+      why: The pilot is the landmark you measure against, held by rule to within 2 Hz, about 105 ppm.
+  answer: clock

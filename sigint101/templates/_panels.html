@@ -83,9 +83,10 @@
                 </aside>
 {% endmacro %}
 
-{# PPM panel (M4): the receiver's crystal error. Measure-on-demand — the button captures the tuned
-   station's 19 kHz stereo pilot via /api/ppm/measure; a mono or weak station carries no pilot, and
-   the panel says so rather than guess. #}
+{# PPM panel (M4): the error of the clock that times the receiver's samples, not the dial's (the
+   tuner has a reference of its own). Measure-on-demand — the button captures the tuned station's
+   19 kHz stereo pilot via /api/ppm/measure; a mono or weak station carries no pilot, and the panel
+   says so rather than guess. #}
 {% macro ppm() %}
                 <aside class="ppm-panel" data-ppm-panel aria-label="Clock error in ppm">
                   <div class="ppm__title">CLOCK &middot; PPM</div>
