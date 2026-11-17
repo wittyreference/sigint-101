@@ -7,7 +7,7 @@ title: "Antennas Are Tuning Forks"
 type: intro
 concept: >-
   An antenna rings only near the frequency whose wavelength matches its length; the wrong length
-  is deaf, and a quarter-wave in metres is 300 / f(MHz), then quartered.
+  hears worse, and a quarter-wave in metres is 300 / f(MHz), then quartered.
 requires_tx: false
 hardware: [rtl-sdr]
 panels: []
@@ -22,18 +22,18 @@ tune:
 stages:
   frame: >-
     Tonight, comrade, you learn why the right antenna is not the biggest one: an antenna rings like a tuning
-    fork — loud at one length, deaf everywhere else — and you are going to feel it happen under
+    fork — loud at one length, quieter everywhere else — and you are going to feel it happen under
     your own thumbs.
   demo: >-
     Watch — hands off for now. The stock whip caught FM loud; at 1090 MHz, where aircraft report
-    positions, it's nearly deaf. An antenna is a tuning fork, ringing only where wavelength
+    positions, it hears worse. An antenna is a tuning fork, ringing only where wavelength
     matches length. Wavelength in metres is 300 over MHz: three at 100, about 0.28 at 1090. A
     quarter-length leg, just under 7 cm, is what 1090 wants.
   try: >-
     Your hands, comrade. Swap in the kit's telescopic dipole, legs long: still almost nothing.
     Slide each leg to just under 7 cm, a thumb's length, watching 1090's floor. Aircraft replies
     are microsecond bursts: a busy sky lifts a faint hump, never a stripe. Still flat? A quiet sky
-    reads like a deaf spot; Lesson 13's radar is the sharper test.
+    reads like poor hearing; Lesson 13's radar is the sharper test.
   predict: >-
     You set the legs for 1090 MHz with 300 over the frequency. Now picture 915 MHz, where small
     wireless gadgets chatter — lower than 1090. To ring there, do the legs get LONGER, SHORTER, or
@@ -46,7 +46,7 @@ stages:
     Pull the legs out, comrade. Frequency and wavelength sit on a seesaw with 300 fixed on top: a
     lower frequency means a longer wave, and 300 over 915 is about 0.33 metres against 0.28 at
     1090. Bigger isn't better, though: an antenna isn't a bucket; it's a tuning fork, ringing at
-    one length and hearing poorly off it, too long or too short. The FM whip is deaf at 1090
+    one length and hearing poorly off it, too long or too short. The FM whip hears worse at 1090
     because it's far too long; the dipole is cut to the number. Carry this out the door: a
     quarter-wave in metres is 300 over the frequency in MHz, then quartered — and when a band
     sounds dead, check your antenna's length before you blame the sky or yourself.
