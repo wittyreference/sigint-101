@@ -91,9 +91,9 @@ def test_m11_try_measures_the_50_cm_from_the_nomad():
 # "LONG_FAST".
 LONGFAST = re.compile(r"\blong[\s_-]?fast\b", re.I)
 
-# LongFast's limit, about -17 dB: Semtech's datasheet gives -17.5 dB as the typical LoRa
-# demodulator SNR at SF11, LongFast's spreading factor. Digits after a minus sign or a hyphen,
-# "minus seventeen", or "seventeen dB under the noise".
+# LongFast's limit, about -17 dB: Semtech gives -17.5 dB as the typical LoRa demodulator SNR at
+# SF11, LongFast's spreading factor (SX1261/2 datasheet, Table 6-1; TN1300.05, Table 1). Digits
+# after a minus sign or a hyphen, "minus seventeen", or "seventeen dB under the noise".
 SEVENTEEN = r"(?:17(?:\.5)?(?!\d)|seventeen\b)"
 LONGFAST_LIMIT = re.compile(rf"(?:[\N{{MINUS SIGN}}-]\s?|\bminus\s+){SEVENTEEN}"
                             rf"|\b{SEVENTEEN}\s*dB\s+(?:below|under)\b", re.I)
@@ -104,11 +104,12 @@ FAILS = re.compile(r"\b(?:fail\w*|give\w* up|drop\w*|los(?:e|es|t|ing)\b"
                    r"|need\w* (?:a )?(?:strong|more))")
 
 
-def _a_clause_has_faster_presets_failing(text):
-    # One clause names the faster (or the short- or medium-range) presets and has them fail.
+def _a_clause_has_short_or_medium_presets_failing(text):
+    # One clause names the Short or Medium presets and has them fail. Not "faster" presets: Long
+    # Turbo is faster than LongFast but keeps SF11, so its limit is LongFast's.
     for clause in re.split(r"[.;:!?]", text.lower()):
         if (re.search(r"\bpresets?\b", clause)
-                and re.search(r"\b(?:faster|quicker|short\w*|medium|turbo)\b", clause)
+                and re.search(r"\b(?:short|medium)\b", clause)
                 and FAILS.search(clause)):
             return True
     return False
@@ -116,20 +117,21 @@ def _a_clause_has_faster_presets_failing(text):
 
 def test_m11_predict_names_the_longfast_preset_but_not_its_limit():
     # Twelve dB under the noise decodes on LongFast (SF11, typical limit -17.5 dB) and fails on the
-    # faster presets (SF7 stops near -7.5 dB), so the predict names the preset it asks about. It
-    # gives no limit: "about -17 dB" there would hand the learner the answer before the commit.
+    # Short presets (SF7 stops near -7.5 dB, SF8 near -10), so the predict names the preset it asks
+    # about. It gives no limit: "about -17 dB" there would hand the learner the answer before the
+    # commit.
     predict = load_lesson_file(PACK).stages["predict"]
     assert LONGFAST.search(predict), "the predict must name the LongFast preset"
     assert not re.search(rf"\b{SEVENTEEN}|\blimit", predict, re.I), (
         "the predict must not give LongFast's limit away")
 
 
-def test_m11_verdict_gives_the_longfast_limit_and_faster_presets_failing_sooner():
-    # The verdict says why the answer holds on this radio: on LongFast a packet decodes down to
-    # about -17 dB, and a faster preset loses the same packet sooner.
+def test_m11_verdict_gives_the_longfast_limit_and_short_and_medium_presets_failing_sooner():
+    # The verdict says why the answer holds on this radio: it decodes cleanly on LongFast, to about
+    # -17 dB, and the Short and Medium presets fail sooner.
     verdict = load_lesson_file(PACK).verdict
     assert re.search(r"\bdecodes\b", verdict, re.I), "the verdict must keep the answer: it decodes"
     assert LONGFAST.search(verdict), "the verdict must name the LongFast preset"
     assert LONGFAST_LIMIT.search(verdict), "the verdict must give LongFast's limit, about -17 dB"
-    assert _a_clause_has_faster_presets_failing(verdict), (
-        "the verdict must say the faster presets fail sooner")
+    assert _a_clause_has_short_or_medium_presets_failing(verdict), (
+        "the verdict must say the Short and Medium presets fail sooner")

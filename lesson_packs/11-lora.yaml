@@ -60,5 +60,5 @@ choices:
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: [decodes]
 verdict: >-
-  It decodes cleanly on LongFast, down to about −17 dB: de-chirping gathers the symbol into one
-  spike above the noise. Faster presets fail sooner.
+  It decodes cleanly on LongFast, to about −17 dB: de-chirping gathers the symbol into one spike
+  above the noise. Short and Medium presets fail sooner.
