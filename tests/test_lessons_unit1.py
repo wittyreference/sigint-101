@@ -90,34 +90,25 @@ def _clauses(sentence):
 
 # The +164 ppm in M4 was the reading of the one radio the course was built on. Every unit
 # carries an error of its own, and the repo itself puts a generic board at 30-100 ppm
-# (tests/test_ppm.py). So no line the learner reads may hand them a figure for their own radio:
-# no "hundred", no "expect a number" or "expect a reading", and no ppm figure said of your radio,
-# panel, number or reading, or of the built-in radio, unless the clause poses it as a supposition
-# ("Say your radio reads +164 ppm"). The try must point them at their own panel's number instead.
+# (tests/test_ppm.py). So every ppm figure the learner reads must belong to something other than
+# their own radio: the build unit ("built on", "ours"), the V3 or the pilot's rule ("V3", "2 Hz",
+# "by rule"), or a supposition ("say", "suppose", "imagine", "if", "assume", "whether"). Two more
+# checks catch what that rule cannot see: "hundred", a figure in words, and "expect a number" or
+# "expect a reading", a figure given without "ppm". The try must point the learner at their own
+# panel's number instead.
 HUNDRED = re.compile(r"\bhundreds?\b", re.I)
-EXPECT_FIGURE = re.compile(r"\bexpect\w*\s+(?:a|an|the|your)?\s*(?:number|reading|figure|value)\b"
-                           r"|\bexpect\w*\b[^.;:]*?\d[\d.,]*\s*ppm\b", re.I)
-LEARNERS_OWN = re.compile(r"\b(?:your|the built-in)\s+(?:own\s+|built-in\s+)?"
-                          r"(?:radio|panel|number|reading)\b", re.I)
+EXPECT_FIGURE = re.compile(r"\bexpect\w*\s+(?:a|an|the|your)?\s*(?:number|reading|figure|value)\b",
+                           re.I)
 PPM_FIGURE = re.compile(r"\d[\d.,]*\s*ppm\b", re.I)
+NOT_THE_LEARNERS = re.compile(r"\bbuilt on\b|\bours\b|\bV3\b|\b2 Hz\b|\bby rule\b", re.I)
 POSED = re.compile(r"\b(?:say|suppose|imagine|if|assum\w*|whether)\b", re.I)
-
-
-def _figure_said_of_the_learners_radio(sentence):
-    """Whether a sentence gives a ppm figure as the learner's own, outside a supposition."""
-    for match in LEARNERS_OWN.finditer(sentence):
-        claim = re.split(r"[;:—–!?]|\.(?:\s|$)", sentence[match.start():], maxsplit=1)[0]
-        lead = re.split(r"[,;:—–(]", sentence[:match.start()])[-1]
-        if PPM_FIGURE.search(claim) and not POSED.search(lead):
-            return True
-    return False
 
 
 def test_m4_try_sends_the_learner_to_their_own_reading(unit1_lessons):
     lesson = unit1_lessons[4]
     given = [s for s in _learner_text(lesson)
              if HUNDRED.search(s) or EXPECT_FIGURE.search(s)
-             or _figure_said_of_the_learners_radio(s)]
+             or (PPM_FIGURE.search(s) and not (NOT_THE_LEARNERS.search(s) or POSED.search(s)))]
     assert not given, f"M4 hands the learner a figure for their own radio: {given}"
     own = [s for s in _sentences(lesson.stages["try"])
            if re.search(r"\b(number|reading|figure|value)\b", s, re.I)
@@ -130,14 +121,14 @@ def test_m4_try_sends_the_learner_to_their_own_reading(unit1_lessons):
 # holds: the osmocom rtl-sdr driver gives an R828D tuner, other than the RTL-SDR Blog V4, a
 # 16 MHz crystal of its own beside the RTL2832U's 28.8 MHz (src/librtlsdr.c,
 # include/tuner_r82xx.h). Until a check on the unit settles it, no line the learner reads may
-# state it as fact: one, a single or the same crystal or clock; a crystal or clock that sets or
-# clocks every frequency or both parts; or the tuner and the sampler on one crystal or clock. A
-# hedge ("if", "may", "not yet confirmed") counts only inside the clause that makes the claim.
+# state it as fact: one, a single or the same crystal, clock, oscillator or reference; one that
+# sets or clocks every frequency or both parts; or the tuner and the sampler on one. A hedge
+# ("if", "may", "not yet confirmed") counts only inside the clause that makes the claim.
+SOURCE = r"(?:crystal|clock|oscillator|reference)s?"
 ONE_CRYSTAL = re.compile("|".join([
-    r"\b(?:one|single|same|shared?|shares)\b.*\b(?:crystal|clock)s?\b",
-    r"\b(?:crystal|clock)s?\b.*\b(?:sets?|clocks?|drives?|feeds?|times|runs?)\b"
-    r".*\b(?:every|both|all)\b",
-    r"^(?=.*\b(?:crystal|clock)s?\b)(?=.*\btuner\b)(?=.*\b(?:sampler|sample rate|sampling)\b)",
+    rf"\b(?:one|single|same|shared?|shares)\b.*\b{SOURCE}\b",
+    rf"\b{SOURCE}\b.*\b(?:sets?|clocks?|drives?|feeds?|times|runs?)\b.*\b(?:every|both|all)\b",
+    rf"^(?=.*\b{SOURCE}\b)(?=.*\btuner\b)(?=.*\b(?:sampler|sample rate|sampling)\b)",
 ]), re.I)
 HEDGE = re.compile(r"\b(?:if|whether|assum\w*|suppos\w*|may|might|unless|unconfirmed"
                    r"|not (?:yet )?(?:confirmed|checked|known))\b", re.I)
@@ -152,23 +143,29 @@ def test_m4_does_not_state_one_crystal_as_fact(unit1_lessons):
 # 47 CFR 73.322(a)(2) holds the stereo pilot to 19 kHz plus or minus 2 Hz: about 105 ppm, the
 # same order as the error M4 measures. The panel takes the pilot as exactly 19 kHz
 # (sigint101/ppm.py, PILOT_HZ), so even a perfect clock reads the pilot's own error.
+EXACT = r"(?:honest|exact|accura|precise|true|perfect)"
 TOLERANCE = re.compile(r"\b(?:2 Hz|two hertz|105 ppm|105 parts per million)\b", re.I)
-NEAR_ZERO = re.compile(r"\b(?:near|nearly|close to|about|around|almost|roughly|read|reads)"
-                       r"\s+(?:zero|0)\b", re.I)
-PILOT_CONDITION = re.compile(r"\bpilot\w*\b(?=.*\b(?:exact\w*|accura\w*|own (?:error|offset)"
-                             r"|tolerance)\b)|\b(?:exact|accura)\w*\b(?=.*\bpilot)", re.I)
+NEAR_ZERO = re.compile(r"\b(?:near|nearly|close to|about|around|almost|roughly|read|reads"
+                       r"|shows?|at|be|is)\s+(?:zero|0)\b", re.I)
+PILOT_CONDITION = re.compile(
+    rf"\bpilot\w*\b(?=.*\b(?:{EXACT}\w*|own (?:error|offset)|tolerance)\b)"
+    rf"|\b{EXACT}\w*\b(?=.*\bpilot)", re.I)
 
-# A sentence that calls the pilot or the landmark honest, exact or accurate must say how far,
-# naming the 2 Hz or the 105 ppm it comes to, unless the clause sets that exactness as a
-# condition: "only against a pilot close to exact", "if the pilot is exact", or, in a promise of
-# a reading near zero, "against an exact pilot". Saying the pilot is, or is kept, exact is no
-# condition.
-REFERENCE = re.compile(r"\b(?:pilot|landmark)s?\b", re.I)
-VOUCH = re.compile(r"\b(?:honest|exact|accura)\w*", re.I)
+# A sentence that calls the pilot, its tone or the landmark honest, exact, accurate, precise,
+# true or perfect must say how far, naming the 2 Hz or the 105 ppm it comes to. A clause that
+# says the pilot is, keeps or is held exact fails unless it opens a condition (if, unless,
+# provided, whether), so "only the pilot is exact" fails. Any other clause passes only when
+# "only", "if", "unless" or "provided" sets the exactness as a condition ("only against a pilot
+# close to exact"), or when a promise of a reading near zero names an indefinite pilot ("against
+# an exact pilot"). "The station's exact pilot" says that pilot is exact.
+REFERENCE = re.compile(r"\b(?:pilot|landmark|tone)s?\b", re.I)
+VOUCH = re.compile(rf"\b{EXACT}\w*", re.I)
 SAID_TO_BE = re.compile(r"\b(?:is|are|was|be|keeps?|kept|holds?|held|stays?|remains?)\b"
-                        r"(?:\s+[\w'-]+){0,3}?\s+(?:honest|exact|accura)", re.I)
-CONDITION = re.compile(r"\b(?:only|if|unless|provided)\b(?=.*\b(?:pilot|landmark)s?\b)"
-                       r"(?=.*\b(?:honest|exact|accura))", re.I)
+                        rf"(?:\s+[\w'-]+){{0,3}}?\s+{EXACT}", re.I)
+OPENS_CONDITION = re.compile(r"\b(?:if|unless|provided|whether)\b", re.I)
+CONDITION = re.compile(r"\b(?:only|if|unless|provided)\b(?=.*\b(?:pilot|landmark|tone)s?\b)"
+                       rf"(?=.*\b{EXACT})", re.I)
+INDEFINITE = re.compile(rf"\b(?:an?|any)\s+(?:\w+\s+)?{EXACT}\w*\s+pilot", re.I)
 
 
 def _vouches_without_tolerance(sentence):
@@ -176,9 +173,13 @@ def _vouches_without_tolerance(sentence):
     if not (REFERENCE.search(sentence) and VOUCH.search(sentence)) or TOLERANCE.search(sentence):
         return False
     for clause in (c for c in _clauses(sentence) if VOUCH.search(c)):
+        if SAID_TO_BE.search(clause):
+            if OPENS_CONDITION.search(clause):
+                continue
+            return True
         if CONDITION.search(clause):
             continue
-        if NEAR_ZERO.search(sentence) and not SAID_TO_BE.search(clause):
+        if NEAR_ZERO.search(sentence) and INDEFINITE.search(clause):
             continue
         return True
     return False
