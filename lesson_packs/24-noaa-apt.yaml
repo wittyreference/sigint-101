@@ -10,9 +10,9 @@ concept: >-
   137 MHz as APT — Automatic Picture Transmission — an analog facsimile, not packets: a 2400 Hz tone
   whose loudness is pixel brightness, 120 lines a minute, two channels (visible and infrared) side by
   side. satdump decodes it live, or aptdec and noaa-apt decode a recorded pass, stacking the lines
-  into an image of your own sky. Because it is analog it degrades gracefully — a weak pass is grainy,
-  never simply gone. The catch: the NOAA APT birds were decommissioned in 2025, so a live image now
-  means a transmitting satellite (Meteor-M N2-3 or N2-4 LRPT, near 137.9 MHz), a 137 MHz antenna
+  into an image of your own sky. Because it is analog it degrades gracefully — a weak pass is grainy
+  long before it is gone. The catch: the NOAA APT birds were decommissioned in 2025, so a live image
+  now means a transmitting satellite (Meteor-M N2-3 or N2-4 LRPT, near 137.9 MHz), a 137 MHz antenna
   and a timed pass.
 requires_tx: false
 hardware: [rtl-sdr]
@@ -44,8 +44,8 @@ stages:
     A weak, noisy pass, the tone buried in hiss. Does that leave you no image, or a grainy but real
     one? Lock it in.
   observe: >-
-    Hold your guess against how a facsimile differs from a packet, comrade. A packet with one
-    flipped bit fails its checksum and is thrown away whole. A picture has no checksum; every
+    Hold your guess against how a facsimile differs from a packet, comrade. A packet past its error
+    correction fails its checksum and is thrown away whole. A picture has no checksum; every
     moment of tone is a brightness, landing wherever the line has reached. Ask what hiss does to a
     brightness, and whether a half-spoiled line is a lost line.
   explain: >-
@@ -55,8 +55,8 @@ stages:
     (137.9125) and NOAA-19 (137.100) were decommissioned through 2025, the last that August. The
     panel stays empty until you aim a 137 megahertz V-dipole or quadrifilar helix at a predicted
     pass of a live bird: Russia's Meteor-M N2-3 or N2-4, near 137.9 MHz, sending digital LRPT.
-    Carry this out the door: every digital decoder behind you was all-or-nothing; analog only gets
-    noisier — and a picture shouted in the clear is yours to read.
+    Carry this out the door: digital decoders behind you were all-or-nothing; analog gets noisier,
+    then gone — and a picture shouted in the clear is yours to read.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:
@@ -67,5 +67,5 @@ choices:
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: ["grainy"]
 verdict: >-
-  A grainy but real picture: APT is analog, so noise only speckles it; no checksum throws a line
+  A grainy but real picture: APT is analog, so noise speckles it; no checksum throws a line
   away.
