@@ -17,6 +17,27 @@ test("a negative ppm keeps its minus sign", () => {
   assert.match(v.text, /-2\.1 ppm/);
 });
 
+// The resolution is 1/T, the width of one spectral bin for the capture's length: 6.579 ppm at the
+// console's 8 s. It says how finely the capture reads, not how far the reading can be wrong, so it
+// is labelled with its unit and never printed as a ± on the reading.
+test("the capture's resolution reads as resolution in ppm, to one decimal, with no ± on it", () => {
+  const v = panel.ppmResultText({ ppm: 164.53, pilot_ratio_db: 31.25, resolution_ppm: 6.579 });
+  assert.match(v.detail, /resolution 6\.6 ppm/);
+  assert.doesNotMatch(v.detail, /±\s*6\.(6|579)\b/);
+  const longer = panel.ppmResultText({ ppm: 164.53, pilot_ratio_db: 31.25, resolution_ppm: 2.632 });
+  assert.match(longer.detail, /resolution 2\.6 ppm/);
+});
+
+// The reference has a tolerance of its own: 47 CFR 73.322(a)(2) sets the pilot at 19 kHz ±2 Hz,
+// and 2 Hz in 19 000 Hz is 105 ppm, the same order as the error the panel measures.
+test("every reading says what the rule holds the pilot to: ±2 Hz, which is ±105 ppm", () => {
+  const rulePpm = Math.round((2 / 19000) * 1e6);
+  const rule = new RegExp(`pilot held to ±2 Hz \\(±${rulePpm} ppm\\) by rule`);
+  const v = panel.ppmResultText({ ppm: 164.53, pilot_ratio_db: 31.25, resolution_ppm: 6.579 });
+  assert.match(v.detail, rule);
+  assert.match(panel.ppmResultText({ ppm: -2.1, pilot_ratio_db: 18 }).detail, rule);
+});
+
 test("no pilot reads as an honest refusal, never a guessed number", () => {
   const v = panel.ppmResultText({ ppm: null, reason: "no 19 kHz pilot here" });
   assert.match(v.text, /no clear pilot/);
