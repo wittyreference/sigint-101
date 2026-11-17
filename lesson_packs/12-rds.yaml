@@ -30,15 +30,15 @@ stages:
     Watch — hands off for now. No waterfall tonight: redsea pulls a hidden stream out of the
     station on the dial. The card fills: the station's name — the PS, eight characters — a
     couple at a time, its programme type, and the RadioText scrolling beneath. That's PSK: a
-    57 kHz subcarrier flipping phase nearly twelve hundred times a second.
+    57 kHz subcarrier carrying nearly twelve hundred bits a second.
   try: >-
     Your turn, comrade — watch the card assemble. RDS is slow, so give it a few seconds. Read the
     programme type and the RadioText. An empty card means this station sends no RDS or arrives too
     weak here; your strongest local station, the brightest stripe from Lesson 1, is the one to set
     (the quick-start shows how).
   predict: >-
-    RDS hides its data in the carrier's phase — not its height or frequency. So does it turn up on
-    the waterfall at all? Lock it in.
+    RDS hides its data in the phase of a quiet subcarrier inside the station's signal. So does it
+    turn up on the waterfall at all? Lock it in.
   observe: >-
     Look at the card against what a waterfall would have shown. On the waterfall this station is just a
     plain FM block — did any of this text ever appear there, in any lesson? And ask yourself the real
@@ -47,8 +47,8 @@ stages:
   explain: >-
     A waterfall draws amplitude across frequency, moment to moment; it shows a PSK signal's energy,
     never which phase each bit took. Two signals
-    half a cycle apart look identical yet carry opposite bits. RDS's 57 kHz subcarrier flips phase
-    1187.5 times a second, locked to the 19 kHz pilot so the receiver knows where each bit begins.
+    half a cycle apart look identical yet carry opposite bits. RDS's 57 kHz subcarrier sends
+    1187.5 bits a second, locked to the 19 kHz pilot so the receiver knows where each bit begins.
     Reading phase takes a decoder that recovers the carrier's reference and measures the shift, as
     redsea did. Broadcast RDS is public, as ordinary as a car radio's display. Carry this out the
     door: eyes see amplitude and frequency, never phase — Wi-Fi's plain 20 MHz block, RDS,
