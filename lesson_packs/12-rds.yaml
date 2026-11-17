@@ -6,8 +6,8 @@ slug: rds
 title: "The Hidden Text"
 type: intro
 concept: >-
-  Phase-shift keying hides data in the timing of the wave — the phase — leaving the height and the
-  frequency untouched, so a waterfall shows the signal's energy but never its bits. RDS is the
+  Phase-shift keying hides data in the timing of the wave — the phase — so a waterfall shows the
+  signal's energy but never its bits. RDS is the
   everyday example: most FM stations flip the phase of a quiet 57 kHz subcarrier to carry their
   station name and scrolling text, and you read it only by decoding the phase. It closes the
   modulation unit: the shape your eyes can never see.
@@ -42,11 +42,11 @@ stages:
   observe: >-
     Look at the card against what a waterfall would have shown. On the waterfall this station is just a
     plain FM block — did any of this text ever appear there, in any lesson? And ask yourself the real
-    question: if shifting phase changes neither height nor frequency, what instrument could ever have
+    question: if a waterfall shows energy but never phase, what instrument could ever have
     shown it to you?
   explain: >-
-    Invisible, every time. A waterfall draws amplitude across frequency, moment to moment; PSK
-    holds both steady and shifts only the phase, the timing of the wave's crossings. Two signals
+    A waterfall draws amplitude across frequency, moment to moment; it shows a PSK signal's energy,
+    never which phase each bit took. Two signals
     half a cycle apart look identical yet carry opposite bits. RDS's 57 kHz subcarrier flips phase
     1187.5 times a second, locked to the 19 kHz pilot so the receiver knows where each bit begins.
     Reading phase takes a decoder that recovers the carrier's reference and measures the shift, as
