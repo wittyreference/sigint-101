@@ -448,7 +448,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_flock = flock_factory
 
-    # The Rayhunter monitor polls an Orbic over WiFi, receive-only — a separate device, like the
+    # The Rayhunter monitor polls an Orbic over WiFi, read-only — a separate device, like the
     # Flock detector and the LoRa listener, so it never arbitrates with the SDR.
     if rayhunter_factory is None:
         build_rayhunter = RayhunterMonitor
@@ -1277,7 +1277,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def rayhunter(limit: int | None = None):
         """The Orbic's Rayhunter recording line + heuristic findings, newest finding first.
 
-        The monitor polls an Orbic over WiFi, receive-only — a separate device from the RTL-SDR, so
+        The monitor polls an Orbic over WiFi, read-only — a separate device from the RTL-SDR, so
         this never disturbs a sweep or a decode. No Orbic reachable is a 503 with the reason, never
         a clean line pretending the air was checked — a quiet line never proves no catcher was near.
         """

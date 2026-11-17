@@ -1,5 +1,5 @@
 # ABOUTME: Polls an Orbic's EFF Rayhunter HTTP API for M19 — the IMSI-catcher / cell-site detector.
-# ABOUTME: Receive-only over WiFi; no finding is an empty list, an unreachable Orbic honest refusal.
+# ABOUTME: Read-only over WiFi; no finding is an empty list, an unreachable Orbic honest refusal.
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ import urllib.request
 from dataclasses import dataclass
 
 # The Orbic hotspot's Rayhunter web server. The console joins the Orbic's WiFi and polls this HTTP
-# API, receive-only — it never transmits or controls the modem. The Orbic is a separate radio over
-# WiFi, like the Flock detector's wlan1 or the LoRa listener's meshtasticd, so there is no SDR
-# release/resume arbitration: this is not an SDR consumer.
+# API read-only: it reads the report and never controls the modem, though the box's WiFi still
+# transmits to the Orbic, as any WiFi client does. The Orbic is a separate radio over WiFi, like the
+# Flock detector's wlan1 or the LoRa listener's meshtasticd, so there is no SDR release/resume
+# arbitration: this is not an SDR consumer.
 DEFAULT_RAYHUNTER_HOST = "192.168.1.1"
 DEFAULT_RAYHUNTER_PORT = 8080
 DEFAULT_TIMEOUT = 4.0
@@ -290,7 +291,7 @@ def _no_answer(where: str, exc: Exception) -> str:
 class RayhunterMonitor:
     """Polls the Orbic's Rayhunter HTTP API for the recording state and its heuristic findings.
 
-    Receive-only: it reads the manifest and analysis reports and never controls the Orbic. Being a
+    Read-only: it reads the manifest and analysis reports and never controls the Orbic. Being a
     separate radio over WiFi, it takes no turns with the RTL-SDR — there is no release()/resume().
     An unreachable or unreadable Orbic raises RayhunterUnavailable rather than inventing a clean or
     a caught line.

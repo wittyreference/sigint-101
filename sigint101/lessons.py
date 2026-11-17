@@ -302,7 +302,7 @@ class Lesson:
     def uses_rayhunter(self) -> bool:
         """True when the instrument is the Rayhunter monitor (the rayhunter panel), not a waterfall.
 
-        It polls an Orbic running EFF's Rayhunter over WiFi — a separate device, receive-only — so
+        It polls an Orbic running EFF's Rayhunter over WiFi — a separate device, read-only — so
         the console renders the recording state + warnings from /api/rayhunter, never the SDR.
         """
         return RAYHUNTER_PANEL in self.panels
