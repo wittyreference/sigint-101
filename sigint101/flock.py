@@ -893,9 +893,11 @@ class MarauderFlockDetector(FlockDetector):
             # Only what was looked for: the by-id name exists only while the bridge runs on USB
             # channel 1, and the bridge starts on channel 0 whenever it is opened afresh
             # (flipperzero-firmware 1.5.1 gpio_scene_usb_uart.c:31-38), so "no bridge" would be
-            # false while it runs there; a pinned path may just be the wrong one. On the by-id
-            # name this fits the two lines of message lesson 18's panel has room for.
-            looked_for = (f"no port at {self._tty}" if self._tty
+            # false while it runs there; a pinned path may just be the wrong one. A pinned path is
+            # named by the variable that pins it, not spelled out: a by-id name alone is some 50
+            # to 60 characters, and spelled out it ran the message to a third line. Either way
+            # this fits the two lines of message lesson 18's panel has room for.
+            looked_for = (f"no {MARAUDER_TTY_ENV} port" if self._tty
                           else "no bridge port on USB Channel 1")
             raise FlockUnavailable(
                 f"no monitor radio: {looked_for}. With the Wi-Fi devboard seated: "

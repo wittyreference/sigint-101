@@ -956,10 +956,31 @@ def test_the_no_bridge_refusal_fits_the_lesson_panels_two_message_lines(tmp_path
     assert "GPIO → USB-UART Bridge, USB Channel 1" in body["reason"]   # still says how
 
 
+# A site may pin the bridge's port in SIGINT101_MARAUDER_TTY, and a by-id name alone runs to some
+# 50 to 60 characters: spelled out in the refusal, a pinned path ran it to a third line, which
+# lesson 18's panel cut off. Whatever the site pins, the refusal keeps to the panel's two lines.
+# Each path here sits under tmp_path, so no real port is ever touched.
+@pytest.mark.parametrize("pinned", [
+    "serial/by-id/usb-Flipper_Devices_Inc._Flipper_Ex4mple_flip_Ex4mple-if02",
+    "ttyACM1",
+], ids=["by-id", "acm"])
+def test_a_pinned_port_keeps_the_refusal_in_the_lesson_panels_two_message_lines(
+        tmp_path, monkeypatch, pinned):
+    monkeypatch.setenv("SIGINT101_FLOCK_SOURCE", "marauder")
+    monkeypatch.setenv("SIGINT101_MARAUDER_TTY", str(tmp_path / pinned))
+    with _client(tmp_path) as client:
+        body = client.get("/api/flock").json()
+    assert body["available"] is False and "state" not in body   # refused, not a stopped link
+    lines = textwrap.wrap(body["reason"], PANEL_MESSAGE_CHARS)
+    assert len(lines) <= PANEL_MESSAGE_LINES, lines
+    assert "GPIO → USB-UART Bridge, USB Channel 1" in body["reason"]   # still says how
+
+
 # The refusal says only what the console looked for. The by-id name exists only while the bridge
 # runs on USB channel 1, and the bridge starts on channel 0 whenever it is opened afresh
 # (flipperzero-firmware 1.5.1 gpio_scene_usb_uart.c:31-38, usb_uart_bridge.c:107-115): "no
-# bridge" would be false while it runs there. A pinned path may just be the wrong one.
+# bridge" would be false while it runs there. A pinned path may just be the wrong one, so the
+# refusal names the variable that pinned it; spelled out, the path would not fit (the test above).
 @pytest.mark.parametrize("pinned", [False, True], ids=["by-id", "pinned"])
 def test_the_no_port_refusal_names_what_it_looked_for(tmp_path, pinned):
     path = str(tmp_path / "ttyACM1")
@@ -970,7 +991,7 @@ def test_the_no_port_refusal_names_what_it_looked_for(tmp_path, pinned):
     looked_for = str(refused.value).split(". ", 1)[0]   # what it found missing, before the remedy
     assert looked_for.startswith("no monitor radio: ")
     if pinned:
-        assert path in looked_for
+        assert "SIGINT101_MARAUDER_TTY" in looked_for, looked_for
     else:
         assert re.search(r"\bUSB Channel 1\b", looked_for), looked_for
 
