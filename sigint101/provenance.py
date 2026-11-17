@@ -24,6 +24,15 @@ def configured_reference_hz(environ=None) -> int:
     """The reference station: SIGINT101_REF_HZ when it names an FM channel, else 106.5 MHz."""
     return configured_fm_hz(REFERENCE_HZ_ENV, REFERENCE_HZ, environ)
 
+
+# What a reference level depends on besides the radio's health, so what a baseline sample is
+# matched on: the radio's serial string, the tuner gain, the reference station, the bin width, and
+# the sweep's span, which sets where the reference falls in its hop. A change in any of them can
+# move the level further than the deaf threshold, so a sample counts only for the set-up it was
+# taken under. The serial is whatever the dongle reports, and many factory-default dongles report
+# the same one (the built-in reports 00000001), so it tells apart only dongles whose strings differ.
+SETUP_KEYS = ("serial", "gain", "ref_hz", "bin_size", "freq_low", "freq_high")
+
 # Where the Pi exposes its SoC temperature, in milli-degrees Celsius.
 THERMAL_PATH = "/sys/class/thermal/thermal_zone0/temp"
 
@@ -122,19 +131,22 @@ def reference_level_db(row, hz: int = REFERENCE_HZ):
     return row.dbm[index]
 
 
-def gather_provenance(*, serial, gain, row=None,
+def gather_provenance(*, serial, gain, bin_size=None, freq_low=None, freq_high=None, row=None,
                       temp=read_soc_temp_c, throttled=read_throttled):
     """Assemble the radio's account of itself into one snapshot.
 
-    Pulls the settings the console already knows (serial, gain) together with what only the
-    hardware can say right now (temperature, power health, the reference level). Anything that
-    cannot be read is None in the snapshot, so a gap reads as "unknown" rather than a plausible
-    zero that a later comparison would trust.
+    Pulls the settings the console already knows (serial, gain, bin size, span) together with
+    what only the hardware can say right now (temperature, power health, the reference level).
+    Anything that cannot be read is None in the snapshot, so a gap reads as "unknown" rather than
+    a plausible zero that a later comparison would trust.
     """
     ref_hz = configured_reference_hz()
     return {
         "serial": serial or None,
         "gain": gain,
+        "bin_size": bin_size,
+        "freq_low": freq_low,
+        "freq_high": freq_high,
         "bias_state": BIAS_STATE,
         "soc_temp_c": temp(),
         "throttled": throttled(),
@@ -169,8 +181,26 @@ class BaselineLog:
         return [event["payload"] for event in self._follower.events()]
 
 
-def compare_to_baseline(current_ref_db, samples, *, drop_threshold_db: float = 6.0) -> dict:
+def _taken_under(sample: dict, setup: dict) -> bool:
+    """True when a sample records every SETUP_KEYS value and each one is the same as `setup`'s.
+
+    A sample logged before the set-up was recorded has no bin size, and its serial came from an
+    environment setting the shipped unit never sets: which radio and which bin read it is unknown.
+    It is taken under no set-up, so the learner captures a fresh baseline instead of the radio
+    being judged against it.
+    """
+    return all(key in sample and sample[key] == setup[key] for key in SETUP_KEYS)
+
+
+def compare_to_baseline(current_ref_db, samples, *, setup=None,
+                        drop_threshold_db: float = 6.0) -> dict:
     """Compare a current reference level against the recorded baseline.
+
+    `setup` is the current reading's set-up (its snapshot will do): only samples taken under the
+    same one make the baseline, and `n_set_aside` counts the others. A level read through another
+    radio, at another gain or in another span can differ by more than the threshold with nothing
+    wrong, so with no sample from this set-up there is no baseline for it, whatever else was
+    recorded. Without `setup`, every sample counts.
 
     `drop_threshold_db` is deliberately a parameter, not a constant: the honest threshold is the
     spread the baseline itself shows across its samples (which is why the baseline is taken more
@@ -178,15 +208,23 @@ def compare_to_baseline(current_ref_db, samples, *, drop_threshold_db: float = 6
     means the reference has fallen further than that threshold below the baseline median — the
     signature of a front end that has gone deaf while the transmitter has not moved.
     """
-    levels = [s["ref_db"] for s in samples if s.get("ref_db") is not None]
+    levels, set_aside = [], 0
+    for sample in samples:
+        if sample.get("ref_db") is None:
+            continue
+        if setup is None or _taken_under(sample, setup):
+            levels.append(sample["ref_db"])
+        else:
+            set_aside += 1
     if not levels:
-        return {"has_baseline": False}
+        return {"has_baseline": False, "n_set_aside": set_aside}
     baseline = statistics.median(levels)
     delta = None if current_ref_db is None else current_ref_db - baseline
     degraded = delta is not None and delta < -abs(drop_threshold_db)
     return {
         "has_baseline": True,
         "n_samples": len(levels),
+        "n_set_aside": set_aside,
         "baseline_ref_db": baseline,
         "current_ref_db": current_ref_db,
         "delta_db": delta,

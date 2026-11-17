@@ -73,3 +73,34 @@ test("a reference that has dropped past the threshold reads DEGRADED — the dea
   assert.match(v.text, /DEGRADED/);
   assert.equal(v.kind, "bad");
 });
+
+// A baseline counts only for the set-up it was taken under (radio, gain, reference, bin). Samples
+// from another radio or another gain cannot judge this one, so the panel names what is missing.
+test("samples only from other set-ups read NO BASELINE for this set-up, never a verdict", () => {
+  const v = panel.provenanceVerdict(
+    { ref_db: -31.8, soc_temp_c: 47 },
+    { has_baseline: false, n_set_aside: 3 }
+  );
+  assert.match(v.text, /NO BASELINE/);
+  assert.match(v.text, /this set-up/);
+  assert.doesNotMatch(v.text, /HEALTHY|DEGRADED/);
+  assert.equal(v.kind, "na");
+});
+
+test("a missing reference still comes first when other set-ups hold a baseline", () => {
+  const v = panel.provenanceVerdict(
+    { ref_db: null, soc_temp_c: 47 },
+    { has_baseline: false, n_set_aside: 2 }
+  );
+  assert.match(v.text, /NO REFERENCE/);
+  assert.equal(v.kind, "na");
+});
+
+test("with no sample recorded at all the panel still asks for a capture", () => {
+  const v = panel.provenanceVerdict(
+    { ref_db: -31.8, soc_temp_c: 47 },
+    { has_baseline: false, n_set_aside: 0 }
+  );
+  assert.match(v.text, /NO BASELINE — capture one/);
+  assert.equal(v.kind, "na");
+});

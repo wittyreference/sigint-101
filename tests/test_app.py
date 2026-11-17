@@ -17,14 +17,24 @@ from sigint101.apt import AptDecoder
 from sigint101.childproc import ChildWatch
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.dmr import DmrDecoder
+from sigint101.events import log_event
 from sigint101.flock import FlockDetector
-from sigint101.hardware import RadioProbe
+from sigint101.hardware import RadioProbe, RtlSdrDevice
 from sigint101.lora import LoRaListener, parse_lora_packet
 from sigint101.pocsag import PocsagDecoder
+from sigint101.provenance import BIAS_STATE, REFERENCE_HZ, read_baseline
 from sigint101.rayhunter import RayhunterMonitor
 from sigint101.rds import RDSDecoder, RDSStation, parse_rds_group
-from sigint101.spectrum import Sweeper, SweepRow, validate_span
+from sigint101.spectrum import (
+    DEFAULT_BIN,
+    DEFAULT_HIGH,
+    DEFAULT_LOW,
+    Sweeper,
+    SweepRow,
+    validate_span,
+)
 from sigint101.sstv import SstvDecoder
+from tests.test_spectrum import FM_LINES, FedProc, wait_for_rows
 
 # The suite owns its lesson content: the real lesson_packs/ are authored in parallel, so a test
 # that read them would go red on someone else's unfinished pack. These fixtures are stable.
@@ -80,6 +90,12 @@ class _StubSweeper:
 
     def rows(self, limit=None):
         return self._rows if limit is None else self._rows[-limit:]
+
+    def reading(self):
+        # One run of rows, all swept under these settings, read while the stand-in "runs".
+        row = self._rows[-1] if self._rows and self._started else None
+        return row, {"serial": None, "gain": self.gain, "bin_size": self.bin_size,
+                     "freq_low": self.low, "freq_high": self.high}
 
     def retune(self, low, high, bin_size=None):
         self.low, self.high, self.bin_size = validate_span(low, high, bin_size)
@@ -2507,6 +2523,190 @@ def test_baseline_capture_without_a_reference_is_refused(tmp_path):
         resp = client.post("/api/provenance/baseline")
     assert resp.status_code == 400
     assert resp.json()["recorded"] is False
+
+
+class _FmSweep(_IdleProc):
+    """A launched rtl_power at the process boundary, printing a real capture of the FM band."""
+
+    def __init__(self):
+        self.stdout = iter(FM_LINES)
+
+
+def _surveyed_sweeper(serial):
+    """A real Sweeper on a bus holding one radio with this serial, sweeping the captured band."""
+    return Sweeper(spawn=lambda cmd: _FmSweep(), radio_present=lambda: True,
+                   list_devices=lambda: (RtlSdrDevice(0, serial),))
+
+
+def _read_with_rows(client):
+    """Start the sweep, let its captured rows land, and read the provenance again."""
+    client.get("/api/provenance")
+    client.app.state.sweeper.drain()
+    return client.get("/api/provenance").json()
+
+
+def _setup(**changes):
+    """The set-up a baseline sample counts for: serial, gain, reference station, bin, span."""
+    return {"serial": "AAAA", "gain": None, "ref_hz": REFERENCE_HZ, "bin_size": DEFAULT_BIN,
+            "freq_low": DEFAULT_LOW, "freq_high": DEFAULT_HIGH, **changes}
+
+
+def test_the_baseline_is_only_the_samples_taken_under_the_current_set_up(tmp_path):
+    # Another radio, two gain steps, another bin, station or span can move the reference level
+    # past the threshold. Pooled, these samples 15 dB up would call this healthy radio deaf.
+    with _client(tmp_path, sweeper_factory=lambda: _surveyed_sweeper("AAAA")) as client:
+        level = _read_with_rows(client)["provenance"]["ref_db"]
+        events = tmp_path / "events.jsonl"
+        for _ in range(2):
+            log_event(events, "baseline_sample", {**_setup(), "ref_db": level})
+        for other in (_setup(serial="BBBB"), _setup(gain=20.7), _setup(bin_size=62_500),
+                      _setup(ref_hz=94_700_000),
+                      _setup(freq_low=89_037_500, freq_high=109_037_500)):
+            log_event(events, "baseline_sample", {**other, "ref_db": level + 15})
+        baseline = client.get("/api/provenance").json()["baseline"]
+    assert baseline["n_samples"] == 2
+    assert baseline["baseline_ref_db"] == level
+    assert baseline["degraded"] is False
+    assert baseline["n_set_aside"] == 5
+
+
+def test_a_sample_logged_before_set_ups_were_recorded_counts_for_no_set_up(tmp_path):
+    # The shape every sample had before: no bin size, and the serial an unset environment gave
+    # (null). Every field it records agrees with this radio-less stand-in's set-up, yet which
+    # radio read it is unknown, so it is set aside and the learner captures a fresh baseline.
+    old = {"serial": None, "gain": None, "bias_state": BIAS_STATE, "soc_temp_c": 41.0,
+           "throttled": None, "ref_hz": REFERENCE_HZ}
+    with _client(tmp_path, sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        level = client.get("/api/provenance").json()["provenance"]["ref_db"]
+        for _ in range(2):
+            log_event(tmp_path / "events.jsonl", "baseline_sample", {**old, "ref_db": level + 15})
+        baseline = client.get("/api/provenance").json()["baseline"]
+    assert baseline == {"has_baseline": False, "n_set_aside": 2}
+
+
+def test_a_captured_sample_records_the_surveyed_serial_and_the_settings(tmp_path, monkeypatch):
+    # The shipped unit sets no serial in its environment: the serial is the string the bus survey
+    # listed for the radio the sweep opened, whatever the dongle reports.
+    monkeypatch.delenv("SIGINT101_RTLSDR_SERIAL", raising=False)
+    with _client(tmp_path, sweeper_factory=lambda: _surveyed_sweeper("AAAA")) as client:
+        _read_with_rows(client)
+        assert client.post("/api/provenance/baseline").json()["recorded"] is True
+    [sample] = read_baseline(tmp_path / "events.jsonl")
+    assert sample["serial"] == "AAAA"
+    assert sample["bin_size"] == DEFAULT_BIN
+    assert (sample["gain"], sample["ref_hz"]) == (None, REFERENCE_HZ)
+    assert (sample["freq_low"], sample["freq_high"]) == (DEFAULT_LOW, DEFAULT_HIGH)
+
+
+def _fed_sweeper(procs, bus, now):
+    """A real Sweeper whose rtl_power prints only what the test feeds procs[-1].
+
+    `bus` holds the serials the survey finds, and a test may swap them; `now` is the clock the
+    restart back-off runs on.
+    """
+    def spawn(cmd):
+        procs.append(FedProc())
+        return procs[-1]
+    return Sweeper(spawn=spawn, radio_present=lambda: bool(bus),
+                   list_devices=lambda: tuple(RtlSdrDevice(i, s) for i, s in enumerate(bus)),
+                   clock=lambda: now[0])
+
+
+def _shifted(lines, db):
+    """The captured sweep with every level moved by `db`: a stand-in for the level at another
+    gain or through another radio, whose real size was not measured."""
+    out = []
+    for line in lines:
+        fields = [field.strip() for field in line.split(",")]
+        out.append(", ".join(fields[:6] + [f"{float(v) + db:.2f}" for v in fields[6:] if v]))
+    return out
+
+
+def _logged_and_deaf(tmp_path, polls):
+    """The (serial, gain) of every sample logged, and which polls called the radio deaf."""
+    logged = [(s["serial"], s["gain"]) for s in read_baseline(tmp_path / "events.jsonl")]
+    return logged, [name for name, body in polls.items() if body["baseline"].get("degraded")]
+
+
+def test_after_a_gain_step_nothing_is_read_or_captured_until_the_new_gain_has_swept(tmp_path):
+    # The old gain's rows stay for the waterfall, but none may be read, or captured, under the
+    # new gain's name. Until the restarted sweep has finished a pass the panel has no reference
+    # and Capture is refused; then the new gain has no baseline of its own; and back at the
+    # captured gain, its own fresh rows are read, never the other gain's.
+    procs, bus, now = [], ["AAAA"], [1000.0]
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
+        sweeper = client.app.state.sweeper
+        client.get("/api/provenance")
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        assert client.post("/api/provenance/baseline").status_code == 200
+        assert client.post("/api/gain", json={"gain": 0.0}).json()["set"] is True
+        polls = {"stepped": client.get("/api/provenance").json()}
+        refused = client.post("/api/provenance/baseline")
+        procs[-1].feed(_shifted(FM_LINES, -20))
+        wait_for_rows(sweeper, 4)
+        polls["swept at 0 dB"] = client.get("/api/provenance").json()
+        client.post("/api/gain", json={"gain": None})
+        polls["back at auto"] = client.get("/api/provenance").json()
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 6)
+        polls["swept at auto"] = client.get("/api/provenance").json()
+    assert _logged_and_deaf(tmp_path, polls) == ([("AAAA", None)], [])
+    assert polls["stepped"]["provenance"]["ref_db"] is None
+    assert (refused.status_code, refused.json()["recorded"]) == (400, False)
+    assert "has not finished a pass" in refused.json()["reason"]
+    assert polls["swept at 0 dB"]["baseline"] == {"has_baseline": False, "n_set_aside": 1}
+    assert polls["back at auto"]["provenance"]["ref_db"] is None
+    assert polls["swept at auto"]["baseline"]["n_samples"] == 1
+
+
+def test_after_a_radio_swap_nothing_is_read_or_captured_until_the_new_radio_has_swept(tmp_path):
+    # Radio AAAA is pulled and its rtl_power exits (modelled here), and BBBB is plugged in. AAAA's
+    # rows stay in the buffer, but none may be read, or captured, under BBBB's serial. This is
+    # also the old row served after a replug: the first poll that reopens a radio has no reading.
+    procs, bus, now = [], ["AAAA"], [1000.0]
+    with _client(tmp_path, sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
+        sweeper = client.app.state.sweeper
+        client.get("/api/provenance")
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        assert client.post("/api/provenance/baseline").status_code == 200
+        procs[-1].die(1)
+        sweeper.drain()
+        bus[:] = ["BBBB"]
+        now[0] += 120                        # past the restart back-off
+        polls = {"death reported": client.get("/api/provenance").json(),
+                 "BBBB opened": client.get("/api/provenance").json()}
+        refused = client.post("/api/provenance/baseline")
+        procs[-1].feed(_shifted(FM_LINES, -12))
+        wait_for_rows(sweeper, 4)
+        polls["BBBB swept"] = client.get("/api/provenance").json()
+    assert _logged_and_deaf(tmp_path, polls) == ([("AAAA", None)], [])
+    assert polls["BBBB opened"]["provenance"]["serial"] == "BBBB"
+    assert polls["BBBB opened"]["provenance"]["ref_db"] is None
+    assert refused.status_code == 400
+    assert polls["BBBB swept"]["provenance"]["serial"] == "BBBB"
+    assert polls["BBBB swept"]["baseline"] == {"has_baseline": False, "n_set_aside": 1}
+
+
+def test_one_tune_step_sets_the_baseline_aside_until_the_span_is_back(tmp_path):
+    # Lesson 3 has a tune strip. One + tap shifts the span, and with it where the reference falls
+    # in its hop, which can move its level by several dB with nothing wrong. A sample from
+    # another span is set aside; back on the captured span it counts again.
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _surveyed_sweeper("AAAA")) as client:
+        _read_with_rows(client)
+        assert client.post("/api/provenance/baseline").status_code == 200
+        plus = {"center": 98_100_000, "span": 20_000_000, "bin_size": DEFAULT_BIN}
+        assert client.post("/api/tune", json=plus).json()["tuned"] is True
+        tuned = _read_with_rows(client)
+        home = {"low": DEFAULT_LOW, "high": DEFAULT_HIGH, "bin_size": DEFAULT_BIN}
+        assert client.post("/api/tune", json=home).json()["tuned"] is True
+        back = _read_with_rows(client)
+    assert tuned["baseline"] == {"has_baseline": False, "n_set_aside": 1}
+    assert tuned["provenance"]["ref_db"] is not None
+    assert (back["baseline"]["has_baseline"], back["baseline"]["n_samples"]) == (True, 1)
 
 
 # --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------
