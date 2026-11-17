@@ -30,14 +30,16 @@ REQUIRED_EMAIL="mc8805@outlook.com"
 #   the pull request's author and committed by GitHub <noreply@github.com>; it comes back to a
 #   clone by fetch, never by push, so this hook never sees it leave.
 # - What the remote holds already is read from this clone's remote-tracking refs for it
-#   (refs/remotes/<remote>/), and a commit they reach is not checked again. Two cases make that
+#   (refs/remotes/<remote>/), and a commit they reach is not checked again. Three cases make that
 #   untrue, and a commit can then leave unchecked. A stale ref: a branch deleted or rewritten on
 #   the remote since this clone last fetched still counts as held, so a commit gone from the
 #   remote (history rewritten to take an identity out, say) goes back up unchecked in a new
 #   branch built on it, or in an update that merges it. Run git fetch --prune <remote> before
 #   pushing. A pushurl: the tracking refs describe the repository the remote fetches from, so
 #   when remote.<name>.pushurl names another repository, a commit that only the fetch side
-#   holds reaches the push side unchecked.
+#   holds reaches the push side unchecked. A changed url: after git remote set-url points the
+#   remote at another repository, the old refs still count as held there until git fetch
+#   --prune <remote> replaces them, so a push to a new, empty repository sends all they reach.
 # - With no remote-tracking refs at all (a push by URL, or to a remote this clone has never
 #   fetched, such as a new mirror), it cannot tell what would leave, and refuses anything but a
 #   delete outright.

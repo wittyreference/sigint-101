@@ -472,6 +472,10 @@ class Clone(Sandbox):
     def refs_at(self, bare):
         return self.git(f"--git-dir={bare}", "for-each-ref").stdout
 
+    def remote_has(self, sha):
+        """Whether origin's object store holds this object, under a ref or not."""
+        return self.git(f"--git-dir={self.remote}", "cat-file", "-e", sha).returncode == 0
+
     def push(self, *args, to="origin", **env) -> Pushed:
         """Run `git push <to>` with these arguments and environment, the hooks armed. `to` is a
         remote's name, or a bare repository's path given as a URL."""
@@ -744,6 +748,74 @@ def test_a_wrong_tagger_on_a_tag_inside_a_tag_is_refused(clone):
     assert out.by_hook
     assert out.says("refs/tags/outer")
     assert out.fields() == ["tagger name"]
+
+
+def test_an_annotated_tag_with_a_wrong_tagger_email_is_refused(clone):
+    tag = clone.git("-c", f"user.email={OTHER_EMAIL}", "tag", "-a", "-m", "release", "v1")
+    assert tag.returncode == 0
+    out = clone.push("v1")
+    assert not out.sent
+    assert out.by_hook
+    assert out.says("refs/tags/v1")
+    assert out.fields() == ["tagger e-mail"]
+    assert out.quiet
+
+
+def test_the_tagger_email_may_differ_in_case(clone):
+    tag = clone.git("-c", f"user.email={EMAIL.upper()}", "tag", "-a", "-m", "release", "v1")
+    assert tag.returncode == 0
+    out = clone.push("v1")
+    assert out.sent
+    assert not out.by_hook
+
+
+@pytest.mark.parametrize("bashopts", [None, "nocasematch"])
+def test_a_tagger_name_that_differs_only_in_case_is_refused(clone, bashopts):
+    tag = clone.git("-c", f"user.name={NAME.capitalize()}", "tag", "-a", "-m", "release", "v1")
+    assert tag.returncode == 0
+    out = clone.push("v1", **({"BASHOPTS": bashopts} if bashopts else {}))
+    assert not out.sent
+    assert out.by_hook
+    assert out.fields() == ["tagger name"]
+
+
+@pytest.mark.parametrize("destination", ["refs/heads/x", "refs/archive/v1"])
+def test_a_tag_pushed_by_object_name_outside_refs_tags_is_checked(clone, destination):
+    # Pushed by its object name, a tag reaches the hook with that name as its local ref, not a
+    # refs/tags/ one. To a branch, the remote refuses the ref only after storing the tag object;
+    # to another namespace, the ref is made. Either way the tagger leaves unless it is checked.
+    tag = clone.git("-c", f"user.name={OTHER_NAME}", "tag", "-a", "-m", "release", "v1")
+    assert tag.returncode == 0
+    sha = clone.git("rev-parse", "v1").stdout.strip()
+    out = clone.push(f"{sha}:{destination}")
+    assert not out.sent
+    assert out.by_hook
+    assert out.fields() == ["tagger name"]
+    assert out.quiet
+    assert not clone.remote_has(sha)
+
+
+def _git_failing(*call):
+    """An environment whose bash imports a function named git that fails this one call and hands
+    every other call to the real git. No real read failure can stand in: an object git cannot
+    read also fails the hook's git rev-list and git's own push, so only this reaches the hook's
+    handling of a cat-file that fails on its own."""
+    match = " && ".join(f'[ "${n}" = {word} ]' for n, word in enumerate(call, 1))
+    return {"BASH_FUNC_git%%": f'() {{ if {match}; then return 1; fi; command git "$@"; }}'}
+
+
+@pytest.mark.parametrize("call", [("cat-file", "-t"), ("cat-file", "tag")],
+                         ids=["type-read", "tag-read"])
+def test_a_tag_git_fails_to_read_in_the_hook_is_refused(clone, call):
+    # Fail closed: a tag the hook cannot read is never taken for a commit, nor skipped.
+    tag = clone.git("-c", f"user.name={OTHER_NAME}", "tag", "-a", "-m", "release", "v1")
+    assert tag.returncode == 0
+    out = clone.push("v1", **_git_failing(*call))
+    assert not out.sent
+    assert out.by_hook
+    assert out.says("git could not read")
+    assert out.fields() == []
+    assert out.quiet
 
 
 def test_a_tag_whose_tagger_cannot_be_read_is_refused(clone):
