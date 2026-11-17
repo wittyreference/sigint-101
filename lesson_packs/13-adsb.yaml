@@ -34,7 +34,7 @@ stages:
   try: >-
     Your scope now, comrade. Give it a minute: ADS-B is a broadcast, not a request; planes appear
     only when they transmit. Read a contact: callsign, ring for distance, angle for bearing. If the
-    sky is quiet or the antenna deaf to 1090 MHz, the scope says so plainly. Notice the shift: you
+    sky is quiet or the antenna weak at 1090 MHz, the scope says so plainly. Notice the shift: you
     are reading a message, not identifying a modulation.
   predict: >-
     An airliner overhead is transmitting on 1090 MHz. To put it on your scope — callsign, altitude,
