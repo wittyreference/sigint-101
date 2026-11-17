@@ -39,7 +39,7 @@ stages:
     the very top it can even shrink, as strong stations overload the receiver. That gap is SNR: it
     decides what you can hear, not the peak's height. Carry this out the door: set gain wherever
     your meter shows the widest gap; a bigger gap comes from a better or better-placed antenna,
-    or getting closer, never more gain past that point.
+    or getting closer, not more gain past that point.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
