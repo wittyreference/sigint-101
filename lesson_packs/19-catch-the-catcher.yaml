@@ -29,7 +29,7 @@ stages:
     down to easily intercepted 2G, or demand your permanent IMSI out of turn.
   try: >-
     Your watch, comrade. Over the Orbic's WiFi, off the tailnet, the console only reads its page at
-    192.168.1.1:8080 (recordings, findings, captures); towers hear the Orbic, never those reads. Its
+    192.168.1.1:8080; towers hear the Orbic itself, never those reads. Its
     screen's line: green while recording cleanly; yellow, orange, then solid red as a warning grows;
     white when paused. Warnings come tagged low, medium or high. Red: what have you been handed?
   predict: >-
