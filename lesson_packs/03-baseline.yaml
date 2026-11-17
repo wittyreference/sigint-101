@@ -35,8 +35,8 @@ stages:
   explain: >-
     They look alike: this screen rescales its colours to whatever noise reaches it, so a deaf
     radio and an empty sky both paint plain grass. A blank waterfall alone never proves the air is
-    empty. Your reference settles it. If your known station holds its baseline level, the radio is
-    healthy and the band is quiet; if it has dropped or vanished while nothing else changed, the
+    empty. If your known station holds its baseline level, the radio hears at that frequency, so a
+    quiet band is more likely real; if it has dropped or vanished while nothing else changed, the
     radio has gone deaf. That's why you logged radio, gain, temperature and power: that context is
     provenance, making one reading comparable to the next. Carry this out the door: a number on
     the screen is not ground truth; a number beside its known-good baseline is — keep the
