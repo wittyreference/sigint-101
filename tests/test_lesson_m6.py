@@ -14,23 +14,27 @@ PACK = Path(__file__).resolve().parent.parent / "lesson_packs" / "06-resonance.y
 # is deaf"), the frame ("loud at one length, deaf everywhere else"), the demo (the stock whip
 # "nearly deaf" at 1090 MHz), the try ("a deaf spot") and the explain ("The FM whip is deaf at
 # 1090"). An antenna off its length hears worse; it is not deaf. RTL-SDR Blog, which makes a
-# telescopic dipole kit, says almost any element length works for strong signals and fine tuning
-# is for weak ones: whatever the length, the SWR stays below 5 at most frequencies, a loss of
-# 2.5 dB or less (rtl-sdr.com, "Using our new dipole antenna kit", "Choosing the Antenna Element
-# Length").
+# telescopic dipole kit, says almost any element length works for most strong signals and fine
+# tuning is for weak ones: in most cases, whatever the length, the SWR should be below 5 at most
+# frequencies, a loss of 2.5 dB or less (rtl-sdr.com, "Using our new dipole antenna kit",
+# "Choosing the Antenna Element Length").
 #
 # The claim is refused in the words a rewrite reaches for: deaf or blind in any form; a dead,
-# silent or mute spot or zone; hearing, catching, picking up or receiving nothing, none or no
-# signal; any of those verbs negated with no degree after it ("can't hear 1090" fails, "can't
-# hear it as well" passes); and dead, silent, mute or useless in one clause with the antenna, the
-# whip, the dipole, a leg, an element, the length or "it". "When a band sounds dead" passes: it
-# names the band, not the antenna.
+# silent or mute spot or zone; hearing, catching, picking up or receiving nothing (or almost,
+# nearly or next to nothing), none or no signal, while "no better" and the other comparatives
+# pass; any of those verbs negated with no degree or comparative after it ("can't hear 1090"
+# fails; "can't hear it as well" and "doesn't hear any better" pass); and dead, silent, mute or
+# useless in one clause with the antenna, the whip, the dipole, a leg, an element, the length or
+# "it". "When a band sounds dead" passes: it names the band, not the antenna.
 HEAR = r"(?:hear\w*|catch\w*|caught|pick\w*\s+up|receiv\w*)"
+NONE_HEARD = (r"(?:(?:almost|next\s+to|nearly)\s+)?"
+              r"(?:nothing|none|no(?!\s+(?:better|more|worse|less|louder|clearer)\b))")
 DEAF = re.compile(r"\bdeaf\w*|\bblind\w*|\b(?:dead|silent|mute)\s+(?:spot|zone)s?\b"
-                  rf"|\b{HEAR}\s+(?:nothing|none|no)\b", re.I)
+                  rf"|\b{HEAR}\s+{NONE_HEARD}\b", re.I)
 NEGATED_HEAR = re.compile(r"(?:\b(?:cannot|never|not|no\s+longer|unable\s+to)|n['’]t)"
                           rf"\s+(?:\w+\s+)?{HEAR}(?P<rest>.*)", re.I)
-DEGREE = re.compile(r"\b(?:as|so|well|much|clearly|nearly|quite|very|weak\w*|faint\w*)\b", re.I)
+DEGREE = re.compile(r"\b(?:as|so|well|much|clearly|nearly|quite|very|weak\w*|faint\w*"
+                    r"|better|more|worse|less|louder|clearer)\b", re.I)
 ANTENNA = re.compile(r"\b(?:antennas?|whips?|dipoles?|legs?|elements?|lengths?|it)\b", re.I)
 NOTHING = re.compile(r"\b(?:dead|silent|mute|useless)\b|\bnothing\s+at\s+all\b", re.I)
 
@@ -113,12 +117,12 @@ def test_m6_says_an_antenna_off_its_length_hears_worse():
 # front end, its "dead-looking band" is a band, and "deaf" said of a radio's front end, as in M3,
 # is another claim. So there a clause counts only when it names the antenna (the antenna, the
 # whip, the dipole, a leg, an element or the length) and calls it deaf, blind, dead, silent, mute
-# or useless, or has it hearing, catching, picking up or receiving nothing, or negated with no
-# degree after it.
+# or useless, or has it hearing, catching, picking up or receiving nothing (or next to nothing),
+# or negated with no degree or comparative after it.
 OTHER_PACKS = ("07-build-and-aim.yaml", "13-adsb.yaml")
 NAMED_ANTENNA = re.compile(r"\b(?:antennas?|whips?|dipoles?|legs?|elements?|lengths?)\b", re.I)
 NO_HEARING = re.compile(r"\bdeaf\w*|\bblind\w*|\b(?:dead|silent|mute|useless)\b"
-                        rf"|\bnothing\s+at\s+all\b|\b{HEAR}\s+(?:nothing|none|no)\b", re.I)
+                        rf"|\bnothing\s+at\s+all\b|\b{HEAR}\s+{NONE_HEARD}\b", re.I)
 
 
 def _named_antenna_deaf_claims(lesson):
