@@ -32,7 +32,7 @@ MARAUDER_ONLY = re.compile(
 
 # tcpdump keeps every management frame (`type mgt`), but Marauder's sniffprobe buffers probe
 # requests only: in its probe scan a beacon is dropped, buffered only by its PWN and AP scans
-# (ESP32 Marauder v1.20.0, esp32_marauder/WiFiScan.cpp:9018-9086 and :9088-9144). A line saying
+# (ESP32 Marauder v1.20.0, esp32_marauder/WiFiScan.cpp:9019-9087 and :9088-9144). A line saying
 # the detector hears beacons, or every management frame, holds for wlan1 alone.
 HEARS_MORE_THAN_PROBES = re.compile(
     r"\bbeacon\w*|\b(?:every|all|each|any)\s+(?:of\s+)?(?:the\s+)?(?:802\.11\s+|wi-?fi\s+)?"

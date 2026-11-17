@@ -890,9 +890,15 @@ class MarauderFlockDetector(FlockDetector):
         else:
             ports = sorted(self._glob(MARAUDER_TTY_GLOB))
         if not ports:
-            # Two lines at most: lesson 18's panel has room for two lines of message, not three.
+            # Only what was looked for: the by-id name exists only while the bridge runs on USB
+            # channel 1, and the bridge starts on channel 0 whenever it is opened afresh
+            # (flipperzero-firmware 1.5.1 gpio_scene_usb_uart.c:31-38), so "no bridge" would be
+            # false while it runs there; a pinned path may just be the wrong one. On the by-id
+            # name this fits the two lines of message lesson 18's panel has room for.
+            looked_for = (f"no port at {self._tty}" if self._tty
+                          else "no bridge port on USB Channel 1")
             raise FlockUnavailable(
-                "no monitor radio: no Flipper USB-UART bridge. With the Wi-Fi devboard seated: "
+                f"no monitor radio: {looked_for}. With the Wi-Fi devboard seated: "
                 "GPIO → USB-UART Bridge, USB Channel 1")
         if len(ports) > 1:
             names = ", ".join(os.path.basename(p) for p in ports)

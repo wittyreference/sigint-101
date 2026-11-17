@@ -956,6 +956,25 @@ def test_the_no_bridge_refusal_fits_the_lesson_panels_two_message_lines(tmp_path
     assert "GPIO → USB-UART Bridge, USB Channel 1" in body["reason"]   # still says how
 
 
+# The refusal says only what the console looked for. The by-id name exists only while the bridge
+# runs on USB channel 1, and the bridge starts on channel 0 whenever it is opened afresh
+# (flipperzero-firmware 1.5.1 gpio_scene_usb_uart.c:31-38, usb_uart_bridge.c:107-115): "no
+# bridge" would be false while it runs there. A pinned path may just be the wrong one.
+@pytest.mark.parametrize("pinned", [False, True], ids=["by-id", "pinned"])
+def test_the_no_port_refusal_names_what_it_looked_for(tmp_path, pinned):
+    path = str(tmp_path / "ttyACM1")
+    dec = (MarauderFlockDetector(tty=path) if pinned
+           else MarauderFlockDetector(glob=lambda pattern: []))
+    with pytest.raises(FlockUnavailable) as refused:
+        dec.start()
+    looked_for = str(refused.value).split(". ", 1)[0]   # what it found missing, before the remedy
+    assert looked_for.startswith("no monitor radio: ")
+    if pinned:
+        assert path in looked_for
+    else:
+        assert re.search(r"\bUSB Channel 1\b", looked_for), looked_for
+
+
 # --------------------------------------------------------------------------- the logged reception
 
 # A Flock reception's record names the tool that heard it beside the command that tool ran. Under
