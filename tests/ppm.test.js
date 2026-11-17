@@ -29,13 +29,18 @@ test("the capture's resolution reads as resolution in ppm, to one decimal, with 
 });
 
 // The reference has a tolerance of its own: 47 CFR 73.322(a)(2) sets the pilot at 19 kHz ±2 Hz,
-// and 2 Hz in 19 000 Hz is 105 ppm, the same order as the error the panel measures.
+// and 2 Hz in 19 000 Hz is 105 ppm, the same order as the error the panel measures. Each fact is
+// checked on its own, so a rewording that keeps all of them still passes.
 test("every reading says what the rule holds the pilot to: ±2 Hz, which is ±105 ppm", () => {
   const rulePpm = Math.round((2 / 19000) * 1e6);
-  const rule = new RegExp(`pilot held to ±2 Hz \\(±${rulePpm} ppm\\) by rule`);
-  const v = panel.ppmResultText({ ppm: 164.53, pilot_ratio_db: 31.25, resolution_ppm: 6.579 });
-  assert.match(v.detail, rule);
-  assert.match(panel.ppmResultText({ ppm: -2.1, pilot_ratio_db: 18 }).detail, rule);
+  const readings = [{ ppm: 164.53, pilot_ratio_db: 31.25, resolution_ppm: 6.579 },
+                    { ppm: -2.1, pilot_ratio_db: 18 }];
+  for (const r of readings) {
+    const detail = panel.ppmResultText(r).detail;
+    assert.match(detail, /±2 Hz/);
+    assert.match(detail, new RegExp(`±${rulePpm} ppm`));
+    assert.match(detail, /\brule\b/);
+  }
 });
 
 test("no pilot reads as an honest refusal, never a guessed number", () => {
