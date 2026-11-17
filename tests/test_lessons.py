@@ -613,7 +613,7 @@ def test_the_answer_rides_the_sealed_reveal():
 @pytest.mark.parametrize("hardware, badges", [
     (["rtl-sdr"], []),                              # the built-in radio needs no badge
     ([], []),                                       # a no-RF lesson needs nothing
-    (["wifi-monitor"], ["Wi-Fi adapter"]),
+    (["wifi-monitor"], ["Wi-Fi monitor"]),          # wlan1's adapter or Marauder's devboard
     (["orbic-rayhunter"], ["Orbic"]),
     (["lora"], ["2nd node"]),                       # the LoRa radio is built in; the peer is not
     (["flipper"], ["Flipper"]),

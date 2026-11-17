@@ -6,8 +6,10 @@ import io
 import os
 import re
 import select
+import shlex
 import struct
 import subprocess
+import textwrap
 import time
 import zlib
 from pathlib import Path
@@ -32,6 +34,7 @@ from sigint101.flock import (
     match_signatures,
     parse_management_frame,
 )
+from tests.child_fakes import Child
 from tests.test_app import _client
 
 # A real off-air capture: tcpdump -i wlan1 -s 512 -w off wlan1 in monitor mode, 2026-10-29.
@@ -95,7 +98,7 @@ def ssid_ies(name):
 # --------------------------------------------------------------------------- pcap + parser
 
 
-def test_iter_pcap_frames_reads_every_record_from_the_real_capture():
+def test_iter_pcap_frames_reads_every_record_from_the_capture_fixture():
     with open(FIXTURE, "rb") as fh:
         frames = list(iter_pcap_frames(fh))
     assert len(frames) == 207
@@ -933,3 +936,84 @@ def test_the_panel_reads_stopped_when_marauder_never_answers(tmp_path, bridge):
     assert body["available"] is False
     assert body["state"] == "stopped"
     assert body["reason"].startswith(f"no answer from Marauder on {bridge.path}")
+
+
+# Lesson 18's panel is 124 px tall: under its head it holds two 18 px lines of message, and the
+# no-bridge refusal's third line was cut off (20.67 px of it, measured at 800x480). A line holds 66
+# characters: 738 px of text (the 764 px panel less its borders and padding) at 11.16 px a
+# character (PT Mono's 0.6 em advance plus the body's 0.02 em letter-spacing, at 18 px).
+PANEL_MESSAGE_CHARS = 66
+PANEL_MESSAGE_LINES = 2
+
+
+def test_the_no_bridge_refusal_fits_the_lesson_panels_two_message_lines(tmp_path):
+    dec = MarauderFlockDetector(glob=lambda pattern: [])
+    with _client(tmp_path, flock_factory=lambda: dec) as client:
+        body = client.get("/api/flock").json()
+    assert body["available"] is False and "state" not in body   # refused, not a stopped link
+    lines = textwrap.wrap(body["reason"], PANEL_MESSAGE_CHARS)
+    assert len(lines) <= PANEL_MESSAGE_LINES, lines
+    assert "GPIO → USB-UART Bridge, USB Channel 1" in body["reason"]   # still says how
+
+
+# The refusal says only what the console looked for. The by-id name exists only while the bridge
+# runs on USB channel 1, and the bridge starts on channel 0 whenever it is opened afresh
+# (flipperzero-firmware 1.5.1 gpio_scene_usb_uart.c:31-38, usb_uart_bridge.c:107-115): "no
+# bridge" would be false while it runs there. A pinned path may just be the wrong one.
+@pytest.mark.parametrize("pinned", [False, True], ids=["by-id", "pinned"])
+def test_the_no_port_refusal_names_what_it_looked_for(tmp_path, pinned):
+    path = str(tmp_path / "ttyACM1")
+    dec = (MarauderFlockDetector(tty=path) if pinned
+           else MarauderFlockDetector(glob=lambda pattern: []))
+    with pytest.raises(FlockUnavailable) as refused:
+        dec.start()
+    looked_for = str(refused.value).split(". ", 1)[0]   # what it found missing, before the remedy
+    assert looked_for.startswith("no monitor radio: ")
+    if pinned:
+        assert path in looked_for
+    else:
+        assert re.search(r"\bUSB Channel 1\b", looked_for), looked_for
+
+
+# --------------------------------------------------------------------------- the logged reception
+
+# A Flock reception's record names the tool that heard it beside the command that tool ran. Under
+# the Marauder source it said "tcpdump" beside "sniffprobe -serial": the rack instrument's default
+# tool, not the configured detector's.
+CAMERA_PROBE = mgmt_frame(4, BROADCAST, FLOCK_OUI + b"\x00\x00\x13", BROADCAST, FLOCK_IES)
+
+
+def _flock_receptions(client):
+    """The Flock receptions the console logged, newest first, as the rack's LOG line reads them."""
+    body = client.get("/api/receptions?instrument=flock").json()
+    return [event["payload"] for event in body["receptions"]]
+
+
+def test_a_reception_off_wlan1_is_logged_with_the_tool_its_command_runs(tmp_path, monkeypatch):
+    # tcpdump's own argv, launched through the product's spawn; only the process is a stand-in.
+    def spawn(argv, **kw):
+        child = Child(argv)
+        child.stdout = io.BytesIO(pcap_stream([CAMERA_PROBE]))
+        return child
+
+    monkeypatch.setattr("sigint101.flock.spawn", spawn)
+    dec = FlockDetector(radio_present=lambda: True, which=lambda name: "/usr/bin/" + name)
+    with _client(tmp_path, flock_factory=lambda: dec) as client:
+        assert client.get("/api/flock").status_code == 200
+        dec.drain()
+        [record] = _flock_receptions(client)
+    assert record["command"].startswith("tcpdump -i wlan1 ")
+    assert record["tool"] == shlex.split(record["command"])[0] == "tcpdump"
+
+
+def test_a_reception_off_marauder_is_logged_with_the_tool_its_command_runs(tmp_path, bridge):
+    dec = MarauderFlockDetector(tty=bridge.path)
+    with _client(tmp_path, flock_factory=lambda: dec) as client:
+        assert client.get("/api/flock").status_code == 200
+        bridge.heard()
+        bridge.say(marauder_stream([CAMERA_PROBE]))
+        wait_for(lambda: _flock_receptions(client))
+        [record] = _flock_receptions(client)
+    # sniffprobe is a command typed into Marauder's console, not a program: Marauder runs it.
+    assert record["command"] == "sniffprobe -serial"
+    assert record["tool"] == "Marauder"

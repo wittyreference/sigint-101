@@ -330,14 +330,16 @@
   </svg>
 {% endmacro %}
 
-{# ---- Flock detector (M18): 802.11 management frames off wlan1 in monitor mode, matched against
-   the camera's OUI + IE fingerprint. flock.js polls /api/flock and lists each detected device with
-   its evidence tier. No monitor interface / no tcpdump / no camera in range shows an honest empty
-   list, never a fabricated detection — no alert never means no camera. ---- #}
-{% macro flock(head_command=true) %}
+{# ---- Flock detector (M18): 802.11 management frames off the monitor radio the site configured
+   (tcpdump on wlan1, or Marauder on the Flipper's Wi-Fi devboard), matched against the camera's
+   OUI + IE fingerprint; the title names that source's tool. flock.js polls /api/flock and lists
+   each detected device with its evidence tier. No monitor radio / no capture tool / no camera in
+   range shows an honest empty list, never a fabricated detection — no alert never means no
+   camera. ---- #}
+{% macro flock(tool, head_command=true) %}
               <div class="decoder" data-flock-panel aria-label="Live Flock camera detections">
                 <div class="decoder__head">
-                  <span class="decoder__title">wlan1 &middot; Flock detector</span>
+                  <span class="decoder__title">{{ tool }} &middot; Flock detector</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
                   <span class="decoder__status" data-flock-badge>SAMPLE &middot; NOT LIVE</span>
                 </div>
@@ -364,7 +366,7 @@
 
 {# ---- Flipper (M29): the attached Flipper Zero, read over its USB serial CLI one short session at
    a time. flipper.js polls /api/flipper and fills the device card with the device's own account
-   of itself: its name, model, firmware and region, and its sub-GHz radio state in words. No
+   of itself: its name, model, firmware and region, and its Bluetooth radio state in words. No
    Flipper on USB, two on the bus, or an app open on it hides the card and shows the reason, never
    a fabricated device. It is its own USB device, so reading it never touches the SDR. ---- #}
 {% macro flipper() %}

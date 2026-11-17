@@ -2026,7 +2026,7 @@ button.rail-pip:disabled {
   margin-top: auto;
 }
 
-/* Hardware a lesson needs beyond the built-in radio (Wi-Fi adapter, Orbic, 2nd node, Flipper):
+/* Hardware a lesson needs beyond the built-in radio (Wi-Fi monitor, Orbic, 2nd node, Flipper):
    read by the word and a warn border, so it shows before the learner opens the lesson. */
 .tile__needs {
   display: flex;

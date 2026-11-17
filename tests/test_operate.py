@@ -182,6 +182,22 @@ def test_a_reception_record_carries_its_provenance():
     assert record["item"]["source"] == "KD2ABC-9"
 
 
+def test_a_reception_record_names_the_tool_its_receiver_runs_when_it_has_its_own():
+    # The Flock instrument's tool is the configured detector's own: Marauder on the Flipper's Wi-Fi
+    # devboard, typed `sniffprobe -serial`, is never logged as the default source's tcpdump.
+    ppm = {"correction": "raw", "measured_ppm": None}
+    record = reception_record(
+        instrument("flock"), {"mac": "b4:1e:52:00:00:01", "tier": 4},
+        freq_hz=None, command="sniffprobe -serial", ppm=ppm,
+        radio={"kind": "wifi", "interface": "/dev/ttyACM1"}, tool="Marauder")
+    assert record["tool"] == "Marauder"
+    assert record["command"] == "sniffprobe -serial"
+    # A receiver with no tool of its own is logged under its instrument's.
+    plain = reception_record(instrument("aprs"), {"source": "KD2ABC-9"}, freq_hz=144_390_000,
+                             command=None, ppm=ppm, radio=None)
+    assert plain["tool"] == "multimon-ng"
+
+
 # --- a stored pager reception is read in without its page's words -----------------------------
 
 PAGER_COMMAND = ("rtl_fm -M fm -f 152840000 -s 22050 -g 49.6 -l 0 -d 0 | "

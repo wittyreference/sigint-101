@@ -531,6 +531,10 @@ class FlockDetector:
     FlockUnavailable — when tcpdump or the monitor interface is missing, rather than invent a hit.
     """
 
+    # The tool this source captures with, by the name the rack's picker, the Flock panel's title,
+    # lesson 18's predict frame and each logged reception give it.
+    tool = TCPDUMP
+
     def __init__(self, *, interface=DEFAULT_MONITOR_INTERFACE, spawn=_popen,
                  radio_present=None, which=shutil.which, ssid_match_enabled=False):
         self.interface = interface
@@ -867,6 +871,9 @@ class MarauderFlockDetector(FlockDetector):
     that drops, is stopped with the reason.
     """
 
+    # Marauder runs the sniff typed into its console, so it is the tool every label names.
+    tool = MARAUDER
+
     def __init__(self, *, tty=None, glob=_glob.glob, answer_timeout=MARAUDER_ANSWER_S,
                  ssid_match_enabled=False):
         super().__init__(interface=tty or MARAUDER_TTY_GLOB,
@@ -883,9 +890,16 @@ class MarauderFlockDetector(FlockDetector):
         else:
             ports = sorted(self._glob(MARAUDER_TTY_GLOB))
         if not ports:
+            # Only what was looked for: the by-id name exists only while the bridge runs on USB
+            # channel 1, and the bridge starts on channel 0 whenever it is opened afresh
+            # (flipperzero-firmware 1.5.1 gpio_scene_usb_uart.c:31-38), so "no bridge" would be
+            # false while it runs there; a pinned path may just be the wrong one. On the by-id
+            # name this fits the two lines of message lesson 18's panel has room for.
+            looked_for = (f"no port at {self._tty}" if self._tty
+                          else "no bridge port on USB Channel 1")
             raise FlockUnavailable(
-                f"no monitor radio: no Flipper USB-UART bridge port at {self.interface}. On the "
-                "Flipper, with the Wi-Fi devboard seated: GPIO → USB-UART Bridge, USB Channel 1")
+                f"no monitor radio: {looked_for}. With the Wi-Fi devboard seated: "
+                "GPIO → USB-UART Bridge, USB Channel 1")
         if len(ports) > 1:
             names = ", ".join(os.path.basename(p) for p in ports)
             raise FlockUnavailable(

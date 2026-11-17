@@ -86,7 +86,9 @@ DEFAULT_TUNE_STEP_HZ = 100_000
 # lessons need a second node to talk to, so that is the badge.
 BUILT_IN_HARDWARE = ("rtl-sdr",)
 HARDWARE_BADGES = {
-    "wifi-monitor": "Wi-Fi adapter",
+    # The site's Flock source is wlan1's USB adapter or the Flipper's Wi-Fi devboard: both are a
+    # Wi-Fi radio in monitor mode, and the tile reads the same for either.
+    "wifi-monitor": "Wi-Fi monitor",
     "orbic-rayhunter": "Orbic",
     "lora": "2nd node",
     "flipper": "Flipper",

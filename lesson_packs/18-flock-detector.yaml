@@ -9,7 +9,7 @@ concept: >-
   Last lesson named the counter-surveillance track's first law; this one builds the detector that
   obeys it. A Flock ALPR camera sends its plates home over cellular, but it also carries a WiFi
   radio that leaks a fingerprint — its MAC OUI plus the order of Information Elements in the 802.11
-  probe requests it sends in the clear. A USB WiFi adapter in monitor mode overhears those management frames and
+  probe requests it sends in the clear. A WiFi radio in monitor mode overhears those management frames and
   matches the shape, strictly receive-only. Recognition is tiered: a bare OUI is a weak hint, OUI
   plus the exact IE fingerprint a strong hit. And the first law still holds — no alert never means
   no camera.
@@ -27,8 +27,8 @@ stages:
     touch the camera. You will not transmit a thing. You will only listen to what it is already
     saying to the air.
   demo: >-
-    Watch — hands off. A plain USB WiFi adapter, not the SDR, sits in monitor mode, overhearing
-    the 802.11 probes and beacons every device shouts in the clear. Each row is one: its OUI, the
+    Watch — hands off. A WiFi radio, not the SDR, sits in monitor mode, overhearing the 802.11
+    probes every device shouts in the clear. Each row is one: its OUI, the
     MAC half naming the maker; its Information Element order, the capabilities it lists; sometimes
     a network it hunts. All matched against a Flock camera's shape.
   try: >-

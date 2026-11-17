@@ -19,6 +19,7 @@ from sigint101.hardware import RadioProbe
 from sigint101.operate import INSTRUMENTS
 from sigint101.pocsag import PocsagDecoder
 from sigint101.spectrum import DEFAULT_HIGH, DEFAULT_LOW, Sweeper, target_span
+from sigint101.units import unit_for_lesson
 from tests.child_fakes import Child
 
 FIXTURE_PACKS = Path(__file__).resolve().parent / "fixtures" / "lesson_packs"
@@ -278,6 +279,73 @@ def test_the_flock_caption_names_no_radio_but_the_one_the_site_picked(tmp_path, 
     wrong = [f"{where}: {c}" for where, found in captions.items() for c in found
              if other_source.search(c)]
     assert not wrong, f"a Flock caption names a radio the site did not pick: {wrong}"
+
+
+# The Flock labels that name the capture itself: the panel's title (lesson 18 and the rack), lesson
+# 18's sealed predict frame, and the picker's tool under "Flock" on every rack page. Under the
+# Marauder source they said "wlan1" and "tcpdump" while the console typed sniffprobe into Marauder.
+# Each names the source the site picked, and never the other one.
+FLOCK_TITLE = re.compile(r'data-flock-panel[^>]*>\s*<div class="decoder__head">\s*'
+                         r'<span class="decoder__title">([^<]*)</span>')
+FLOCK_AXIS = re.compile(r'<div class="decoder__axis"[^>]*>([^<]*)</div>')
+FLOCK_PICK = re.compile(r'<a class="rack__pick[^"]*" href="/operate/flock"[^>]*>\s*'
+                        r'<span class="rack__pick-label">[^<]*</span>\s*'
+                        r'<span class="rack__pick-tool">([^<]*)</span>')
+
+
+def _use_flock_source(monkeypatch, source):
+    if source is None:
+        monkeypatch.delenv(FLOCK_SOURCE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(FLOCK_SOURCE_ENV, source)
+
+
+@pytest.mark.parametrize("source, picked, other_source", [
+    (None, WLAN1_SOURCE, MARAUDER_SOURCE),                   # unset: tcpdump on wlan1
+    (FLOCK_SOURCE_MARAUDER, MARAUDER_SOURCE, WLAN1_SOURCE),  # Marauder on the Wi-Fi devboard
+], ids=["wlan1", "marauder"])
+def test_the_flock_labels_name_the_source_the_site_picked(tmp_path, monkeypatch, source, picked,
+                                                          other_source):
+    _use_flock_source(monkeypatch, source)
+    with _client(tmp_path, pack_dir=LESSON_PACKS) as client:
+        # Drawing a page never starts the detector, so neither source touches a radio here.
+        lesson = client.get("/lesson/18").text
+        rack = client.get("/operate/flock").text
+        elsewhere = client.get("/operate/waterfall").text
+    labels = {"lesson 18 panel": FLOCK_TITLE.findall(lesson),
+              "lesson 18 predict frame": FLOCK_AXIS.findall(lesson),
+              "the rack's panel": FLOCK_TITLE.findall(rack),
+              "the rack's picker": FLOCK_PICK.findall(rack),
+              "the picker on another view": FLOCK_PICK.findall(elsewhere)}
+    assert all(labels.values()), f"each page must carry its Flock labels: {labels}"
+    found = [(where, unescape(label)) for where, each in labels.items() for label in each]
+    wrong = [f"{where}: {label}" for where, label in found if other_source.search(label)]
+    assert not wrong, f"a Flock label names a radio or tool the site did not pick: {wrong}"
+    unnamed = [f"{where}: {label}" for where, label in found if not picked.search(label)]
+    assert not unnamed, f"a Flock label does not name the source the site runs: {unnamed}"
+
+
+# Lesson 18's tile says what to bring before the lesson opens. "Wi-Fi adapter" named the wlan1
+# path's USB adapter, not the Flipper's Wi-Fi devboard that the Marauder source listens with. The
+# badge reads the same whichever source the site set, so it names neither source's kit.
+LESSON_18_TILE = re.compile(r'href="/lesson/18">(.*?)</a>', re.S)
+TILE_NEED = re.compile(r'tile__need">\s*([^<]*?)\s*<')
+
+
+@pytest.mark.parametrize("source, other_source", [
+    (None, MARAUDER_SOURCE),
+    (FLOCK_SOURCE_MARAUDER, WLAN1_SOURCE),
+], ids=["wlan1", "marauder"])
+def test_the_flock_lessons_tile_names_no_kit_the_site_did_not_pick(tmp_path, monkeypatch, source,
+                                                                   other_source):
+    _use_flock_source(monkeypatch, source)
+    with _client(tmp_path, pack_dir=LESSON_PACKS) as client:
+        page = client.get(f"/unit/{unit_for_lesson(18).id}").text
+    [tile] = LESSON_18_TILE.findall(page)
+    needs = [unescape(need) for need in TILE_NEED.findall(tile)]
+    assert needs, "lesson 18's tile must say it needs a radio of its own"
+    wrong = [need for need in needs if other_source.search(need)]
+    assert not wrong, f"lesson 18's tile names kit the site did not pick: {wrong}"
 
 
 # --- the sweep: tuned to a target, and its refusals logged once per streak --------------------
