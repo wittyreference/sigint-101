@@ -188,6 +188,31 @@ def _events_of(row: dict):
                 yield index, event, ts
 
 
+def _report_objects(raw: bytes):
+    """Yield each line of a newline-delimited JSON body that parses to an object; skip the rest."""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def _is_report(raw: bytes) -> bool:
+    """True when a body holds a line parse_analysis reads as part of a Rayhunter analysis report.
+
+    That is the metadata line (its `analyzers` list), which Rayhunter writes as a recording starts,
+    or an analysis row (an `events` list, or the legacy `analysis` list). A report that found
+    nothing still has them; a body with none (empty, a web page, an error object) is no report.
+    """
+    return any(isinstance(obj.get(key), list)
+               for obj in _report_objects(raw) for key in ("analyzers", "events", "analysis"))
+
+
 def parse_analysis(raw: bytes) -> list[RayhunterWarning]:
     """Parse a /api/analysis-report/{name} body (newline-delimited JSON) to warnings, newest first.
 
@@ -199,17 +224,7 @@ def parse_analysis(raw: bytes) -> list[RayhunterWarning]:
     analyzer_names: list[str] = []
     warnings: list[RayhunterWarning] = []
 
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(obj, dict):
-            continue
-
+    for obj in _report_objects(raw):
         # The metadata line carries the analyzer roster; capture the names and move on.
         if isinstance(obj.get("analyzers"), list):
             analyzer_names = [
@@ -359,29 +374,38 @@ class RayhunterMonitor:
         # No Rayhunter at the address: as when it is unreachable, "running" must not outlive it.
         self._running = False
         if status != 200:
-            raise self._unreadable(f"HTTP {status} for the recording manifest")
-        raise self._unreadable("the answer is not a Rayhunter recording manifest")
+            raise self._unreadable(
+                f"{self.base_url} answered HTTP {status}, not Rayhunter's recording manifest")
+        raise self._unreadable(f"{self.base_url} answered with a page that is not Rayhunter's")
 
     def _warnings_for(self, name: str) -> list[RayhunterWarning] | None:
         """Fetch and parse one recording's analysis report; None while there is no report (404).
 
-        Any other failed answer is an analysis the console could not read, never an empty one, so
-        it raises RayhunterUnavailable rather than let the line read clean. The Orbic itself was
-        reached, so the monitor stays running.
+        Any other failed answer, or a 200 whose body holds no report line (_is_report), is an
+        analysis the console could not read, never an empty one, so it raises RayhunterUnavailable
+        rather than let the line read clean. The Orbic itself was reached, so it stays running.
         """
         status, body = self._get(ANALYSIS_REPORT_PATH.format(name=name))
         if status == 404:
             return None
         if status != 200:
-            raise self._unreadable(f"HTTP {status} for the analysis report of {name}")
+            raise self._unreadable(
+                f"Rayhunter answered, but its analysis report gave HTTP {status}")
+        if not _is_report(body):
+            raise self._unreadable("Rayhunter answered, but its analysis report could not be read")
         warnings = parse_analysis(body)
         self._report_new(name, warnings)
         return warnings
 
-    def _unreadable(self, what: str) -> RayhunterUnavailable:
-        """Note in `error` why the answer cannot be read, and return the refusal to raise."""
-        self.error = f"Rayhunter at {self.base_url}: {what}"
-        return RayhunterUnavailable(self.error)
+    def _unreadable(self, reason: str) -> RayhunterUnavailable:
+        """Note in `error` what was answered instead, and return the refusal to raise.
+
+        The panel keeps its one "unreachable" headline for every refusal and shows this reason
+        under it, so the reason says which it was: an HTTP error, a page that is not Rayhunter's,
+        or a report that could not be read (no answer at all is _get's own reason).
+        """
+        self.error = reason
+        return RayhunterUnavailable(reason)
 
     def _report_new(self, name: str, warnings: list[RayhunterWarning]) -> None:
         """Hand each warning not parsed before to on_reception, oldest first, exactly once."""

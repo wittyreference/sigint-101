@@ -396,3 +396,40 @@ def test_an_unreadable_report_for_the_active_recording_is_unavailable_never_clea
         mon.warnings()
     # The Orbic answered its manifest, so it was reached: only its report could not be read.
     assert mon.running is True
+
+
+# A 200 whose body holds no line the parser reads as a report (no metadata line, no analysis row)
+# is a report the console could not read, not one that found nothing.
+@pytest.mark.parametrize("body", [
+    b"",
+    b"\n   \n",
+    b"<!DOCTYPE html><html><head><title>Router login</title></head></html>",
+    b"Internal Server Error",
+    json.dumps({"error": "analysis busy"}).encode(),
+    json.dumps([None, None, None]).encode(),
+], ids=["empty", "blank-lines", "html", "plain-text", "json-error-object", "json-list"])
+def test_a_200_report_with_nothing_parsable_is_unavailable_never_clean(body):
+    mon = RayhunterMonitor(fetch=_answers(report=(200, body)))
+    mon.start()
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+    assert "analysis report" in mon.error
+    with pytest.raises(RayhunterUnavailable):
+        mon.warnings()
+    assert mon.running is True
+
+
+# A genuine report that parses and holds no finding stays clean: the metadata line Rayhunter
+# writes when a recording starts, with or without rows, or rows alone (the parser reads those too).
+@pytest.mark.parametrize("report", [
+    _report(),
+    REPORT_CLEAN,
+    (json.dumps(CLEAN_ROW) + "\n").encode(),
+    (json.dumps({"analysis": [{"timestamp": "2026-10-29T11:00:01-07:00",
+                               "events": [None]}]}) + "\n").encode(),
+], ids=["metadata-only", "metadata-and-rows", "rows-only", "legacy-row"])
+def test_a_genuine_report_with_no_finding_is_still_clean(report):
+    mon = RayhunterMonitor(fetch=_answers(report=(200, report)))
+    mon.start()
+    assert mon.status() == "clean"
+    assert mon.warnings() == []

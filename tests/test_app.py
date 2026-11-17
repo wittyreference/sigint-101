@@ -1990,6 +1990,28 @@ def test_rayhunter_says_no_report_yet_not_clean_before_the_report_exists(tmp_pat
     assert body["warnings"] == []
 
 
+@pytest.mark.parametrize("fetch,says", [
+    (_unreachable_fetch, "not reachable"),
+    (_answers((500, b"Internal Server Error")), "answered HTTP 500"),
+    (_answers((200, b"<html><head><title>Router login</title></head></html>")),
+     "answered with a page that is not Rayhunter's"),
+    (_answers(_RH_RECORDING, report=(503, b"busy")),
+     "Rayhunter answered, but its analysis report gave HTTP 503"),
+    (_answers(_RH_RECORDING, report=(200, b"")),
+     "Rayhunter answered, but its analysis report could not be read"),
+], ids=["no-answer", "http-error", "not-rayhunter", "report-http-error", "report-not-a-report"])
+def test_rayhunter_refusal_says_what_happened_under_the_headline(tmp_path, fetch, says):
+    # The panel keeps its "orbic unreachable" headline and shows this reason under it, so the
+    # reason tells no answer, an HTTP error, another site's page and an unreadable report apart.
+    with _client(tmp_path, rayhunter_factory=lambda: RayhunterMonitor(fetch=fetch)) as client:
+        resp = client.get("/api/rayhunter")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["status"] == "off"
+    assert says in body["reason"]
+
+
 def test_rayhunter_returns_the_line_and_findings_when_reachable(tmp_path):
     warns = _rayhunter_warnings()
     with _client(tmp_path,
