@@ -44,8 +44,8 @@ stages:
     A weak, noisy pass, the tone buried in hiss. Does that leave you no image, or a grainy but real
     one? Lock it in.
   observe: >-
-    Hold your guess against how a facsimile differs from a packet, comrade. Packets with more errors
-    than their error correction can repair are thrown away whole. A picture has no checksum; every
+    Hold your guess against how a facsimile differs from a packet, comrade. A packet past its error
+    correction fails its checksum and is thrown away whole. A picture has no checksum; every
     moment of tone is a brightness, landing wherever the line has reached. Ask what hiss does to a
     brightness, and whether a half-spoiled line is a lost line.
   explain: >-
@@ -67,5 +67,5 @@ choices:
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: ["grainy"]
 verdict: >-
-  A grainy but real picture: APT is analog, so noise only speckles it; no checksum throws a line
+  A grainy but real picture: APT is analog, so noise speckles it; no checksum throws a line
   away.

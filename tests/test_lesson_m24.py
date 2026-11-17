@@ -26,9 +26,9 @@ LOSS = re.compile(
     r"|losing|vanish\w*|gone|kill\w*|ruin\w*|reject\w*|destroy\w*|wreck\w*|dies|dead)\b", re.I)
 REPAIRED = re.compile(r"\b(?:repaired|corrected|fixed|repairs|corrects|fixes)\b", re.I)
 
-# What the pack says instead, in the ruling's words: a packet is thrown away when it carries more
-# errors than its error correction can repair. One sentence must name a packet (or a frame, a
-# codeword, a page or a message), its repair or correction, and its loss.
+# What the pack says instead: a packet is thrown away when its errors are past what its error
+# correction can repair. One sentence must name a packet (or a frame, a codeword, a page or a
+# message), its repair or correction, and its loss.
 PACKET = re.compile(r"\b(?:packets?|frames?|codewords?|pages?|messages?)\b", re.I)
 REPAIR = re.compile(r"\b(?:repair\w*|correct(?:s|ed|ing|ion)?|fix(?:es|ed|ing)?)\b", re.I)
 
@@ -61,6 +61,15 @@ ONLY_NOISIER = re.compile(
     r"\b(?:only|just|merely|simply)\s+(?:ever\s+)?(?:gets?|grows?|becomes?|turns?|goes|go)\s+"
     r"(?:\w+\s+){0,2}?(?:noisier|grainier|fainter|weaker|worse|dimmer|snowier|more\s+\w+)\b"
     r"|\bonly\s+ever\s+(?:noisier|grainier|fainter|weaker|worse)\b", re.I)
+
+# A28 in the verdict too: "APT is analog, so noise only speckles it" says noise does nothing worse
+# to the picture than speckle it, which is "analog only gets noisier" in other words; below the FM
+# threshold the picture is lost, not speckled. A sentence fails when noise, hiss or static only
+# (just, merely, simply) speckles, grains, dims, fades, blurs, mars, spoils, degrades or adds to it.
+NOISE_ONLY = re.compile(
+    r"\b(?:noise|hiss|static)\s+(?:only|just|merely|simply)\s+(?:ever\s+)?"
+    r"(?:speckles?|specks?|grains?|dims?|fades?|greys?|grays?|blurs?|mars?|spoils?|degrades?"
+    r"|adds?|dirties|roughens?|dusts?|peppers?|snows?)\b", re.I)
 
 
 def _sentences(text):
@@ -146,3 +155,8 @@ def test_m24_never_says_a_weak_pass_is_never_gone():
 def test_m24_never_says_analog_only_gets_noisier():
     claims = [s for s in _learner_text(load_lesson_file(PACK)) if ONLY_NOISIER.search(s)]
     assert not claims, f"M24 still says analog only gets noisier: {claims}"
+
+
+def test_m24_never_says_noise_only_speckles_the_picture():
+    claims = [s for s in _learner_text(load_lesson_file(PACK)) if NOISE_ONLY.search(s)]
+    assert not claims, f"M24 still says noise only speckles an analog picture: {claims}"
