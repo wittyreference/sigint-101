@@ -1,5 +1,5 @@
 // ABOUTME: Drives the M4 ppm panel — the Measure button captures a station's 19 kHz stereo pilot
-// ABOUTME: via /api/ppm/measure and shows the crystal error, or an honest "no pilot" when absent.
+// ABOUTME: via /api/ppm/measure and shows the sampling clock's error, or an honest "no pilot".
 
 (function () {
   "use strict";

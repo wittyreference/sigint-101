@@ -1,4 +1,4 @@
-# ABOUTME: The frequency-error instrument — how far this receiver's crystal is from the dial.
+# ABOUTME: The frequency-error instrument — the error of the clock timing this receiver's samples.
 # ABOUTME: Measures against two independent references; it never averages a disagreement away.
 
 from __future__ import annotations

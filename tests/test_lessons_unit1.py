@@ -205,3 +205,151 @@ def test_m4_ties_a_near_zero_reading_to_the_pilot(unit1_lessons):
     untied = [s for s in _learner_text(unit1_lessons[4])
               if NEAR_ZERO.search(s) and not (PILOT_CONDITION.search(s) or TOLERANCE.search(s))]
     assert not untied, f"M4 promises a reading near zero without the pilot's condition: {untied}"
+
+
+# M4 once taught that the pilot's figure is the dial's error and that `-p <figure>` cures it. On
+# the build unit that is false: its radio has two clocks. Measured on the kiosk on 2026-11-17,
+# receive only, the pilot gave +144 ppm, the error of the RTL2832U's clock, which times the
+# samples; the dial, an R828D tuner on a reference of its own, read high by a smaller, different
+# amount, and `-p 144` moved every carrier further from its channel. The osmocom driver gives one
+# `-p` figure to both the sample rate and the tuner's crystal value (src/librtlsdr.c,
+# rtlsdr_set_freq_correction and rtlsdr_get_xtal_freq). So M4 keeps the measurement, says what it
+# measures, gives the dial an error of its own, and drops the cure and every distance worked from
+# the figure. Each test below reads every line the learner sees: the sentences, the chip labels,
+# and the check read whole where its parts answer each other.
+def _learner_lines(lesson):
+    """Every line the learner reads in a lesson: its sentences, then every chip label."""
+    labels = [choice["label"] for choice in lesson.choices]
+    if lesson.check:
+        labels += [choice["label"] for choice in lesson.check["choices"]]
+    return _learner_text(lesson) + labels
+
+
+# The pilot's own numbers and the V3's rating are not the figure the panel reads: the 19 kHz tone,
+# the 2 Hz and 105 ppm the rule holds it to, and the V3's 1 ppm. A line is read with them blanked.
+CONSTANTS = re.compile(r"\b(?:19 kHz|2 Hz|105 ppm|1 ppm)\b", re.I)
+
+# The pilot's figure as a line names it: a reading in ppm or parts per million ("+164 ppm"), a
+# signed figure ("+164"), the pilot or the landmark it is, or a number, figure, reading or ppm that
+# is the panel's, the learner's, the measured one or the one they have ("the number your panel
+# shows", "your measured ppm", "the one number you have").
+READING = re.compile(r"[+−-]?\d[\d.,]*\s*(?:ppm|parts per million)\b|(?<![\w.])[+−]\d", re.I)
+FIGURE = re.compile(r"\b(?:pilot|landmark)'?s?\b|\b(?:measured|panel'?s|your|that|this|the|one)"
+                    r"\s+(?:own\s+)?(?:number|figure|reading|ppm)\b", re.I)
+
+# The dial's error as a line names it: the dial or the tuner, what you tune, every, any or each
+# MHz, frequency, band, station or channel, everywhere or wherever, the radio's frequency error,
+# how far off, or landing high, low or off. The dial the learner steps or turns is the control,
+# not its error ("Step the dial to your strongest station"), and so is "Tune ..." said to them.
+DIAL = re.compile(r"(?<!step the )(?<!turn the )\b(?:dial|tuner)'?s?\b|\byou(?:'ve| have)? tuned?\b"
+                  r"|\b(?:every|any|each) (?:MHz|frequency|band|station|channel)\b"
+                  r"|\b(?:everywhere|wherever)\b|\bfrequency error\b|\bhow far off\b"
+                  r"|\blands?\b[^.;]*\b(?:high|low|off)\b", re.I)
+
+# A line sets the two apart when it negates the dial ("not the dial's", "nothing about the
+# tuner") or gives the dial an error of its own or a separate one ("the dial has its own").
+APART = re.compile(r"(?:\b(?:not|never|nothing|no)\b|n't)(?:\W+\w+){0,3}?\W+(?:dial|tuner)"
+                   r"|\b(?:dial|tuner)\b[^.;]*\b(?:own|separate\w*)\b"
+                   r"|\bseparate\w*\b[^.;]*\b(?:dial|tuner)\b", re.I)
+
+# Hertz for every MHz tuned makes a figure the dial's error whatever it is tied to ("164 Hz of
+# error for every MHz you tune"), and either way round.
+HZ_PER_MHZ = re.compile(r"\d[\d,.]*\s*Hz\b[^.;]*\b(?:per|every|each)\s+MHz\b"
+                        r"|\b(?:per|every|each)\s+MHz\b[^.;]*\d[\d,.]*\s*Hz\b", re.I)
+
+
+def _makes_the_figure_the_dials_error(line):
+    """Whether a line ties the pilot's figure to the dial's error and does not set them apart."""
+    line = CONSTANTS.sub(" ", line)
+    if HZ_PER_MHZ.search(line):
+        return True
+    return bool((READING.search(line) or FIGURE.search(line)) and DIAL.search(line)
+                and not APART.search(line))
+
+
+# The check's prompt is also read whole: "Say your radio reads +164 ppm. ... About how far off
+# frequency does it land?" ties the two across its sentences.
+def test_m4_never_makes_the_pilots_figure_the_dials_error(unit1_lessons):
+    lesson = unit1_lessons[4]
+    prompt = [lesson.check["prompt"]] if lesson.check else []
+    tied = [line for line in _learner_lines(lesson) + prompt
+            if _makes_the_figure_the_dials_error(line)]
+    assert not tied, f"M4 makes the pilot's figure the dial's error: {tied}"
+
+
+# The cure: `-p` or `--ppm` given a value ("-p 164", "--ppm <yours>"), or named beside the figure
+# or a word for curing ("the cure is -p"), or tools told, given or passed something ("tell each
+# tool your measured number").
+OPTION = r"(?<![\w-])(?:-p|--ppm)(?![\w-])"
+CURING = r"\b(?:cure|correct|fix|apply|set|tell|give|pass|feed|hand)\w*"
+CURE = re.compile(rf"{OPTION}\s*(?:[+−-]?\d|<)|{OPTION}.*{CURING}|{CURING}.*{OPTION}"
+                  rf"|{CURING}[^.?!]*\btools?\b|\btools?\b[^.?!]*{CURING}", re.I)
+
+# A cure refused is no cure: "This console applies no ppm correction", "Never hand that number to
+# your tools", "Don't give rtl_433 your number with -p". A negation just before a word for curing,
+# a tool or the option drops the rest of its clause before the line is read.
+NEGATED_CURE = re.compile(rf"(?:\b(?:no|not|never|nothing)\b|n't)\s+(?:\w+\s+)?"
+                          rf"(?:{CURING}|tools?\b|`?(?:-p|--ppm)\b)[^,;:.?!—–]*", re.I)
+
+
+def _gives_a_cure(line):
+    """Whether a line hands the pilot's figure on as a cure, once any refused cure is dropped."""
+    line = NEGATED_CURE.sub(" ", line)
+    return bool(CURE.search(line) or (re.search(OPTION, line, re.I)
+                                      and (READING.search(line) or FIGURE.search(line))))
+
+
+def test_m4_gives_no_cure_from_the_pilots_figure(unit1_lessons):
+    cures = [line for line in _learner_lines(unit1_lessons[4]) if _gives_a_cure(line)]
+    assert not cures, f"M4 gives a cure from the pilot's figure: {cures}"
+
+
+# A distance worked from the figure: an offset in Hz or kHz beside a reading in ppm, or beside a
+# frequency in MHz unless the line poses it. The predict's "Say your radio sits about 16 kHz high
+# at 100 MHz" supposes a distance and works none from the figure; "Say it reads +150 ppm: then
+# 400 MHz lands 60 kHz high" works one. The check is also read whole, prompt, chips and whys
+# together, because its chips carry the distances its prompt asks for.
+OFFSET = re.compile(r"\d[\d,.]*\s*k?Hz\b", re.I)
+TUNED = re.compile(r"\d[\d,.]*\s*MHz\b", re.I)
+
+
+def _works_a_distance(line):
+    """Whether a line works an offset from a reading, or from a tuned frequency it does not pose."""
+    line = CONSTANTS.sub(" ", line)
+    if not OFFSET.search(line):
+        return False
+    return bool(READING.search(line) or (TUNED.search(line) and not POSED.search(line)))
+
+
+def test_m4_works_no_distance_from_the_pilots_figure(unit1_lessons):
+    lesson = unit1_lessons[4]
+    whole = []
+    if lesson.check:
+        parts = [f"{choice['label']}. {choice['why']}" for choice in lesson.check["choices"]]
+        whole = [" ".join([lesson.check["prompt"], *parts])]
+    worked = [line for line in _learner_lines(lesson) + whole if _works_a_distance(line)]
+    assert not worked, f"M4 works a distance from the pilot's figure: {worked}"
+
+
+# What M4 says in their place. The figure is the error of the clock that times the samples: a
+# clause names a clock and the samples ("the sampling clock", "the clock that times the samples")
+# beside the panel, the pilot or the figure, and nothing in the clause denies it. The dial has an
+# error of its own: a sentence gives the dial or the tuner its own or a separate error, and
+# nothing in the sentence denies it.
+SAMPLE_CLOCK = re.compile(r"\bsampl\w*.*\b(?:clock|crystal|oscillator)s?\b"
+                          r"|\b(?:clock|crystal|oscillator)s?\b.*\bsampl\w*", re.I)
+MEASURED = re.compile(r"\b(?:panel|pilot|ppm|number|figure|reading)s?\b", re.I)
+DENIED = re.compile(r"\b(?:not|never|no|nothing|without)\b|n't", re.I)
+OWN = re.compile(r"\b(?:own|separate\w*)\b", re.I)
+
+
+def test_m4_says_the_figure_is_the_sampling_clocks_and_the_dial_has_its_own(unit1_lessons):
+    lines = _learner_lines(unit1_lessons[4])
+    clock = [clause for line in lines for clause in _clauses(line)
+             if SAMPLE_CLOCK.search(clause) and MEASURED.search(clause)
+             and not DENIED.search(clause)]
+    assert clock, "M4 must say its figure is the error of the clock that times the samples"
+    dial = [line for line in lines
+            if re.search(r"\b(?:dial|tuner)\b", line, re.I) and OWN.search(line)
+            and re.search(r"\berrors?\b", line, re.I) and not DENIED.search(line)]
+    assert dial, "M4 must say the dial (the tuner) has an error of its own, separate"
