@@ -3,6 +3,7 @@
 
 import json
 import re
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder
 from sigint101.events import log_event, read_events
+from sigint101.flock import FLOCK_SOURCE_ENV, FLOCK_SOURCE_MARAUDER, MarauderFlockDetector
 from sigint101.hardware import RadioProbe
 from sigint101.operate import INSTRUMENTS
 from sigint101.pocsag import PocsagDecoder
@@ -188,6 +190,89 @@ def test_home_has_the_operator_mode_bar(tmp_path):
     assert 'href="/operate"' in html
     assert "Operator mode" in html
     assert "The radios, no script" in html
+
+
+# --- the fixed dials' captions, in the rack and in their lessons -------------------------------
+
+LESSON_PACKS = Path(__file__).resolve().parent.parent / "lesson_packs"
+
+# The caption under a fixed dial. The rack's dial and the lesson's carry the same line.
+CAPTION = re.compile(r'<div class="tune__caption"[^>]*>([^<]*)</div>')
+
+# Where a caption's clauses break: its middle dots, commas, semicolons, colons, dashes, brackets.
+CLAUSE_BREAK = re.compile(r"[·,;:—–()]")
+
+# The Flipper's caption said "Flipper Zero · serial, receive-only". Read as the cable, that is
+# false: the console types CLI commands down it (sigint101/flipper.py), and lesson 29's observe
+# says the cable carries the command line both ways. What holds is narrower: nothing the console
+# asks of the Flipper keys one of its radios. So a receive-only label, in the words a trim reaches
+# for (lesson 19's set), or a clause that says nothing is sent, passes only in a clause that names
+# the radios and not the link.
+RECEIVE_ONLY = re.compile(
+    r"\breceiv(?:e|es|ing)[\s-]+only\b|\brx[\s-]*only\b|\blisten(?:s|ing)?[\s-]+only\b"
+    r"|\b(?:only|just|merely)\s+(?:receiv|listen)\w*|\bpassive(?:ly)?\b|\bone[\s-]way\b", re.I)
+SENDS_NOTHING = re.compile(
+    r"(?:\b(?:never|not|no|nothing|none|without)\b|n't).*?"
+    r"\b(?:tx|transmi\w*|send\w*|sent|emit\w*|radiat\w*|broadcast\w*|talk\w*|writ\w*)\b"
+    r"|\b(?:transmi\w*|send\w*|emit\w*|writ\w*)\s+(?:nothing|none|no)\b", re.I)
+RADIOS = re.compile(r"\bradios?\b|\bsub-?ghz\b|\bantennas?\b", re.I)
+LINK = re.compile(r"\b(?:serial|usb|cli|cable|link|port|uart|bridge|command\w*|wired?)\b", re.I)
+
+# The Flock caption named wlan1 ("WiFi · wlan1 monitor mode, receive-only") even where the site
+# sets SIGINT101_FLOCK_SOURCE=marauder, whose radio is the Flipper's Wi-Fi devboard read over the
+# Flipper's USB-UART bridge (sigint101/flock.py). Either radio listens in monitor mode and sends
+# nothing, so a caption may name the radio in use, or none; never the other source's radio or tool.
+WLAN1_SOURCE = re.compile(
+    r"\bwlan\d*\b|\bwl[a-z]+\d\w*\b|\bmon\d+\b|\btcpdump\b|\badapter\b|\bdongle\b|\brtl8821\w*",
+    re.I)
+MARAUDER_SOURCE = re.compile(
+    r"\bmarauder\b|\bdevboard\b|\besp32\w*|\bflipper\b|\buart\b|\bbridge\b|\bsniffprobe\b", re.I)
+
+
+def _captions(pages):
+    """Each page's fixed-dial captions as the screen reads them (&middot; as a middle dot)."""
+    return {where: [unescape(c) for c in CAPTION.findall(page)] for where, page in pages.items()}
+
+
+def _labels_off_the_radios(caption):
+    """The clauses of a caption that call anything but the radios receive-only, or silent."""
+    return [clause.strip() for clause in CLAUSE_BREAK.split(caption)
+            if (RECEIVE_ONLY.search(clause) or SENDS_NOTHING.search(clause))
+            and (LINK.search(clause) or not RADIOS.search(clause))]
+
+
+def test_the_flipper_caption_never_calls_its_command_line_receive_only(tmp_path):
+    with _client(tmp_path, pack_dir=LESSON_PACKS) as client:
+        pages = {"lesson 29": client.get("/lesson/29").text,
+                 "the rack": client.get("/operate/flipper").text}
+    captions = _captions(pages)
+    assert all(captions.values()), f"each page must carry the Flipper dial's caption: {captions}"
+    labelled = [f"{where}: {c}" for where, found in captions.items() for c in found
+                if _labels_off_the_radios(c)]
+    assert not labelled, f"a Flipper caption calls more than its radios receive-only: {labelled}"
+
+
+@pytest.mark.parametrize("source, other_source", [
+    (None, MARAUDER_SOURCE),                 # unset: tcpdump on wlan1
+    (FLOCK_SOURCE_MARAUDER, WLAN1_SOURCE),   # the Flipper's Wi-Fi devboard over its UART bridge
+], ids=["wlan1", "marauder"])
+def test_the_flock_caption_names_no_radio_but_the_one_the_site_picked(tmp_path, monkeypatch,
+                                                                       source, other_source):
+    if source is None:
+        monkeypatch.delenv(FLOCK_SOURCE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(FLOCK_SOURCE_ENV, source)
+    with _client(tmp_path, pack_dir=LESSON_PACKS) as client:
+        # Drawing a page never starts the detector, so neither source touches a radio here.
+        on_marauder = isinstance(client.app.state.flock, MarauderFlockDetector)
+        pages = {"lesson 18": client.get("/lesson/18").text,
+                 "the rack": client.get("/operate/flock").text}
+    assert on_marauder == (source == FLOCK_SOURCE_MARAUDER)
+    captions = _captions(pages)
+    assert all(captions.values()), f"each page must carry the Flock dial's caption: {captions}"
+    wrong = [f"{where}: {c}" for where, found in captions.items() for c in found
+             if other_source.search(c)]
+    assert not wrong, f"a Flock caption names a radio the site did not pick: {wrong}"
 
 
 # --- the sweep: tuned to a target, and its refusals logged once per streak --------------------
