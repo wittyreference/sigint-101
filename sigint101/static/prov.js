@@ -71,13 +71,15 @@
 
   // The one decision the panel makes about what the learner sees. A deaf radio and a quiet band
   // draw the same waterfall, so only this reference-vs-baseline verdict tells them apart — stated
-  // by word and glyph, with "no baseline" / "no radio" admitted plainly rather than guessed.
+  // by word and glyph, with "no reference" / "no baseline" admitted plainly rather than guessed.
   function provenanceVerdict(p, b) {
     p = p || {};
     b = b || {};
+    // Only the reference reading speaks for the radio; the Pi's own chip temperature reads with no
+    // radio attached. No reading (radio unplugged, sweep off the FM band, the first poll before a
+    // sweep row) leaves nothing to judge, so no baseline state can turn it into a verdict.
     var hasRef = p.ref_db !== null && p.ref_db !== undefined;
-    var hasRadio = hasRef || (p.soc_temp_c !== null && p.soc_temp_c !== undefined);
-    if (!hasRadio) return { text: "NO RADIO", kind: "na" };
+    if (!hasRef) return { text: "NO REFERENCE — can't tell", kind: "na" };
     if (!b.has_baseline) return { text: "NO BASELINE — capture one", kind: "na" };
     if (b.degraded) return { text: "▼ DEGRADED — gone deaf", kind: "bad" };
     return { text: "✓ HEALTHY", kind: "ok" };
