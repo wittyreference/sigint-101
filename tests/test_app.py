@@ -1,7 +1,10 @@
 # ABOUTME: Integration tests for the FastAPI console — its routes and the server-side
 # ABOUTME: commit-before-reveal gate, driven through the TestClient against a fixture pack.
 
+import io
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -1880,11 +1883,111 @@ def test_rayhunter_reports_503_and_a_reason_when_the_orbic_is_unreachable(tmp_pa
     assert "Rayhunter" in body["reason"] or "reachable" in body["reason"]
 
 
-def test_rayhunter_default_monitor_also_refuses_without_an_orbic(tmp_path):
+class _RouterLoginPage:
+    """What urlopen hands back when a home router's login page answers at the Orbic's address."""
+
+    status = 200
+
+    def read(self):
+        return b"<!DOCTYPE html><html><head><title>Router login</title></head></html>"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _no_route(url, timeout):
+    raise urllib.error.URLError("no route to host")
+
+
+def _not_found(url, timeout):
+    raise urllib.error.HTTPError(url, 404, "Not Found", None, io.BytesIO(b"Not Found"))
+
+
+def _router_login(url, timeout):
+    return _RouterLoginPage()
+
+
+@pytest.mark.parametrize("urlopen", [_no_route, _not_found, _router_login],
+                         ids=["nothing-answers", "http-404", "a-router-answers"])
+def test_rayhunter_default_monitor_also_refuses_without_an_orbic(tmp_path, monkeypatch, urlopen):
+    # The default monitor's own fetch, with the answer injected where it meets the network:
+    # nothing leaves the machine, and whatever answers at 192.168.1.1:8080 here cannot change it.
+    seen = []
+
+    def answer(url, timeout):
+        seen.append(url)
+        return urlopen(url, timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", answer)
     with _client(tmp_path) as client:
         resp = client.get("/api/rayhunter")
+    assert seen and all(url.startswith("http://192.168.1.1:8080/") for url in seen)
     assert resp.status_code == 503
     assert resp.json()["available"] is False
+
+
+def _answers(manifest, report=(404, b"Analysis file not found")):
+    """A fake HTTP GET at the boundary: each manifest and report request answered as given."""
+
+    def fetch(url, timeout):
+        if url.endswith("/api/qmdl-manifest"):
+            return manifest
+        return report
+
+    return fetch
+
+
+# Rayhunter's manifest while it records: entries, and the active recording as current_entry.
+_RH_RECORDING = (200, b'{"entries": [], "current_entry": {"name": "1730300000"}}')
+
+
+@pytest.mark.parametrize("manifest", [
+    (500, b"Internal Server Error"),
+    (404, b"Not Found"),
+    (200, b"<!DOCTYPE html><html><head><title>Router login</title></head></html>"),
+    (200, b'{"entries": []}'),
+    (200, b'{"current_entry": null}'),
+], ids=["http-500", "http-404", "html-200", "no-current_entry", "no-entries"])
+def test_rayhunter_refuses_an_answer_that_is_not_a_rayhunter_manifest(tmp_path, manifest):
+    # An error page, or a router or captive portal at the Orbic's address, is not "LIVE, not
+    # recording": it is the same 503 with a reason as an Orbic that is not there.
+    with _client(tmp_path,
+                 rayhunter_factory=lambda: RayhunterMonitor(fetch=_answers(manifest))) as client:
+        resp = client.get("/api/rayhunter")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["status"] == "off"
+    assert body["warnings"] == []
+    assert "Rayhunter" in body["reason"]
+
+
+@pytest.mark.parametrize("code", [500, 503])
+def test_rayhunter_refuses_when_the_recordings_report_cannot_be_read(tmp_path, code):
+    # A report the console could not read is never "recording · clean".
+    fetch = _answers(_RH_RECORDING, report=(code, b"Internal Server Error"))
+    with _client(tmp_path, rayhunter_factory=lambda: RayhunterMonitor(fetch=fetch)) as client:
+        resp = client.get("/api/rayhunter")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["status"] != "clean"
+    assert str(code) in body["reason"]
+
+
+def test_rayhunter_says_no_report_yet_not_clean_before_the_report_exists(tmp_path):
+    # Recording, but with no analysis report (404) nothing has been read to call clean.
+    fetch = _answers(_RH_RECORDING, report=(404, b"Analysis file not found"))
+    with _client(tmp_path, rayhunter_factory=lambda: RayhunterMonitor(fetch=fetch)) as client:
+        resp = client.get("/api/rayhunter")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["status"] == "no-report"
+    assert body["warnings"] == []
 
 
 def test_rayhunter_returns_the_line_and_findings_when_reachable(tmp_path):

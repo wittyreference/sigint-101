@@ -260,11 +260,13 @@ def test_status_is_clean_when_recording_with_no_finding():
     assert mon.status() == "clean"
 
 
-def test_status_is_clean_when_recording_has_no_report_yet():
-    # The active recording's analysis report does not exist yet (404): recording, nothing flagged.
+def test_status_is_no_report_when_recording_has_no_report_yet():
+    # The active recording's analysis report does not exist yet (404): recording, but nothing has
+    # been read. "clean" would claim an analysis the console never saw.
     mon = RayhunterMonitor(fetch=_fetch(reports={}))
     mon.start()
-    assert mon.status() == "clean"
+    assert mon.status() == "no-report"
+    assert mon.warnings() == []                # still no finding, and no refusal either
 
 
 def test_status_is_off_when_not_recording():
@@ -328,3 +330,69 @@ def test_an_orbic_that_goes_away_is_no_longer_running():
     with pytest.raises(RayhunterUnavailable):
         mon.status()
     assert mon.running is False
+
+
+# --------------------------------------------------------------------------- non-Rayhunter answers
+
+
+def _answers(manifest=(200, MANIFEST_RECORDING), report=(404, b"Analysis file not found")):
+    """A fake HTTP GET at the boundary: each manifest and report request answered as given."""
+
+    def fetch(url, timeout):
+        if url.endswith("/api/qmdl-manifest"):
+            return manifest
+        return report
+
+    return fetch
+
+
+# What else can answer at 192.168.1.1:8080: an HTTP error, or a home router's or captive portal's
+# own page. None of them is an Orbic that is not recording.
+@pytest.mark.parametrize("manifest", [
+    (500, b"Internal Server Error"),
+    (404, b"Not Found"),
+    (200, b"<!DOCTYPE html><html><head><title>Router login</title></head></html>"),
+    (200, json.dumps({"entries": []}).encode()),
+    (200, json.dumps({"current_entry": None}).encode()),
+    (200, json.dumps([PAST]).encode()),
+    (500, MANIFEST_STOPPED),
+], ids=["http-500", "http-404", "html-200", "no-current_entry", "no-entries", "json-list",
+        "manifest-under-500"])
+def test_an_answer_that_is_not_a_rayhunter_manifest_is_unavailable_not_off(manifest):
+    mon = RayhunterMonitor(fetch=_answers(manifest=manifest))
+    with pytest.raises(RayhunterUnavailable):
+        mon.start()
+    assert mon.running is False
+    assert "Rayhunter" in mon.error
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+
+
+def test_a_manifest_that_stops_being_rayhunters_mid_poll_is_no_longer_running():
+    # Reached once, then something else answers at the address (the hotspot's WiFi swapped for a
+    # router's): the next poll refuses, and "running" does not outlive the Orbic.
+    state = {"manifest": (200, MANIFEST_STOPPED)}
+
+    def fetch(url, timeout):
+        return _answers(manifest=state["manifest"])(url, timeout)
+
+    mon = RayhunterMonitor(fetch=fetch)
+    mon.start()
+    assert mon.status() == "off"
+    state["manifest"] = (200, b"<html><title>Captive portal</title></html>")
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+    assert mon.running is False
+
+
+@pytest.mark.parametrize("code", [500, 503])
+def test_an_unreadable_report_for_the_active_recording_is_unavailable_never_clean(code):
+    mon = RayhunterMonitor(fetch=_answers(report=(code, b"Internal Server Error")))
+    mon.start()
+    with pytest.raises(RayhunterUnavailable):
+        mon.status()
+    assert str(code) in mon.error
+    with pytest.raises(RayhunterUnavailable):
+        mon.warnings()
+    # The Orbic answered its manifest, so it was reached: only its report could not be read.
+    assert mon.running is True
