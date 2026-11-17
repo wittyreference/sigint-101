@@ -746,7 +746,7 @@ def test_a_lesson_tile_badges_the_hardware_it_needs_beyond_the_radio(tmp_path):
                             (18, {"hardware": ["wifi-monitor"]}),
                             (19, {"hardware": ["orbic-rayhunter"]})) as client:
         html = client.get("/unit/7").text
-    assert re.findall(r'tile__need">\s*([^<]*?)\s*<', html) == ["Wi-Fi adapter", "Orbic"]
+    assert re.findall(r'tile__need">\s*([^<]*?)\s*<', html) == ["Wi-Fi monitor", "Orbic"]
 
 
 def test_a_radio_only_lesson_tile_carries_no_badge(tmp_path):

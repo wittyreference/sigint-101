@@ -78,6 +78,8 @@ INSTRUMENTS = (
     Instrument("apt", "APT", "satdump", "apt", "apt", "rtl-sdr"),
     Instrument("sstv", "SSTV", "sstv", "sstv", "sstv", "rtl-sdr"),
     Instrument("lora", "LoRa", "meshtasticd", "lora", "lora", "lora"),
+    # The default source's tool. The rack, the panel and each logged reception name the tool of
+    # the detector the site configured instead (flock.py: tcpdump, or Marauder).
     Instrument("flock", "Flock", "tcpdump", "flock", "flock", "wlan1"),
     Instrument("rayhunter", "Rayhunter", "Orbic", "rayhunter", "rayhunter", "orbic"),
     # The Flipper reads the device's identity over its USB CLI; it decodes nothing, so it has no
@@ -228,16 +230,20 @@ def reception_summary(key: str, item: dict) -> str:
     return summarize(item or {}) if summarize else ""
 
 
-def reception_record(inst: Instrument, item: dict, *, freq_hz, command, ppm, radio) -> dict:
+def reception_record(inst: Instrument, item: dict, *, freq_hz, command, ppm, radio,
+                     tool=None) -> dict:
     """The provenance a live reception is logged with: what heard it, where, and how.
 
     `freq_hz` is where the receiver listened (a list for a two-channel decoder, None where the
     radio picks its own channel); `ppm` is the clock-correction state; `radio` names the radio
-    (an RTL-SDR's serial and index, or the separate radio's host). The time is the event's own.
+    (an RTL-SDR's serial and index, or the separate radio's host). `tool` is the receiver's own
+    tool where it has one, as the Flock detector does (tcpdump, or Marauder on the Wi-Fi
+    devboard), so the record never names another tool beside its command; otherwise the
+    instrument's. The time is the event's own.
     """
     return {
         "instrument": inst.key,
-        "tool": inst.tool,
+        "tool": tool or inst.tool,
         "freq_hz": freq_hz,
         "gain": command_gain(command),
         "ppm": ppm,

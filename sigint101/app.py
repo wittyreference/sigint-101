@@ -277,8 +277,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return {"battery_pct": reading.percent, "battery_charging": reading.charging,
                 "battery_low": reading.low, "battery_volts": reading.voltage}
 
+    def flock_tool(request: Request) -> dict:
+        """The Flock source's tool, read off the detector the site configured: tcpdump or Marauder.
+
+        The rack's picker, the Flock panel's title and lesson 18's predict frame name it, so none
+        says tcpdump while the console types into Marauder. A stand-in detector with no tool of
+        its own reads as the instrument's default.
+        """
+        detector = getattr(request.app.state, "flock", None)
+        return {"flock_tool": getattr(detector, "tool", None) or rack_instrument("flock").tool}
+
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
-                                context_processors=[status_bar])
+                                context_processors=[status_bar, flock_tool])
 
     # The radios the bus held the last time a tool looked, as each SDR tool enumerates them before
     # it opens one. A reception names its radio's serial from here, so logging one never has to
@@ -1669,6 +1679,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             record = reception_record(
                 inst, item, freq_hz=freq,
                 command=live_command() if live_command else None,
+                # A receiver that names its own tool (the Flock detector's source) is logged
+                # under it, so the record names the tool that ran its command.
+                tool=getattr(receiver, "tool", None),
                 # No tool is ever handed a ppm correction, so every reception is uncorrected;
                 # the last measurement this run rides along for whoever reads the record.
                 ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
