@@ -52,9 +52,9 @@ def test_a_synthesised_pilot_recovers_the_ppm_it_was_built_with():
 
 
 def test_a_fast_crystal_puts_the_pilot_below_nineteen_kilohertz():
-    # The single easiest thing in this module to get backwards. One crystal clocks both the
-    # tuner and the sample rate, so a fast crystal stretches assumed time and the tone lands low
-    # — while the dial reads lower than the frequency actually being received.
+    # The single easiest thing in this module to get backwards. The crystal clocks the sample
+    # rate, so a fast crystal stretches assumed time and the tone lands low; where it also clocks
+    # the tuner, the dial reads lower than the frequency actually being received.
     result = measure(137.0)
     assert result["apparent_hz"] < ppm.PILOT_HZ
     assert measure(-46.0)["apparent_hz"] > ppm.PILOT_HZ
