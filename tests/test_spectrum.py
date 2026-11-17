@@ -586,6 +586,66 @@ def test_the_age_limit_outlasts_three_rows_of_a_healthy_sweep(low, high, bin_siz
     assert sweeper.stale_after() >= 3 * (sweeper.integration + hops / 16)
 
 
+# --- C23: the first rows after a stall carry levels from before it ------------------------------
+# WHY: a pass is published when the next one begins. After a stall, the pass held back when
+# rtl_power stalled is published, stamped with the time it is published, when the first pass after
+# the stall arrives, and the row after it is the pass rtl_power was sweeping when it stalled,
+# finished after. Both were the reading at once, and a Capture logged a level from before the
+# stall. The first two rows published after a wait longer than stale_after() are no reading now;
+# the third is.
+
+def test_after_a_stall_the_first_two_rows_published_are_no_reading_and_the_third_is():
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    clock.now += 60                               # a minute with no new pass
+    for n in range(2):
+        procs[-1].feed(_fm_pass(n))               # publishes the pass held back, then the next
+        wait_for_rows(sweeper, 3 + n)
+        assert sweeper.reading()[0] is None, f"row {n + 1} after the stall is a reading"
+    procs[-1].feed(_fm_pass(2))
+    wait_for_rows(sweeper, 5)
+    assert sweeper.reading()[0] == sweeper.rows()[-1]
+    sweeper.stop()
+
+
+def test_a_wait_just_past_the_age_limit_is_a_stall():
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    clock.now += sweeper.stale_after() + 0.01
+    procs[-1].feed(_fm_pass(0))
+    wait_for_rows(sweeper, 3)
+    assert sweeper.reading()[0] is None
+    sweeper.stop()
+
+
+def test_rows_that_each_land_within_the_age_limit_are_each_a_reading_at_once():
+    # No stall, no change: a sweep delivering at its own pace reads each row as it is published.
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    for n in range(3):
+        clock.now += sweeper.stale_after() - 0.01
+        procs[-1].feed(_fm_pass(n))
+        wait_for_rows(sweeper, 3 + n)
+        assert sweeper.reading()[0] == sweeper.rows()[-1]
+    sweeper.stop()
+
+
+def test_the_newest_row_reads_stalled_then_resuming_then_a_reading_again():
+    # One rule for the reading, the Capture refusal and the waterfall: newest() says how the newest
+    # row stands, and reading() hands a row out only when it is not stale.
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    states = [sweeper.newest()[1]]
+    clock.now += 60
+    states.append(sweeper.newest()[1])
+    for n in range(3):
+        procs[-1].feed(_fm_pass(n))
+        wait_for_rows(sweeper, 3 + n)
+        states.append(sweeper.newest()[1])
+    assert states == [None, "stalled", "resuming", "resuming", None]
+    sweeper.stop()
+
+
 def test_a_sweeper_whose_process_exited_is_not_running():
     sweeper = Sweeper(spawn=lambda cmd: DeadProc([]), radio_present=lambda: True)
     sweeper.start()

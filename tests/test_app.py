@@ -37,7 +37,7 @@ from sigint101.spectrum import (
     validate_span,
 )
 from sigint101.sstv import SstvDecoder
-from tests.test_spectrum import FM_LINES, FedProc, wait_for_rows
+from tests.test_spectrum import FM_LINES, FedProc, _fm_pass, wait_for_rows
 
 # The suite owns its lesson content: the real lesson_packs/ are authored in parallel, so a test
 # that read them would go red on someone else's unfinished pack. These fixtures are stable.
@@ -99,6 +99,11 @@ class _StubSweeper:
         row = self._rows[-1] if self._rows and self._started else None
         return row, {"serial": None, "gain": self.gain, "bin_size": self.bin_size,
                      "freq_low": self.low, "freq_high": self.high}
+
+    def newest(self):
+        # The stand-in's rows never age and it never stalls: its newest row is always a reading.
+        row = self.reading()[0]
+        return row, None, (None if row is None else 0.0)
 
     def retune(self, low, high, bin_size=None):
         self.low, self.high, self.bin_size = validate_span(low, high, bin_size)
@@ -2850,8 +2855,8 @@ def test_a_sweep_that_stops_without_exiting_reads_no_reference_until_it_sweeps_a
     # rtl_power can stop sweeping without exiting. It still reads as running, and its last row
     # stayed the reading: a saved baseline kept the panel at HEALTHY on a level that only grew old.
     # Past the age limit there is no reference, so the panel reads NO REFERENCE before any baseline
-    # verdict, and Capture is refused with the reason. The waterfall keeps its rows, and the next
-    # pass brings the reading back.
+    # verdict, and Capture is refused with the reason. The waterfall keeps its rows, and the first
+    # pass swept wholly after the stall brings the reading back.
     procs, bus, now = [], ["AAAA"], [1000.0]
     with _client(tmp_path, probe=_present,
                  sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
@@ -2865,8 +2870,11 @@ def test_a_sweep_that_stops_without_exiting_reads_no_reference_until_it_sweeps_a
         stalled = client.get("/api/provenance").json()
         refused = client.post("/api/provenance/baseline")
         rows = client.get("/api/spectrum").json()["rows"]
-        procs[-1].feed(FM_LINES[:8])        # the next pass publishes the one it held
-        wait_for_rows(sweeper, 3)
+        # The first pass after the stall publishes the one held back when it stalled, and the
+        # second the one rtl_power was sweeping then; both carry levels from before the stall.
+        # The third brings the reading back.
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 5)
         resumed = client.get("/api/provenance").json()
     assert stalled["provenance"]["ref_db"] is None
     assert (stalled["baseline"]["has_baseline"], stalled["baseline"]["degraded"]) == (True, False)
@@ -2899,6 +2907,65 @@ def test_a_stalled_sweep_and_a_restarted_one_refuse_capture_each_with_its_own_re
     assert "has not finished a pass for 60 s" in stalled.json()["reason"]
     assert "has not finished a pass since it started" in restarted.json()["reason"]
     assert [sample["gain"] for sample in read_baseline(tmp_path / "events.jsonl")] == [0.0]
+
+
+def test_after_a_stall_capture_is_refused_until_a_pass_swept_wholly_after_it(tmp_path):
+    # The first two rows published after a stall carry levels from before it: the pass held back
+    # when rtl_power stalled, then the pass it was sweeping then. Capture logged the first of them.
+    # Both are no reference now, and Capture says why; the third row is the reference again.
+    procs, bus, now = [], ["AAAA"], [1000.0]
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
+        sweeper = client.app.state.sweeper
+        client.get("/api/provenance")
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        now[0] += 60                        # a minute with no new pass from a live rtl_power
+        refused = []
+        for n in range(2):
+            procs[-1].feed(_fm_pass(n))
+            wait_for_rows(sweeper, 3 + n)
+            refused.append(client.post("/api/provenance/baseline"))
+        procs[-1].feed(_fm_pass(2))
+        wait_for_rows(sweeper, 5)
+        captured = client.post("/api/provenance/baseline")
+    assert [response.status_code for response in refused] == [400, 400]
+    assert all("after a stall" in response.json()["reason"] for response in refused)
+    assert captured.status_code == 200
+    assert len(read_baseline(tmp_path / "events.jsonl")) == 1
+
+
+def test_the_spectrum_route_marks_a_stall_by_the_rule_the_reading_follows(tmp_path):
+    # A stalled rtl_power still answers with its kept rows, and the waterfall drew them as live.
+    # The route still serves them (they are real, and Lesson 2 compares gains on them), but says
+    # the sweep has stalled, past the limit, and then that it is resuming, for exactly as long as
+    # the baseline panel has no reading; it clears with the reading.
+    procs, bus, now = [], ["AAAA"], [1000.0]
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
+        sweeper = client.app.state.sweeper
+
+        def poll():
+            spectrum = client.get("/api/spectrum").json()
+            reference = client.get("/api/provenance").json()["provenance"]["ref_db"]
+            return (spectrum["available"], len(spectrum["rows"]), spectrum.get("stale"),
+                    reference is not None)
+
+        client.get("/api/spectrum")
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        polls = [poll()]
+        now[0] += sweeper.stale_after() - 0.01
+        polls.append(poll())
+        now[0] += 0.02                      # just past the limit
+        polls.append(poll())
+        for n in range(3):
+            procs[-1].feed(_fm_pass(n))
+            wait_for_rows(sweeper, 3 + n)
+            polls.append(poll())
+    assert polls == [(True, 2, None, True), (True, 2, None, True), (True, 2, "stalled", False),
+                     (True, 3, "resuming", False), (True, 4, "resuming", False),
+                     (True, 5, None, True)]
 
 
 # --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------

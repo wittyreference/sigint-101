@@ -416,3 +416,68 @@ test("the gain meter reads the sweep's median floor and peak, not the row minimu
   const next = panel.meterReading({ floor: -10, peak: 20 }, { floor_db: -9, peak_db: 25 });
   assert.ok(Math.abs(next.floor - -9.8) < 1e-9 && Math.abs(next.peak - 21) < 1e-9);
 });
+
+// --- a stalled sweep: the badge and the meter say so (C25) ----------------------------------------
+// An rtl_power that stops sweeping without exiting still answers /api/spectrum with its kept rows,
+// and the panel kept reading "live · N" over a waterfall that had stopped, beside a meter holding
+// its last floor and peak. The console now says how its newest row stands (`stale`), by the rule
+// the baseline panel's reading follows: "stalled" once the sweep has gone too long without a pass,
+// "resuming" for the first two passes after, which carry levels from before the stall. The kept
+// rows stay painted either way: they are real, and Lesson 2 compares gains on them.
+
+const FM_BODY = { freq_low: 88e6, freq_high: 108e6, stale: null };
+
+test("the badge reads live with the passes painted while the newest row is a reading", () => {
+  assert.deepEqual(panel.sweepBadge(FM_BODY, 57),
+                   { text: "live · 57", kind: "live", title: "live sweep" });
+});
+
+test("before the first pass the badge reads waiting", () => {
+  const badge = panel.sweepBadge(FM_BODY, 0);
+  assert.deepEqual([badge.text, badge.kind], ["waiting", "sample"]);
+  assert.equal(badge.title, "sweeping 88.0 MHz–108.0 MHz, waiting for the first pass");
+});
+
+test("a stalled sweep's badge reads stalled, not live, over the rows it kept", () => {
+  // In the colour of a tool that stopped (a decoder's STOPPED), not of one getting going.
+  const badge = panel.sweepBadge({ ...FM_BODY, stale: "stalled" }, 57);
+  assert.deepEqual([badge.text, badge.kind], ["stalled", "na"]);
+});
+
+test("after a stall the badge reads resuming until the console reads a row again", () => {
+  const badge = panel.sweepBadge({ ...FM_BODY, stale: "resuming" }, 58);
+  assert.deepEqual([badge.text, badge.kind], ["resuming", "sample"]);
+});
+
+const ROW = (floor, peak) => ({ floor_db: floor, peak_db: peak });
+
+test("a stalled sweep's meter drops its floor and peak and says stalled", () => {
+  assert.deepEqual(panel.meterState({ floor: -9.5, peak: 20.2 }, [], "stalled"),
+                   { reading: null, note: "stalled" });
+});
+
+test("the rows painted while the sweep resumes do not reach the meter", () => {
+  assert.deepEqual(panel.meterState(null, [ROW(-30, 0)], "resuming"),
+                   { reading: null, note: "resuming" });
+});
+
+test("a meter with no reading starts from the newest row alone, a reading again", () => {
+  // The poll that brings the reading back can carry a row painted while the sweep resumed: the
+  // console's rule covers only its newest row, so that is the one the meter starts from.
+  assert.deepEqual(panel.meterState(null, [ROW(-30, 0), ROW(-10, 20)], null),
+                   { reading: { floor: -10, peak: 20 }, note: null });
+});
+
+test("a meter with no reading and no row to read says it is waiting, not stalled", () => {
+  // A gain step out of a stall restarts the sweep: nothing is stalled while the new gain's first
+  // pass is on its way, and the meter has nothing to read yet.
+  assert.deepEqual(panel.meterState(null, [], null), { reading: null, note: "waiting" });
+});
+
+test("a live meter eases in each fresh row, and keeps its reading between rows", () => {
+  const eased = panel.meterState({ floor: -10, peak: 20 }, [ROW(-9, 25)], null);
+  assert.equal(eased.note, null);
+  assert.ok(Math.abs(eased.reading.floor - -9.8) < 1e-9 && Math.abs(eased.reading.peak - 21) < 1e-9);
+  assert.deepEqual(panel.meterState({ floor: -10, peak: 20 }, [], null),
+                   { reading: { floor: -10, peak: 20 }, note: null });
+});

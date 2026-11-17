@@ -23,7 +23,7 @@
       tapToHz: tapToHz, bandRequest: bandRequest, formatTuneMHz: formatTuneMHz,
       makeTuner: makeTuner, nextGain: nextGain, formatGain: formatGain,
       makeGainStepper: makeGainStepper, meterReading: meterReading,
-      meterLabelTops: meterLabelTops,
+      meterLabelTops: meterLabelTops, sweepBadge: sweepBadge, meterState: meterState,
     };
     return;
   }
@@ -178,6 +178,42 @@
   function meterReading(prev, row) {
     if (!prev) return { floor: row.floor_db, peak: row.peak_db };
     return { floor: prev.floor * 0.8 + row.floor_db * 0.2, peak: prev.peak * 0.8 + row.peak_db * 0.2 };
+  }
+
+  // What the gain meter shows after one poll: a reading, or a note in place of one. While the
+  // console's newest row is stale (`stale`: "stalled", or "resuming" for the first two passes after
+  // a stall, which carry levels from before it) the meter has no floor or peak to show, and says
+  // why. A meter with no reading starts again from the newest fresh row alone: the console's rule
+  // covers only its newest row, and one painted before it in the same poll may be stale; with no
+  // row to read yet it is waiting. A meter with a reading eases it through each fresh row.
+  function meterState(prev, fresh, stale) {
+    if (stale) return { reading: null, note: stale };
+    var reading = prev;
+    (prev ? fresh : fresh.slice(-1)).forEach(function (row) {
+      reading = meterReading(reading, row);
+    });
+    return reading ? { reading: reading, note: null } : { reading: null, note: "waiting" };
+  }
+
+  // The waterfall's badge, short, with the whole account in its title. A stale newest row reads
+  // stalled or resuming by the console's own rule, the one the baseline panel's reading follows;
+  // the rows already painted stay, since they are real. Stalled takes the colour of a tool that
+  // stopped (a decoder's STOPPED); resuming, like waiting, the colour of one getting going.
+  function sweepBadge(body, total) {
+    if (body.stale === "stalled") {
+      return { text: "stalled", kind: "na",
+               title: "no new pass from rtl_power: the rows shown are from before it stalled" };
+    }
+    if (body.stale === "resuming") {
+      return { text: "resuming", kind: "sample",
+               title: "the first passes after a stall carry levels from before it" };
+    }
+    if (!total) {
+      return { text: "waiting", kind: "sample",
+               title: "sweeping " + formatMHz(body.freq_low) + "–" + formatMHz(body.freq_high) +
+                      ", waiting for the first pass" };
+    }
+    return { text: "live · " + total, kind: "live", title: "live sweep" };
   }
 
   // The colour-scale bounds of one row: its weakest and strongest measured bins, or null when it
@@ -381,8 +417,10 @@
     var root = wrap.closest(".instrument");
     var meter = root && root.querySelector("[data-gain-meter]");
     if (!meter) return null;
+    var empty = meter.querySelector("[data-gain-empty]");
     return {
-      empty: meter.querySelector("[data-gain-empty]"),
+      empty: empty,
+      emptyText: empty ? empty.textContent : "",
       peak: meter.querySelector("[data-gain-peak]"),
       floor: meter.querySelector("[data-gain-floor]"),
       gap: meter.querySelector("[data-gain-gap]"),
@@ -438,12 +476,16 @@
     m.floor.style.setProperty("--label-shift", (tops.floor - topOf(m.floor)) + "px");
   }
 
-  function clearGainMeter(p) {
+  // Empty the meter: its own "no radio" line, or the note given (stalled, resuming) in its place.
+  function clearGainMeter(p, note) {
     var m = p.meter;
     p.reading = null;
     p.geometry = null;
     if (!m) return;
-    if (m.empty) m.empty.hidden = false;
+    if (m.empty) {
+      m.empty.textContent = note ? "— " + note + " —" : m.emptyText;
+      m.empty.hidden = false;
+    }
     [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = true; });
   }
 
@@ -655,8 +697,15 @@
       p.ctx.fillStyle = binColour(row.dbm[i], p.floorDbm, range, ramp, empty);
       p.ctx.fillRect(i, 0, 1, ROW_H);
     }
-    if (p.meter) {
-      p.reading = meterReading(p.reading, row);
+  }
+
+  // Show what meterState decided: the floor and peak lines for a reading, or the empty meter with
+  // the note in place of a floor and a peak the sweep no longer has.
+  function showMeter(p, shown) {
+    if (shown.note) {
+      clearGainMeter(p, shown.note);
+    } else if (shown.reading && shown.reading !== p.reading) {
+      p.reading = shown.reading;
       updateGainMeter(p);
     }
   }
@@ -774,14 +823,12 @@
           lastRow = { low: row.freq_low, high: row.freq_high, bins: row.dbm.length };
           panels.forEach(function (p) { drawRow(p, row); });
         });
+        panels.forEach(function (p) {
+          if (p.meter) showMeter(p, meterState(p.reading, fresh, result.body.stale));
+        });
 
-        if (!total) {
-          say("waiting", "sample",
-              "sweeping " + formatMHz(result.body.freq_low) + "–" +
-              formatMHz(result.body.freq_high) + ", waiting for the first pass");
-        } else {
-          say("live · " + total, "live", "live sweep");
-        }
+        var badge = sweepBadge(result.body, total);
+        say(badge.text, badge.kind, badge.title);
       })
       .catch(function (err) {
         say("no console", "na", "lost contact with the console: " + err.message);

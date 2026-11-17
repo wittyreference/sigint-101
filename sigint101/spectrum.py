@@ -69,7 +69,8 @@ HOP_S = 0.1
 
 # A row stops being a reading once this many row periods have gone by with no newer row. An
 # rtl_power that stops sweeping without exiting still reads as running, so without a limit its
-# last row would stay the reading for good.
+# last row would stay the reading for good. A wait that long is a stall, and the first two rows
+# published after it are no reading either: they carry levels from before it (Sweeper.newest).
 STALE_AFTER_ROWS = 3
 
 
@@ -473,7 +474,9 @@ class Sweeper:
         # death keeps the old rows, so a row from an earlier start may have been swept at another
         # gain, span or radio than the sweeper now names. reading() hands out only the rows of the
         # start that is running now. Each is kept with the time it was published, too, on `clock`,
-        # so reading() can also refuse a row from a sweep that has stopped sweeping.
+        # so reading() can also refuse a row from a sweep that has stopped sweeping, and with how
+        # long its start went without a row before it and before the row it follows, so reading()
+        # can refuse the first two rows after a stall as well.
         self._rows = deque(maxlen=history)
         self._run = 0
         # Two locks on purpose. _lock guards the row buffer and is taken by the reader
@@ -746,14 +749,19 @@ class Sweeper:
         return chunk.ts != self._pending[0].ts or chunk.freq_low <= self._pending[-1].freq_low
 
     def _flush(self, run: int) -> None:
-        """Turn the collected chunks into one full-band row and publish it, kept with its run and
-        the time it was published."""
+        """Turn the collected chunks into one full-band row and publish it, kept with its run, the
+        time it was published, and how long its run waited for it and for the row before it. A
+        run's first row waited for nothing of its own: a restart is not a stall."""
         if not self._pending:
             return
         row = merge_chunks(self._pending)
         self._pending = []
         with self._lock:
-            self._rows.append((run, self._clock(), row))
+            now = self._clock()
+            last = self._rows[-1] if self._rows else None
+            waits = ((now - last[1], last[2][0]) if last is not None and last[0] == run
+                     else (None, None))
+            self._rows.append((run, now, waits, row))
 
     def drain(self, timeout: float = 5.0) -> None:
         """Wait for a finite source to be fully consumed. Real sweeps never end."""
@@ -766,7 +774,7 @@ class Sweeper:
         Copied under the lock because the reader thread appends while the console reads.
         """
         with self._lock:
-            rows = [row for _, _, row in self._rows]
+            rows = [row for _, _, _, row in self._rows]
         if limit is None:
             return rows
         return rows[-limit:] if limit > 0 else []
@@ -779,28 +787,40 @@ class Sweeper:
         gain step keeps them, and so does a death) may have been swept at another gain, span or
         radio, so a reading recorded under the current settings never borrows one. Taken under
         the lifecycle lock, so no gain step, retune or restart lands between the two. The row is
-        None, too, once it is older than stale_after(): an rtl_power that stops sweeping without
-        exiting still reads as running, and its last row must not stay the reading.
+        None, too, while it is stale (newest()): an rtl_power that stops sweeping without exiting
+        still reads as running, and neither its last row nor the first two after it may be the
+        reading.
         """
         with self._life:
-            row, age = self._newest()
-            if age is not None and age > self.stale_after():
-                row = None
-            return row, {"serial": self.device_serial, "gain": self.gain,
-                         "bin_size": self.bin_size, "freq_low": self.low, "freq_high": self.high}
+            row, stale, _ = self.newest()
+            return (None if stale else row), {
+                "serial": self.device_serial, "gain": self.gain, "bin_size": self.bin_size,
+                "freq_low": self.low, "freq_high": self.high}
 
-    def row_age(self) -> float | None:
-        """Seconds since the running sweep published its newest row, or None if it has none."""
+    def newest(self) -> tuple:
+        """The running sweep's newest row, whether it is stale, and its age in seconds.
+
+        (row, stale, age), or (None, None, None) until the sweep running now has published a row
+        of its own. `stale` is None while the row is a reading. It is "stalled" once the row is
+        older than stale_after(). It is "resuming" for the first two rows published after a wait
+        that long: a pass is published when the next one begins, so the first is the pass held
+        back when rtl_power stalled, and the second the one rtl_power was sweeping then, finished
+        after. Both carry levels from before the stall. The reading, the Capture refusal and the
+        waterfall all judge by this one rule.
+        """
         with self._life:
-            return self._newest()[1]
-
-    def _newest(self) -> tuple:
-        """The running sweep's newest row and its age in seconds, or (None, None) if it has none."""
-        with self._lock:
-            run, published, row = self._rows[-1] if self._rows else (None, None, None)
-        if run != self._run or not self.running:
-            return None, None
-        return row, self._clock() - published
+            with self._lock:
+                run, published, waits, row = (self._rows[-1] if self._rows
+                                              else (None, None, (None, None), None))
+            if run != self._run or not self.running:
+                return None, None, None
+            limit = self.stale_after()
+            age = self._clock() - published
+            if age > limit:
+                return row, "stalled", age
+            if any(wait is not None and wait > limit for wait in waits):
+                return row, "resuming", age
+            return row, None, age
 
     def stale_after(self) -> float:
         """How old the newest row may grow, in seconds, and still be a reading.
@@ -809,7 +829,7 @@ class Sweeper:
         sweep can go an interval plus a pass across its hops between rows: a pass that began just
         before the tick holds that row back. The limit is STALE_AFTER_ROWS of those, at HOP_S a
         hop. A wider span hops more, so its limit is longer: 5.4 s for the FM default's eight hops,
-        33 s for a hundred one-bin hops.
+        33 s for a hundred one-bin hops. A longer wait between two rows is a stall (newest()).
         """
         with self._life:
             hops = len(hop_plan(self.low, self.high, self.bin_size).centres)

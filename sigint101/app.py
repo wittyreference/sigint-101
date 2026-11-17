@@ -999,7 +999,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         level can only be read from a sweep the hardware actually produced, never invented. The
         row is None with no radio, and until the sweep running now has finished a pass: a row kept
         from before a gain step, a retune or a restart was swept under other settings. It is None,
-        too, once the newest row is too old to be a reading (Sweeper.stale_after).
+        too, while the newest row is stale: too old to be a reading, or one of the first two rows
+        after a stall (Sweeper.newest).
         """
         sweeper = app.state.sweeper
         if not sweeper.running:
@@ -1042,15 +1043,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         that was never measured; the honest answer is to refuse, the same way the spectrum route
         refuses to fake a sweep. That includes the seconds after a gain step, a retune or a
         restart, before the sweep has finished a pass under the settings the sample would name,
-        and a sweep that has stopped finishing passes without exiting, whose last row has grown
-        too old to be a reading. The refusal says which.
+        a sweep that has stopped finishing passes without exiting, whose last row has grown too
+        old to be a reading, and the first two rows after such a stall, which carry levels from
+        before it. The refusal says which.
         """
         snapshot = _snapshot()
         if snapshot["ref_db"] is None:
             sweeper = app.state.sweeper
-            age = sweeper.row_age()
-            if age is not None and age > sweeper.stale_after():
+            _, stale, age = sweeper.newest()
+            if stale == "stalled":
                 reason = f"no reference — the sweep has not finished a pass for {age:.0f} s"
+            elif stale == "resuming":
+                reason = ("no reference yet — the sweep's first passes after a stall carry levels "
+                          "from before it")
             elif sweeper.running and age is None:
                 reason = "no reference yet — the sweep has not finished a pass since it started"
             else:
@@ -1179,6 +1184,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # reads: the frequency tuned to when the span was built around one (offset off it so the
         # target is measured), else the span's middle.
         target = getattr(sweeper, "target", None)
+        # Judged before the rows are read, so a row published in between is judged on the next poll.
+        _, stale, _ = sweeper.newest()
         return {
             "available": True,
             "freq_low": sweeper.low,
@@ -1188,6 +1195,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "gain": sweeper.gain,
             # The exact rtl_power line running now, for the panel's command strip.
             "command": shlex.join(sweeper.command()) if sweeper.running else None,
+            # Whether the newest row is still a reading, by the rule the baseline panel's reading
+            # follows (Sweeper.newest): null while it is; "stalled" once rtl_power has gone too
+            # long without a pass; "resuming" for the first two passes after, which carry levels
+            # from before the stall. The rows are served either way: they are real.
+            "stale": stale,
             "rows": [row.as_dict() for row in sweeper.rows(limit)],
         }
 
