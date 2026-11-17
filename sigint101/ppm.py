@@ -49,8 +49,8 @@ MIN_PILOT_DB = 15.0
 # How far past its own length a capture may run before rtl_fm is taken to have stalled. On the Pi
 # a whole 8 s measurement took 11.2-11.6 s (the 2026-11-02 audit), 1.6 s of it the search after
 # the capture, which leaves at most two seconds for everything else, rtl_fm's start included.
-# Five covers a slow start more than twice over, and ends a stalled 8 s capture at 13 s, against
-# 11-12 s for a good one.
+# Five covers a slow start more than twice over, and stops waiting on a stalled 8 s capture at
+# 13 s, against 11-12 s for a whole good measurement; stopping rtl_fm comes after that.
 CAPTURE_MARGIN_S = 5.0
 
 # Linux adjtimex reports the kernel's frequency correction in units of 2^-16 ppm, and sets
@@ -231,6 +231,7 @@ class _CaptureStream:
         self._proc = proc
         self._deadline = time.monotonic() + seconds + CAPTURE_MARGIN_S
         self.stalled = False
+        self.stop_failed = False
 
     def read(self, n):
         """Read one chunk of raw samples from the running rtl_fm.
@@ -258,7 +259,9 @@ class _CaptureStream:
     def close(self):
         """Stop rtl_fm and release the dongle, whatever the measurement decided."""
         if self._proc.poll() is None:
-            stop_process(self._proc)
+            # stop_process is False only when even SIGKILL left rtl_fm running (uninterruptible
+            # sleep). It then still holds the dongle, and the answer must not say otherwise.
+            self.stop_failed = not stop_process(self._proc)
         if self._proc.stdout:
             self._proc.stdout.close()
 
@@ -286,9 +289,13 @@ def measure_pilot_ppm(*, hz, seconds=DEFAULT_SECONDS, gain=DEFAULT_GAIN, device=
     base = {"hz": hz, "gain": gain, "soc_temp_c": temp() if temp else None}
     if getattr(stream, "stalled", False):
         got = len(phasors) * BLOCK / DEMOD_RATE
+        if getattr(stream, "stop_failed", False):
+            end = "would not stop: it may still hold the radio"
+        else:
+            end = "was stopped — a stall is not a measurement"
         return {**base, "ppm": None, "seconds": got,
-                "reason": f"rtl_fm stalled after {got:.1f} s of the {seconds:g} s capture and was "
-                          "stopped — a stall is not a measurement"}
+                "reason": f"rtl_fm stalled after {got:.1f} s of the {seconds:g} s capture "
+                          f"and {end}"}
     if probe is None or len(phasors) < wanted // 2:
         return {**base, "ppm": None, "seconds": len(phasors) * BLOCK / DEMOD_RATE,
                 "reason": "the capture ended before enough audio arrived to measure"}

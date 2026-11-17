@@ -4,6 +4,7 @@
 import io
 import json
 import math
+import os
 import random
 import sys
 import threading
@@ -331,19 +332,20 @@ def test_closing_a_capture_kills_an_rtl_fm_that_ignores_sigterm(monkeypatch):
 # --- a stalled rtl_fm is stopped at a deadline; a working or finished one reads as before ---
 
 
-def _stall_rtl_fm(monkeypatch):
-    """Make rtl_fm one that stays alive and writes nothing, as on a stalled USB stream.
+def _stall_rtl_fm(monkeypatch, stand_in=("sleep", "30")):
+    """Make rtl_fm one that never delivers its capture: by default alive and writing nothing.
 
-    `sleep` stands in for it: a real process on a real pipe, so the read blocks exactly as it
-    would on the radio's output, and nothing here opens a dongle. The margin drops to half a
-    second so a test takes about one; raising=False keeps the test runnable against a capture
-    with no margin to shorten, where it shows the wait. Returns the stand-ins as they start.
+    `sleep` stands in for rtl_fm on a stalled USB stream: a real process on a real pipe, so the
+    read blocks exactly as it would on the radio's output, and nothing here opens a dongle. The
+    margin drops to half a second so a test takes about one; raising=False keeps the test
+    runnable against a capture with no margin to shorten, where it shows the wait. Returns the
+    stand-ins as they start.
     """
     monkeypatch.setattr(ppm, "CAPTURE_MARGIN_S", 0.5, raising=False)
     children = []
 
     def spawn(argv, **kw):
-        children.append(childproc.spawn(["sleep", "30"], **kw))
+        children.append(childproc.spawn(list(stand_in), **kw))
         return children[-1]
 
     monkeypatch.setattr(ppm, "spawn", spawn)
@@ -399,6 +401,81 @@ def test_a_stalled_rtl_fm_is_stopped_at_the_deadline_and_measures_nothing(monkey
     assert "stall" in result["reason"]
     assert codes and None not in codes   # the capture itself stopped rtl_fm
     json.dumps(result, allow_nan=False)
+
+
+# An rtl_fm that is alive and writing, but far too slowly ever to deliver its capture: two bytes
+# every 50 ms. Each single wait for data ends within 50 ms, so only a deadline on the whole
+# capture stops it.
+_TRICKLE = """
+import sys, time
+while True:
+    sys.stdout.buffer.write(bytes(2))
+    sys.stdout.buffer.flush()
+    time.sleep(0.05)
+"""
+
+
+def test_an_rtl_fm_that_only_trickles_is_stopped_at_the_deadline_for_the_whole_capture(
+        monkeypatch):
+    # A timeout for each wait never fires on a trickle: data keeps coming, never enough, and the
+    # radio would stay held for as long as it lasted. The deadline is for the whole capture,
+    # counted from rtl_fm's start.
+    children = _stall_rtl_fm(monkeypatch, [sys.executable, "-c", _TRICKLE])
+    deadline = 0.5 + 0.5
+    started = time.monotonic()
+    try:
+        result = _within(deadline + 3.0,
+                         lambda: ppm.measure_pilot_ppm(hz=106_500_000, seconds=0.5))
+        took = time.monotonic() - started
+        codes = [child.poll() for child in children]
+    finally:
+        _reap(children)
+    assert deadline <= took < deadline + 1.0
+    assert result["ppm"] is None
+    assert "stall" in result["reason"]
+    assert codes and None not in codes   # the capture itself stopped rtl_fm
+
+
+def test_a_read_that_starts_after_the_deadline_takes_what_is_there_and_waits_for_nothing(
+        monkeypatch):
+    # The reader can be busy elsewhere when the deadline passes. Its next read takes what the
+    # pipe already holds and stops there: the time left is then below zero, and a wait for that
+    # long is, to poll, a wait without end.
+    monkeypatch.setattr(ppm, "CAPTURE_MARGIN_S", 0.0)
+    proc = Child(["rtl_fm"])
+    held, writer = os.pipe()
+    os.write(writer, bytes(1000))       # some audio already waiting, and no more coming
+    proc.stdout = os.fdopen(held, "rb")
+    stream = ppm._CaptureStream(proc, 0.0)
+    time.sleep(0.05)                    # the deadline is 50 ms gone
+    try:
+        started = time.monotonic()
+        data = _within(2.0, lambda: stream.read(4000))
+        took = time.monotonic() - started
+    finally:
+        os.close(writer)
+        stream.close()
+    assert len(data) == 1000
+    assert stream.stalled is True
+    assert took < 0.25
+
+
+def test_a_stalled_rtl_fm_that_will_not_stop_is_not_reported_as_stopped(monkeypatch):
+    # An rtl_fm in uninterruptible sleep outlives SIGKILL and keeps the dongle, and the next tool
+    # will find it busy. The answer must not say it was stopped; it says it would not stop.
+    monkeypatch.setattr(ppm, "CAPTURE_MARGIN_S", 0.2)
+    proc = Child(["rtl_fm"], unkillable=True)
+    quiet, writer = os.pipe()           # an output that stays open and never carries a byte
+    proc.stdout = os.fdopen(quiet, "rb")
+    try:
+        result = _within(5.0, lambda: ppm.measure_pilot_ppm(
+            hz=106_500_000, seconds=0.2, capture=lambda **_: ppm._CaptureStream(proc, 0.2)))
+    finally:
+        os.close(writer)
+    assert proc.sent == ["TERM", "KILL"]
+    assert result["ppm"] is None
+    assert "would not stop" in result["reason"]
+    assert "was stopped" not in result["reason"]
 
 
 # A working rtl_fm, standing in on a real pipe: it streams a capture file in pieces that are not
