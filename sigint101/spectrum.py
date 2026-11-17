@@ -62,6 +62,16 @@ RTL_POWER_GIANT_BIN_HZ = 1_000_000
 # skirt; a few bins out is clean, and still far from the roll-off at the hop's edges.
 SPAN_GUARD_BINS = 4
 
+# How long rtl_power can take over one hop, in seconds: a retune and a read. The real FM capture
+# the tests use (eight hops at -i 1) integrated two passes into each one-second row, 512 samples a
+# hop where one pass gives 256, so a hop took about 1/16 s. This allows 0.1 s.
+HOP_S = 0.1
+
+# A row stops being a reading once this many row periods have gone by with no newer row. An
+# rtl_power that stops sweeping without exiting still reads as running, so without a limit its
+# last row would stay the reading for good.
+STALE_AFTER_ROWS = 3
+
 
 class SpectrumUnavailable(RuntimeError):
     """The radio cannot be swept. Never a reason to synthesise data — the panel says so instead."""
@@ -462,7 +472,8 @@ class Sweeper:
         # retune and a radio swap all take effect only through a new start, and a gain step or a
         # death keeps the old rows, so a row from an earlier start may have been swept at another
         # gain, span or radio than the sweeper now names. reading() hands out only the rows of the
-        # start that is running now.
+        # start that is running now. Each is kept with the time it was published, too, on `clock`,
+        # so reading() can also refuse a row from a sweep that has stopped sweeping.
         self._rows = deque(maxlen=history)
         self._run = 0
         # Two locks on purpose. _lock guards the row buffer and is taken by the reader
@@ -735,13 +746,14 @@ class Sweeper:
         return chunk.ts != self._pending[0].ts or chunk.freq_low <= self._pending[-1].freq_low
 
     def _flush(self, run: int) -> None:
-        """Turn the collected chunks into one full-band row and publish it, kept with its run."""
+        """Turn the collected chunks into one full-band row and publish it, kept with its run and
+        the time it was published."""
         if not self._pending:
             return
         row = merge_chunks(self._pending)
         self._pending = []
         with self._lock:
-            self._rows.append((run, row))
+            self._rows.append((run, self._clock(), row))
 
     def drain(self, timeout: float = 5.0) -> None:
         """Wait for a finite source to be fully consumed. Real sweeps never end."""
@@ -754,7 +766,7 @@ class Sweeper:
         Copied under the lock because the reader thread appends while the console reads.
         """
         with self._lock:
-            rows = [row for _, row in self._rows]
+            rows = [row for _, _, row in self._rows]
         if limit is None:
             return rows
         return rows[-limit:] if limit > 0 else []
@@ -766,16 +778,42 @@ class Sweeper:
         always swept with the settings handed out with it. Rows kept from an earlier start (a
         gain step keeps them, and so does a death) may have been swept at another gain, span or
         radio, so a reading recorded under the current settings never borrows one. Taken under
-        the lifecycle lock, so no gain step, retune or restart lands between the two. A row's age
-        is not checked: an rtl_power that hangs without exiting keeps its last row as the reading.
+        the lifecycle lock, so no gain step, retune or restart lands between the two. The row is
+        None, too, once it is older than stale_after(): an rtl_power that stops sweeping without
+        exiting still reads as running, and its last row must not stay the reading.
         """
         with self._life:
-            with self._lock:
-                run, row = self._rows[-1] if self._rows else (None, None)
-            if run != self._run or not self.running:
+            row, age = self._newest()
+            if age is not None and age > self.stale_after():
                 row = None
             return row, {"serial": self.device_serial, "gain": self.gain,
                          "bin_size": self.bin_size, "freq_low": self.low, "freq_high": self.high}
+
+    def row_age(self) -> float | None:
+        """Seconds since the running sweep published its newest row, or None if it has none."""
+        with self._life:
+            return self._newest()[1]
+
+    def _newest(self) -> tuple:
+        """The running sweep's newest row and its age in seconds, or (None, None) if it has none."""
+        with self._lock:
+            run, published, row = self._rows[-1] if self._rows else (None, None, None)
+        if run != self._run or not self.running:
+            return None, None
+        return row, self._clock() - published
+
+    def stale_after(self) -> float:
+        """How old the newest row may grow, in seconds, and still be a reading.
+
+        rtl_power prints a row at the first pass to end after each interval's tick, so a healthy
+        sweep can go an interval plus a pass across its hops between rows: a pass that began just
+        before the tick holds that row back. The limit is STALE_AFTER_ROWS of those, at HOP_S a
+        hop. A wider span hops more, so its limit is longer: 5.4 s for the FM default's eight hops,
+        33 s for a hundred one-bin hops.
+        """
+        with self._life:
+            hops = len(hop_plan(self.low, self.high, self.bin_size).centres)
+            return STALE_AFTER_ROWS * (self.integration + hops * HOP_S)
 
     def set_gain(self, gain) -> None:
         """Point the input amplifier at a new gain and stand down; the next poll restarts.

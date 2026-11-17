@@ -489,6 +489,103 @@ def test_rows_a_dead_sweep_left_behind_are_no_reading():
     assert sweeper.reading()[0] is None
 
 
+# --- C22: an rtl_power that stops sweeping without exiting leaves no reading -------------------
+# WHY: reading() handed out the running sweep's newest row however old it was. An rtl_power that
+# stops sweeping without exiting still reads as running, so its last row stayed the reading for
+# good, and the baseline panel could keep reading HEALTHY on a level that only grew old. A row past
+# the sweep's age limit is no reading now. The waterfall still draws the kept rows, as before.
+
+def _fm_pass(n):
+    """One pass of the captured FM band: the capture's three passes, taken in turn."""
+    first = 8 * (n % 3)
+    return FM_LINES[first:first + 8]
+
+
+def _sweeping(clock):
+    """A running sweep on an injected clock that has published two rows of the captured FM band.
+
+    Its rtl_power stays alive and prints only what the test feeds procs[-1] next. The capture's
+    third pass is held, as every pass is, until the next one begins.
+    """
+    procs = []
+    sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, clock=clock)
+    sweeper.start()
+    procs[-1].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    return sweeper, procs
+
+
+def test_a_sweep_that_stops_without_exiting_has_no_reading():
+    clock = _Clock()
+    sweeper, _ = _sweeping(clock)
+    row, settings = sweeper.reading()
+    assert row == sweeper.rows()[-1]
+    clock.now += 60                               # a minute with no new pass
+    assert sweeper.running                        # rtl_power is still alive
+    assert sweeper.reading() == (None, settings)
+    assert len(sweeper.rows()) == 2               # still there for the waterfall
+    sweeper.stop()
+
+
+def test_a_row_is_a_reading_up_to_its_age_limit_and_none_past_it():
+    clock = _Clock()
+    sweeper, _ = _sweeping(clock)
+    newest = sweeper.rows()[-1]
+    clock.now += sweeper.stale_after() - 0.01
+    assert sweeper.reading()[0] == newest
+    clock.now += 0.02
+    assert sweeper.reading()[0] is None
+    sweeper.stop()
+
+
+def test_each_fresh_row_starts_the_age_limit_again():
+    # A sweep delivering at its own pace never ages out, however long it runs: the reading is
+    # judged by the newest row's age, so rows that each land just inside the limit keep it.
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    limit = sweeper.stale_after()
+    for n in range(10):
+        clock.now += limit - 0.01
+        assert sweeper.reading()[0] == sweeper.rows()[-1]
+        procs[-1].feed(_fm_pass(n))               # publishes the pass it held
+        wait_for_rows(sweeper, 3 + n)
+    clock.now += limit + 0.01
+    assert sweeper.reading()[0] is None
+    sweeper.stop()
+
+
+def test_a_restarted_sweep_reads_only_its_own_rows_and_they_age_too():
+    # As C12 made it: after a restart the old start's rows are no reading, fresh or not, until the
+    # restarted rtl_power has finished a pass. Its own rows then age like any other.
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    sweeper.set_gain(0.0)
+    sweeper.start()
+    assert sweeper.reading()[0] is None
+    clock.now += 60
+    procs[-1].feed(FM_LINES)
+    wait_for_rows(sweeper, 4)
+    assert sweeper.reading()[0] == sweeper.rows()[-1]
+    clock.now += 60
+    assert sweeper.reading()[0] is None
+    sweeper.stop()
+
+
+@pytest.mark.parametrize("low, high, bin_size", [
+    (88_000_000, 108_000_000, 125_000),           # the FM default: 8 hops
+    (24_000_000, 124_000_000, 125_000),           # the widest span: 36 hops
+    (24_000_000, 124_000_000, 1_000_000),         # the same span in one-bin hops: 100 hops
+])
+def test_the_age_limit_outlasts_three_rows_of_a_healthy_sweep(low, high, bin_size):
+    # rtl_power prints a row at the first pass to end after each interval's tick, so a healthy
+    # sweep can go an interval plus a pass between rows. The real FM capture integrated two passes
+    # of its eight hops into each one-second row (512 samples a hop, 256 a pass): about 1/16 s a
+    # hop. The limit must leave three such rows room at that pace, however many hops a span takes.
+    sweeper = Sweeper(spawn=lambda cmd: FakeProc([]), low=low, high=high, bin_size=bin_size)
+    hops = len(hop_plan(low, high, bin_size).centres)
+    assert sweeper.stale_after() >= 3 * (sweeper.integration + hops / 16)
+
+
 def test_a_sweeper_whose_process_exited_is_not_running():
     sweeper = Sweeper(spawn=lambda cmd: DeadProc([]), radio_present=lambda: True)
     sweeper.start()
