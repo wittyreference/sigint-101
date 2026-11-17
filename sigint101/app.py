@@ -37,6 +37,7 @@ from .exam import (
     EXAM_SIZE,
     PASS_MARK,
     ExamStore,
+    PoolError,
     build_exam,
     load_pool,
     next_sim_question,
@@ -233,6 +234,23 @@ def _after_complete_href(lesson_id: int, lessons: dict) -> str:
         if next_id in lessons:
             return f"/lesson/{next_id}"
     return f"/unit/{unit.id}"
+
+
+class _TrainerDisabled(Exception):
+    """An exam route was asked for while the pool stands refused; the message is the reason."""
+
+
+def _pool_refusal(exc: Exception) -> str:
+    """Why the exam pool was refused at start-up, in words for the trainer's page and the log.
+
+    The pool's own guard already says what failed. A file that is not JSON, or a question that has
+    lost a field, reaches here as the loader's ValueError or KeyError, put into words here.
+    """
+    if isinstance(exc, PoolError):
+        return str(exc)
+    if isinstance(exc, KeyError):
+        return f"pool file is malformed: a question has no {exc} field"
+    return f"pool file is malformed: {exc}"
 
 
 def _resume_stage(lesson, saved, committed: bool) -> tuple:
@@ -503,8 +521,21 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.flipper = build_flipper()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
-        # survives a kiosk power-cut the same way.
-        app.state.exam_pool = load_pool(pool_path)
+        # survives a kiosk power-cut the same way. The pool must pass its correctness guard to be
+        # served: a short or stale pool teaches wrong answers. One that fails it, or a pool file
+        # that is missing, is not JSON or has lost a field, ships the trainer disabled with the
+        # reason, logged once here, and the rest of the console starts as usual.
+        app.state.exam_pool = None
+        app.state.exam_disabled_reason = None
+        try:
+            pool = load_pool(pool_path)
+            pool.verify()
+        except (PoolError, ValueError, KeyError) as exc:
+            reason = _pool_refusal(exc)
+            app.state.exam_disabled_reason = reason
+            log_event(app.state.events_path, "exam_disabled", {"reason": reason})
+        else:
+            app.state.exam_pool = pool
         app.state.exam_store = ExamStore(Path(data_dir) / "exam.db")
         # Injected so a test drives the ppm route without 8 s of real IQ capture; the default is
         # the real pilot measurement, which holds the dongle exclusively (the route stands the
@@ -800,6 +831,29 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         log_event(app.state.events_path, "completed", {"lesson": lesson_id})
         return {"completed": True, "lesson": lesson_id}
 
+    def _require_trainer():
+        """Refuse every exam route the same way while the pool stands refused (see the lifespan).
+
+        Nothing is served from a pool the console could not vouch for: no question, no answer
+        recorded, no practice exam drawn or cleared.
+        """
+        reason = app.state.exam_disabled_reason
+        if reason is not None:
+            raise _TrainerDisabled(reason)
+
+    @app.exception_handler(_TrainerDisabled)
+    async def trainer_disabled(request: Request, exc: _TrainerDisabled):
+        """The page every exam route answers with then: the trainer is disabled, and why.
+
+        The console's own refusal page, for the form posts too: they come from the trainer's own
+        screens, so a stale one lands on the reason, never on a raw JSON sheet.
+        """
+        return templates.TemplateResponse(
+            request=request, name="error.html", status_code=503,
+            context={"title": "Exam Trainer", "back_href": "/", "back_label": "Home",
+                     "status": 503, "heading": "Trainer disabled", "detail": str(exc)},
+        )
+
     def _next_card_id() -> str:
         """The id of the card to study next: the weakest one due now, else the first in the pool.
 
@@ -818,6 +872,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         The correct answer is never placed in the question HTML — commit-before-reveal, the same
         rule the lesson predict gate keeps. The reveal lives on /exam/review, after an answer is in.
         """
+        _require_trainer()
         question = app.state.exam_pool.get(_next_card_id())
         return templates.TemplateResponse(
             request=request,
@@ -829,6 +884,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.post("/api/exam/answer")
     async def exam_answer(question_id: str, request: Request):
         """Record one tap answer and redirect to its review — no JS, like the predict gate."""
+        _require_trainer()
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
@@ -842,6 +898,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.get("/exam/review/{question_id}", response_class=HTMLResponse)
     def exam_review(request: Request, question_id: str, choice: str = ""):
         """Show the answered card with the right option revealed and the learner's choice marked."""
+        _require_trainer()
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
@@ -893,6 +950,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         Skip is offered while another question is still waiting. The correct answer is never in
         the question HTML — commit-before-reveal, like the study card and the lesson predict gate.
         """
+        _require_trainer()
         store = app.state.exam_store
         sim = store.sim()
         if sim is None:
@@ -921,6 +979,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         choice that is not one of the question's options is never stored — it goes back to the
         question rather than locking it in as wrong.
         """
+        _require_trainer()
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
@@ -939,6 +998,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def exam_sim_skip(question_id: str):
         """Defer a sim question until the others are done; it stays answerable, and the results
         wait for it (a skip never leaves a question blank)."""
+        _require_trainer()
         if app.state.exam_pool.get(question_id) is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
         app.state.exam_store.skip_sim_question(question_id)
@@ -952,6 +1012,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         Only an answered question is revealed, and the choice shown is the stored one: a question
         not yet answered goes back to the sim, so the review can never leak an answer early.
         """
+        _require_trainer()
         question = app.state.exam_pool.get(question_id)
         if question is None:
             raise HTTPException(status_code=404, detail=f"question {question_id} not found")
@@ -978,6 +1039,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def exam_sim_results(request: Request):
         """Score the finished practice exam: total, pass/fail at 26/35, and a per-subelement
         breakdown. An unfinished or absent sim is sent back to answer the rest."""
+        _require_trainer()
         sim = app.state.exam_store.sim()
         if sim is None:
             return RedirectResponse("/exam/sim", status_code=303)
@@ -999,6 +1061,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.post("/api/exam/sim/restart")
     def exam_sim_restart():
         """Discard the finished (or abandoned) sim and start a fresh one."""
+        _require_trainer()
         app.state.exam_store.clear_sim()
         return RedirectResponse("/exam/sim", status_code=303)
 
