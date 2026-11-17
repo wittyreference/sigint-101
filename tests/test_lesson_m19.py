@@ -4,9 +4,17 @@
 import re
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from sigint101.app import create_app
+from sigint101.hardware import RadioProbe
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
+from sigint101.rayhunter import RayhunterMonitor
 
 PACK = (Path(__file__).resolve().parent.parent / "lesson_packs" / "19-catch-the-catcher.yaml")
+
+# The caption under a fixed dial, in the lesson console and in the rack.
+CAPTION = re.compile(r'<div class="tune__caption"[^>]*>([^<]*)</div>')
 
 # The pack called the console's link to the Orbic "receive-only" (the try: "polls its page ...:
 # receive-only"), the whole set-up the same ("awareness, bounded and receive-only") and, in its
@@ -168,3 +176,25 @@ def test_m19_says_the_orbic_itself_talks_to_towers():
     sentences = _learner_text(load_lesson_file(PACK))
     assert any(_orbic_talks(s) for s in sentences), (
         "M19 must say the Orbic itself is a cellular device that talks to towers")
+
+
+def _no_orbic(url, timeout):
+    """A fetch that reaches nothing: drawing a page must never need the Orbic."""
+    raise OSError("no Orbic in a test")
+
+
+def test_no_rayhunter_caption_calls_the_orbic_link_receive_only(tmp_path):
+    """The caption under the Rayhunter dial, on lesson 19's screens and in the rack, is read while
+    the try says the console only reads. "Receive-only" there said the WiFi link sends nothing."""
+    app = create_app(pack_dir=PACK.parent, data_dir=tmp_path,
+                     probe=lambda: RadioProbe(False, "lsusb", "none"),
+                     rayhunter_factory=lambda: RayhunterMonitor(fetch=_no_orbic))
+    with TestClient(app) as client:
+        pages = {"lesson 19": client.get("/lesson/19").text,
+                 "the rack": client.get("/operate/rayhunter").text}
+    captions = {where: [c for c in CAPTION.findall(html) if "Rayhunter" in c]
+                for where, html in pages.items()}
+    assert all(captions.values()), f"each page must carry its Rayhunter caption: {captions}"
+    labelled = [f"{where}: {c}" for where, found in captions.items() for c in found
+                if RECEIVE_ONLY.search(c)]
+    assert not labelled, f"a Rayhunter caption calls the Orbic link receive-only: {labelled}"
