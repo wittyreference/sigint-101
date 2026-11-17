@@ -297,10 +297,11 @@ def fcs(dot11):
     return struct.pack("<I", zlib.crc32(dot11))
 
 
-def flock_probe_whose_fcs(shape):
-    """The Flock probe (FLOCK_IES) with the first sequence number whose FCS has this shape."""
+def flock_probe_whose_fcs(shape, ies=FLOCK_IES):
+    """A probe from FLOCK_CAMERA carrying `ies`, by default the fingerprint, with the first
+    sequence number whose FCS has this shape."""
     for seq in range(4096):
-        probe = probe_request(FLOCK_CAMERA, FLOCK_IES, seq)
+        probe = probe_request(FLOCK_CAMERA, ies, seq)
         if shape(fcs(probe)):
             return probe
     raise AssertionError("no sequence number gives an FCS of that shape")
@@ -342,6 +343,16 @@ def test_the_retry_reads_no_fcs_flag_as_upstream_does():
     probe = flock_probe_whose_fcs(lambda f: f[0] != 0 and f[1] == 2)
     (hit,) = tcpdump_hits(radiotap_record(probe + fcs(probe), 0))
     assert (hit.tier, hit.rule) == TIER4
+
+
+def test_a_wildcard_probe_stays_tier3_when_its_fcs_starts_with_zero():
+    # An FCS whose first octet is 0 reads as one more SSID element, about one frame in 256, and
+    # with a second octet above 0 it would name a directed probe. The first SSID element is the
+    # probe's, as upstream reads it.
+    ies = bytes.fromhex("0000" "010482848b96")     # wildcard SSID, supported rates; no fingerprint
+    probe = flock_probe_whose_fcs(lambda f: f[0] == 0 and f[1] > 0, ies)
+    (hit,) = tcpdump_hits(radiotap_record(probe + fcs(probe), RADIOTAP_F_FCS))
+    assert (hit.tier, hit.rule, hit.ssid) == (3, "wildcard probe from Flock OUI", "")
 
 
 # --------------------------------------------------------------------------- roster

@@ -136,9 +136,17 @@ def _is_multicast(mac: str) -> bool:
 def _parse_ies(ies: bytes) -> tuple[str | None, bool, str]:
     """Walk the information-element TLVs, returning (ssid, ssid_wildcard, fingerprint).
 
-    The fingerprint skips the SSID and emits each remaining tag per FLOCK_IE_SIGNATURE. A tag whose
-    declared length runs past the captured bytes (common with tcpdump's snaplen) still contributes
-    its id: the slice clamps and the walk then ends, which is what the upstream detector does.
+    The SSID is the first SSID element's, as upstream reads it (flock-you @6704f01 main.cpp,
+    isWildcardProbeIE): a later one, such as a kept FCS whose first octet is 0, never replaces it.
+    The fingerprint skips every SSID and emits each remaining tag per FLOCK_IE_SIGNATURE.
+
+    A tag whose declared length runs past the captured bytes (common with tcpdump's snaplen) still
+    contributes its id here: the slice clamps and the walk then ends. Upstream's fingerprint walk
+    (fyBuildFlockIeSigFromIes) never emits such a tag. When its length is over 200, or it is tag 64
+    of length 128 with a vendor element of length 7 and OUI 50:6f:9a starting in the 32 bytes after
+    its header, upstream skips just that 2-byte header and walks on (at most 16 times a walk);
+    otherwise it walks on from the first later position, within 64 bytes, whose length is at most
+    200 and fits the bytes left; failing both, that walk gives no fingerprint.
     """
     ssid: str | None = None
     ssid_wildcard = False
@@ -149,8 +157,9 @@ def _parse_ies(ies: bytes) -> tuple[str | None, bool, str]:
         length = ies[i + 1]
         val = ies[i + 2:i + 2 + length]
         if tag == SSID_TAG:
-            ssid = val.decode("utf-8", "replace")
-            ssid_wildcard = length == 0
+            if ssid is None:
+                ssid = val.decode("utf-8", "replace")
+                ssid_wildcard = length == 0
         elif tag == VENDOR_SPECIFIC_TAG:
             parts.append("221:" + val[:8].hex())
         else:
