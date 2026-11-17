@@ -12,14 +12,36 @@ PACK = Path(__file__).resolve().parent.parent / "lesson_packs" / "12-rds.yaml"
 # The pack said three ways that a phase shift leaves the wave's height and frequency alone: the
 # concept's "leaving the height and the frequency untouched", the observe's "changes neither
 # height nor frequency" and the explain's "PSK holds both steady". For RDS it is false: the
-# standard has the 57 kHz subcarrier suppressed and amplitude-modulated by the shaped,
-# biphase-coded data (NRSC-4-A §1.4), so its height follows the data. A sentence that names the
-# phase and holds height, amplitude or frequency steady, untouched or unchanged, or says they
-# change neither, makes that claim.
-PHASE = re.compile(r"\bphase\b|\bpsk\b")
-HELD_STEADY = re.compile(r"\bneither\s+(?:the\s+)?(?:height|amplitude|frequency)\b"
-                         r"|\b(?:height|amplitude|frequency|both)\b[^.?!]*"
-                         r"\b(?:steady|untouched|unchanged)\b")
+# 57 kHz subcarrier is suppressed and amplitude-modulated by the shaped, biphase-coded data
+# (NRSC-4-A §1.4; ITU-R BS.643-4 (12/2022), Annex 1, §1.4), so its height follows the data.
+# PHASE finds a sentence about shifting the phase (PSK, phase-shift, a phase that shifts, flips,
+# moves or changes), not one that only names the phase, so a true contrast such as "FM holds the
+# height steady and moves the frequency, and with it the phase" is left alone. HELD_STEADY finds
+# the claim in the wordings met so far: height, amplitude or frequency (or both) held steady,
+# untouched, unchanged, constant, fixed, alone, the same or as they were; a shift that changes
+# neither of them or does not change them; one that moves only the phase, or the phase and
+# nothing else.
+PHASE = re.compile(r"\bpsk\b|\bphase[- ]shift|\bshift(?:s|ed|ing)?\s+(?:only\s+)?(?:the\s+)?phase\b"
+                   r"|\bflip(?:s|ped|ping)?\s+(?:the\s+)?phase\b"
+                   r"|\bphase\s+(?:flips?|flipped|flipping|moves?|moved|moving|changes?|changed"
+                   r"|changing)\b")
+HELD_STEADY = re.compile("|".join((
+    r"\bneither\s+(?:the\s+)?(?:height|amplitude|frequency)\b",
+    r"\b(?:height|amplitude|frequency|both)\b[^.?!]*\b(?:steady|untouched|unchanged|constant|fixed"
+    r"|alone|the\s+same|as\s+(?:it|they)\s+(?:was|were))\b",
+    r"\b(?:height|amplitude|frequency|both)\b[^.?!]*\b(?:does\s+not|doesn['’]t|do\s+not|don['’]t"
+    r"|never)\s+change",
+    r"\b(?:does\s+not|doesn['’]t|do\s+not|don['’]t|never)\s+change[sd]?\b[^.?!]*"
+    r"\b(?:height|amplitude|frequency)\b",
+    r"\b(?:shifts?|moves?|changes?|flips?)\s+only\s+(?:the\s+)?phase\b",
+    r"\bonly\s+(?:the\s+)?phase\s+(?:shifts|moves|changes|flips)\b",
+    r"\b(?:shifts?|moves?|changes?|flips?)\s+(?:the\s+)?phase\s+and\s+nothing\s+else\b",
+)))
+
+# What the explain's sentence about the waterfall must name: the energy or the power, and not as
+# something there is none of ("no energy").
+ENERGY = re.compile(r"\b(?:energy|power)\b")
+NO_ENERGY = re.compile(r"\bno\s+(?:\w+\s+)?(?:energy|power)\b")
 
 
 def _sentences(text):
@@ -89,11 +111,12 @@ def test_m12_explain_says_the_waterfall_shows_the_energy_but_not_the_phase():
     # The waterfall paints one pixel per rtl_power bin, coloured by that bin's power (spectrum.py
     # SweepRow, waterfall.js drawRow): a PSK signal's energy shows, which phase each bit took never
     # does. "Invisible, every time" said a PSK signal never shows at all, against the explain's own
-    # last line. One sentence must name the waterfall, the energy and the phase; only those three
-    # words are held, so the wording around them stays free to change.
+    # last line. The verdict above the explain carries the answer, so the explain needs no
+    # "invisible" in any wording. One sentence must name the waterfall and the phase, and the
+    # energy or the power without saying there is none; the wording around them stays free.
     explain = load_lesson_file(PACK).stages["explain"]
-    assert "invisible, every time" not in explain.lower()
-    assert any(all(word in sentence for word in ("waterfall", "energy", "phase"))
-               for sentence in _sentences(explain)), (
-        "the explain must say, in one sentence, that a waterfall shows a PSK signal's energy and "
-        "never its phase")
+    assert "invisible" not in explain.lower(), "the explain must not call a PSK signal invisible"
+    assert any("waterfall" in sentence and "phase" in sentence and ENERGY.search(sentence)
+               and not NO_ENERGY.search(sentence) for sentence in _sentences(explain)), (
+        "the explain must say, in one sentence, that a waterfall shows a PSK signal's energy (or "
+        "power) and never its phase")
