@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# ABOUTME: Pre-push git-identity guard — refuses a push unless every commit it sends carries the
-# ABOUTME: name wittyreference and the expected e-mail as author and committer, whatever made it.
+# ABOUTME: Pre-push git-identity guard — refuses a push unless every commit and annotated tag it
+# ABOUTME: sends carries the name wittyreference and the expected e-mail, whatever made it.
 
 # An exported SHELLOPTS can turn xtrace on as bash starts, and the trace would print every
 # identity this hook reads. It goes off before anything is read.
@@ -9,35 +9,49 @@ set -euo pipefail
 # An exported BASHOPTS can turn nocasematch on as bash starts, and the name comparison below
 # would then ignore case. The name must match exactly, so the option goes off first.
 shopt -u nocasematch
-# A replace ref (git replace) changes what git shows for a commit, but a push sends the original
-# object, so every git command below reads the commits as they will leave.
+# A replace ref (git replace) changes what git shows for an object, but a push sends the
+# original, so every git command below reads the objects as they will leave.
 export GIT_NO_REPLACE_OBJECTS=1
 
 # githooks/pre-commit and githooks/pre-merge-commit refuse a commit or a local merge unless the
 # identity it is about to carry is the handle and the address. A cherry-pick, rebase, am or
 # revert that no conflict stops runs neither of them and writes the configured identity as
-# committer, so a clone whose user.name is a person's own name leaks it by another road. This
-# hook checks what leaves instead, whatever made it: the push goes only when every commit it
-# sends has the name wittyreference, exactly, and the address, in any case, as both author and
-# committer. The repository is public, and only rewriting published history takes a pushed
-# identity back out. A refusal stops the whole push and never prints the wrong value.
+# committer, and git tag -a writes it as tagger with no hook at all, so a clone whose user.name
+# is a person's own name leaks it by other roads. This hook checks what leaves instead, whatever
+# made it: the push goes only when every commit it sends has the name wittyreference, exactly,
+# and the address, in any case, as both author and committer, and every annotated tag it sends
+# has them as tagger. The repository is public, and only rewriting published history takes a
+# pushed identity back out. A refusal stops the whole push and never prints the wrong value.
 REQUIRED_NAME="wittyreference"
 REQUIRED_EMAIL="mc8805@outlook.com"
 
-# What it cannot see. A merge made on GitHub runs no local hook at all. A squash merge made
-# there is authored by the pull request's author and committed by GitHub <noreply@github.com>;
-# it comes back to a clone by fetch, never by push, so this hook never sees it leave. The same
-# holds for every commit the remote has already: whatever this clone's remote-tracking refs for
-# that remote reach counts as there, and is not checked again. Given a bare URL instead of a
-# remote's name, the hook knows of nothing there and checks every commit it can reach, GitHub's
-# squash merges among them, so push to the named remote. Only commits are checked, not an
-# annotated tag's tagger line. A push with --no-verify, or from a clone whose core.hooksPath does
-# not point at githooks/ (bootstrap.sh sets it), runs no hook.
+# What it cannot see, and what it takes on trust:
+# - A merge made on GitHub runs no local hook at all. A squash merge made there is authored by
+#   the pull request's author and committed by GitHub <noreply@github.com>; it comes back to a
+#   clone by fetch, never by push, so this hook never sees it leave.
+# - What the remote holds already is read from this clone's remote-tracking refs for it
+#   (refs/remotes/<remote>/), and a commit they reach is not checked again. Two cases make that
+#   untrue, and a commit can then leave unchecked. A stale ref: a branch deleted or rewritten on
+#   the remote since this clone last fetched still counts as held, so a commit gone from the
+#   remote (history rewritten to take an identity out, say) goes back up unchecked in a new
+#   branch built on it, or in an update that merges it. Run git fetch --prune <remote> before
+#   pushing. A pushurl: the tracking refs describe the repository the remote fetches from, so
+#   when remote.<name>.pushurl names another repository, a commit that only the fetch side
+#   holds reaches the push side unchecked.
+# - With no remote-tracking refs at all (a push by URL, or to a remote this clone has never
+#   fetched, such as a new mirror), it cannot tell what would leave, and refuses anything but a
+#   delete outright.
+# - It reads the tagger of each annotated tag pushed and of each tag that one points at, not
+#   the mergetag header that a git merge of a signed tag writes into the merge commit.
+# - A push with --no-verify, or from a clone whose core.hooksPath does not point at githooks/
+#   (bootstrap.sh sets it), runs no hook.
 
 # Below, only git and bash's own builtins run: no outside tool, so none can go missing and let a
 # wrong identity through, and every message is printed by the printf builtin for the same reason.
-refuse() {
+refuse() {  # $1: why, then any further lines
     printf 'sigint101: refusing to push: %s\n' "$1" >&2
+    shift
+    if [ "$#" -gt 0 ]; then printf '           %s\n' "$@" >&2; fi
     exit 1
 }
 
@@ -49,25 +63,36 @@ refs=()
 while IFS= read -r line || [ -n "$line" ]; do
     refs+=("$line")
 done
+tracked="$(git for-each-ref --count=1 --format='%(refname)' "refs/remotes/$remote")" ||
+    refuse "git could not read this clone's remote-tracking refs."
 
-line_re='^[^ ]+ ([0-9a-f]+) [^ ]+ ([0-9a-f]+)$'
+line_re='^([^ ]+) ([0-9a-f]+) ([^ ]+) ([0-9a-f]+)$'
 zero_re='^0+$'
+object_re='^object ([0-9a-f]+)$'
+type_re='^type ([a-z]+)$'
 # "author Name <email> epoch tz": git keeps '<' and '>' out of both the name and the address.
-ident_re='^(author|committer) (.*) <([^<>]*)> '
-checked=" "  # the commits checked so far, so one sent under two refs is reported once
-bad=()       # "<abbreviated hash> <wrong fields>", one entry per commit that fails
+ident_re='^(author|committer|tagger) (.*) <([^<>]*)> '
+bad=()         # "<ref> <commit or tag> <abbreviated hash>: <wrong fields>", one per failure
+bad_commit=no  # a commit failed, so the advice to re-author applies
+bad_tag=no     # a tag failed, so the advice to remake it applies
 
-check() {  # $1: a commit this push sends; adds it to bad unless its identity is the handle's
-    local sha="$1" body line role name email same short joined
-    local wrong=() author=no committer=no
-    body="$(git cat-file commit "$sha")" || refuse "git could not read a commit this push sends."
+judge() {  # $1: the ref pushed, $2: commit or tag, $3: its hash. Adds it to bad unless every
+    # identity in its header is the handle's; for a tag, sets pointee and pointee_type.
+    local ref="$1" kind="$2" sha="$3" body line role name email same short joined
+    local wrong=() expected=() seen=" "
+    if [ "$kind" = tag ]; then expected=(tagger); else expected=(author committer); fi
+    pointee=""
+    pointee_type=""
+    body="$(git cat-file "$kind" "$sha")" || refuse "git could not read a $kind this push sends."
     while IFS= read -r line; do
-        [ -n "$line" ] || break  # the headers end at the first empty line
+        [ -n "$line" ] || break  # the header ends at the first empty line
+        if [[ "$line" =~ $object_re ]]; then pointee="${BASH_REMATCH[1]}"; continue; fi
+        if [[ "$line" =~ $type_re ]]; then pointee_type="${BASH_REMATCH[1]}"; continue; fi
         [[ "$line" =~ $ident_re ]] || continue
         role="${BASH_REMATCH[1]}"
         name="${BASH_REMATCH[2]}"
         email="${BASH_REMATCH[3]}"
-        if [ "$role" = author ]; then author=yes; else committer=yes; fi
+        seen+="$role "
         [[ "$name" == "$REQUIRED_NAME" ]] || wrong+=("$role name")
         # Only the address ignores case: nocasematch is on for this one comparison and no other.
         same=no
@@ -76,22 +101,39 @@ check() {  # $1: a commit this push sends; adds it to bad unless its identity is
         shopt -u nocasematch
         [ "$same" = yes ] || wrong+=("$role e-mail")
     done <<< "$body"
-    # A commit without a readable author or committer line fails on both of that one's fields.
-    [ "$author" = yes ] || wrong+=("author name" "author e-mail")
-    [ "$committer" = yes ] || wrong+=("committer name" "committer e-mail")
+    # An identity that is missing or unreadable fails on both of its fields.
+    for role in "${expected[@]}"; do
+        if [[ "$seen" != *" $role "* ]]; then wrong+=("$role name" "$role e-mail"); fi
+    done
     if [ "${#wrong[@]}" -gt 0 ]; then
         short="$(git rev-parse --short "$sha")" || short="$sha"
         printf -v joined '%s, ' "${wrong[@]}"
-        bad+=("$short ${joined%, }")
+        bad+=("$ref $kind $short: ${joined%, }")
+        if [ "$kind" = tag ]; then bad_tag=yes; else bad_commit=yes; fi
     fi
 }
 
 for line in "${refs[@]}"; do
     [[ "$line" =~ $line_re ]] || refuse "git sent a line this hook cannot read."
-    local_sha="${BASH_REMATCH[1]}"
-    remote_sha="${BASH_REMATCH[2]}"
-    # A delete sends no commit.
+    local_ref="${BASH_REMATCH[1]}"
+    local_sha="${BASH_REMATCH[2]}"
+    remote_sha="${BASH_REMATCH[4]}"
+    # A delete sends nothing.
     if [[ "$local_sha" =~ $zero_re ]]; then continue; fi
+    # Without remote-tracking refs every commit would count as leaving, the whole history with
+    # it, GitHub's squash merges included, so the hook says why instead of listing them.
+    [ -n "$tracked" ] ||
+        refuse "this check can only judge a push to a remote this clone has fetched." \
+            "Push to origin, or fetch the remote first."
+    # An annotated tag carries a tagger, and so does each tag it points at.
+    kind="$(git cat-file -t "$local_sha")" ||
+        refuse "git could not read an object this push sends."
+    sha="$local_sha"
+    while [ "$kind" = tag ]; do
+        judge "$local_ref" tag "$sha"
+        sha="$pointee"
+        kind="$pointee_type"
+    done
     # The commits this ref sends: those its new tip reaches and no ref of that remote reaches,
     # nor, when the ref exists there already, the tip the remote has for it now. So a commit the
     # remote holds under any branch, as it holds GitHub's squash merges on main, never counts.
@@ -105,22 +147,29 @@ for line in "${refs[@]}"; do
         commits+=("$sha")
     done <<< "$listed"
     for sha in "${commits[@]}"; do
-        if [ -z "$sha" ] || [[ "$checked" == *" $sha "* ]]; then continue; fi
-        checked+="$sha "
-        check "$sha"
+        if [ -n "$sha" ]; then judge "$local_ref" commit "$sha"; fi
     done
 done
 
 if [ "${#bad[@]}" -gt 0 ]; then
-    printf 'sigint101: refusing to push: %s\n' \
-        "these commits are not $REQUIRED_NAME <$REQUIRED_EMAIL> as both author and committer:" >&2
-    printf '           %s\n' "${bad[@]}" >&2
-    printf '           %s\n' \
-        "Nothing was pushed. Set the identity in this clone and re-author the commits:" \
+    printf 'sigint101: refusing to push: these carry an author, committer or tagger %s\n' \
+        "other than $REQUIRED_NAME <$REQUIRED_EMAIL>:" >&2
+    printf '           %s\n' "${bad[@]}" \
+        "Nothing was pushed. Set the identity in this clone, then fix what is listed:" \
         "git config user.name $REQUIRED_NAME" \
-        "git config user.email $REQUIRED_EMAIL" \
-        "git rebase --exec 'git commit --amend --no-edit --reset-author' <base>" \
-        "with <base> the parent of the oldest commit listed on that branch; then push again." >&2
+        "git config user.email $REQUIRED_EMAIL" >&2
+    if [ "$bad_commit" = yes ]; then
+        # From where the branch meets the remote's main, a rebase replays only the branch's own
+        # commits: what a merge of main brought in, GitHub's squash merges among it, stays as is.
+        printf '           %s\n' \
+            "check out each branch listed and re-author the commits it adds:" >&2
+        printf "           git rebase --exec '%s' \$(git merge-base HEAD %s/main)\n" \
+            "git commit --amend --no-edit --reset-author" "$remote" >&2
+    fi
+    if [ "$bad_tag" = yes ]; then
+        printf '           %s\n' "remake each tag listed: git tag -f -a <tag> <tag>^{}" >&2
+    fi
+    printf '           %s\n' "Then push again." >&2
     exit 1
 fi
 exit 0

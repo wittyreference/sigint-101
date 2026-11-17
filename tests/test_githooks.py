@@ -394,9 +394,11 @@ def test_a_refused_merge_says_how_to_return_to_a_clean_tree(repo):
 # --- pushes: pre-push checks every commit that leaves, whatever made it ----------------
 #
 # A cherry-pick, rebase, am or revert that no conflict stops runs neither hook above and writes
-# the configured name as committer. githooks/pre-push meets every commit a push sends instead.
+# the configured name as committer, and git tag writes it as tagger with no hook at all.
+# githooks/pre-push meets every commit and annotated tag a push sends instead.
 
-FIELDS = ("author name", "author e-mail", "committer name", "committer e-mail")
+COMMIT_FIELDS = ("author name", "author e-mail", "committer name", "committer e-mail")
+FIELDS = COMMIT_FIELDS + ("tagger name", "tagger e-mail")
 WRONG = (OTHER_NAME, OTHER_EMAIL)
 
 
@@ -419,7 +421,9 @@ class Pushed:
 
 
 class Clone(Sandbox):
-    """A Sandbox whose remote, origin, is a throwaway bare repository beside it.
+    """A Sandbox whose remote, origin, is a throwaway bare repository beside it. Like every clone
+    of this repository, it starts from a remote with history that it has fetched: here, one
+    commit by the handle on main.
 
     make() and push_unchecked() go round the hooks, so a test can build the history it needs,
     such as a commit by another identity that the remote already holds, as it holds every squash
@@ -429,9 +433,17 @@ class Clone(Sandbox):
 
     def __init__(self, tmp_path: Path):
         super().__init__(tmp_path)
-        self.remote = tmp_path / "remote.git"
-        assert self.git("init", "-q", "--bare", "-b", "main", str(self.remote)).returncode == 0
+        self.tmp = tmp_path
+        self.remote = self.bare("remote.git")
         assert self.git("remote", "add", "origin", str(self.remote)).returncode == 0
+        self.make()
+        self.push_unchecked("main")
+
+    def bare(self, name):
+        """A new, empty bare repository beside the clone."""
+        path = self.tmp / name
+        assert self.git("init", "-q", "--bare", "-b", "main", str(path)).returncode == 0
+        return path
 
     def make(self, author=(NAME, EMAIL), committer=(NAME, EMAIL)):
         """Commit one new file on the current branch as these identities, by plumbing, which
@@ -457,15 +469,18 @@ class Clone(Sandbox):
     def short(self, sha):
         return self.git("rev-parse", "--short", sha).stdout.strip()
 
-    def remote_refs(self):
-        return self.git(f"--git-dir={self.remote}", "for-each-ref").stdout
+    def refs_at(self, bare):
+        return self.git(f"--git-dir={bare}", "for-each-ref").stdout
 
-    def push(self, *args, **env) -> Pushed:
-        """Run `git push origin` with these arguments and environment, the hooks armed."""
-        before = self.remote_refs()
-        run = self.git("push", "origin", *args, **env)
+    def push(self, *args, to="origin", **env) -> Pushed:
+        """Run `git push <to>` with these arguments and environment, the hooks armed. `to` is a
+        remote's name, or a bare repository's path given as a URL."""
+        url = self.git("remote", "get-url", to)
+        bare = url.stdout.strip() if url.returncode == 0 else to
+        before = self.refs_at(bare)
+        run = self.git("push", to, *args, **env)
         said = run.stdout + run.stderr
-        return Pushed(sent=self.remote_refs() != before,
+        return Pushed(sent=self.refs_at(bare) != before,
                       by_hook="sigint101: refusing to push" in run.stderr,
                       quiet=OTHER_NAME not in said and OTHER_EMAIL not in said,
                       said=said)
@@ -489,11 +504,14 @@ def clone(tmp_path):
 def test_commits_under_the_required_identity_are_pushed(clone):
     clone.make()
     clone.make()
-    new_branch = clone.push("main")
+    update = clone.push("main")
+    assert update.sent
+    assert not update.by_hook
+    clone.checkout("-b", "topic")
+    clone.make()
+    new_branch = clone.push("topic")
     assert new_branch.sent
     assert not new_branch.by_hook
-    clone.make()
-    assert clone.push("main").sent  # and an update to it
 
 
 def test_one_wrong_author_name_in_the_middle_refuses_the_push(clone):
@@ -503,12 +521,14 @@ def test_one_wrong_author_name_in_the_middle_refuses_the_push(clone):
     out = clone.push("main")
     assert not out.sent
     assert out.by_hook
-    # It names that commit and that field, and neither the right commits nor the wrong value.
-    assert out.says(clone.short(wrong))
+    # It names the ref, that commit and that field, and neither the right commits nor the value.
+    assert out.says("refs/heads/main", clone.short(wrong))
     assert out.fields() == ["author name"]
     assert not out.says(clone.short(before)) and not out.says(clone.short(after))
     assert out.quiet
-    assert out.says("git rebase --exec", "--reset-author")
+    # The advised base is where the branch meets the remote's main, so a branch that merged main
+    # re-authors only its own commits, never copies of GitHub's squash merges.
+    assert out.says("git rebase --exec", "--reset-author", "$(git merge-base HEAD origin/main)")
 
 
 def test_a_wrong_committer_name_from_a_clean_rebase_is_refused(clone):
@@ -596,7 +616,8 @@ def test_one_wrong_ref_among_several_refuses_the_whole_push(clone):
     out = clone.push("good", "bad")
     assert not out.sent  # the good branch did not go either
     assert out.by_hook
-    assert out.says(clone.short(wrong))
+    assert out.says("refs/heads/bad", clone.short(wrong))
+    assert not out.says("refs/heads/good")
     assert out.fields() == ["author e-mail"]
     assert out.quiet
 
@@ -624,7 +645,7 @@ def test_a_refused_push_never_prints_the_wrong_value(clone, shellopts):
     out = clone.push("main", **_shellopts(shellopts))
     assert not out.sent
     assert out.by_hook
-    assert out.fields() == list(FIELDS)
+    assert out.fields() == list(COMMIT_FIELDS)
     assert out.quiet
 
 
@@ -684,3 +705,96 @@ def test_the_push_guard_needs_nothing_but_git_and_bash(clone, tmp_path):
     assert not out.sent
     assert out.by_hook
     assert out.fields() == ["author name", "author e-mail"]
+
+
+# --- tags: an annotated tag carries a tagger, and git tag runs no hook ------------------
+
+
+def test_an_annotated_tag_with_a_wrong_tagger_name_is_refused(clone):
+    # git tag -a writes the configured name as tagger, and no hook sees it before the push.
+    tag = clone.git("-c", f"user.name={OTHER_NAME}", "tag", "-a", "-m", "release", "v1")
+    assert tag.returncode == 0
+    out = clone.push("v1")
+    assert not out.sent
+    assert out.by_hook
+    assert out.says("refs/tags/v1")
+    assert out.fields() == ["tagger name"]
+    assert out.says("git tag -f -a")
+    assert out.quiet
+
+
+def test_tags_under_the_required_identity_are_pushed(clone):
+    # An annotated tag whose tagger is the handle, and a lightweight tag, which has no tagger and
+    # brings only commits the remote holds.
+    assert clone.git("tag", "-a", "-m", "release", "v2").returncode == 0
+    assert clone.git("tag", "v3").returncode == 0
+    out = clone.push("v2", "v3")
+    assert out.sent
+    assert not out.by_hook
+
+
+def test_a_wrong_tagger_on_a_tag_inside_a_tag_is_refused(clone):
+    # A tag can point at another tag. The push sends both, and each carries a tagger.
+    inner = clone.git("-c", f"user.name={OTHER_NAME}", "tag", "-a", "-m", "inner", "inner")
+    assert inner.returncode == 0
+    assert clone.git("tag", "-a", "-m", "outer", "outer", "inner").returncode == 0
+    assert clone.git("tag", "-d", "inner").returncode == 0  # only the outer tag is pushed
+    out = clone.push("outer")
+    assert not out.sent
+    assert out.by_hook
+    assert out.says("refs/tags/outer")
+    assert out.fields() == ["tagger name"]
+
+
+def test_a_tag_whose_tagger_cannot_be_read_is_refused(clone):
+    # A hand-made tag whose tagger line has no address in brackets still carries a name; the
+    # guard cannot read it as an identity, so it fails closed on both fields.
+    text = clone.tmp / "odd-tag.txt"
+    text.write_text(f"object {clone.head()}\ntype commit\ntag odd\n"
+                    f"tagger {OTHER_NAME} 1700000000 +0000\n\nodd\n", encoding="utf-8")
+    made = clone.git("hash-object", "-t", "tag", "-w", "--literally", str(text))
+    assert made.returncode == 0
+    assert clone.git("update-ref", "refs/tags/odd", made.stdout.strip()).returncode == 0
+    out = clone.push("odd")
+    assert not out.sent
+    assert out.by_hook
+    assert out.fields() == ["tagger name", "tagger e-mail"]
+    assert out.quiet
+
+
+# --- where the guard cannot judge: no remote-tracking refs ------------------------------
+
+
+@pytest.mark.parametrize("where", ["url", "unfetched remote", "mirror"])
+def test_a_push_the_guard_cannot_judge_is_refused_in_one_line(clone, where):
+    # With no remote-tracking refs for where the push goes, every commit would count as leaving,
+    # the whole history with it, GitHub's squash merges included. The guard says so in a line
+    # instead of listing that history; the same branch pushed to origin goes.
+    clone.make(committer=WRONG)
+    clone.push_unchecked("main")
+    clone.checkout("-b", "topic")
+    clone.make()
+    if where == "url":
+        out = clone.push("topic", to=str(clone.remote))
+    elif where == "unfetched remote":
+        assert clone.git("remote", "add", "backup", str(clone.bare("backup.git"))).returncode == 0
+        out = clone.push("topic", to="backup")
+    else:
+        out = clone.push("--mirror", to=str(clone.bare("mirror.git")))
+    assert not out.sent
+    assert out.by_hook
+    assert out.says("Push to origin, or fetch the remote first.")
+    assert out.fields() == []
+    assert not out.says("git rebase")
+    assert out.quiet
+    assert clone.push("topic").sent
+
+
+def test_a_delete_by_url_goes(clone):
+    # A delete sends nothing, so it needs no judging even where the guard cannot judge a push.
+    clone.checkout("-b", "topic")
+    clone.make()
+    assert clone.push("topic").sent
+    out = clone.push("--delete", "topic", to=str(clone.remote))
+    assert out.sent
+    assert not out.by_hook

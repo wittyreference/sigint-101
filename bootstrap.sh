@@ -7,8 +7,8 @@ python3 -m venv .venv
 .venv/bin/pip install -q --upgrade pip
 .venv/bin/pip install -q -r requirements.txt
 echo "bootstrap: deps installed"
-# Re-arm the pre-commit git-identity guard. core.hooksPath is repo-local config and does
-# not survive a clone, so every bootstrap re-points git at githooks/.
+# Re-arm the git-identity guards: core.hooksPath makes git run every hook in githooks/. It is
+# repo-local config and does not survive a clone, so every bootstrap re-points git at githooks/.
 git config core.hooksPath githooks
 echo "bootstrap: git hooks armed (core.hooksPath=githooks)"
 .venv/bin/ruff --version
