@@ -1,5 +1,5 @@
-# ABOUTME: Lesson M22 "Two Streams" — I/Q (quadrature) sampling (no RF): the dongle hands up two streams, against
-# ABOUTME: references a quarter-cycle apart, carrying phase as well as amplitude; 2.4 MSPS is a 2.4 MHz slice.
+# ABOUTME: Lesson M22 "Two Streams" — I/Q (quadrature) sampling (no RF): the dongle hands up two streams, measured
+# ABOUTME: against references a quarter-cycle apart, carrying phase as well as amplitude; 2.4 MSPS is a 2.4 MHz slice.
 
 id: 22
 slug: iq-sampling

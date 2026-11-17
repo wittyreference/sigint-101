@@ -18,15 +18,16 @@ PACK = Path(__file__).resolve().parent.parent / "lesson_packs" / "22-iq-sampling
 # A quarter-cycle (a quarter of a cycle, period, wave or turn, 90 degrees, pi/2) belongs to the
 # nearest thing its sentence names before it, or after it when nothing comes before. A reference
 # passes: a reference, an oscillator or LO, a carrier, waves (plural: "the wave" is the signal
-# being read), a cosine or sine, or the floor, wall or axes of the clock-hand picture. A sample, a
-# reading, a measurement, a stream, I or Q, "twice", "again", a moment, an instant or a time fails,
-# and so does a quarter-cycle that names nothing.
+# being read), a cosine or sine, a mixer or a tone (lesson 21's words: "two mixers a quarter-turn
+# apart", "the radio's own tone"), or the floor, wall or axes of the clock-hand picture. A sample,
+# a reading, a measurement, a stream, I or Q, "twice", "again", a moment, an instant or a time
+# fails, and so does a quarter-cycle that names nothing.
 QUARTER = re.compile(
     r"\bquarter[\s-]+(?:of\s+(?:an?|the|its)\s+)?(?:cycle|period|wave|turn)s?\b"
     r"|\b(?:90|ninety)[\s-]*(?:degrees?|deg)\b|\b90\s*°|\b(?:π|pi)\s*/\s*2\b", re.I)
 SUBJECT = re.compile(
-    r"(?P<reference>\b(?i:references?|oscillators?|carriers?|waves|cosines?|sines?"
-    r"|floors?|walls?|axis|axes)\b|\bLOs?\b)"
+    r"(?P<reference>\b(?i:references?|oscillators?|carriers?|waves|cosines?|sines?|mixers?"
+    r"|tones?|floors?|walls?|axis|axes)\b|\bLOs?\b)"
     r"|\b(?i:sampl\w*|readings?|reads?|measur\w*|streams?|twice|again|moments?|instants?"
     r"|times?)\b|\b[IQ]\b")
 
