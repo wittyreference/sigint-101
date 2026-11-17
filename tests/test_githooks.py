@@ -1,10 +1,10 @@
-# ABOUTME: Tests the identity guard (githooks/pre-commit, pre-merge-commit) in throwaway git repos.
-# ABOUTME: Commits and merges are made only when author and committer are the required identity.
+# ABOUTME: Tests the identity guard (githooks/pre-commit, pre-merge-commit, pre-push) in throwaway
+# ABOUTME: git repos: commits, merges and pushes go only when author and committer are the handle.
 
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -116,7 +116,7 @@ def test_the_email_may_differ_in_case(repo):
     assert repo.commit().made
 
 
-@pytest.mark.parametrize("hook", ["pre-commit", "pre-merge-commit"])
+@pytest.mark.parametrize("hook", ["pre-commit", "pre-merge-commit", "pre-push"])
 def test_the_guard_is_executable_bash(hook):
     # git skips a hook that is not executable, which would disarm the guard without a word.
     path = HOOKS / hook
@@ -389,3 +389,298 @@ def test_a_refused_merge_says_how_to_return_to_a_clean_tree(repo):
     assert repo.git("merge", "--abort").returncode == 0
     assert repo.git("status", "--porcelain").stdout == ""
     assert repo.head() == before
+
+
+# --- pushes: pre-push checks every commit that leaves, whatever made it ----------------
+#
+# A cherry-pick, rebase, am or revert that no conflict stops runs neither hook above and writes
+# the configured name as committer. githooks/pre-push meets every commit a push sends instead.
+
+FIELDS = ("author name", "author e-mail", "committer name", "committer e-mail")
+WRONG = (OTHER_NAME, OTHER_EMAIL)
+
+
+@dataclass
+class Pushed:
+    """A push outcome. What git and the hook printed stays out of repr and comparisons, so a
+    failing assert never prints an identity."""
+
+    sent: bool  # the remote's refs changed
+    by_hook: bool  # the guard's own refusal is on stderr
+    quiet: bool  # neither invented wrong value is anywhere in stdout or stderr
+    said: str = field(repr=False, compare=False)
+
+    def says(self, *words):
+        return all(word in self.said for word in words)
+
+    def fields(self):
+        """The identity fields the refusal names as wrong."""
+        return [name for name in FIELDS if name in self.said]
+
+
+class Clone(Sandbox):
+    """A Sandbox whose remote, origin, is a throwaway bare repository beside it.
+
+    make() and push_unchecked() go round the hooks, so a test can build the history it needs,
+    such as a commit by another identity that the remote already holds, as it holds every squash
+    merge GitHub commits. That is setup in throwaway repositories only: the rule against going
+    round a hook is about real commits to this repository.
+    """
+
+    def __init__(self, tmp_path: Path):
+        super().__init__(tmp_path)
+        self.remote = tmp_path / "remote.git"
+        assert self.git("init", "-q", "--bare", "-b", "main", str(self.remote)).returncode == 0
+        assert self.git("remote", "add", "origin", str(self.remote)).returncode == 0
+
+    def make(self, author=(NAME, EMAIL), committer=(NAME, EMAIL)):
+        """Commit one new file on the current branch as these identities, by plumbing, which
+        runs no hook. Returns the commit's hash."""
+        self.files += 1
+        name = f"file{self.files}.txt"
+        (self.path / name).write_text(f"{self.files}\n", encoding="utf-8")
+        assert self.git("add", name).returncode == 0
+        tree = self.git("write-tree").stdout.strip()
+        parent = self.head()
+        made = self.git("commit-tree", tree, *(["-p", parent] if parent else []),
+                        "-m", f"change {self.files}",
+                        GIT_AUTHOR_NAME=author[0], GIT_AUTHOR_EMAIL=author[1],
+                        GIT_COMMITTER_NAME=committer[0], GIT_COMMITTER_EMAIL=committer[1])
+        assert made.returncode == 0
+        sha = made.stdout.strip()
+        assert self.git("update-ref", "HEAD", sha).returncode == 0
+        return sha
+
+    def checkout(self, *args):
+        assert self.git("checkout", "-q", *args).returncode == 0
+
+    def short(self, sha):
+        return self.git("rev-parse", "--short", sha).stdout.strip()
+
+    def remote_refs(self):
+        return self.git(f"--git-dir={self.remote}", "for-each-ref").stdout
+
+    def push(self, *args, **env) -> Pushed:
+        """Run `git push origin` with these arguments and environment, the hooks armed."""
+        before = self.remote_refs()
+        run = self.git("push", "origin", *args, **env)
+        said = run.stdout + run.stderr
+        return Pushed(sent=self.remote_refs() != before,
+                      by_hook="sigint101: refusing to push" in run.stderr,
+                      quiet=OTHER_NAME not in said and OTHER_EMAIL not in said,
+                      said=said)
+
+    def push_unchecked(self, *refs):
+        """Put commits on the remote with the hooks off, as a merge made on GitHub lands there."""
+        run = self.git("-c", "core.hooksPath=/dev/null", "push", "-q", "origin", *refs)
+        assert run.returncode == 0
+
+
+@pytest.fixture
+def clone(tmp_path):
+    """Armed and set to the identity the repository requires, with an empty remote."""
+    box = Clone(tmp_path)
+    box.config("user.name", NAME)
+    box.config("user.email", EMAIL)
+    box.arm()
+    return box
+
+
+def test_commits_under_the_required_identity_are_pushed(clone):
+    clone.make()
+    clone.make()
+    new_branch = clone.push("main")
+    assert new_branch.sent
+    assert not new_branch.by_hook
+    clone.make()
+    assert clone.push("main").sent  # and an update to it
+
+
+def test_one_wrong_author_name_in_the_middle_refuses_the_push(clone):
+    before = clone.make()
+    wrong = clone.make(author=(OTHER_NAME, EMAIL))
+    after = clone.make()
+    out = clone.push("main")
+    assert not out.sent
+    assert out.by_hook
+    # It names that commit and that field, and neither the right commits nor the wrong value.
+    assert out.says(clone.short(wrong))
+    assert out.fields() == ["author name"]
+    assert not out.says(clone.short(before)) and not out.says(clone.short(after))
+    assert out.quiet
+    assert out.says("git rebase --exec", "--reset-author")
+
+
+def test_a_wrong_committer_name_from_a_clean_rebase_is_refused(clone):
+    # The other road: a rebase that no conflict stops runs no commit hook, so pre-commit never
+    # meets the name it writes as committer.
+    clone.make()
+    assert clone.push("main").sent
+    clone.checkout("-b", "topic")
+    clone.make()
+    assert clone.push("topic").sent
+    clone.checkout("main")
+    clone.make()
+    assert clone.push("main").sent
+    clone.checkout("topic")
+    rebase = clone.git("-c", f"user.name={OTHER_NAME}", "rebase", "-q", "main")
+    assert rebase.returncode == 0  # no hook stopped it
+    out = clone.push("--force", "topic")
+    assert not out.sent
+    assert out.by_hook
+    assert out.fields() == ["committer name"]
+    assert out.quiet
+
+
+def test_a_wrong_committer_email_is_refused(clone):
+    clone.make()
+    assert clone.push("main").sent
+    wrong = clone.make(committer=(NAME, OTHER_EMAIL))
+    out = clone.push("main")
+    assert not out.sent
+    assert out.by_hook
+    assert out.says(clone.short(wrong))
+    assert out.fields() == ["committer e-mail"]
+    assert out.quiet
+
+
+def test_a_new_branch_of_commits_the_remote_already_holds_is_pushed(clone):
+    # The remote holds a commit by another identity, as it holds every squash merge GitHub
+    # commits. A new branch made only of commits the remote holds sends none of them.
+    clone.make()
+    clone.make(committer=WRONG)
+    clone.push_unchecked("main")
+    assert clone.git("branch", "copy").returncode == 0
+    out = clone.push("copy")
+    assert out.sent
+    assert not out.by_hook
+
+
+def test_merging_in_commits_the_remote_already_holds_is_pushed(clone):
+    # Bringing a branch up to date with main takes in what main holds, GitHub's squash merges
+    # among them. Only the merge itself leaves, so only the merge is checked.
+    clone.make()
+    assert clone.push("main").sent
+    clone.checkout("-b", "topic")
+    clone.make()
+    assert clone.push("topic").sent
+    clone.checkout("main")
+    clone.make(committer=WRONG)
+    clone.push_unchecked("main")
+    clone.checkout("topic")
+    assert clone.merge("main").made
+    out = clone.push("topic")
+    assert out.sent
+    assert not out.by_hook
+
+
+def test_a_branch_delete_is_pushed(clone):
+    # A delete sends no commit, and a branch that holds another identity must stay removable.
+    clone.make()
+    assert clone.push("main").sent
+    clone.checkout("-b", "topic")
+    clone.make(author=WRONG)
+    clone.push_unchecked("topic")
+    out = clone.push("--delete", "topic")
+    assert out.sent
+    assert not out.by_hook
+
+
+def test_one_wrong_ref_among_several_refuses_the_whole_push(clone):
+    clone.make()
+    assert clone.push("main").sent
+    clone.checkout("-b", "good")
+    clone.make()
+    clone.checkout("-b", "bad", "main")
+    wrong = clone.make(author=(NAME, OTHER_EMAIL))
+    out = clone.push("good", "bad")
+    assert not out.sent  # the good branch did not go either
+    assert out.by_hook
+    assert out.says(clone.short(wrong))
+    assert out.fields() == ["author e-mail"]
+    assert out.quiet
+
+
+def test_the_email_may_differ_in_case_in_a_push(clone):
+    clone.make(author=(NAME, EMAIL.upper()), committer=(NAME, EMAIL.upper()))
+    out = clone.push("main")
+    assert out.sent
+    assert not out.by_hook
+
+
+@pytest.mark.parametrize("bashopts", [None, "nocasematch"])
+def test_a_name_that_differs_only_in_case_is_refused_in_a_push(clone, bashopts):
+    # An exported BASHOPTS=nocasematch would make the name comparison ignore case.
+    clone.make(author=(NAME.capitalize(), EMAIL))
+    out = clone.push("main", **({"BASHOPTS": bashopts} if bashopts else {}))
+    assert not out.sent
+    assert out.by_hook
+    assert out.fields() == ["author name"]
+
+
+@pytest.mark.parametrize("shellopts", [None, "xtrace"])
+def test_a_refused_push_never_prints_the_wrong_value(clone, shellopts):
+    clone.make(author=WRONG, committer=WRONG)
+    out = clone.push("main", **_shellopts(shellopts))
+    assert not out.sent
+    assert out.by_hook
+    assert out.fields() == list(FIELDS)
+    assert out.quiet
+
+
+def test_a_replace_ref_does_not_hide_a_commit_from_the_push_guard(clone):
+    # git replace changes what git log and git cat-file show for a commit; a push still sends
+    # the original commit, so the guard must read that one.
+    clone.make()
+    wrong = clone.make(author=WRONG)
+    tree = clone.git("rev-parse", f"{wrong}^{{tree}}").stdout.strip()
+    parent = clone.git("rev-parse", f"{wrong}^").stdout.strip()
+    stand_in = clone.git("commit-tree", tree, "-p", parent, "-m", "stand-in")
+    assert stand_in.returncode == 0
+    assert clone.git("replace", wrong, stand_in.stdout.strip()).returncode == 0
+    out = clone.push("main")
+    assert not out.sent
+    assert out.by_hook
+    assert out.fields() == ["author name", "author e-mail"]
+
+
+def test_a_remote_tip_this_clone_has_not_fetched_is_refused(clone):
+    # The remote's branch moved on to a commit this clone lacks, so the guard cannot list what
+    # the push would send. It refuses rather than guess, even when forced.
+    clone.make()
+    assert clone.push("main").sent
+    at_remote = [f"--git-dir={clone.remote}"]
+    tree = clone.git(*at_remote, "rev-parse", "main^{tree}").stdout.strip()
+    moved = clone.git(*at_remote, "commit-tree", tree, "-p", "main", "-m", "elsewhere",
+                      GIT_AUTHOR_NAME=NAME, GIT_AUTHOR_EMAIL=EMAIL,
+                      GIT_COMMITTER_NAME=NAME, GIT_COMMITTER_EMAIL=EMAIL)
+    assert moved.returncode == 0
+    assert clone.git(*at_remote, "update-ref", "refs/heads/main",
+                     moved.stdout.strip()).returncode == 0
+    clone.make()
+    out = clone.push("--force", "main")
+    assert not out.sent
+    assert out.by_hook
+
+
+def _path_with_only(tmp_path, *wanted):
+    """A PATH whose one directory holds links to these tools and nothing else. git puts its own
+    exec-path first on the PATH it hands a hook, so its helpers are still found."""
+    tools = tmp_path / ("only-" + "-".join(wanted))
+    tools.mkdir()
+    for tool in wanted:
+        (tools / tool).symlink_to(shutil.which(tool))
+    return str(tools)
+
+
+def test_the_push_guard_needs_nothing_but_git_and_bash(clone, tmp_path):
+    # No outside tool can go missing and open the check: with only git and bash on the PATH, a
+    # right push still goes and a wrong one is still refused in the guard's own words.
+    only = _path_with_only(tmp_path, "git", "bash")
+    clone.make()
+    assert clone.push("main", PATH=only).sent
+    clone.make(author=WRONG)
+    out = clone.push("main", PATH=only)
+    assert not out.sent
+    assert out.by_hook
+    assert out.fields() == ["author name", "author e-mail"]
