@@ -2,13 +2,19 @@
 # ABOUTME: Every seam is injected: a synthesised pilot stands in for the radio, no dongle opened.
 
 import io
+import json
 import math
+import random
+import sys
+import threading
+import time
 from array import array
 
 import pytest
 
 from sigint101 import childproc, ppm
 from tests.child_fakes import Child
+from tests.test_app import _client, _rows, _StubSweeper
 
 
 def synth_stream(ppm_error, seconds=20.0, pilot_amp=4000.0, rate=ppm.DEMOD_RATE, noise=1500.0):
@@ -84,6 +90,67 @@ def test_a_capture_that_ended_early_is_refused_not_extrapolated():
                                    capture=lambda **_: io.BytesIO(b""))
     assert result["ppm"] is None
     assert result["reason"]
+
+
+def silent_stream(seconds):
+    """rtl_fm running but delivering exact zeros: not even the noise a working receiver hears."""
+    return io.BytesIO(bytes(2 * int(ppm.DEMOD_RATE * seconds)))
+
+
+def test_a_silent_capture_is_refused_not_read_as_the_edge_of_the_search():
+    # Zeros make every level a division by zero. The infinite ratio that left passed the pilot
+    # threshold, so silence came back as +400.16 ppm, the edge of the search window, with no
+    # reason; and the route could not even send it, because JSON has no infinity.
+    result = ppm.measure_pilot_ppm(hz=106_500_000, seconds=2.0,
+                                   capture=lambda **_: silent_stream(2.0))
+    assert result["ppm"] is None
+    assert "zero" in result["reason"]
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize("bad", [math.inf, math.nan], ids=["inf", "nan"])
+def test_a_pilot_ratio_that_is_not_a_finite_number_is_refused(monkeypatch, bad):
+    # A level with nothing under it to compare against is not a level. Neither infinity nor NaN
+    # is below the pilot threshold, so either one used to come back as a measurement.
+    monkeypatch.setattr(ppm, "pilot_ratio_db", lambda *a, **kw: bad)
+    result = measure(137.0, seconds=1.0)
+    assert result["ppm"] is None
+    assert result["reason"]
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize("bad", [math.inf, math.nan], ids=["inf", "nan"])
+def test_a_prominence_that_is_not_a_finite_number_is_refused(monkeypatch, bad):
+    # The search's prominence travels with every measurement, so a non-finite one spoils the
+    # answer as surely as a non-finite ratio does.
+    search = ppm.offset_hz_from_phasors
+    monkeypatch.setattr(ppm, "offset_hz_from_phasors",
+                        lambda *a, **kw: (search(*a, **kw)[0], bad))
+    result = measure(137.0, seconds=1.0)
+    assert result["ppm"] is None
+    assert result["reason"]
+    json.dumps(result, allow_nan=False)
+
+
+def level_stream(seconds, value=1000):
+    """One sample value held throughout: energy, but no tone of any frequency."""
+    return io.BytesIO((array("h", [value]) * int(ppm.DEMOD_RATE * seconds)).tobytes())
+
+
+def low_noise_stream(seconds, amplitude=3, seed=101):
+    """Noise a few counts high, as from a radio hearing almost nothing. Seeded, so it repeats."""
+    rng = random.Random(seed)
+    n = int(ppm.DEMOD_RATE * seconds)
+    return io.BytesIO(array("h", rng.choices(range(-amplitude, amplitude + 1), k=n)).tobytes())
+
+
+@pytest.mark.parametrize("stream", [level_stream, low_noise_stream], ids=["constant", "low-noise"])
+def test_quiet_audio_that_is_not_silence_is_still_judged_by_its_pilot(stream):
+    # Only exact zeros are refused as silence. A constant level or a faint hiss is audio with no
+    # pilot in it, and the pilot check refuses it, in its own words, as it always did.
+    result = ppm.measure_pilot_ppm(hz=106_500_000, seconds=2.0, capture=lambda **_: stream(2.0))
+    assert result["ppm"] is None
+    assert "above its shoulders" in result["reason"]
 
 
 class EndlessStream:
@@ -259,3 +326,182 @@ def test_closing_a_capture_kills_an_rtl_fm_that_ignores_sigterm(monkeypatch):
     proc.stdout = io.BytesIO(b"")
     ppm._CaptureStream(proc).close()
     assert proc.sent == ["TERM", "KILL"]
+
+
+# --- a stalled rtl_fm is stopped at a deadline; a working or finished one reads as before ---
+
+
+def _stall_rtl_fm(monkeypatch):
+    """Make rtl_fm one that stays alive and writes nothing, as on a stalled USB stream.
+
+    `sleep` stands in for it: a real process on a real pipe, so the read blocks exactly as it
+    would on the radio's output, and nothing here opens a dongle. The margin drops to half a
+    second so a test takes about one; raising=False keeps the test runnable against a capture
+    with no margin to shorten, where it shows the wait. Returns the stand-ins as they start.
+    """
+    monkeypatch.setattr(ppm, "CAPTURE_MARGIN_S", 0.5, raising=False)
+    children = []
+
+    def spawn(argv, **kw):
+        children.append(childproc.spawn(["sleep", "30"], **kw))
+        return children[-1]
+
+    monkeypatch.setattr(ppm, "spawn", spawn)
+    return children
+
+
+def _reap(children):
+    """Leave no stand-in behind, whatever the test did."""
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        if child.stdout:
+            child.stdout.close()
+
+
+def _within(seconds, fn):
+    """fn's result, or a failure rather than a hung suite if it has not returned in time."""
+    box = {}
+
+    def run():
+        try:
+            box["result"] = fn()
+        except BaseException as exc:  # handed back to the test, which re-raises it
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        pytest.fail(f"still blocked after {seconds:.1f} s")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
+def test_a_stalled_rtl_fm_is_stopped_at_the_deadline_and_measures_nothing(monkeypatch):
+    # rtl_fm can stay alive with its USB stream stalled, writing nothing, and a pipe read waits as
+    # long as its writer lives: the measurement waited with it, holding the radio. A capture gets
+    # its own length plus a margin; then rtl_fm is stopped and the answer is no measurement.
+    children = _stall_rtl_fm(monkeypatch)
+    deadline = 0.5 + 0.5
+    started = time.monotonic()
+    try:
+        result = _within(deadline + 3.0,
+                         lambda: ppm.measure_pilot_ppm(hz=106_500_000, seconds=0.5))
+        took = time.monotonic() - started
+        codes = [child.poll() for child in children]
+    finally:
+        _reap(children)
+    assert deadline <= took < deadline + 1.0
+    assert result["ppm"] is None
+    assert "stall" in result["reason"]
+    assert codes and None not in codes   # the capture itself stopped rtl_fm
+    json.dumps(result, allow_nan=False)
+
+
+# A working rtl_fm, standing in on a real pipe: it streams a capture file in pieces that are not
+# whole blocks, pausing between them so the reader keeps catching up, then idles, never ending.
+_STREAM_THEN_IDLE = """
+import sys, time
+data = open(sys.argv[1], "rb").read()
+for i in range(0, len(data), 1500):
+    sys.stdout.buffer.write(data[i:i + 1500])
+    sys.stdout.buffer.flush()
+    time.sleep(0.001)
+time.sleep(30)
+"""
+
+
+def test_a_working_rtl_fm_is_read_in_whole_blocks_through_a_real_pipe(tmp_path, monkeypatch):
+    # The deadline means reading the pipe in whatever pieces have arrived; a block must still be
+    # a whole block, and a capture that keeps up must never be called a stall.
+    recorded = tmp_path / "pilot.raw"
+    recorded.write_bytes(synth_stream(137.0, seconds=1.0).getvalue())
+    children = []
+
+    def spawn(argv, **kw):
+        children.append(childproc.spawn([sys.executable, "-c", _STREAM_THEN_IDLE, str(recorded)],
+                                        **kw))
+        return children[-1]
+
+    monkeypatch.setattr(ppm, "spawn", spawn)
+    try:
+        result = _within(10.0, lambda: ppm.measure_pilot_ppm(hz=106_500_000, seconds=1.0))
+        codes = [child.poll() for child in children]
+    finally:
+        _reap(children)
+    assert result["ppm"] == pytest.approx(137.0, abs=0.5)
+    assert codes and None not in codes   # stopped once it had all it asked for
+
+
+def test_an_rtl_fm_that_exits_is_an_early_end_not_a_stall(monkeypatch):
+    # rtl_fm exits at once when another process holds the dongle. Its end is the end of the read,
+    # straight away, and not something to wait out to the deadline and call a stall.
+    children = []
+
+    def spawn(argv, **kw):
+        children.append(childproc.spawn(["true"], **kw))
+        return children[-1]
+
+    monkeypatch.setattr(ppm, "spawn", spawn)
+    started = time.monotonic()
+    try:
+        result = _within(10.0, lambda: ppm.measure_pilot_ppm(hz=106_500_000, seconds=1.0))
+    finally:
+        _reap(children)
+    assert time.monotonic() - started < 1.0
+    assert result["ppm"] is None
+    assert result["reason"] == "the capture ended before enough audio arrived to measure"
+
+
+# --- through the route: a refusal is an answer, the last real figure stands, the radio returns --
+
+
+def _short(seconds, **fixed):
+    """The real measurement as the route calls it, over a shorter capture than the route asks."""
+    def measure(**kw):
+        return ppm.measure_pilot_ppm(**{**kw, "seconds": seconds, **fixed})
+    return measure
+
+
+def test_a_silent_capture_through_the_route_is_an_answer_and_keeps_the_last_real_figure(tmp_path):
+    # Silence used to reach the route as +400.16 ppm: the route kept it as the last measurement,
+    # to be stamped on every later reception, and then failed to send it. A refusal is a 200 the
+    # panel can read, and the last real measurement stays the one receptions carry.
+    captures = iter([synth_stream(137.0, seconds=1.0), silent_stream(1.0)])
+    with _client(tmp_path, ppm_measure=_short(1.0, capture=lambda **_: next(captures)),
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        real = client.post("/api/ppm/measure?hz=98100000").json()
+        silent = client.post("/api/ppm/measure?hz=98100000")
+        last = client.app.state.last_ppm
+    assert real["ppm"] == pytest.approx(137.0, abs=0.5)
+    assert silent.status_code == 200
+    assert silent.json()["ppm"] is None
+    assert silent.json()["reason"]
+    assert last == real["ppm"]
+
+
+def test_a_stalled_capture_through_the_route_answers_and_hands_the_radio_back(tmp_path,
+                                                                              monkeypatch):
+    # The measurement holds the one radio lock for its whole capture, so a stall blocked every
+    # SDR route behind it: the waterfall's next poll waited for as long as rtl_fm lived.
+    children = _stall_rtl_fm(monkeypatch)
+    with _client(tmp_path, ppm_measure=_short(0.5),
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        try:
+            resp = _within(4.0, lambda: client.post("/api/ppm/measure?hz=98100000"))
+            codes = [child.poll() for child in children]
+            spectrum = _within(2.0, lambda: client.get("/api/spectrum"))
+        finally:
+            _reap(children)
+        last = client.app.state.last_ppm
+        sweeping = client.app.state.sweeper.running
+    assert resp.status_code == 200
+    assert resp.json()["ppm"] is None
+    assert "stall" in resp.json()["reason"]
+    assert last is None
+    assert codes and None not in codes
+    assert spectrum.status_code == 200
+    assert sweeping                      # the waterfall's poll got the radio back
