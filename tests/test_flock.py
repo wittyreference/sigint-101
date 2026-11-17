@@ -140,7 +140,7 @@ def test_iter_pcap_frames_refuses_a_linktype_it_cannot_read():
         list(iter_pcap_frames(stream))
 
 
-def test_every_frame_of_the_real_capture_says_it_ends_in_its_fcs():
+def test_every_frame_of_the_capture_fixture_says_it_ends_in_its_fcs():
     # wlan1's radiotap names TSFT and Flags behind two present words, and its Flags carry 0x10.
     with open(FIXTURE, "rb") as fh:
         says = [has_fcs for _, has_fcs in iter_pcap_captures(fh)]
@@ -273,7 +273,7 @@ def test_highest_tier_wins_when_several_rules_fire():
     assert match_signatures(parse_management_frame(frame)).tier == 4
 
 
-def test_no_probe_in_the_real_capture_is_a_flock_hit():
+def test_no_probe_in_the_capture_fixture_is_a_flock_hit():
     with open(FIXTURE, "rb") as fh:
         infos = [parse_management_frame(f) for f in iter_pcap_frames(fh)]
     probes = [i for i in infos if i is not None and i.is_probe_request]
