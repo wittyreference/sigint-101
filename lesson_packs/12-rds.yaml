@@ -30,7 +30,7 @@ stages:
     Watch — hands off for now. No waterfall tonight: redsea pulls a hidden stream out of the
     station on the dial. The card fills: the station's name — the PS, eight characters — a
     couple at a time, its programme type, and the RadioText scrolling beneath. That's PSK: a
-    57 kHz subcarrier carrying nearly twelve hundred bits a second.
+    57 kHz subcarrier's phase carrying nearly twelve hundred bits a second.
   try: >-
     Your turn, comrade — watch the card assemble. RDS is slow, so give it a few seconds. Read the
     programme type and the RadioText. An empty card means this station sends no RDS or arrives too
