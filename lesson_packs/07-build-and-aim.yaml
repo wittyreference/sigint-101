@@ -48,7 +48,7 @@ stages:
     nothing to take away, and the hiss at 915 isn't FM, so it isn't quieter either. Weak 915 wants
     last lesson's fix: legs grown to about 8.2 cm, aimed for how the gadget is polarized. Carry
     this out the door: name the disease first — length and aim are fixed at the antenna, an
-    overloading neighbour with a notch, and more gain fixes neither.
+    overloading neighbour with a notch, and excess gain fixes neither.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
