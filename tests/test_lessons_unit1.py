@@ -157,7 +157,9 @@ PILOT_CONDITION = re.compile(
 # provided, whether), so "only the pilot is exact" fails. Any other clause passes only when
 # "only", "if", "unless" or "provided" sets the exactness as a condition ("only against a pilot
 # close to exact"), or when a promise of a reading near zero names an indefinite pilot ("against
-# an exact pilot"). "The station's exact pilot" says that pilot is exact.
+# an exact pilot"). "The station's exact pilot" says that pilot is exact. An exactness word that
+# is negated ("the pilot isn't exact") or that describes another thing ("a perfect clock") vouches
+# for nothing.
 REFERENCE = re.compile(r"\b(?:pilot|landmark|tone)s?\b", re.I)
 VOUCH = re.compile(rf"\b{EXACT}\w*", re.I)
 SAID_TO_BE = re.compile(r"\b(?:is|are|was|be|keeps?|kept|holds?|held|stays?|remains?)\b"
@@ -166,6 +168,10 @@ OPENS_CONDITION = re.compile(r"\b(?:if|unless|provided|whether)\b", re.I)
 CONDITION = re.compile(r"\b(?:only|if|unless|provided)\b(?=.*\b(?:pilot|landmark|tone)s?\b)"
                        rf"(?=.*\b{EXACT})", re.I)
 INDEFINITE = re.compile(rf"\b(?:an?|any)\s+(?:\w+\s+)?{EXACT}\w*\s+pilot", re.I)
+NEGATED = re.compile(r"(?:\b(?:not|never|no|nor|neither)\b|n't)"
+                     rf"(?:\s+[\w'-]+){{0,3}}?\s+{EXACT}", re.I)
+OTHER_THING = re.compile(rf"\b{EXACT}\w*\s+"
+                         r"(?:clock|crystal|oscillator|radio|receiver|V3|dongle)s?\b", re.I)
 
 
 def _vouches_without_tolerance(sentence):
@@ -173,6 +179,8 @@ def _vouches_without_tolerance(sentence):
     if not (REFERENCE.search(sentence) and VOUCH.search(sentence)) or TOLERANCE.search(sentence):
         return False
     for clause in (c for c in _clauses(sentence) if VOUCH.search(c)):
+        if NEGATED.search(clause) or OTHER_THING.search(clause):
+            continue
         if SAID_TO_BE.search(clause):
             if OPENS_CONDITION.search(clause):
                 continue
