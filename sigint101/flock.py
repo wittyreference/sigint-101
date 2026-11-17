@@ -45,10 +45,13 @@ SUBTYPE_PROBE_REQUEST = 4
 MGMT_HEADER_LEN = 24
 
 # A frame ends in a 4-byte frame check sequence (FCS), a CRC-32 of the rest. A capture may keep it
-# after the last element (radiotap's Flags field then carries 0x10; a capture off wlan1 keeps it
-# on every frame), and walked as elements those bytes read as one more tag. So the fingerprint is
-# also taken without the last 4 bytes, and either may match: upstream does the same, reading no
-# flag (flock-you @6704f01 main.cpp, fyProbeBodyFlockIeSigPrimary: whole body, then less 4 bytes).
+# after the last element, and walked as elements those bytes read as one more tag. So a frame known
+# to end in its FCS is also fingerprinted without its last 4 bytes, and either fingerprint may
+# match. Upstream (flock-you @6704f01 main.cpp, fyProbeBodyFlockIeSigPrimary) makes that second
+# try on every frame, because its ESP32 radio always hands it the FCS. Ours follows its sources,
+# not a different rule: tcpdump on wlan1 keeps the FCS on every frame and radiotap's Flags say so
+# (0x10); Marauder drops it before it writes a frame, so its frames never get the second try, and
+# neither does a frame whose source cannot tell.
 FCS_LEN = 4
 
 # The Flock OUI set from colonelpanichacks/flock-you @6704f01 (main.cpp): 32 community-reported
@@ -87,8 +90,8 @@ class FrameInfo:
 
     `src` is the transmitter (addr2), `dst` the receiver (addr1), `bssid` addr3. `ie_signature` is
     the probe-request fingerprint described on FLOCK_IE_SIGNATURE, or '' for any other frame;
-    `ie_signature_without_fcs` is the same fingerprint taken without the last FCS_LEN bytes,
-    where a kept FCS sits ('' when nothing is left).
+    `ie_signature_without_fcs` is the same fingerprint taken without the last FCS_LEN bytes of a
+    frame known to end in its FCS, and '' for any other frame.
     """
 
     src: str
@@ -140,13 +143,13 @@ def _parse_ies(ies: bytes) -> tuple[str | None, bool, str]:
     isWildcardProbeIE): a later one, such as a kept FCS whose first octet is 0, never replaces it.
     The fingerprint skips every SSID and emits each remaining tag per FLOCK_IE_SIGNATURE.
 
-    A tag whose declared length runs past the captured bytes (common with tcpdump's snaplen) still
-    contributes its id here: the slice clamps and the walk then ends. Upstream's fingerprint walk
-    (fyBuildFlockIeSigFromIes) never emits such a tag. When its length is over 200, or it is tag 64
-    of length 128 with a vendor element of length 7 and OUI 50:6f:9a starting in the 32 bytes after
-    its header, upstream skips just that 2-byte header and walks on (at most 16 times a walk);
-    otherwise it walks on from the first later position, within 64 bytes, whose length is at most
-    200 and fits the bytes left; failing both, that walk gives no fingerprint.
+    A tag whose declared length runs past the end of the bytes (on wlan1 usually the kept FCS, read
+    as a tag) still contributes its id here: the slice clamps and the walk then ends. Upstream's
+    fingerprint walk (fyBuildFlockIeSigFromIes) never emits such a tag. When its length is over 200,
+    or it is tag 64 of length 128 with a vendor element of length 7 and OUI 50:6f:9a starting in the
+    32 bytes after its header, upstream skips just that 2-byte header and walks on (at most 16 times
+    a walk); otherwise it walks on from the first later position, within 64 bytes, whose length is
+    at most 200 and fits the bytes left; failing both, that walk gives no fingerprint.
     """
     ssid: str | None = None
     ssid_wildcard = False
@@ -168,11 +171,13 @@ def _parse_ies(ies: bytes) -> tuple[str | None, bool, str]:
     return ssid, ssid_wildcard, ",".join(parts)
 
 
-def parse_management_frame(dot11: bytes) -> FrameInfo | None:
+def parse_management_frame(dot11: bytes, *, has_fcs: bool = False) -> FrameInfo | None:
     """Turn raw 802.11 bytes (radiotap already stripped) into a FrameInfo, or None.
 
-    None when the frame is too short for a management header or is not a management frame at all;
-    only management frames carry the probe requests and beacons the detector reasons about.
+    `has_fcs` says the bytes end in the frame's FCS, which only radiotap's Flags can tell; a probe
+    request is then also fingerprinted without it (see FCS_LEN). None when the frame is too short
+    for a management header or is not a management frame at all; only management frames carry the
+    probe requests and beacons the detector reasons about.
     """
     if len(dot11) < MGMT_HEADER_LEN:
         return None
@@ -188,7 +193,7 @@ def parse_management_frame(dot11: bytes) -> FrameInfo | None:
     if is_probe_request:
         ies = dot11[MGMT_HEADER_LEN:]
         ssid, ssid_wildcard, ie_signature = _parse_ies(ies)
-        ie_signature_without_fcs = _parse_ies(ies[:-FCS_LEN])[2]
+        ie_signature_without_fcs = _parse_ies(ies[:-FCS_LEN])[2] if has_fcs else ""
     else:
         ssid, ssid_wildcard, ie_signature, ie_signature_without_fcs = None, False, "", ""
     return FrameInfo(src=src, dst=dst, bssid=bssid, ftype=ftype, subtype=subtype,
@@ -214,7 +219,7 @@ def match_signatures(
     """The best Flock tier a frame earns, or None. Highest tier wins.
 
     tier 4 probe request from a Flock OUI (transmitter) whose IE fingerprint matches exactly, over
-           every element or without a trailing FCS (see FCS_LEN);
+           every element or, on a frame known to end in its FCS, without it (see FCS_LEN);
     tier 3 wildcard-SSID probe request from a Flock OUI but the fingerprint does not match;
     tier 2 a Flock OUI as the transmitter of any management frame;
     tier 1 a Flock OUI as the unicast receiver, or as the BSSID of a management frame;
@@ -337,6 +342,39 @@ def _strip_radiotap(frame: bytes) -> bytes | None:
     return frame[rt_len:]
 
 
+# radiotap's present words follow its first 4 bytes, and a word with bit 31 set has another after
+# it. The fields come next, in bit order, each aligned to its own size from the start of the
+# header: TSFT (bit 0) is 8 bytes, then Flags (bit 1) is one octet, whose 0x10 says the frame ends
+# in its FCS.
+RADIOTAP_TSFT = 1 << 0
+RADIOTAP_FLAGS = 1 << 1
+RADIOTAP_EXT = 1 << 31
+RADIOTAP_F_FCS = 0x10
+
+
+def _radiotap_keeps_fcs(frame: bytes) -> bool:
+    """True when the radiotap header in front of a frame says the frame ends in its FCS.
+
+    A header that names no Flags field, or is too short to hold it, says nothing, and nothing is
+    assumed. Read only on a record _strip_radiotap accepted.
+    """
+    header = frame[:struct.unpack("<H", frame[2:4])[0]]
+    if len(header) < 8:
+        return False
+    (present,) = struct.unpack_from("<I", header, 4)
+    at, word = 8, present
+    while word & RADIOTAP_EXT:
+        if at + 4 > len(header):
+            return False
+        (word,) = struct.unpack_from("<I", header, at)
+        at += 4
+    if not present & RADIOTAP_FLAGS:
+        return False
+    if present & RADIOTAP_TSFT:
+        at = (at + 7) // 8 * 8 + 8
+    return at < len(header) and bool(header[at] & RADIOTAP_F_FCS)
+
+
 def _bare_802_11(frame: bytes) -> bytes:
     """A linktype-105 record already is the 802.11 frame."""
     return frame
@@ -358,27 +396,37 @@ def pcap_link_decoder(global_header: bytes):
         f"radiotap ({LINKTYPE_IEEE802_11_RADIOTAP}); SIGINT 101 will not guess at its frames")
 
 
-def iter_pcap_frames(stream):
-    """Yield the 802.11 bytes of each frame in a pcap stream, radiotap stripped where present.
+def iter_pcap_captures(stream):
+    """Yield (802.11 bytes, whether they end in the frame's FCS) for each frame in a pcap stream.
 
     Reads the global header once, then one record at a time, so it works on a live tcpdump pipe
-    exactly as on a captured file. A short read (a truncated or ended stream) stops iteration.
+    exactly as on a captured file. A short read (a truncated or ended stream) stops iteration. Only
+    a radiotap record can say its frame keeps the FCS, and one the snaplen cut short has lost it; a
+    bare 802.11 record says nothing, so no FCS is assumed there.
     """
     global_header = _read_exact(stream, PCAP_GLOBAL_HEADER_LEN)
     if len(global_header) < PCAP_GLOBAL_HEADER_LEN:
         return
     to_dot11 = pcap_link_decoder(global_header)
+    (linktype,) = struct.unpack("<I", global_header[20:24])
     while True:
         header = _read_exact(stream, PCAP_RECORD_HEADER_LEN)
         if len(header) < PCAP_RECORD_HEADER_LEN:
             return
-        _, _, caplen, _ = struct.unpack("<IIII", header)
+        _, _, caplen, origlen = struct.unpack("<IIII", header)
         frame = _read_exact(stream, caplen)
         if len(frame) < caplen:
             return
         dot11 = to_dot11(frame)
         if dot11 is not None:
-            yield dot11
+            yield dot11, (linktype == LINKTYPE_IEEE802_11_RADIOTAP and caplen == origlen
+                          and _radiotap_keeps_fcs(frame))
+
+
+def iter_pcap_frames(stream):
+    """Yield the 802.11 bytes of each frame in a pcap stream, radiotap stripped where present."""
+    for dot11, _ in iter_pcap_captures(stream):
+        yield dot11
 
 
 # ESP32 Marauder streams a sniff's pcap over its serial console when the sniff command carries
@@ -555,15 +603,15 @@ class FlockDetector:
             raise FlockUnavailable(f"cannot run tcpdump: {exc}") from exc
 
     def _frames(self, proc):
-        """The 802.11 frames the running capture yields."""
-        return iter_pcap_frames(proc.stdout)
+        """The running capture's frames, each with whether radiotap says it ends in its FCS."""
+        return iter_pcap_captures(proc.stdout)
 
     def _read(self, proc) -> None:
         """Consume the pcap stream on a background thread, feeding matched frames to the roster."""
         detected = set()   # the MACs this capture has already reported as new detections
         try:
-            for dot11 in self._frames(proc):
-                frame = parse_management_frame(dot11)
+            for dot11, has_fcs in self._frames(proc):
+                frame = parse_management_frame(dot11, has_fcs=has_fcs)
                 if frame is None:
                     continue
                 hit = match_signatures(frame, ssid_match_enabled=self.ssid_match_enabled)
@@ -860,9 +908,11 @@ class MarauderFlockDetector(FlockDetector):
         return link
 
     def _frames(self, link):
-        """Marauder's frames. A stream that cannot be read stops the sniff and ends the link."""
+        """Marauder's frames, never with an FCS: it drops a frame's FCS before writing it (v1.20.0
+        WiFiScan.cpp:9013). A stream that cannot be read stops the sniff and ends the link."""
         try:
-            yield from iter_marauder_frames(link)
+            for dot11 in iter_marauder_frames(link):
+                yield dot11, False
         except (ValueError, struct.error) as exc:
             link.end(str(exc))
             raise
