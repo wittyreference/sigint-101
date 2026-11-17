@@ -57,6 +57,9 @@
 
   // How a measurement reads to the learner: the signed ppm with its resolution when the pilot was
   // found, or an honest "no clear pilot" with the reason when it was not — never a guessed figure.
+  // The resolution is the width of one spectral bin for the capture's length, not the reading's
+  // error, so it is named and never written as a ±. The reference has a tolerance of its own:
+  // 47 CFR 73.322 sets the pilot at 19 kHz ±2 Hz, and 2 Hz in 19 000 Hz is ±105 ppm.
   function ppmResultText(r) {
     r = r || {};
     if (r.ppm === null || r.ppm === undefined) {
@@ -64,10 +67,10 @@
                detail: r.reason || "no 19 kHz pilot to measure against" };
     }
     var sign = r.ppm > 0 ? "+" : "";
-    var res = (r.resolution_ppm !== null && r.resolution_ppm !== undefined)
-      ? " ±" + r.resolution_ppm : "";
+    var res = (typeof r.resolution_ppm === "number" && isFinite(r.resolution_ppm))
+      ? " · resolution " + r.resolution_ppm.toFixed(1) + " ppm" : "";
     return { text: sign + r.ppm + " ppm", kind: "ok",
              detail: "pilot " + (r.pilot_ratio_db === undefined ? "?" : r.pilot_ratio_db) +
-                     " dB" + res };
+                     " dB" + res + " · pilot held to ±2 Hz (±105 ppm) by rule" };
   }
 })();

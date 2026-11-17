@@ -14,7 +14,8 @@ from .childproc import spawn, stop_process
 from .provenance import read_soc_temp_c
 
 # The reference tone. Every stereo FM broadcast carries a 19 kHz pilot, and 47 CFR 73.322 holds
-# it to 19 kHz +/- 2 Hz — so the transmitter is a frequency standard nobody here had to buy.
+# it to 19 kHz +/- 2 Hz — a reference nobody here had to buy, but by rule only good to +/-105 ppm
+# (2 Hz in 19 kHz), the same order as the crystal error it is used to measure.
 PILOT_HZ = 19_000.0
 
 # rtl_fm -M fm -s 200000, with no -r and no de-emphasis. `-M wbfm` is the tempting shorthand and
