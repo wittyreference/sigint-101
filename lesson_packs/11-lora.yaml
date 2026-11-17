@@ -32,8 +32,9 @@ stages:
     far below zero can it go yet arrive whole? No second node? Neighbours' nodes may land here too,
     and an empty list is the honest answer.
   predict: >-
-    A LoRa packet arrives twelve dB below the noise floor — weaker than the very noise around it. Does
-    it decode cleanly, arrive garbled, or fail outright? Lock it in.
+    A LoRa packet on this radio's LongFast preset arrives twelve dB below the noise floor — weaker
+    than the very noise around it. Does it decode cleanly, arrive garbled, or fail outright?
+    Lock it in.
   observe: >-
     Go back to the list and find a reception, eye on its SNR. Is that number above zero or below it?
     And sit with the puzzle: if the signal is genuinely weaker than the noise, how can the radio read
@@ -59,5 +60,5 @@ choices:
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: [decodes]
 verdict: >-
-  It decodes cleanly: de-chirping gathers the spread symbol into one spike that stands above the
-  noise.
+  It decodes cleanly on LongFast, down to about −17 dB: de-chirping gathers the symbol into one
+  spike above the noise. Faster presets fail sooner.
