@@ -1,5 +1,5 @@
-# ABOUTME: Tests M2 "Turn It Up" gives the best gain no usual place on the knob (it once said
-# ABOUTME: "usually mid-scale"), and that its explain still sets the gain by the gap on the meter.
+# ABOUTME: Tests M2 "Turn It Up": no usual place on the knob for the best gain, more gain refused a
+# ABOUTME: bigger gap only past the widest one, and an explain that still sets the gain by the gap.
 
 import re
 from pathlib import Path
@@ -154,3 +154,104 @@ def test_m2_explain_still_sets_the_gain_by_the_gap():
     explain = load_lesson_file(PACK).stages["explain"]
     rules = [s for s in _sentences(explain) if GAIN.search(s) and GAP.search(s) and GUIDE.search(s)]
     assert rules, "M2's explain must still tell the learner to set the gain by the gap they read"
+
+
+# The rule to carry out the door ended "a bigger gap comes from a better or better-placed antenna,
+# or getting closer, never more gain." Read alone, that says more gain never widens the gap, and it
+# does while the gain sits below its best point. RTL-SDR Blog's quick start guide (rtl-sdr.com,
+# "RTL-SDR Quick Start Guide") says the RF gain starts at zero, where the dongle hears little but
+# strong broadcast FM, and to raise it until other signals appear. Its SDR# guide ("SDR# Users
+# Guide", "Setting the RF Gain") says that as the gain rises a point comes where the noise floor
+# climbs faster than the signal, and to stop raising the gain there. So more gain stops widening
+# the gap only past the widest gap, and a line that refuses gain a bigger gap must tie it there.
+#
+# GAINS is gain in the words a rewrite reaches for: gain, more, extra, higher or added gain, the
+# gain knob, turning, cranking or raising the gain (up). A refusal takes one of three shapes:
+# 1. gain set aside as the source: "never more gain", "not from more gain", "rather than the gain
+#    knob", "never by turning the gain up", "no more gain", "no amount of gain";
+# 2. gain as the subject of a negated widening: "more gain never widens the gap", "gain can't
+#    improve your SNR", "turning up the gain won't help", "the gain knob can't buy you a bigger
+#    gap", or a bare "gain can't";
+# 3. a gap that does not grow with gain: "the gap never grows with more gain".
+GAINS = (r"\b(?:(?:the|any|more|extra|higher|added|additional|further)\s+)*gain\b(?:\s+knob\b)?"
+         r"|\b(?:turning|cranking|raising|pushing|winding)\s+(?:up\s+)?(?:the\s+|your\s+)?gain\b"
+         r"(?:\s+(?:up|higher)\b)?")
+WIDEN = r"(?:widen|grow|open|improve|raise|increase|lift|boost|help|stretch|enlarge|expand)\w*"
+GIVE = r"(?:make|give|buy|bring|add|win|get|earn)\w*"
+GAP_WORD = r"(?:gap|snr|signal[- ]to[- ]noise|margin|wider|bigger|larger|it|that|this)"
+WONT = (r"(?:(?:can|will|does|would|could)\s+)?never|can['’]?t|cannot|can\s+not|won['’]t"
+        r"|will\s+not|doesn['’]t|does\s+not|didn['’]t|did\s+not|wouldn['’]t|couldn['’]t"
+        r"|(?:is\s+not|isn['’]t)\s+going\s+to")
+REFUSALS = (
+    re.compile(rf"(?:\b(?:never|not|nor)\b|\brather\s+than\b|\binstead\s+of\b)"
+               rf"(?:\s+(?:comes?|coming))?(?:\s+(?:from|by|through|with|via))?\s+(?:{GAINS})"
+               r"|\bno\s+(?:(?:more|extra|added|additional|further|amount\s+of)\s+)+gain\b", re.I),
+    re.compile(rf"(?:{GAINS}),?(?:\s+(?:alone|itself|by\s+itself|ever|still|simply|just))?"
+               rf"\s+(?:{WONT})(?:\s+(?:ever|really|actually|truly))?(?:\s+{WIDEN}"
+               rf"|\s+{GIVE}(?:\s+[\w'’-]+){{0,3}}?\s+{GAP_WORD}\b|(?=\s*(?:[.;:!?)—–]|$)))", re.I),
+    re.compile(rf"(?:\b(?:never|not|cannot)\b|n['’]t\b)[^.;:,—–]*?\b(?:with|from|by|through|via)"
+               rf"\s+(?:{GAINS})", re.I),
+)
+
+# A refusal holds when it is tied to the widest gap. Its sentence says where: past, beyond or after
+# that point (or that setting, it, there, the widest, the best, the peak, the top), once, already,
+# any further, further, from there, at that point (or the widest, the best, the very top), or a
+# bigger gap than that (or than the widest). Or it refuses gain only for a gap the sentence has just
+# named as the widest, by "it", "that" or "this" ("set gain wherever your meter shows the widest
+# gap; ... no more gain will widen it"). A check's chips and whys answer its prompt, so a prompt
+# that already puts the gain at the widest gap ties them too ("your gain is already where the gap
+# was widest").
+SCOPE = re.compile(r"\b(?:past|beyond|after)\s+(?:(?:that|this|the|its|a|some|your)\s+)?"
+                   r"(?:point|setting|spot|it|there|here|that|this|widest|best|peak|top|optimum"
+                   r"|maximum)\b|\bonce\b|\balready\b|\bany\s+(?:further|more|wider)\b(?!\s+gain)"
+                   r"|\bfurther\b(?!\s+gain)|\bfrom\s+(?:there|here|th(?:at|is)\s+point|then\s+on)\b"
+                   r"|\bat\s+(?:that|this|the|its|your)\s+(?:very\s+)?(?:point|widest|best|top|peak"
+                   r"|optimum|maximum)\b|\b(?:wider|bigger|larger|greater)\s+(?:gap\s+)?than\s+"
+                   r"(?:that|this|it|the\s+widest)\b", re.I)
+WIDEST = re.compile(r"\b(?:widest|biggest|largest|greatest|best)\b", re.I)
+IT_OBJECT = re.compile(rf"^[^,.;:!?—–]*?\b(?:{WIDEN}|{GIVE})\s+(?:it|that|this)\b", re.I)
+
+
+def _refusals(sentence):
+    """Every place in a sentence that refuses more gain as a way to a bigger gap."""
+    return [m for pattern in REFUSALS for m in pattern.finditer(sentence)]
+
+
+def _tied(sentence, refusal, prompt=""):
+    """Whether one refusal is tied to the widest gap: by its sentence, by the gap the sentence has
+    just named as the widest, or by the check prompt the sentence answers."""
+    if SCOPE.search(sentence) or (SCOPE.search(prompt) and WIDEST.search(prompt)):
+        return True
+    return bool(WIDEST.search(sentence[:refusal.start()])
+                and IT_OBJECT.search(sentence[refusal.start():]))
+
+
+def _untied_refusals(lesson):
+    """Each sentence of M2 that refuses more gain a bigger gap and does not tie it to the widest."""
+    prompt = lesson.check["prompt"] if lesson.check else ""
+    claims = []
+    for where, text in _learner_lines(lesson):
+        for sentence in _sentences(text):
+            if any(not _tied(sentence, m, prompt if where == "check" else "")
+                   for m in _refusals(sentence)):
+                claims.append(f"{where}: {sentence}")
+    return claims
+
+
+def test_m2_refuses_more_gain_a_bigger_gap_only_past_the_widest_gap():
+    claims = _untied_refusals(load_lesson_file(PACK))
+    assert not claims, f"M2 says more gain never widens the gap, not only past the widest: {claims}"
+
+
+# What the explain says instead: past the widest gap, more gain will not widen it. One explain
+# sentence must hold a refusal tied by its own words, or say past that point (or once, further and
+# the rest above) that more gain narrows, shrinks, closes, hurts, costs or loses the gap.
+NARROWS = re.compile(rf"(?:{GAINS})[^.;:]*?\b(?:narrow\w*|shr[iu]nk\w*|clos(?:e|es|ed|ing)|hurt\w*"
+                     r"|costs?|costing|los(?:e|es|ing))\b", re.I)
+
+
+def test_m2_explain_still_says_more_gain_past_the_widest_gap_wont_widen_it():
+    explain = load_lesson_file(PACK).stages["explain"]
+    lines = [s for s in _sentences(explain)
+             if any(_tied(s, m) for m in _refusals(s)) or (SCOPE.search(s) and NARROWS.search(s))]
+    assert lines, "M2's explain must still say that past the widest gap more gain will not widen it"
