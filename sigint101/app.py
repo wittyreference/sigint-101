@@ -998,7 +998,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         Mirrors /api/spectrum's lazy start so the provenance panel works on its own: a reference
         level can only be read from a sweep the hardware actually produced, never invented. The
         row is None with no radio, and until the sweep running now has finished a pass: a row kept
-        from before a gain step, a retune or a restart was swept under other settings.
+        from before a gain step, a retune or a restart was swept under other settings. It is None,
+        too, once the newest row is too old to be a reading (Sweeper.stale_after).
         """
         sweeper = app.state.sweeper
         if not sweeper.running:
@@ -1040,14 +1041,20 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         A baseline against a reference the hardware never read would be a number to trust later
         that was never measured; the honest answer is to refuse, the same way the spectrum route
         refuses to fake a sweep. That includes the seconds after a gain step, a retune or a
-        restart, before the sweep has finished a pass under the settings the sample would name.
+        restart, before the sweep has finished a pass under the settings the sample would name,
+        and a sweep that has stopped finishing passes without exiting, whose last row has grown
+        too old to be a reading. The refusal says which.
         """
         snapshot = _snapshot()
         if snapshot["ref_db"] is None:
-            waiting = app.state.sweeper.running and app.state.sweeper.reading()[0] is None
-            reason = ("no reference yet — the sweep has not finished a pass since it started"
-                      if waiting else
-                      "no reference level — the sweep must cover the reference before a baseline")
+            sweeper = app.state.sweeper
+            age = sweeper.row_age()
+            if age is not None and age > sweeper.stale_after():
+                reason = f"no reference — the sweep has not finished a pass for {age:.0f} s"
+            elif sweeper.running and age is None:
+                reason = "no reference yet — the sweep has not finished a pass since it started"
+            else:
+                reason = "no reference level — the sweep must cover the reference before a baseline"
             log_event(app.state.events_path, "baseline_refused", {"reason": reason})
             return JSONResponse(status_code=400, content={"recorded": False, "reason": reason})
         record_baseline_sample(app.state.events_path, snapshot)

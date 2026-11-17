@@ -2846,6 +2846,61 @@ def test_one_tune_step_sets_the_baseline_aside_until_the_span_is_back(tmp_path):
     assert (back["baseline"]["has_baseline"], back["baseline"]["n_samples"]) == (True, 1)
 
 
+def test_a_sweep_that_stops_without_exiting_reads_no_reference_until_it_sweeps_again(tmp_path):
+    # rtl_power can stop sweeping without exiting. It still reads as running, and its last row
+    # stayed the reading: a saved baseline kept the panel at HEALTHY on a level that only grew old.
+    # Past the age limit there is no reference, so the panel reads NO REFERENCE before any baseline
+    # verdict, and Capture is refused with the reason. The waterfall keeps its rows, and the next
+    # pass brings the reading back.
+    procs, bus, now = [], ["AAAA"], [1000.0]
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
+        sweeper = client.app.state.sweeper
+        client.get("/api/provenance")
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        assert client.post("/api/provenance/baseline").status_code == 200
+        now[0] += 60                        # a minute with no new pass from a live rtl_power
+        assert sweeper.running
+        stalled = client.get("/api/provenance").json()
+        refused = client.post("/api/provenance/baseline")
+        rows = client.get("/api/spectrum").json()["rows"]
+        procs[-1].feed(FM_LINES[:8])        # the next pass publishes the one it held
+        wait_for_rows(sweeper, 3)
+        resumed = client.get("/api/provenance").json()
+    assert stalled["provenance"]["ref_db"] is None
+    assert (stalled["baseline"]["has_baseline"], stalled["baseline"]["degraded"]) == (True, False)
+    assert (refused.status_code, refused.json()["recorded"]) == (400, False)
+    assert refused.json()["reason"] == "no reference — the sweep has not finished a pass for 60 s"
+    assert len(rows) == 2
+    assert resumed["provenance"]["ref_db"] is not None
+    assert len(read_baseline(tmp_path / "events.jsonl")) == 1
+
+
+def test_a_stalled_sweep_and_a_restarted_one_refuse_capture_each_with_its_own_reason(tmp_path):
+    # A stall and a restart both leave no reference, for different reasons, and the refusal names
+    # the right one: a restart (here a gain step) waits for its own first pass, as C12 made it.
+    procs, bus, now = [], ["AAAA"], [1000.0]
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
+        sweeper = client.app.state.sweeper
+        client.get("/api/provenance")
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        now[0] += 60
+        stalled = client.post("/api/provenance/baseline")
+        assert client.post("/api/gain", json={"gain": 0.0}).json()["set"] is True
+        client.get("/api/provenance")       # the poll that restarts the sweep at the new gain
+        restarted = client.post("/api/provenance/baseline")
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 4)
+        swept = client.post("/api/provenance/baseline")
+    assert (stalled.status_code, restarted.status_code, swept.status_code) == (400, 400, 200)
+    assert "has not finished a pass for 60 s" in stalled.json()["reason"]
+    assert "has not finished a pass since it started" in restarted.json()["reason"]
+    assert [sample["gain"] for sample in read_baseline(tmp_path / "events.jsonl")] == [0.0]
+
+
 # --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------
 
 
