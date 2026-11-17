@@ -1051,8 +1051,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         holds the claim until rtl_fm is done: a waterfall poll arriving mid-capture waits rather
         than taking the radio back (the next spectrum poll after it brings the sweep back). ppm is
         None with a reason whenever no pilot is there to measure against — a mono station carries
-        none, and a weak one reads the same — never a guessed ppm. A capture that cannot run at
-        all (no rtl_fm, a pinned radio that is not on the bus) is a 503 with the reason.
+        none, and a weak one reads the same — never a guessed ppm. It is None with a reason, too,
+        when the capture held nothing to measure: rtl_fm stalled and was cut off at its deadline,
+        or it sent only exact zeros. A capture that cannot run at all (no rtl_fm, a pinned radio
+        that is not on the bus) is a 503 with the reason.
         """
         def measure():
             return app.state.ppm_measure(hz=hz, seconds=PPM_SECONDS, device=_pinned_index())

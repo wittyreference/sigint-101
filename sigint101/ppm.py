@@ -6,8 +6,11 @@ from __future__ import annotations
 import cmath
 import ctypes
 import math
+import os
 import re
+import select
 import subprocess
+import time
 from array import array
 
 from .childproc import spawn, stop_process
@@ -43,6 +46,13 @@ DEFAULT_GAIN = 40.0
 # The pilot must stand this far above its own shoulders to count as present. The gating run
 # measured 29.6-33.1 dB on a good station, against roughly 9 dB where there is no pilot at all.
 MIN_PILOT_DB = 15.0
+
+# How far past its own length a capture may run before rtl_fm is taken to have stalled. On the Pi
+# a whole 8 s measurement took 11.2-11.6 s (the 2026-11-02 audit), 1.6 s of it the search after
+# the capture, which leaves at most two seconds for everything else, rtl_fm's start included.
+# Five covers a slow start more than twice over, and stops waiting on a stalled 8 s capture at
+# 13 s, against 11-12 s for a whole good measurement; stopping rtl_fm comes after that.
+CAPTURE_MARGIN_S = 5.0
 
 # Linux adjtimex reports the kernel's frequency correction in units of 2^-16 ppm, and sets
 # STA_UNSYNC when nothing is disciplining the clock.
@@ -203,28 +213,56 @@ def _default_capture(*, hz, seconds, gain, device=None):
         proc = spawn(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError as exc:
         raise PpmUnavailable(f"cannot run rtl_fm, so the pilot cannot be captured: {exc}") from exc
-    return _CaptureStream(proc)
+    return _CaptureStream(proc, seconds)
 
 
 class _CaptureStream:
-    """rtl_fm's output, with an off switch.
+    """rtl_fm's output, with an off switch and a deadline.
 
     rtl_fm holds the dongle until it is killed, so closing the pipe is not enough — the process
     has to go, or the console cannot take the radio back. Closing is idempotent because the
     caller closes in a finally block that also runs on the paths that already closed.
+
+    rtl_fm can also stay alive and write nothing, as it does when its USB stream stalls, and a
+    pipe read waits for as long as its writer lives. So no read here waits past the capture's
+    length plus CAPTURE_MARGIN_S, counted from when rtl_fm was started.
     """
 
-    def __init__(self, proc):
+    def __init__(self, proc, seconds=DEFAULT_SECONDS):
         self._proc = proc
+        self._deadline = time.monotonic() + seconds + CAPTURE_MARGIN_S
+        self.stalled = False
+        self.stop_failed = False
 
     def read(self, n):
-        """Read one chunk of raw samples from the running rtl_fm."""
-        return self._proc.stdout.read(n)
+        """Read one chunk of raw samples from the running rtl_fm.
+
+        Short when rtl_fm ends, as a finite source ends. Short with `stalled` set when getting
+        the rest would mean waiting past the deadline.
+        """
+        fd = self._proc.stdout.fileno()
+        ready = select.poll()
+        ready.register(fd, select.POLLIN)
+        chunks, got = [], 0
+        while got < n:
+            left = max(0.0, self._deadline - time.monotonic())
+            if not ready.poll(left * 1000):
+                self.stalled = True
+                break
+            # Straight from the descriptor: the buffered reader would wait for all n bytes.
+            chunk = os.read(fd, n - got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+        return b"".join(chunks)
 
     def close(self):
         """Stop rtl_fm and release the dongle, whatever the measurement decided."""
         if self._proc.poll() is None:
-            stop_process(self._proc)
+            # stop_process is False only when even SIGKILL left rtl_fm running (uninterruptible
+            # sleep). It then still holds the dongle, and the answer must not say otherwise.
+            self.stop_failed = not stop_process(self._proc)
         if self._proc.stdout:
             self._proc.stdout.close()
 
@@ -236,7 +274,8 @@ def measure_pilot_ppm(*, hz, seconds=DEFAULT_SECONDS, gain=DEFAULT_GAIN, device=
 
     Returns ppm=None with a reason whenever the pilot is not there to be measured — a mono
     station carries none by design, and one too weak tonight reads identically. A measurement
-    without its reference is not a measurement.
+    without its reference is not a measurement. Nor is a capture that stalled or held only
+    silence: neither carries anything to measure.
     """
     wanted = int(seconds * DEMOD_RATE / BLOCK)
     stream = capture(hz=hz, seconds=seconds, gain=gain, device=device)
@@ -249,9 +288,24 @@ def measure_pilot_ppm(*, hz, seconds=DEFAULT_SECONDS, gain=DEFAULT_GAIN, device=
         if close:
             close()
     base = {"hz": hz, "gain": gain, "soc_temp_c": temp() if temp else None}
+    if getattr(stream, "stalled", False):
+        got = len(phasors) * BLOCK / DEMOD_RATE
+        if getattr(stream, "stop_failed", False):
+            end = "would not stop: it may still hold the radio"
+        else:
+            end = "was stopped — a stall is not a measurement"
+        return {**base, "ppm": None, "seconds": got,
+                "reason": f"rtl_fm stalled after {got:.1f} s of the {seconds:g} s capture "
+                          f"and {end}"}
     if probe is None or len(phasors) < wanted // 2:
         return {**base, "ppm": None, "seconds": len(phasors) * BLOCK / DEMOD_RATE,
                 "reason": "the capture ended before enough audio arrived to measure"}
+    # Every level below is a ratio, and exact silence makes each one a division by zero. A
+    # working receiver hears noise even where there is no station, so zeros are no reading.
+    if not any(probe):
+        return {**base, "ppm": None, "seconds": len(phasors) * BLOCK / DEMOD_RATE,
+                "reason": "rtl_fm sent a second of exact zeros — not even the noise a working "
+                          "receiver hears — so there is nothing to measure"}
     phasors = phasors[:wanted]
 
     # Find where the pilot sits BEFORE asking whether it is there: the presence check has to be
@@ -260,6 +314,12 @@ def measure_pilot_ppm(*, hz, seconds=DEFAULT_SECONDS, gain=DEFAULT_GAIN, device=
     apparent = PILOT_HZ + offset
     ratio = pilot_ratio_db(probe, apparent)
     captured = len(phasors) * BLOCK / DEMOD_RATE
+    # Neither infinity nor NaN is below the threshold, so both would pass it as a pilot, and JSON
+    # carries neither: a level that is not a finite number is no level.
+    if not (math.isfinite(ratio) and math.isfinite(prominence)):
+        return {**base, "ppm": None, "seconds": captured,
+                "reason": "the pilot's level against its surroundings came out infinite or "
+                          "undefined, so there is no measurement"}
     base = {**base, "apparent_hz": apparent, "pilot_ratio_db": round(ratio, 2),
             "prominence_db": round(prominence, 2), "seconds": captured,
             "resolution_ppm": round(resolution_ppm(captured), 3)}
