@@ -230,11 +230,12 @@ def _learner_lines(lesson):
 CONSTANTS = re.compile(r"\b(?:19 kHz|2 Hz|105 ppm|1 ppm)\b", re.I)
 
 # The pilot's figure as a line names it: a reading in ppm or parts per million ("+164 ppm"), a
-# signed figure ("+164"), the pilot itself, or a number, figure, reading or ppm that is the panel's,
-# the learner's or the measured one ("the number your panel shows", "your measured ppm").
+# signed figure ("+164"), the pilot or the landmark it is, or a number, figure, reading or ppm that
+# is the panel's, the learner's, the measured one or the one they have ("the number your panel
+# shows", "your measured ppm", "the one number you have").
 READING = re.compile(r"[+−-]?\d[\d.,]*\s*(?:ppm|parts per million)\b|(?<![\w.])[+−]\d", re.I)
-FIGURE = re.compile(r"\bpilot'?s?\b|\b(?:measured|panel'?s|your|that|this|the)\s+(?:own\s+)?"
-                    r"(?:number|figure|reading|ppm)\b", re.I)
+FIGURE = re.compile(r"\b(?:pilot|landmark)'?s?\b|\b(?:measured|panel'?s|your|that|this|the|one)"
+                    r"\s+(?:own\s+)?(?:number|figure|reading|ppm)\b", re.I)
 
 # The dial's error as a line names it: the dial or the tuner, what you tune, every, any or each
 # MHz, frequency, band, station or channel, everywhere or wherever, the radio's frequency error,
@@ -284,11 +285,22 @@ CURING = r"\b(?:cure|correct|fix|apply|set|tell|give|pass|feed|hand)\w*"
 CURE = re.compile(rf"{OPTION}\s*(?:[+−-]?\d|<)|{OPTION}.*{CURING}|{CURING}.*{OPTION}"
                   rf"|{CURING}[^.?!]*\btools?\b|\btools?\b[^.?!]*{CURING}", re.I)
 
+# A cure refused is no cure: "This console applies no ppm correction", "Never hand that number to
+# your tools", "Don't give rtl_433 your number with -p". A negation just before a word for curing,
+# a tool or the option drops the rest of its clause before the line is read.
+NEGATED_CURE = re.compile(rf"(?:\b(?:no|not|never|nothing)\b|n't)\s+(?:\w+\s+)?"
+                          rf"(?:{CURING}|tools?\b|`?(?:-p|--ppm)\b)[^,;:.?!—–]*", re.I)
+
+
+def _gives_a_cure(line):
+    """Whether a line hands the pilot's figure on as a cure, once any refused cure is dropped."""
+    line = NEGATED_CURE.sub(" ", line)
+    return bool(CURE.search(line) or (re.search(OPTION, line, re.I)
+                                      and (READING.search(line) or FIGURE.search(line))))
+
 
 def test_m4_gives_no_cure_from_the_pilots_figure(unit1_lessons):
-    cures = [line for line in _learner_lines(unit1_lessons[4])
-             if CURE.search(line) or (re.search(OPTION, line, re.I)
-                                      and (READING.search(line) or FIGURE.search(line)))]
+    cures = [line for line in _learner_lines(unit1_lessons[4]) if _gives_a_cure(line)]
     assert not cures, f"M4 gives a cure from the pilot's figure: {cures}"
 
 

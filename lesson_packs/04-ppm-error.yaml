@@ -15,32 +15,33 @@ panels: [ppm]
 
 stages:
   frame: >-
-    Tonight, comrade, you meet the lie your built-in radio tells on every frequency — a big, known
-    error baked into its cheap clock — and you measure it against a landmark the broadcaster keeps
-    honest for you, though by rule only to within 2 Hz, about 105 ppm.
+    Tonight, comrade, you meet a lie your built-in radio tells — a big, known error baked into the
+    cheap clock that times its samples — and you measure it against a landmark the broadcaster
+    keeps honest for you, though by rule only to within 2 Hz, about 105 ppm.
   demo: >-
     Watch — hands off for now. Every stereo FM station hides a steady 19 kHz tone, the pilot,
     inside its audio, held to within 2 Hz by FCC rule. The ppm panel times that tone against this
     radio's sampling clock. The radio this course was built on read about +164 ppm: that clock's
     error, not the dial's.
   try: >-
-    Your turn. Step the dial to your strongest station with − and +, then tap Measure ppm. Use the
+    Your turn. Step the dial to your strongest station with − and +, then tap Measure ppm. Read the
     number your panel shows, not ours. "No pilot" means mono or too weak: pick a stronger station.
   predict: >-
-    Say your radio sits about 16 kHz high at 100 MHz. Up at 1090 MHz — where aircraft report their
+    Say your dial sits about 10 kHz high at 100 MHz. Up at 1090 MHz — where aircraft report their
     positions — will its error in kHz be BIGGER, about the SAME, or SMALLER? Lock it in — the rest
     stays hidden until you do.
   observe: >-
-    Reason from the one number you have, then say what you expect: at 1090 MHz — about eleven
-    times higher than that FM station — how far off would the built-in radio land, and would that
-    error still tuck inside a channel or throw you clean off the signal?
+    Reason from the predict's supposition, then say what you expect: at 1090 MHz — about eleven
+    times higher than 100 MHz — how far off would the built-in radio land, and would that error
+    still tuck inside a channel or throw you clean off the signal?
   explain: >-
-    Bigger, about elevenfold: the dial's ppm holds everywhere and the kHz grow with it. Width
-    decides if it hurts. ADS-B, 2 MHz wide, shrugs it off — its transmitters may sit 1–3 MHz off,
-    and dump1090 samples 2.4 MHz. Narrow signal off its listed frequency? Suspect this, not
-    yourself or the device. Carry this out the door: your panel's number is the error of the clock
-    that times the samples, not the dial's. The dial (the tuner) has its own error, separate and,
-    on ours, smaller. The kit's 1 ppm V3 would read near zero only against a pilot close to exact.
+    Bigger, about elevenfold: the dial's ppm (parts per million) holds everywhere and the kHz grow
+    with it. Width decides if it hurts. ADS-B, 2 MHz wide, shrugs it off — its transmitters may sit
+    1–3 MHz off, and dump1090 samples 2.4 MHz. Narrow signal off its listed frequency? Suspect this,
+    not yourself or the device. Carry this out the door: your panel's number is the error of the
+    clock that times the samples, not the dial's. The dial (the tuner) has its own error, separate
+    and, on ours, smaller. The kit's 1 ppm V3 would read near zero only against a pilot close to
+    exact. This console applies no ppm correction; its PPM RAW chip says so.
 
 # The predict stage offers keyboard-free, tap-to-choose answers (no on-screen keyboard at the
 # predict gate). Each is a {key, label}: the key is what the commit records, the label is what the
@@ -56,13 +57,12 @@ answer: [bigger]
 verdict: >-
   Bigger: the dial's error holds in ppm, so its kHz grow with the frequency you tune.
 
-# The post-lesson check: one situation on this lesson's idea (the panel's number is the sampling
-# clock's error, not the dial's), scored after the explain. Each chip's `why` is the feedback for
-# choosing it.
+# The post-lesson check: one new situation on this lesson's idea (the panel's number is the
+# sampling clock's error, not the dial's), scored after the explain. Each chip's `why` is the
+# feedback for choosing it.
 check:
   prompt: >-
-    You tap Measure ppm on a strong stereo station, and your panel shows a number. Whose error is
-    that number?
+    Say a friend's panel reads +90 ppm on a stereo station. Whose error is that number?
   choices:
     - key: dial
       label: The dial (tuner)
@@ -71,6 +71,6 @@ check:
       label: The sampling clock
       why: The panel times the pilot against the clock that times the samples, so it reads that clock's error.
     - key: station
-      label: The station's pilot
+      label: The station
       why: The pilot is the landmark you measure against, held by rule to within 2 Hz, about 105 ppm.
   answer: clock
