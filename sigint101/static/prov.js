@@ -86,7 +86,9 @@
       return { text: "NO BASELINE — this set-up", kind: "na" };
     }
     if (!b.has_baseline) return { text: "NO BASELINE — capture one", kind: "na" };
-    if (b.degraded) return { text: "▼ DEGRADED — gone deaf", kind: "bad" };
-    return { text: "✓ HEALTHY", kind: "ok" };
+    // The verdict names what it checked, one station's level against its baseline: a reference
+    // that holds may have lost up to 6 dB, and one past that has dropped, not proved a deaf radio.
+    if (b.degraded) return { text: "▼ REFERENCE DROPPED", kind: "bad" };
+    return { text: "✓ REFERENCE HOLDS", kind: "ok" };
   }
 })();
