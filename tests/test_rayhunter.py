@@ -2,6 +2,7 @@
 # ABOUTME: The HTTP fetch is a fake at the boundary; an unreachable Orbic is an honest refusal.
 
 import json
+import urllib.error
 
 import pytest
 
@@ -433,3 +434,29 @@ def test_a_genuine_report_with_no_finding_is_still_clean(report):
     mon.start()
     assert mon.status() == "clean"
     assert mon.warnings() == []
+
+
+# What urlopen raises when nothing answers: the cause rides in URLError.reason. The refusal names
+# it when the line still fits, and drops it otherwise: never past the panel's line of 66 characters.
+@pytest.mark.parametrize("exc,cause", [
+    (urllib.error.URLError(OSError(113, "No route to host")), "no route to host"),
+    (urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
+     "connection refused"),
+    (urllib.error.URLError(TimeoutError("timed out")), "timed out"),
+    (TimeoutError("timed out"), "timed out"),
+    (urllib.error.URLError(OSError(110, "Connection timed out")), "connection timed out"),
+    (urllib.error.URLError(OSError(101, "Network is unreachable")), None),
+    (ConnectionResetError(104, "Connection reset by peer"), None),
+], ids=["no-route", "refused", "url-timeout", "read-timeout", "connect-timeout",
+        "network-unreachable", "reset"])
+def test_no_answer_names_its_cause_within_one_panel_line(exc, cause):
+    def fetch(url, timeout):
+        raise exc
+
+    mon = RayhunterMonitor(fetch=fetch)
+    with pytest.raises(RayhunterUnavailable):
+        mon.start()
+    assert "reachable" in mon.error and "192.168.1.1:8080" in mon.error
+    assert len(mon.error) <= 66, (len(mon.error), mon.error)
+    if cause is not None:
+        assert cause in mon.error

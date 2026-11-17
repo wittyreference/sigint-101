@@ -1990,26 +1990,38 @@ def test_rayhunter_says_no_report_yet_not_clean_before_the_report_exists(tmp_pat
     assert body["warnings"] == []
 
 
-@pytest.mark.parametrize("fetch,says", [
-    (_unreachable_fetch, "not reachable"),
-    (_answers((500, b"Internal Server Error")), "answered HTTP 500"),
+# Lesson 19's panel shows the reason on one line of at most 66 characters at 800x480 (18 px PT Mono
+# in a 738 px column); a second line falls below the panel's fixed height and is cut off.
+_REASON_FITS = 66
+
+
+def _long_unreachable_fetch(url, timeout):
+    raise OSError("the remote end closed the connection without a response after a long wait")
+
+
+@pytest.mark.parametrize("fetch,facts", [
+    (_unreachable_fetch, ["reachable", "192.168.1.1:8080"]),
+    (_long_unreachable_fetch, ["reachable", "192.168.1.1:8080"]),
+    (_answers((500, b"Internal Server Error")), ["500", "not rayhunter", "192.168.1.1:8080"]),
     (_answers((200, b"<html><head><title>Router login</title></head></html>")),
-     "answered with a page that is not Rayhunter's"),
-    (_answers(_RH_RECORDING, report=(503, b"busy")),
-     "Rayhunter answered, but its analysis report gave HTTP 503"),
-    (_answers(_RH_RECORDING, report=(200, b"")),
-     "Rayhunter answered, but its analysis report could not be read"),
-], ids=["no-answer", "http-error", "not-rayhunter", "report-http-error", "report-not-a-report"])
-def test_rayhunter_refusal_says_what_happened_under_the_headline(tmp_path, fetch, says):
+     ["not rayhunter", "192.168.1.1:8080"]),
+    (_answers(_RH_RECORDING, report=(503, b"busy")), ["503", "report"]),
+    (_answers(_RH_RECORDING, report=(200, b"")), ["report", "read"]),
+], ids=["no-answer", "no-answer-long-cause", "http-error", "not-rayhunter", "report-http-error",
+        "report-not-a-report"])
+def test_rayhunter_refusal_says_what_happened_in_one_panel_line(tmp_path, fetch, facts):
     # The panel keeps its "orbic unreachable" headline and shows this reason under it, so the
-    # reason tells no answer, an HTTP error, another site's page and an unreadable report apart.
+    # reason tells no answer, an HTTP error, another site's page and an unreadable report apart,
+    # in a line the panel shows whole.
     with _client(tmp_path, rayhunter_factory=lambda: RayhunterMonitor(fetch=fetch)) as client:
         resp = client.get("/api/rayhunter")
     assert resp.status_code == 503
     body = resp.json()
     assert body["available"] is False
     assert body["status"] == "off"
-    assert says in body["reason"]
+    reason = body["reason"]
+    assert all(fact in reason.lower() for fact in facts), reason
+    assert len(reason) <= _REASON_FITS, (len(reason), reason)
 
 
 def test_rayhunter_returns_the_line_and_findings_when_reachable(tmp_path):
