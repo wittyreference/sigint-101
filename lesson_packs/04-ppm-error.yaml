@@ -62,7 +62,7 @@ verdict: >-
 # feedback for choosing it.
 check:
   prompt: >-
-    Say a friend's panel reads +90 ppm on a stereo station. Whose error is that number?
+    Say a friend's panel reads +150 ppm on a stereo station. Whose error is that number?
   choices:
     - key: dial
       label: The dial (tuner)
