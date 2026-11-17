@@ -243,11 +243,15 @@ class _TrainerDisabled(Exception):
 def _pool_refusal(exc: Exception) -> str:
     """Why the exam pool was refused at start-up, in words for the trainer's page and the log.
 
-    The pool's own guard already says what failed. A file that is not JSON, or a question that has
-    lost a field, reaches here as the loader's ValueError or KeyError, put into words here.
+    The pool's own guard already says what failed. A file that cannot be read reaches here as an
+    OSError; one that is not JSON, or not shaped like a pool (a question has lost a field, or a
+    list or string stands where an object belongs), as the loader's ValueError, KeyError,
+    TypeError or AttributeError. Those are put into words here.
     """
     if isinstance(exc, PoolError):
         return str(exc)
+    if isinstance(exc, OSError):
+        return f"pool file cannot be read: {exc.strerror or exc}"
     if isinstance(exc, KeyError):
         return f"pool file is malformed: a question has no {exc} field"
     return f"pool file is malformed: {exc}"
@@ -523,14 +527,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way. The pool must pass its correctness guard to be
         # served: a short or stale pool teaches wrong answers. One that fails it, or a pool file
-        # that is missing, is not JSON or has lost a field, ships the trainer disabled with the
-        # reason, logged once here, and the rest of the console starts as usual.
+        # that is missing, cannot be read, is not JSON or is not shaped like a pool, ships the
+        # trainer disabled with the reason, logged once here, and the rest of the console starts
+        # as usual.
         app.state.exam_pool = None
         app.state.exam_disabled_reason = None
         try:
             pool = load_pool(pool_path)
             pool.verify()
-        except (PoolError, ValueError, KeyError) as exc:
+        except (PoolError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             reason = _pool_refusal(exc)
             app.state.exam_disabled_reason = reason
             log_event(app.state.events_path, "exam_disabled", {"reason": reason})

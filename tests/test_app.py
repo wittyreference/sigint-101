@@ -3,6 +3,7 @@
 
 import io
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -2637,8 +2638,8 @@ def test_exam_sim_skip_for_an_unknown_question_is_404(tmp_path):
 
 # --- C14: a pool the console cannot vouch for ships the trainer disabled ----------------------
 # A wrong pool teaches wrong answers, so a pool that fails its correctness guard is never served,
-# and a pool file that is missing, cut off or short of a field turns the trainer off, not the
-# whole console.
+# and a pool file that is missing, unreadable or not shaped like a pool turns the trainer off,
+# not the whole console.
 
 def _shipped_pool():
     return json.loads(exam.POOL_PATH.read_text(encoding="utf-8"))
@@ -2676,6 +2677,23 @@ def _pool_without_an_answer(path):
     data = _shipped_pool()
     del data["questions"][0]["answer"]
     path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _pool_holding_a_list(path):
+    """Valid JSON, but a list where the pool object belongs."""
+    path.write_text("[]", encoding="utf-8")
+
+
+def _pool_with_a_question_that_is_not_an_object(path):
+    data = _shipped_pool()
+    data["questions"][0] = "T1A01"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _unreadable_pool(path):
+    """The shipped pool, in a file nobody may read."""
+    path.write_text(exam.POOL_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    path.chmod(0)
 
 
 def _pool_file(tmp_path, write):
@@ -2719,6 +2737,11 @@ def test_a_missing_pool_file_does_not_stop_the_console(tmp_path):
     (_cut_off_pool, "pool file is malformed: "),
     (_empty_pool, "pool file is malformed: Expecting value"),
     (_pool_without_an_answer, "pool file is malformed: a question has no 'answer' field"),
+    (_pool_holding_a_list, "pool file is malformed: "),
+    (_pool_with_a_question_that_is_not_an_object, "pool file is malformed: "),
+    # Root reads a file whatever its mode, so this case means nothing when the suite runs as root.
+    pytest.param(_unreadable_pool, "pool file cannot be read: Permission denied",
+                 marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")),
 ])
 def test_a_broken_pool_file_does_not_stop_the_console(tmp_path, write, reason):
     with _client(tmp_path, pool_path=_pool_file(tmp_path, write)) as client:
