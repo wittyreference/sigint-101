@@ -6,7 +6,7 @@ slug: ppm-error
 title: "The Number on the Dial"
 type: intro
 concept: >-
-  The built-in radio has a large, known frequency error (well over a hundred ppm) that drifts as
+  The built-in radio has a large, known frequency error that drifts as
   the Pi warms; you measure it against a broadcaster's 19 kHz pilot, and the cure is telling each
   tool its error with -p or --ppm.
 requires_tx: false
@@ -64,7 +64,7 @@ verdict: >-
 # grows with frequency), scored after the explain. Each chip's `why` is the feedback for choosing it.
 check:
   prompt: >-
-    Your radio reads +164 ppm. You tune to 315 MHz, where car key fobs talk. About how far off
+    Say your radio reads +164 ppm. You tune to 315 MHz, where car key fobs talk. About how far off
     frequency does it land?
   choices:
     - key: five

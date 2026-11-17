@@ -162,10 +162,10 @@ def offset_hz_from_phasors(phasors, *, block_rate, search_ppm=SEARCH_PPM, step_p
 def ppm_from_apparent(apparent_hz, nominal=PILOT_HZ) -> float:
     """Turn the pilot's apparent frequency into the crystal's fractional error.
 
-    One crystal clocks both the tuner and the sample rate, so samples arriving at Rn(1+x) but
-    read as Rn stretch assumed time: a true 19 kHz tone lands at 19000/(1+x). A fast crystal
-    therefore drops the tone BELOW nominal, while pushing the frequency actually received above
-    what the dial says.
+    The crystal clocks the sample rate, so samples arriving at Rn(1+x) but read as Rn stretch
+    assumed time: a true 19 kHz tone lands at 19000/(1+x). A fast crystal therefore drops the
+    tone BELOW nominal. Where the same crystal also clocks the tuner, it pushes the frequency
+    actually received above what the dial says.
     """
     if apparent_hz <= 0:
         raise PpmError("an apparent frequency of zero or less is not a measurement")
