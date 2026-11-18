@@ -66,7 +66,7 @@ check:
     gain, same temperature. Likeliest verdict?
   choices:
     - key: deaf
-      label: Your radio went deaf
+      label: Your radio hears worse
       why: A steady station 15 dB down, with gain and temperature unchanged, puts the loss in your radio.
     - key: quiet
       label: The band is just quiet
