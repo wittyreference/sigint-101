@@ -748,6 +748,36 @@ def test_a_reader_that_outlives_a_retune_paints_no_row_on_the_new_span():
     sweeper.stop()
 
 
+@pytest.mark.parametrize("stand_down, args, lines, span", [
+    ("retune", (88_000_000, 93_000_000, 78_125),
+     [LINE_A, LINE_B, LINE_A.replace("02:40:17", "02:40:18")], (88_000_000, 93_000_000, 64)),
+    ("release", (), _fm_pass(0) + _fm_pass(1)[:1], (88_000_000, 108_000_000, 256)),
+], ids=["retune", "release"])
+def test_a_reader_that_outlives_its_stop_publishes_nothing_before_the_next_start(
+        stand_down, args, lines, span):
+    # Until the next start only the stop mark shuts the old reader out, as the run's number changes
+    # at that start. After a retune that lasts until the next poll; after a release, as long as the
+    # other tool holds the radio. Here the old reader ends the pass it held, begins the next, and
+    # its pipe closes, all before the next start. No row of it may stand, then or after.
+    procs = []
+    sweeper = Sweeper(spawn=_late_then_fed(procs), radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].feed(FM_LINES[:12])                  # one pass published, half the next held
+    wait_for_rows(sweeper, 1)
+    getattr(sweeper, stand_down)(*args)
+    procs[0].feed(FM_LINES[12:17])                # the held pass ends, and the next one begins
+    procs[0].close_pipe()
+    procs[0].reader.join(5)
+    assert _spans(sweeper.rows()) == []
+    sweeper.resume()                              # the radio comes back, after a release
+    sweeper.start()
+    procs[1].feed(lines)                          # a whole pass of the new run; the next begins
+    wait_for_rows(sweeper, 1)
+    assert _spans(sweeper.rows()) == [span]
+    sweeper.stop()
+
+
 def test_the_slow_reader_of_a_dead_sweep_publishes_nothing_into_the_next_one():
     # rtl_power exits on its own while its reader still has lines to read, and the next poll starts
     # another. The old reader's run is no longer the one running: it publishes nothing, and records
