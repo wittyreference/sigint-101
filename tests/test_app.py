@@ -2,9 +2,12 @@
 # ABOUTME: commit-before-reveal gate, driven through the TestClient against a fixture pack.
 
 import io
+import json
+import os
 import re
 import urllib.error
 import urllib.request
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -20,7 +23,7 @@ from sigint101.apt import AptDecoder
 from sigint101.childproc import ChildWatch
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.dmr import DmrDecoder
-from sigint101.events import log_event
+from sigint101.events import log_event, read_events
 from sigint101.flock import FlockDetector
 from sigint101.hardware import RadioProbe, RtlSdrDevice
 from sigint101.lora import LoRaListener, parse_lora_packet
@@ -653,7 +656,7 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
             aprs_factory=None, pocsag_factory=None, acars_factory=None, ais_factory=None,
             dmr_factory=None, apt_factory=None, sstv_factory=None, flock_factory=None,
-            rayhunter_factory=None, flipper_factory=None):
+            rayhunter_factory=None, flipper_factory=None, pool_path=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
@@ -664,7 +667,7 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
                      ais_factory=ais_factory, dmr_factory=dmr_factory,
                      apt_factory=apt_factory, sstv_factory=sstv_factory,
                      flock_factory=flock_factory, rayhunter_factory=rayhunter_factory,
-                     flipper_factory=flipper_factory)
+                     flipper_factory=flipper_factory, pool_path=pool_path)
     return TestClient(app)
 
 
@@ -2631,6 +2634,226 @@ def test_exam_sim_skip_for_an_unknown_question_is_404(tmp_path):
         client.get("/exam/sim")
         resp = client.post("/api/exam/sim/skip?question_id=NOPE99")
     assert resp.status_code == 404
+
+
+# --- C14: a pool the console cannot vouch for ships the trainer disabled ----------------------
+# A wrong pool teaches wrong answers, so a pool that fails its correctness guard is never served,
+# and a pool file that is missing, unreadable or not shaped like a pool turns the trainer off,
+# not the whole console.
+
+def _shipped_pool():
+    return json.loads(exam.POOL_PATH.read_text(encoding="utf-8"))
+
+
+def _short_pool(path):
+    """300 of the 409 questions: the right shape, so it loads, but not the published pool."""
+    data = _shipped_pool()
+    data["questions"] = data["questions"][:300]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _pre_errata_pool(path):
+    """All 409 questions, one still worded as before the 2026-02-19 errata: a stale pool."""
+    data = _shipped_pool()
+    for q in data["questions"]:
+        if q["id"] == "T0A10":
+            q["question"] = ("What hazard occurs when rapidly charging or discharging an "
+                             "unprotected battery?")
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _cut_off_pool(path):
+    """The shipped pool cut off halfway through, as an interrupted write leaves it."""
+    text = exam.POOL_PATH.read_text(encoding="utf-8")
+    path.write_text(text[:len(text) // 2], encoding="utf-8")
+
+
+def _empty_pool(path):
+    path.write_text("", encoding="utf-8")
+
+
+def _pool_without_an_answer(path):
+    """One question has lost its answer field."""
+    data = _shipped_pool()
+    del data["questions"][0]["answer"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _pool_holding_a_list(path):
+    """Valid JSON, but a list where the pool object belongs."""
+    path.write_text("[]", encoding="utf-8")
+
+
+def _pool_with_a_question_that_is_not_an_object(path):
+    data = _shipped_pool()
+    data["questions"][0] = "T1A01"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _unreadable_pool(path):
+    """The shipped pool, in a file nobody may read."""
+    path.write_text(exam.POOL_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    path.chmod(0)
+
+
+def _pool_that_is_a_directory(path):
+    """A directory where the pool file belongs: it cannot be read as a file, even by root."""
+    path.mkdir()
+
+
+def _no_pool_file(path):
+    """Nothing at the pool's path."""
+
+
+def _pool_with_no_questions(path):
+    path.write_text(json.dumps({"questions": []}), encoding="utf-8")
+
+
+def _pool_file(tmp_path, write):
+    path = tmp_path / "pool.json"
+    write(path)
+    return path
+
+
+def _says_trainer_disabled(resp, reason):
+    """The page says the trainer is disabled and gives the reason, as the learner reads it."""
+    text = unescape(resp.text)
+    return "trainer disabled" in text.lower() and reason in text
+
+
+@pytest.mark.parametrize("write, reason", [
+    (_short_pool, "pool has 300 questions, expected 409"),
+    (_pre_errata_pool, "errata question T0A10 does not carry its corrected text"),
+])
+def test_a_pool_that_fails_its_check_is_not_served(tmp_path, write, reason):
+    # Short or stale, the pool loads without error; only its check refuses it. The study card
+    # must not serve a question from it, and must say why the trainer is off.
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, write)) as client:
+        card = client.get("/exam")
+    assert card.status_code == 503
+    assert 'name="choice"' not in card.text
+    assert _says_trainer_disabled(card, reason)
+
+
+def test_a_missing_pool_file_does_not_stop_the_console(tmp_path):
+    with _client(tmp_path, pool_path=tmp_path / "no-such-pool.json") as client:
+        home = client.get("/")
+        lesson = client.get("/lesson/1")
+        card = client.get("/exam")
+    assert home.status_code == 200
+    assert lesson.status_code == 200
+    assert card.status_code == 503
+    assert _says_trainer_disabled(card, "pool file not found")
+
+
+@pytest.mark.parametrize("write, reason", [
+    (_cut_off_pool, "pool file is malformed: "),
+    (_empty_pool, "pool file is malformed: Expecting value"),
+    (_pool_without_an_answer, "pool file is malformed: a question has no 'answer' field"),
+    (_pool_holding_a_list, "pool file is malformed: "),
+    (_pool_with_a_question_that_is_not_an_object, "pool file is malformed: "),
+    # Root reads a file whatever its mode, so this case means nothing when the suite runs as root.
+    pytest.param(_unreadable_pool, "pool file cannot be read: Permission denied",
+                 marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")),
+    # The same error path for every user, root included.
+    (_pool_that_is_a_directory, "pool file cannot be read: Is a directory"),
+])
+def test_a_broken_pool_file_does_not_stop_the_console(tmp_path, write, reason):
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, write)) as client:
+        home = client.get("/")
+        lesson = client.get("/lesson/1")
+        card = client.get("/exam")
+    assert home.status_code == 200
+    assert lesson.status_code == 200
+    assert card.status_code == 503
+    assert _says_trainer_disabled(card, reason)
+
+
+# Every exam route, each with what it would act on if the trainer were on. The restart comes
+# before the practice exam, so a sim the routes start would still be there at the end.
+_EXAM_ROUTES = (
+    ("GET", "/exam"),
+    ("POST", "/api/exam/answer?question_id=T1A01"),
+    ("GET", "/exam/review/T1A01?choice=A"),
+    ("POST", "/api/exam/sim/restart"),
+    ("GET", "/exam/sim"),
+    ("POST", "/api/exam/sim/answer?question_id=T1A01"),
+    ("POST", "/api/exam/sim/skip?question_id=T1A01"),
+    ("GET", "/exam/sim/review/T1A01"),
+    ("GET", "/exam/sim/results"),
+)
+
+
+def test_every_exam_route_says_the_trainer_is_disabled_and_why(tmp_path):
+    # A refused pool is refused on every route, not only on the card: no question, no answer
+    # recorded and no practice exam drawn from it, and each screen says why.
+    reason = "pool has 300 questions, expected 409"
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, _short_pool)) as client:
+        answers = {}
+        for method, url in _EXAM_ROUTES:
+            body = {"data": {"choice": "A"}, "headers": _FORM} if method == "POST" else {}
+            resp = client.request(method, url, follow_redirects=False, **body)
+            answers[url] = (resp.status_code, _says_trainer_disabled(resp, reason))
+        recorded = client.app.state.exam_store.state("T1A01")
+        sim = client.app.state.exam_store.sim()
+    assert answers == {url: (503, True) for _, url in _EXAM_ROUTES}
+    assert recorded is None
+    assert sim is None
+
+
+def _ask_every_exam_route(client):
+    """Each exam route's answer, in _EXAM_ROUTES order; the posts carry a choice."""
+    pages = []
+    for method, url in _EXAM_ROUTES:
+        body = {"data": {"choice": "A"}, "headers": _FORM} if method == "POST" else {}
+        pages.append(client.request(method, url, follow_redirects=False, **body))
+    return pages
+
+
+# An absolute path in shown text: a token that starts at the root ("/tmp/...", "/home/..."), at
+# a home folder ("~/...", "~user"), or at a Windows drive ("C:\...").
+_ABSOLUTE_PATH = re.compile(r"(?:^|[\s'\"(=:])(?:/[^\s/]|~)|\b[A-Za-z]:\\")
+
+
+# Every refused pool. The directory stands for every file that cannot be read: an OSError shows
+# only its strerror, whatever the cause.
+@pytest.mark.parametrize("write", [
+    _no_pool_file, _pool_with_no_questions, _short_pool, _pre_errata_pool, _cut_off_pool,
+    _empty_pool, _pool_without_an_answer, _pool_holding_a_list,
+    _pool_with_a_question_that_is_not_an_object, _pool_that_is_a_directory,
+])
+def test_no_exam_page_shows_where_the_pool_lives(tmp_path, write):
+    # The reason is on the learner's screen, and on the kiosk the pool's absolute path runs
+    # through the home folder. A reason may name the file, never the folders above it.
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, write)) as client:
+        pages = _ask_every_exam_route(client)
+    for (_, url), page in zip(_EXAM_ROUTES, pages):
+        found = re.search(r'class="error-screen__detail">(.*?)</p>', page.text, re.S)
+        assert found, url
+        reason = unescape(found.group(1)).strip()
+        assert reason, url
+        assert not _ABSOLUTE_PATH.search(reason), (url, reason)
+        assert str(tmp_path) not in reason, (url, reason)
+        assert "/home/" not in reason, (url, reason)
+
+
+def test_a_refused_pool_is_logged_with_its_reason(tmp_path):
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, _short_pool)):
+        pass
+    logged = [e["payload"] for e in read_events(tmp_path / "events.jsonl")
+              if e["kind"] == "exam_disabled"]
+    assert logged == [{"reason": "pool has 300 questions, expected 409"}]
+
+
+def test_a_refused_pool_is_logged_once_however_often_the_trainer_is_asked(tmp_path):
+    # The reason is logged at start-up, not again on each refused request: a learner tapping the
+    # exam bar again and again must not grow the log by a line each time.
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, _short_pool)) as client:
+        for _ in range(3):
+            _ask_every_exam_route(client)
+    logged = [e["payload"] for e in read_events(tmp_path / "events.jsonl")
+              if e["kind"] == "exam_disabled"]
+    assert logged == [{"reason": "pool has 300 questions, expected 409"}]
 
 
 # --- provenance panel (M3): the radio's account of itself + baseline (deaf vs. empty) ---------
