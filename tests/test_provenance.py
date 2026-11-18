@@ -174,7 +174,7 @@ def test_compare_does_not_flag_a_reference_within_the_threshold(tmp_path):
 # --- the baseline belongs to one set-up: radio, gain, reference station, bin size ---------------
 
 # Another radio, two gain steps or another span can move the reference level further than the
-# 6 dB threshold, so a sample taken under another set-up cannot say whether this radio went deaf.
+# 6 dB threshold, so a sample taken under another set-up cannot say whether this radio hears worse.
 _HERE = {"serial": "00000001", "gain": None, "ref_hz": REFERENCE_HZ, "bin_size": 125_000,
          "freq_low": 88_000_000, "freq_high": 108_000_000}
 

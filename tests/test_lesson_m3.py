@@ -224,3 +224,35 @@ def test_m3_explain_never_calls_a_dropped_reference_a_deaf_radio():
     claims = [clause for sentence in about_a_drop for clause in _clauses(sentence)
               if _calls_the_radio_deaf(clause)]
     assert not claims, f"M3's explain calls a dropped reference a deaf radio: {claims}"
+
+
+# The check scores "Your radio went deaf" for a reference 15 dB under its baseline. The explain
+# already says the radio "hears worse there": a drop of that size (a thirtieth of the power,
+# 10 lg 0.0316 = -15.0, NIST SP 811 §8.7) shows the radio hears that station worse, not that it
+# hears nothing. So nothing the check shows (its prompt, chips and whys) calls the drop deafness,
+# and the scored chip says the radio hears worse. The explain's own test above reads the same
+# wordings (DEAF); here every clause of the check is read, since all of it speaks of the drop.
+HEARS_WORSE = re.compile(
+    r"\b(?:radio|receiver)\b.*\bhears?\s+(?:it\s+|that\s+\w+\s+)?worse\b", re.I)
+
+
+def _check_texts(lesson):
+    texts = [lesson.check["prompt"]]
+    for choice in lesson.check["choices"]:
+        texts.extend((choice["label"], choice["why"]))
+    return texts
+
+
+def test_m3_check_never_calls_a_15_db_drop_deafness():
+    lesson = load_lesson_file(PACK)
+    claims = [clause for text in _check_texts(lesson) for sentence in _sentences(text)
+              for clause in _clauses(sentence) if _calls_the_radio_deaf(clause)]
+    assert not claims, f"M3's check calls a dropped reference a deaf radio: {claims}"
+
+
+def test_m3_check_scores_the_chip_that_says_the_radio_hears_worse():
+    lesson = load_lesson_file(PACK)
+    scored = [c for c in lesson.check["choices"] if c["key"] in lesson.check["answer"]]
+    assert len(scored) == 1
+    assert HEARS_WORSE.search(scored[0]["label"]), (
+        f"the scored chip must say the radio hears worse: {scored[0]['label']!r}")
