@@ -2696,6 +2696,19 @@ def _unreadable_pool(path):
     path.chmod(0)
 
 
+def _pool_that_is_a_directory(path):
+    """A directory where the pool file belongs: it cannot be read as a file, even by root."""
+    path.mkdir()
+
+
+def _no_pool_file(path):
+    """Nothing at the pool's path."""
+
+
+def _pool_with_no_questions(path):
+    path.write_text(json.dumps({"questions": []}), encoding="utf-8")
+
+
 def _pool_file(tmp_path, write):
     path = tmp_path / "pool.json"
     write(path)
@@ -2742,6 +2755,8 @@ def test_a_missing_pool_file_does_not_stop_the_console(tmp_path):
     # Root reads a file whatever its mode, so this case means nothing when the suite runs as root.
     pytest.param(_unreadable_pool, "pool file cannot be read: Permission denied",
                  marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")),
+    # The same error path for every user, root included.
+    (_pool_that_is_a_directory, "pool file cannot be read: Is a directory"),
 ])
 def test_a_broken_pool_file_does_not_stop_the_console(tmp_path, write, reason):
     with _client(tmp_path, pool_path=_pool_file(tmp_path, write)) as client:
@@ -2786,9 +2801,56 @@ def test_every_exam_route_says_the_trainer_is_disabled_and_why(tmp_path):
     assert sim is None
 
 
+def _ask_every_exam_route(client):
+    """Each exam route's answer, in _EXAM_ROUTES order; the posts carry a choice."""
+    pages = []
+    for method, url in _EXAM_ROUTES:
+        body = {"data": {"choice": "A"}, "headers": _FORM} if method == "POST" else {}
+        pages.append(client.request(method, url, follow_redirects=False, **body))
+    return pages
+
+
+# An absolute path in shown text: a token that starts at the root ("/tmp/...", "/home/..."), at
+# a home folder ("~/...", "~user"), or at a Windows drive ("C:\...").
+_ABSOLUTE_PATH = re.compile(r"(?:^|[\s'\"(=:])(?:/[^\s/]|~)|\b[A-Za-z]:\\")
+
+
+# Every refused pool. The directory stands for every file that cannot be read: an OSError shows
+# only its strerror, whatever the cause.
+@pytest.mark.parametrize("write", [
+    _no_pool_file, _pool_with_no_questions, _short_pool, _pre_errata_pool, _cut_off_pool,
+    _empty_pool, _pool_without_an_answer, _pool_holding_a_list,
+    _pool_with_a_question_that_is_not_an_object, _pool_that_is_a_directory,
+])
+def test_no_exam_page_shows_where_the_pool_lives(tmp_path, write):
+    # The reason is on the learner's screen, and on the kiosk the pool's absolute path runs
+    # through the home folder. A reason may name the file, never the folders above it.
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, write)) as client:
+        pages = _ask_every_exam_route(client)
+    for (_, url), page in zip(_EXAM_ROUTES, pages):
+        found = re.search(r'class="error-screen__detail">(.*?)</p>', page.text, re.S)
+        assert found, url
+        reason = unescape(found.group(1)).strip()
+        assert reason, url
+        assert not _ABSOLUTE_PATH.search(reason), (url, reason)
+        assert str(tmp_path) not in reason, (url, reason)
+        assert "/home/" not in reason, (url, reason)
+
+
 def test_a_refused_pool_is_logged_with_its_reason(tmp_path):
     with _client(tmp_path, pool_path=_pool_file(tmp_path, _short_pool)):
         pass
+    logged = [e["payload"] for e in read_events(tmp_path / "events.jsonl")
+              if e["kind"] == "exam_disabled"]
+    assert logged == [{"reason": "pool has 300 questions, expected 409"}]
+
+
+def test_a_refused_pool_is_logged_once_however_often_the_trainer_is_asked(tmp_path):
+    # The reason is logged at start-up, not again on each refused request: a learner tapping the
+    # exam bar again and again must not grow the log by a line each time.
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, _short_pool)) as client:
+        for _ in range(3):
+            _ask_every_exam_route(client)
     logged = [e["payload"] for e in read_events(tmp_path / "events.jsonl")
               if e["kind"] == "exam_disabled"]
     assert logged == [{"reason": "pool has 300 questions, expected 409"}]

@@ -161,15 +161,17 @@ def load_pool(path=None) -> Pool:
     """Load the pool from JSON. Honest about trouble, never fabricating questions.
 
     A missing file or an empty question list raises PoolError rather than returning a
-    placeholder pool: the trainer has no questions to teach from, and must say so.
+    placeholder pool: the trainer has no questions to teach from, and must say so. The message
+    names the file but not its folders: the console shows it on the learner's screen, and on the
+    kiosk the folders run through the home directory.
     """
     path = Path(path) if path is not None else POOL_PATH
     if not path.exists():
-        raise PoolError(f"pool file not found: {path}")
+        raise PoolError(f"pool file not found: {path.name}")
     data = json.loads(path.read_text(encoding="utf-8"))
     raw = data.get("questions") or []
     if not raw:
-        raise PoolError(f"pool file carries no questions: {path}")
+        raise PoolError(f"pool file carries no questions: {path.name}")
     questions = [
         Question(
             id=q["id"],
