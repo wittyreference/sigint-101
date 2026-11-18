@@ -646,6 +646,162 @@ def test_the_newest_row_reads_stalled_then_resuming_then_a_reading_again():
     sweeper.stop()
 
 
+# --- C27: a reader that outlives its stop publishes nothing into the next run -----------------
+# WHY: a reader can outlive stop()'s wait for it: an rtl_power that is not reaped keeps its pipe
+# open, and a reader slowed on a loaded Pi can still be reading after its process has gone. It then
+# shared its list of chunks with the next run's reader, and at its end it asked the new rtl_power,
+# not its own, whether it had exited. So part of the new run's pass could be published as a whole
+# row, and the old run's held pass as the new run's first reading. A gain step, a retune and the
+# poll after a death all start a new run. A reader now keeps its own process and chunks, and
+# publishes nothing once its run is stopped or replaced.
+
+class LateReaderProc(FedProc):
+    """rtl_power whose pipe outlives it, so its reader is still reading after the process ended.
+
+    terminate() and die() end the process but not the pipe; only close_pipe() or break_pipe()
+    ends what the reader reads. `reader` is the thread that reads it.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.reader = None
+        self.stdout = self._stream()
+
+    def _stream(self):
+        self.reader = threading.current_thread()
+        for line in iter(self._lines.get, None):
+            if isinstance(line, OSError):
+                raise line
+            yield line
+
+    def die(self, code):
+        self.returncode = code
+
+    def terminate(self):
+        self.terminated = True
+        if self.returncode is None:
+            self.returncode = -15
+
+    def close_pipe(self):
+        self._lines.put(None)
+
+    def break_pipe(self, error):
+        self._lines.put(error)
+
+
+def _late_then_fed(procs):
+    """A spawn whose first rtl_power's pipe outlives it; every later start gets a FedProc."""
+    def spawn(cmd):
+        procs.append(FedProc() if procs else LateReaderProc())
+        return procs[-1]
+    return spawn
+
+
+def _spans(rows):
+    """Each row's first and last frequency and its bin count: part of a pass shows as its own."""
+    return [(row.freq_low, row.freq_high, len(row.dbm)) for row in rows]
+
+
+def test_a_reader_that_outlives_a_gain_step_publishes_nothing_into_the_restarted_sweep():
+    procs = []
+    sweeper = Sweeper(spawn=_late_then_fed(procs), radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 0.05                    # stop() stops waiting for the reader at once
+    sweeper.start()
+    procs[0].feed(FM_LINES)                       # two passes published, the third held
+    wait_for_rows(sweeper, 2)
+    kept = _spans(sweeper.rows())
+    sweeper.set_gain(0.0)
+    assert procs[0].reader.is_alive()             # the old reader outlived the stop
+    sweeper.start()
+    procs[1].feed(_fm_pass(0)[:4])                # half of the restarted sweep's first pass
+    procs[0].close_pipe()                         # the old reader comes to the end of its pipe
+    procs[0].reader.join(5)
+    assert _spans(sweeper.rows()) == kept
+    procs[1].feed(_fm_pass(0)[4:] + _fm_pass(1)[:1])   # the rest of the pass; the next begins
+    wait_for_rows(sweeper, 3)
+    assert _spans(sweeper.rows()) == kept + [(88_000_000, 108_000_000, 256)]
+    assert sweeper.reading()[0] == sweeper.rows()[-1]
+    sweeper.stop()
+
+
+def test_a_reader_that_outlives_a_retune_paints_no_row_on_the_new_span():
+    # The old reader reads on through the FM band after the restart. The retune dropped the old
+    # span's rows; none may come back, and no part of the new span's first pass may stand as a row.
+    procs = []
+    sweeper = Sweeper(spawn=_late_then_fed(procs), radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].feed(FM_LINES[:12])                  # one pass published, half the next held
+    wait_for_rows(sweeper, 1)
+    sweeper.retune(88_000_000, 93_000_000, 78_125)    # the two hops LINE_A and LINE_B sweep
+    assert procs[0].reader.is_alive()
+    sweeper.start()
+    procs[1].feed([LINE_A])                       # the new span's first hop
+    procs[0].feed(FM_LINES[12:])
+    procs[0].close_pipe()
+    procs[0].reader.join(5)
+    assert _spans(sweeper.rows()) == []
+    procs[1].feed([LINE_B, LINE_A.replace("02:40:17", "02:40:18")])
+    wait_for_rows(sweeper, 1)
+    assert _spans(sweeper.rows()) == [(88_000_000, 93_000_000, 64)]
+    assert sweeper.reading()[0] == sweeper.rows()[-1]
+    sweeper.stop()
+
+
+def test_the_slow_reader_of_a_dead_sweep_publishes_nothing_into_the_next_one():
+    # rtl_power exits on its own while its reader still has lines to read, and the next poll starts
+    # another. The old reader's run is no longer the one running: it publishes nothing, and records
+    # no death against the new one.
+    procs = []
+    sweeper = Sweeper(spawn=_late_then_fed(procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(FM_LINES[:12])                  # one pass published, half the next held
+    wait_for_rows(sweeper, 1)
+    kept = _spans(sweeper.rows())
+    procs[0].die(1)
+    sweeper.start()                               # the next poll finds it gone and starts again
+    procs[1].feed(_fm_pass(0)[:4])
+    procs[0].feed(FM_LINES[12:16])                # the old reader reads on, slowly
+    procs[0].close_pipe()
+    procs[0].reader.join(5)
+    assert (_spans(sweeper.rows()), sweeper.error) == (kept, None)
+    procs[1].feed(_fm_pass(0)[4:] + _fm_pass(1)[:1])
+    wait_for_rows(sweeper, 2)
+    assert _spans(sweeper.rows()) == kept + [(88_000_000, 108_000_000, 256)]
+    assert sweeper.reading()[0] == sweeper.rows()[-1]
+    sweeper.stop()
+
+
+def test_a_reader_that_outlives_its_stop_leaves_no_failure_for_the_next_start():
+    # The old pipe fails after the restart. That was the old run's pipe, and a failure kept would
+    # be the reason the next start refuses, while the new run sweeps on.
+    procs = []
+    sweeper = Sweeper(spawn=_late_then_fed(procs), radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].feed(FM_LINES[:9])                   # one pass published
+    wait_for_rows(sweeper, 1)
+    sweeper.set_gain(0.0)
+    sweeper.start()
+    procs[0].break_pipe(OSError("Input/output error"))
+    procs[0].reader.join(5)
+    assert sweeper.error is None
+    sweeper.stop()
+
+
+def test_the_running_sweep_still_records_its_own_pipe_failing():
+    # The other side of that guard: a failure of the pipe the sweep is reading now is kept.
+    procs = []
+    sweeper = Sweeper(spawn=_late_then_fed(procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(FM_LINES[:9])                   # one pass published
+    wait_for_rows(sweeper, 1)
+    procs[0].break_pipe(OSError("Input/output error"))
+    procs[0].reader.join(5)
+    assert sweeper.error == "Input/output error"
+    sweeper.stop()
+
+
 def test_a_sweeper_whose_process_exited_is_not_running():
     sweeper = Sweeper(spawn=lambda cmd: DeadProc([]), radio_present=lambda: True)
     sweeper.start()

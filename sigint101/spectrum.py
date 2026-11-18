@@ -479,13 +479,12 @@ class Sweeper:
         # can refuse the first two rows after a stall as well.
         self._rows = deque(maxlen=history)
         self._run = 0
-        # Two locks on purpose. _lock guards the row buffer and is taken by the reader
-        # thread; _life guards start/stop/release so two threadpool routes cannot race
-        # over the dongle. Sharing one would deadlock, because stop() joins the reader
-        # while the reader is trying to append a row.
+        # Two locks on purpose. _lock guards the row buffer, and which start may add to it,
+        # and is taken by the reader thread; _life guards start/stop/release so two threadpool
+        # routes cannot race over the dongle. Sharing one would deadlock, because stop() joins
+        # the reader while the reader is trying to append a row.
         self._lock = threading.Lock()
         self._life = threading.RLock()
-        self._pending = []
         self._proc = None
         self._thread = None
         self._released = False
@@ -569,7 +568,6 @@ class Sweeper:
         with self._life:
             self._released = True
             self.stop()
-            self._pending = []
             with self._lock:
                 self._rows.clear()
 
@@ -625,29 +623,37 @@ class Sweeper:
             raise SpectrumUnavailable(f"cannot run {RTL_POWER}: {exc}") from exc
 
         self.error = None
-        self._interrupted = False
         self._started_at = self._clock()
-        self._run += 1
+        # In one step under the row lock, so a reader left from an earlier start never sees
+        # this one half made (_current).
+        with self._lock:
+            self._interrupted = False
+            self._run += 1
         # A daemon thread, so a wedged rtl_power cannot keep the whole console alive
         # after shutdown — the dongle must come free when the service stops.
-        self._thread = threading.Thread(target=self._read, args=(self._run,),
+        self._thread = threading.Thread(target=self._read, args=(self._run, self._proc),
                                         name="sigint101-sweeper", daemon=True)
         self._thread.start()
 
-    def _read(self, run: int) -> None:
+    def _read(self, run: int, proc) -> None:
         """Consume rtl_power's CSV on a background thread until the process ends.
 
         Runs off the request path because a sweep never finishes on its own — reading
         it inline would block the console forever. `run` is the start this process belongs
-        to; every row it publishes is kept with it.
+        to; every row it publishes is kept with it. The reader keeps its own process and its
+        own unfinished pass, because it can outlive its stop: an rtl_power that is not reaped
+        keeps the pipe open past stop()'s wait, and by then the next start may be sweeping.
+        Once its start is stopped or replaced, it publishes and records nothing (_current).
         """
+        pending = []
         try:
-            for raw in self._proc.stdout:
+            for raw in proc.stdout:
                 chunk = parse_line(raw)
                 if chunk is not None:
-                    self._absorb(chunk, run)
+                    self._absorb(chunk, run, pending)
         except (OSError, ValueError) as exc:  # loud, never silent
-            self.error = str(exc)
+            if self._current(run):
+                self.error = str(exc)
         finally:
             # A deliberate stop() cuts rtl_power off mid-pass, so its in-flight chunks cover a
             # fraction of the band — publishing them would hand the panel a row whose SNR and
@@ -658,18 +664,25 @@ class Sweeper:
             # cut the pass short, so its chunks are dropped rather than merged into a full-looking
             # row, and the reason is recorded so /api/spectrum reports the block. Our own stop's
             # SIGTERM never reaches this branch: _interrupted is set before the process is killed,
-            # and in production the read above blocks on the pipe until that kill closes it.
-            if self._interrupted:
-                self._pending = []
-            else:
-                code = None if self._proc is None else self._proc.poll()
+            # and in production the read above blocks on the pipe until that kill closes it. Nor
+            # does a reader whose start a later one replaced: the sweep is another process now.
+            if self._current(run):
+                code = proc.poll()
                 if code is None or code == 0:
-                    self._flush(run)
+                    self._flush(run, pending)
                 else:
-                    self._record_abnormal_death(code)
-                    self._pending = []
+                    self._record_abnormal_death(code, proc)
 
-    def _record_abnormal_death(self, code) -> None:
+    def _current(self, run: int) -> bool:
+        """Is `run` the start running now, neither stopped nor replaced by a later start?
+
+        Only its reader may publish a row or record why rtl_power ended. Read under the row lock,
+        which start and stop hold while they change it, so a reader never sees half a restart.
+        """
+        with self._lock:
+            return run == self._run and not self._interrupted
+
+    def _record_abnormal_death(self, code, proc) -> None:
         """Record why rtl_power died a death we did not cause, so the block is reported.
 
         A positive status is rtl_power's own error, and its stderr carries the reason. A
@@ -679,9 +692,6 @@ class Sweeper:
         the pass was cut short, so the reason is recorded rather than a truncated in-flight
         pass merged into a full-looking row and served as `available: true`.
         """
-        proc = self._proc
-        if proc is None:
-            return
         if code > 0:
             self.error = f"the sweep stopped (rtl_power status {code}){self._stderr_tail(proc)}"
         else:
@@ -736,27 +746,31 @@ class Sweeper:
             return ""
         return ": " + " | ".join(lines[-cls.STDERR_LINES:])[:400]
 
-    def _absorb(self, chunk: SweepRow, run: int) -> None:
+    def _absorb(self, chunk: SweepRow, run: int, pending: list) -> None:
         """Collect one chunk, closing off the previous sweep when a new one begins."""
-        if self._pending and self._starts_a_new_sweep(chunk):
-            self._flush(run)
-        self._pending.append(chunk)
+        if pending and self._starts_a_new_sweep(chunk, pending):
+            self._flush(run, pending)
+        pending.append(chunk)
 
-    def _starts_a_new_sweep(self, chunk: SweepRow) -> bool:
+    def _starts_a_new_sweep(self, chunk: SweepRow, pending: list) -> bool:
         """Has rtl_power begun a fresh pass across the band?"""
         # rtl_power stamps only to the second, so two sweeps can share a timestamp.
         # The band wrapping back to a lower frequency is the reliable structural signal.
-        return chunk.ts != self._pending[0].ts or chunk.freq_low <= self._pending[-1].freq_low
+        return chunk.ts != pending[0].ts or chunk.freq_low <= pending[-1].freq_low
 
-    def _flush(self, run: int) -> None:
+    def _flush(self, run: int, pending: list) -> None:
         """Turn the collected chunks into one full-band row and publish it, kept with its run, the
         time it was published, and how long its run waited for it and for the row before it. A
-        run's first row waited for nothing of its own: a restart is not a stall."""
-        if not self._pending:
+        run's first row waited for nothing of its own: a restart is not a stall. Only the start
+        running now publishes: a reader whose start was stopped or replaced drops it (_current)."""
+        if not pending:
             return
-        row = merge_chunks(self._pending)
-        self._pending = []
+        row = merge_chunks(pending)
+        pending.clear()
         with self._lock:
+            # _current's test, made under the lock the append holds, so no stop slips between.
+            if run != self._run or self._interrupted:
+                return
             now = self._clock()
             last = self._rows[-1] if self._rows else None
             waits = ((now - last[1], last[2][0]) if last is not None and last[0] == run
@@ -869,7 +883,6 @@ class Sweeper:
             self.stop()
             self.low, self.high, self.bin_size = low, high, bin_size
             self.target = None if target is None else int(target)
-            self._pending = []
             with self._lock:
                 self._rows.clear()
 
@@ -881,6 +894,11 @@ class Sweeper:
         """
         low, high, bin_size = validate_target_span(center, width, bin_size)
         self.retune(low, high, bin_size, target=center)
+
+    #: How long stop() waits, in seconds, at each of its three steps: for rtl_power to exit after
+    #: SIGTERM, again after SIGKILL, and for the reader to end. A reader can outlive the last
+    #: wait; it then publishes nothing (_read).
+    STOP_WAIT_S = 3.0
 
     def stop(self) -> None:
         """End the sweep and let go of the dongle."""
@@ -894,8 +912,10 @@ class Sweeper:
         returning — `make listen` opens the device immediately afterwards.
         """
         # Mark the interruption before the process dies, so the reader's final flush
-        # knows the chunks it holds are an incomplete pass and drops them.
-        self._interrupted = True
+        # knows the chunks it holds are an incomplete pass and drops them. Under the row
+        # lock, as a start changes it, so no row of this start is published after it.
+        with self._lock:
+            self._interrupted = True
         # Clear the handle first, in one step, so the sweeper reads as "not running" for
         # the whole of the slow shutdown below and nothing tries to kill it twice.
         proc, self._proc = self._proc, None
@@ -904,14 +924,14 @@ class Sweeper:
                 # terminate() only asks; wait() is what confirms the OS has reaped it and
                 # the USB device is genuinely free for the next program.
                 proc.terminate()
-                proc.wait(timeout=3)
+                proc.wait(timeout=self.STOP_WAIT_S)
             except subprocess.TimeoutExpired:
                 # The opposite of already-dead: rtl_power ignored the ask and still holds
                 # the dongle, so escalate to kill. If even that goes unreaped, say so —
                 # the next program will find the radio busy and deserves the reason.
                 proc.kill()
                 try:
-                    proc.wait(timeout=3)
+                    proc.wait(timeout=self.STOP_WAIT_S)
                 except subprocess.TimeoutExpired:
                     self.error = "rtl_power survived kill; the dongle may still be held"
             except (OSError, subprocess.SubprocessError):
@@ -920,7 +940,8 @@ class Sweeper:
                 # nothing here to report: success and this error mean the same thing.
                 pass
         if self._thread is not None:
-            # The reader owns the pipe; joining it prevents a dead thread appending a row
-            # from the old sweep after a retune has already cleared the buffer.
-            self._thread.join(timeout=3)
+            # The reader owns the pipe and ends as the process does. One that outlives this
+            # wait (an rtl_power not reaped keeps the pipe open) appends nothing: its start is
+            # marked stopped above, so no row of the old sweep lands after a retune's clear.
+            self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
