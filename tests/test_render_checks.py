@@ -1,4 +1,4 @@
-# ABOUTME: Tests that tools/render's render_scroll.py and render_figure.py exit 0 only on a PASS.
+# ABOUTME: Tests render tools' verdicts and behavior when Chrome disconnects.
 # ABOUTME: A fake DevTools endpoint stands in for Chrome; the scripts run as real processes.
 
 import base64
@@ -16,6 +16,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 SCROLL = REPO / "tools" / "render" / "render_scroll.py"
 FIGURE = REPO / "tools" / "render" / "render_figure.py"
+FIT = REPO / "tools" / "render" / "render_fit.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -25,6 +26,15 @@ FAST = (
     "time.sleep = lambda seconds: None\n"
     "script = sys.argv.pop(1)\n"
     "runpy.run_path(script, run_name='__main__')\n"
+)
+
+# Fit uses a fixed Chrome port. Run its main against the fake's ephemeral port.
+FIT_ON_FAKE_PORT = (
+    "import os, runpy, sys\n"
+    "script = sys.argv.pop(1)\n"
+    "main = runpy.run_path(script)['main']\n"
+    "main.__globals__['PORT'] = int(os.environ['CDP_PORT'])\n"
+    "main()\n"
 )
 
 # An expression that throws in the page: Chrome answers with exceptionDetails and no value.
@@ -65,16 +75,21 @@ class FakeDevTools:
 
     `answers` maps a piece of an evaluated expression to the value the page gives back, or to
     THROWS. document.readyState is always "complete"; any other expression gives no value.
+    `disconnect_at` can end the connection during the handshake or the first reply frame.
     """
 
-    def __init__(self, answers):
+    def __init__(self, answers, *, disconnect_at=None):
         self.answers = answers
+        self.disconnect_at = disconnect_at
         self.server = socket.create_server(("127.0.0.1", 0))
         self.port = self.server.getsockname()[1]
         threading.Thread(target=self._serve, daemon=True).start()
 
     def close(self):
-        self.server.close()
+        try:
+            self.server.shutdown(socket.SHUT_RDWR)
+        finally:
+            self.server.close()
 
     def _serve(self):
         while True:
@@ -95,6 +110,8 @@ class FakeDevTools:
             head, rest = head.split(b"\r\n\r\n", 1)
             path = head.split(b" ", 2)[1].decode()
             if b"upgrade: websocket" in head.lower():
+                if self.disconnect_at == "handshake":
+                    return
                 conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                              b"Connection: Upgrade\r\n\r\n")
                 self._websocket(conn, rest)
@@ -102,6 +119,10 @@ class FakeDevTools:
             if path == "/json/version":
                 url = f"ws://127.0.0.1:{self.port}/devtools/browser/fake"
                 body = json.dumps({"webSocketDebuggerUrl": url}).encode()
+                status = b"200 OK"
+            elif path == "/json":
+                url = f"ws://127.0.0.1:{self.port}/devtools/page/fake"
+                body = json.dumps([{"type": "page", "webSocketDebuggerUrl": url}]).encode()
                 status = b"200 OK"
             else:
                 body, status = b"{}", b"404 Not Found"
@@ -133,7 +154,11 @@ class FakeDevTools:
                 buf = buf[off + 4 + n:]
                 msg = json.loads(data)
                 reply = {"id": msg["id"], "result": self._result(msg)}
-                conn.sendall(_ws_frame(json.dumps(reply).encode()))
+                frame = _ws_frame(json.dumps(reply).encode())
+                if self.disconnect_at == "frame":
+                    conn.sendall(frame[:-1])
+                    return
+                conn.sendall(frame)
         except (EOFError, OSError):
             return
 
@@ -163,8 +188,8 @@ class FakeDevTools:
 def devtools():
     made = []
 
-    def make(answers):
-        fake = FakeDevTools(answers)
+    def make(answers, *, disconnect_at=None):
+        fake = FakeDevTools(answers, disconnect_at=disconnect_at)
         made.append(fake)
         return fake.port
 
@@ -179,13 +204,15 @@ def _closed_port():
         return s.getsockname()[1]
 
 
-def run(script, *args, port, fast=True):
+def run(script, *args, port, fast=True, timeout=60):
     env = dict(os.environ, CDP_PORT=str(port), no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
-    if fast:
+    if script == FIT:
+        cmd = [sys.executable, "-c", FIT_ON_FAKE_PORT, str(script), *args]
+    elif fast:
         cmd = [sys.executable, "-c", FAST, str(script), *args]
     else:
         cmd = [sys.executable, str(script), *args]
-    return subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True, timeout=60)
+    return subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True, timeout=timeout)
 
 
 def _verdicts(proc):
@@ -243,6 +270,16 @@ def test_render_scroll_run_plainly_exits_1_on_fail(devtools):
 def test_render_scroll_with_no_browser_exits_non_zero():
     proc = run(SCROLL, "http://127.0.0.1:1/lesson/2", "explain", port=_closed_port())
     assert_no_pass(proc)
+
+
+@pytest.mark.parametrize("script", [SCROLL, FIT], ids=["scroll", "fit"])
+@pytest.mark.parametrize("disconnect_at", ["handshake", "frame"])
+def test_render_exits_when_devtools_disconnects(devtools, script, disconnect_at):
+    port = devtools({}, disconnect_at=disconnect_at)
+    proc = run(script, "http://127.0.0.1:1/lesson/2", port=port, timeout=3)
+    assert proc.returncode == 1
+    assert proc.stderr.strip() == "Chrome DevTools connection closed"
+    assert _verdicts(proc) == []
 
 
 FIGURE_CASES = {

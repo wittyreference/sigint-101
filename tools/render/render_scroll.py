@@ -66,10 +66,17 @@ class CDP:
         )
         b = b""
         while b"\r\n\r\n" not in b:
-            b += self.s.recv(4096)
+            b += self._recv(4096)
         self.buf = b.split(b"\r\n\r\n", 1)[1]
         self.id = 0
         self.session = None
+
+    def _recv(self, size):
+        chunk = self.s.recv(size)
+        if not chunk:
+            self.s.close()
+            sys.exit("Chrome DevTools connection closed")
+        return chunk
 
     def send(self, m, p=None):
         self.id += 1
@@ -95,7 +102,7 @@ class CDP:
     def frame(self):
         def need(n):
             while len(self.buf) < n:
-                self.buf += self.s.recv(65536)
+                self.buf += self._recv(65536)
 
         need(2)
         ln = self.buf[1] & 0x7F
