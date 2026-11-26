@@ -12,10 +12,10 @@ Status: in active development (see STATUS.md).
 ## Setup
 
 ### Development, on any Linux machine
-You need Python 3 with its `venv` module (on Debian, the `python3-venv` package), git, make, and
-Node.js 20.11 or later. Node runs the panels' JavaScript tests, which `make selftest` includes;
-the course itself does not use it. `./bootstrap.sh` downloads the Python packages, so it needs a
-network connection.
+You need Python 3 with its `venv` module (on Debian, the `python3-venv` package), git, make, jq,
+and Node.js 20.11+ (21.2+ on the 21 line; 22 and later work). `make selftest` needs Node for the
+panels' JavaScript tests and jq for the credential-check tests; the course itself uses neither.
+`./bootstrap.sh` downloads the Python packages, so it needs a network connection.
 
 ```
 ./bootstrap.sh   # makes .venv, installs requirements.txt, arms the git hooks

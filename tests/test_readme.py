@@ -17,10 +17,12 @@ def _setup():
 
 def test_setup_names_every_tool_development_needs():
     # bootstrap.sh runs python3 -m venv and git; the Makefile drives the rest; make selftest runs
-    # tests/test_js_panels.py, which fails without node. The README is where a newcomer looks.
+    # tests/test_js_panels.py, which fails without node, and tests/test_credential_patterns.py,
+    # which fails without jq (the hooks it runs read JSON with it). The README is where a newcomer
+    # looks. The list is by hand: a tool the suite comes to need must be added here too.
     text = _setup().lower()
     tools = {"python": r"\bpython", "git": r"\bgit\b", "make": r"\bmake\b",
-             "node": r"\bnode(?:js)?\b"}
+             "node": r"\bnode(?:js)?\b", "jq": r"\bjq\b"}
     missing = [tool for tool, pattern in tools.items() if not re.search(pattern, text)]
     assert not missing, f"README's Setup names no {missing}"
 

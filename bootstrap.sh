@@ -17,5 +17,5 @@ echo "bootstrap: git hooks armed (core.hooksPath=githooks)"
 # without it. The course itself never runs node, so a missing one is a warning, not a stop.
 if ! command -v node >/dev/null; then
   echo "bootstrap: WARNING: node is not on PATH; make selftest needs it for the panel tests." >&2
-  echo "bootstrap: install Node.js 20.11 or later; the course itself runs without it." >&2
+  echo "bootstrap: install Node.js 20.11+ (21.2+ on the 21 line); the course runs without it." >&2
 fi
