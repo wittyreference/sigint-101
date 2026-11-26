@@ -4,15 +4,15 @@
 
 **Goal:** Add a comprehensive Flipper Zero unit (U10, M29–M38) to SIGINT-101, with the nomad console as a live mirror of the device over its USB serial CLI.
 
-**Architecture:** A new `FlipperLink` backend owns `/dev/ttyACM0` on nomad-b and exposes read-only device state to the kiosk — mirroring the `RayhunterMonitor` pattern (separate device, injected transport seam, `*Unavailable` refusal, no SDR arbitration). The live mirror is SD-file-driven: the learner saves a capture on the device, the console pulls and parses it; `device_info`/`loader`/`storage` are always-on reads. Lessons are device-in-hand, taught + verified on the 800×480 panel.
+**Architecture:** A new `FlipperLink` backend owns `/dev/ttyACM0` on the reference Recon and exposes read-only device state to the kiosk — mirroring the `RayhunterMonitor` pattern (separate device, injected transport seam, `*Unavailable` refusal, no SDR arbitration). The live mirror is SD-file-driven: the learner saves a capture on the device, the console pulls and parses it; `device_info`/`loader`/`storage` are always-on reads. Lessons are device-in-hand, taught + verified on the 800×480 panel.
 
-**Tech Stack:** Python 3 / FastAPI / Jinja2 / pyserial (already on nomad-b) / vanilla JS panels + node tests. SQLite progress unchanged.
+**Tech Stack:** Python 3 / FastAPI / Jinja2 / pyserial (already on the reference Recon) / vanilla JS panels + node tests. SQLite progress unchanged.
 
 **Spec:** `docs/superpowers/specs/2026-10-31-flipper-module-design.md` (read it alongside this plan).
 
 ## Global Constraints
 
-- Target: nomad-b (`spec5b`), Flipper on `/dev/ttyACM0`, official fw 1.4.3. Dev loop: author in this droplet worktree → push branch → on nomad-b `git fetch && git checkout -f <branch>` → run uvicorn → HIL over `ssh spec5@<nomad-b tailnet address>`.
+- Target: the reference Recon, Flipper on `/dev/ttyACM0`, official fw 1.4.3. Dev loop: author in this droplet worktree → push branch → on the reference Recon `git fetch && git checkout -f <branch>` → run uvicorn → HIL over `ssh <user>@<reference Recon's address>`.
 - **No fake/mock mode in the product.** The only test double is `FlipperCli`'s `opener` seam (a scripted byte channel) and `FlipperConsole`'s injected `cli_factory`/`glob`; no real serial in unit tests. Acceptance is real device output.
 - **Build on the existing transport** (`flipper.py`: `FlipperCli`/`probe_flipper`/`read_file`, errors `FlipperError`/`FlipperSelectionError`) and `.sub` parser (`subfile.py`). Do not reimplement them or edit their tests. No new exception type (reuse `FlipperError`).
 - **TDD for logic:** parsers are test-first against **real captured fixtures** (CLI text / saved `.sub`/`.nfc`/`.ir`/RFID/iButton files pulled from the device), the way AIS used the gpsd vectors. Never edit a test to fit a bug.
@@ -119,14 +119,14 @@ Proves the whole live mirror end-to-end on real hardware: the console shows real
 - [ ] **Step 4: Run** → PASS; full `pytest -q` + `ruff` green.
 - [ ] **Step 5: Commit.**
 
-### Task 5: HIL acceptance on nomad-b (core)
+### Task 5: HIL acceptance on the reference Recon (core)
 
 Not code — the named device-output acceptance for the core.
 
-- [ ] **Step 1:** push `flipper-module`; on nomad-b `git fetch && git checkout -f flipper-module`; symlink/confirm `.venv`; run uvicorn on 127.0.0.1:8008.
+- [ ] **Step 1:** push `flipper-module`; on the reference Recon `git fetch && git checkout -f flipper-module`; symlink/confirm `.venv`; run uvicorn on 127.0.0.1:8008.
 - [ ] **Step 2:** `curl /api/flipper` → real `available:true` + the live `device_info` (fw 1.4.3). Record verbatim.
 - [ ] **Step 3:** render M29 demo + predict at a forced 800×480; confirm Next≈423 / Commit≈474.
-- [ ] **Step 4:** restore main on nomad-b; update `STATUS.md` (in-worktree) with observed evidence; push. **Ship Phase 1 as its own PR** (small usable core).
+- [ ] **Step 4:** restore main on the reference Recon; update `STATUS.md` (in-worktree) with observed evidence; push. **Ship Phase 1 as its own PR** (small usable core).
 
 ---
 
@@ -136,7 +136,7 @@ Each is the same shape. **Capability-lesson task template** (instantiate once pe
 
 **Files (per lesson X / capability C):** `sigint101/<C>file.py` (+`parse_<C>(text) -> record`, a per-format parser module in the `subfile.py` style — NOT added to the transport `flipper.py`), `tests/test_<C>file.py` (+parser tests vs a real fixture), `tests/fixtures/flipper/<C>.<ext>` (a real saved file pulled from the device), `sigint101/flipperconsole.py` (+a `<C>(path)` read method using `cli.read_file`), `sigint101/app.py` (+`GET /api/flipper/<C>`), `tests/test_app.py` (+stub/route), `sigint101/static/flipper.js` (+`<C>Line`/renderer) + `tests/flipper.test.js`, `sigint101/lessons.py` (+panel), `sigint101/templates/console.html` (+branch), `lesson_packs/X-<slug>.yaml`, `tests/test_lesson_mX.py`.
 
-**Steps (per lesson):** (1) capture the real fixture from the device (`storage read_chunks /ext/<C>/<saved>` via `cli.read_file`, or an idle CLI read); (2) write failing parser + console-read + route + lesson tests; (3) run → FAIL; (4) implement parser + console read + route + panel + pack; (5) run → PASS, `ruff`/node green; (6) commit; (7) HIL on nomad-b: present a real object (fob/card/remote) → save on device → console mirrors it; record evidence. (M30's parser is already done — see Task 6.)
+**Steps (per lesson):** (1) capture the real fixture from the device (`storage read_chunks /ext/<C>/<saved>` via `cli.read_file`, or an idle CLI read); (2) write failing parser + console-read + route + lesson tests; (3) run → FAIL; (4) implement parser + console read + route + panel + pack; (5) run → PASS, `ruff`/node green; (6) commit; (7) HIL on the reference Recon: present a real object (fob/card/remote) → save on device → console mirrors it; record evidence. (M30's parser is already done — see Task 6.)
 
 **Instances:**
 
@@ -156,12 +156,12 @@ Each task ships green; batch into one Phase-2 PR or ship per-lesson (per STATUS 
 
 ### Task 13: Whole-rig runbook + M37 lesson
 
-**Files:** Create `docs/runbook.md` (authoritative recovery doc, cross-links `machines/hosts/nomad-b.md`); `lesson_packs/37-rig-rescue.yaml`; `tests/test_lesson_m37.py`. Optionally `GET /api/flipper` already supplies fw/SD diagnostics; add `storage info` (FS free) to the panel for the rig-health read.
+**Files:** Create `docs/runbook.md` (authoritative recovery doc, cross-links the owner's private host notes); `lesson_packs/37-rig-rescue.yaml`; `tests/test_lesson_m37.py`. Optionally `GET /api/flipper` already supplies fw/SD diagnostics; add `storage info` (FS free) to the panel for the rig-health read.
 
-- [ ] **Step 1:** write `docs/runbook.md` — Diagnose (won't boot / panel-dark EDID pin / kiosk down / radio missing / Flipper not mounting / meshtasticd / battery-UPS / tailnet / lab-guard), Restore (SD backup+restore, config from `machines/hosts/nomad-b.md`, meshtastic identity on spec5, re-flash, re-pair), Update (RPi OS/apt, kiosk app, Flipper fw 1.4.3→). Acceptance = a real dry-run of at least the diagnose checks on nomad-b, recorded.
+- [ ] **Step 1:** write `docs/runbook.md` — Diagnose (won't boot / panel-dark EDID pin / kiosk down / radio missing / Flipper not mounting / meshtasticd / battery-UPS / tailnet / lab-guard), Restore (SD backup+restore, config from the owner's private host notes, meshtastic identity on the second Recon, re-flash, re-pair), Update (RPi OS/apt, kiosk app, Flipper fw 1.4.3→). Acceptance = a real dry-run of at least the diagnose checks on the reference Recon, recorded.
 - [ ] **Step 2:** author `37-rig-rescue.yaml` (walks the high points; ≤~50-word bodies) + `test_lesson_m37.py`; run → PASS.
 - [ ] **Step 3: SD-baseline-image GATE.** The runbook documents the restore *procedure*; **stop and get MC's explicit approval** before creating the baseline SD image (no image exists today — spec §6a). Record the chosen method (physical card-reader vs network `dd`/`rpi-clone`) and destination as MC's call; do not image the shared rig without it.
-- [ ] **Step 4:** commit; HIL the diagnose checks on nomad-b; record.
+- [ ] **Step 4:** commit; HIL the diagnose checks on the reference Recon; record.
 
 ---
 
@@ -174,7 +174,7 @@ Each task ships green; batch into one Phase-2 PR or ship per-lesson (per STATUS 
 - [ ] **Step 1:** write failing `test_lesson_m38.py`.
 - [ ] **Step 2:** author the capstone (Flipper as field tool, nomad as analyzer/library; standalone vs plugged-in recap) with the combined live-mirror panel.
 - [ ] **Step 3:** run full `pytest -q` + all node tests + `ruff` → green/pristine.
-- [ ] **Step 4:** HIL the full unit at 800×480 on nomad-b; update STATUS; push; final PR; squash-merge; prune the worktree.
+- [ ] **Step 4:** HIL the full unit at 800×480 on the reference Recon; update STATUS; push; final PR; squash-merge; prune the worktree.
 
 ---
 

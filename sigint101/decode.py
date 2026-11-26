@@ -33,9 +33,10 @@ _ENVELOPE_KEYS = frozenset({"time", "model", "mod", "freq", "freq1", "freq2",
                             "rssi", "snr", "noise"})
 
 # rtl_433 prints every copy of a packet a sensor repeats: an Acurite-Tower sends each reading three
-# times in one burst, and all three decode (captured on nomad-b: three identical lines inside 6 ms,
-# the next reading ~17 s later). Copies of one transmission land milliseconds apart and a sensor's
-# next reading seconds later, so a copy inside this window is the same reception.
+# times in one burst, and all three decode (captured on the reference Recon: three identical
+# lines inside 6 ms, the next reading ~17 s later). Copies of one transmission land milliseconds
+# apart and a sensor's next reading seconds later, so a copy inside this window is the same
+# reception.
 REPEAT_WINDOW_S = 2.0
 
 

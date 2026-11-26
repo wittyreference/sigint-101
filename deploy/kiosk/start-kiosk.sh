@@ -53,7 +53,7 @@ open_course() {
 
 # XDG autostart, once per desktop session. It must check, not wait: the /usr/bin/chromium wrapper
 # returns before the browser exits, and a bare relaunch loop hands each new launch to the running
-# browser as yet another window (it ran nomad-b to load 20 in minutes).
+# browser as yet another window (it ran the reference Recon to load 20 in minutes).
 watch() {
   if [ -z "${WAYLAND_DISPLAY:-}" ] || [ ! -S "$RUNTIME/$WAYLAND_DISPLAY" ]; then
     echo "sigint101-course: no Wayland session to put the course on; not watching" >&2

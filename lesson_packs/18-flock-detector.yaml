@@ -1,4 +1,4 @@
-# ABOUTME: Lesson M18 "The Camera's Fingerprint" — build the Flock ALPR detector on nomad-b's own
+# ABOUTME: Lesson M18 "The Camera's Fingerprint" — build the Flock ALPR detector on the Recon's own
 # ABOUTME: WiFi radio in monitor mode: recognise the camera by its MAC OUI + probe-request IE order.
 
 id: 18

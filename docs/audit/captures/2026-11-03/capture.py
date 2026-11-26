@@ -2,8 +2,8 @@
 # ABOUTME: rows its waterfall paints, to CSV: the tier-C captures behind the L1, L2, L3 and L8 keys.
 """Tier-C capture for the predict items (docs/audit/2026-11-03-item-review.md §1.4, §3).
 
-Run it against a console on the real radio (nomad-b), never against anything that invents rows:
-it only records what the console's rtl_power sweep (spectrum.py) delivered.
+Run it against a console on the real radio (the reference Recon), never against anything that
+invents rows: it only records what the console's rtl_power sweep (spectrum.py) delivered.
 
     capture.py BASE fm OUT.csv [--seconds 60]           L1: the default FM sweep, auto gain
     capture.py BASE gain OUT.csv [--runs 3]             L2: middle vs top rung of the gain ladder
@@ -14,14 +14,15 @@ it only records what the console's rtl_power sweep (spectrum.py) delivered.
 Every row is written as: label, ts, gain, freq_low, freq_step, then one dB value per bin, with an
 empty field where rtl_power measured nothing (a hop's centre bin).
 
-Running it: serve the branch on nomad-b at 127.0.0.1:8064 inside `flock /tmp/sigint101-sdr.lock`
-(never the kiosk's 8008), forward that port, and pass http://127.0.0.1:8064 as BASE. Then
+Running it: serve the branch on the reference Recon at 127.0.0.1:8064 inside
+`flock /tmp/sigint101-sdr.lock` (never the kiosk's 8008), forward that port, and pass
+http://127.0.0.1:8064 as BASE. Then
 `assert_keys.py` reads the CSVs written here (l1-fm-rows.csv, l2-gain-rows.csv,
 l8-airband-rows.csv; l8-iq-frames.csv comes from iq_carrier.py).
 
 L3 needs hands on the radio, so its capture is a short drill:
-  1. Pick a 20 MHz span outside FM where the waterfall shows no stripe at nomad-b's location that
-     day, and record it with the antenna on:
+  1. Pick a 20 MHz span outside FM where the waterfall shows no stripe at the Recon's location
+     that day, and record it with the antenna on:
        capture.py BASE span l3-antenna-on.csv --low LOW --high HIGH --label antenna-on
      and screenshot the waterfall at 800x480.
   2. MC unscrews the SDR antenna from the Nomad's SDR port (receive-only, so safe; leave the LoRa

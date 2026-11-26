@@ -58,13 +58,13 @@ RDS_OTHER_PI = '{"pi":"0x1234","group":"0A","tp":false}'
 
 # acarsdec -o 4 JSON (tests/test_acars.py).
 ACARS_WITH_TEXT = (
-    '{"timestamp":1793151825.5348461,"station_id":"spec5b","channel":0,"freq":131.550,'
+    '{"timestamp":1793151825.5348461,"station_id":"recon","channel":0,"freq":131.550,'
     '"level":-8.5,"error":0,"mode":"G","label":"H1","block_id":"3","ack":false,'
     '"tail":"F-GTAE","flight":"AF7728","msgno":"D65C",'
     '"text":"#DFB00000/V206,05,124,183,02,00,00000/V7044,078,00081,22222222222111/",'
     '"app":{"name":"acarsdec","ver":"3.7"}}')
 ACARS_NO_TEXT = (
-    '{"timestamp":1793151825.53618,"station_id":"spec5b","channel":1,"freq":131.725,'
+    '{"timestamp":1793151825.53618,"station_id":"recon","channel":1,"freq":131.725,'
     '"level":-23.0,"error":0,"mode":"E","label":"5V","block_id":"4","ack":false,'
     '"tail":"PH-BXR","flight":"KL1681","msgno":"S53A","app":{"name":"acarsdec","ver":"3.7"}}')
 

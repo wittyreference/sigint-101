@@ -19,9 +19,10 @@ from sigint101.decode import (
     parse_decode_line,
 )
 
-# Real rtl_433 -F json output shapes. The ASK line is one captured live on nomad-b from an
-# Acurite-Tower weather sensor; the FSK line is rtl_433's documented FSK shape, which reports
-# the two mark/space tones as freq1 and freq2 (the whole point of M10) rather than one freq.
+# Real rtl_433 -F json output shapes. The ASK line is one captured live on the reference Recon
+# from an Acurite-Tower weather sensor; the FSK line is rtl_433's documented FSK shape, which
+# reports the two mark/space tones as freq1 and freq2 (the whole point of M10) rather than one
+# freq.
 ASK_LINE = ('{"time" : "2026-10-27 13:04:11", "model" : "Acurite-Tower", "id" : 12345, '
             '"channel" : "A", "battery_ok" : 1, "temperature_C" : 18.000, "humidity" : 51, '
             '"mic" : "CHECKSUM", "mod" : "ASK", "freq" : 433.950, "rssi" : -1.112, '
@@ -216,10 +217,11 @@ def test_parse_tolerates_a_malformed_frequency_without_inventing_one():
 
 # --- one reception per transmission, however many copies rtl_433 prints -------------------------
 
-# A real capture: 75 s of `rtl_433 -f 433920000 -F json -M level -d 0` on nomad-b (2026-11-02),
-# each line prefixed with its arrival time (epoch s). The Acurite-Tower sends every reading three
-# times in one burst and rtl_433 prints all three, byte-identical, within 6 ms; the next burst
-# comes ~17 s later carrying the same 16.0 °C / 42 % — a new reading that happens to match.
+# A real capture: 75 s of `rtl_433 -f 433920000 -F json -M level -d 0` on the reference Recon
+# (2026-11-02), each line prefixed with its arrival time (epoch s). The Acurite-Tower sends every
+# reading three times in one burst and rtl_433 prints all three, byte-identical, within 6 ms; the
+# next burst comes ~17 s later carrying the same 16.0 °C / 42 % — a new reading that happens to
+# match.
 REPEATS = Path(__file__).parent / "fixtures" / "rtl_433" / "acurite-tower-repeats.txt"
 
 

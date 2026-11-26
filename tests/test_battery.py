@@ -23,9 +23,9 @@ from sigint101.hardware import RadioProbe
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FIXTURE_PACKS = FIXTURES / "lesson_packs"
 
-# A real reading, captured from nomad-b's battery daemon (GET 127.0.0.1:9099/battery) on
+# A real reading, captured from the reference Recon's battery daemon (GET 127.0.0.1:9099/battery) on
 # 2026-11-03 while the Recon sat on charge in the truck.
-REAL = json.loads((FIXTURES / "battery" / "daemon-nomad-b.json").read_text())
+REAL = json.loads((FIXTURES / "battery" / "daemon-reference-recon.json").read_text())
 # The wall-clock moment the real reading was taken, so the fixture reads as fresh.
 REAL_AT = 1793671271.0  # 2026-11-03T02:01:11Z
 

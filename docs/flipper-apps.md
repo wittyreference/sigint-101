@@ -1,7 +1,7 @@
 # Flipper Zero apps: installed set
 
 The seven apps MC approved on 2026-10-31, built from source and installed on 2026-11-02 to the
-Flipper (official firmware 1.5.1, API 88.2), attached to nomad-b at `/dev/ttyACM0`.
+Flipper (official firmware 1.5.1, API 88.2), attached to the reference Recon at `/dev/ttyACM0`.
 
 Source of truth: the official catalog,
 [flipperdevices/flipper-application-catalog](https://github.com/flipperdevices/flipper-application-catalog)
@@ -23,9 +23,9 @@ Item 6 is two catalog apps (`sub_analyzer` and `subghz_raw_edit`), so both are i
 
 ## How it was built and installed
 
-- **Build:** on nomad-b in a scratch dir (`/tmp/fap-build`, removed afterwards). Each repo was
-  fetched at its pinned commit and built with `ufbt` (release channel, SDK 1.5.1, hw target f7).
-  All eight builds exited 0 and `APPCHK` reported `Target: 7, API: 88.2` for each.
+- **Build:** on the reference Recon in a scratch dir (`/tmp/fap-build`, removed afterwards). Each
+  repo was fetched at its pinned commit and built with `ufbt` (release channel, SDK 1.5.1, hw target
+  f7). All eight builds exited 0 and `APPCHK` reported `Target: 7, API: 88.2` for each.
 - **Install:** `~/.ufbt/current/scripts/storage.py -p /dev/ttyACM0 send <fap> /ext/apps/<Category>/<id>.fap`,
   one file at a time, after `fuser` showed nothing holding `/dev/ttyACM0`.
 - **Not touched:** firmware, the SD card's other files, the Wi-Fi devboard, the kiosk, the

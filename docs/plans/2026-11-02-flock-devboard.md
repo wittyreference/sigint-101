@@ -11,8 +11,8 @@ the dongle.
 
 **Shape.** The devboard (ESP32-S2) runs ESP32 Marauder and sniffs 2.4 GHz management frames.
 The devboard sits on the Flipper's GPIO. The Flipper runs its built-in GPIO → **USB-UART
-Bridge** on USB channel 1, so nomad-b sees the ESP32's serial as a second CDC port, with the
-Flipper CLI staying on the first.
+Bridge** on USB channel 1, so the reference Recon sees the ESP32's serial as a second CDC port, with
+the Flipper CLI staying on the first.
 
 A new capture source in `sigint101/flock.py` reads Marauder's raw-frame stream and feeds the
 **same** `parse_management_frame → match_signatures` detector that already exists. This keeps
@@ -30,8 +30,8 @@ MC's 10-29 call: our algorithm on our radio, never another device's verdicts.
      is MC's one tap.
    - Confirm afterwards: Marauder's `info`/version over the bridge.
 4. **Capture source (TDD).**
-   - Capture real Marauder raw-frame output from the air on nomad-b first, and use it as the
-     fixture.
+   - Capture real Marauder raw-frame output from the air on the reference Recon first, and use it as
+     the fixture.
    - Parse Marauder's serial pcap framing (LINKTYPE 802.11, no radiotap) into frames.
    - Hop channels the way the detector needs.
    - Report honestly:
@@ -45,7 +45,7 @@ MC's 10-29 call: our algorithm on our radio, never another device's verdicts.
    - In the quick-start kit table, the devboard replaces the dongle and the powered hub.
    - `provision.sh` gains nothing system-level for this path, since there is no
      NetworkManager or udev work.
-6. **HIL on nomad-b.**
+6. **HIL on the reference Recon.**
    - Real management frames flow from the air into `/api/flock`.
    - The over-current count stays flat for the whole run.
    - The panel renders at 800x480.
@@ -137,7 +137,7 @@ it at HIL (step 6). Nothing here has run against the devboard.
   `SIGINT101_MARAUDER_TTY`.
 
 **NOT VERIFIED (needs the device, step 6):**
-- that the bridge's port is `-if02` on nomad-b;
+- that the bridge's port is `-if02` on the reference Recon;
 - that Marauder streams over the bridge as its source says;
 - the 5 s answer budget;
 - the boot-line detection;

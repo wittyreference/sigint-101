@@ -1,10 +1,10 @@
 # SIGINT-101 technical audit — 2026-11-02
 
-**Scope.** I audited `main` at **c22f7d9** plus the unmerged `origin/ux-polish` (345fbfb) and `origin/flipper-module` (41b37a4). I measured on **nomad-b** (spec5b, Pi 4 8 GB, R828D on Debian librtlsdr 0.6.0-4) from a detached worktree at `/tmp/audit-tech`, serving on 127.0.0.1:8028. I didn't touch the kiosk checkout or port 8008. Code citations are `file:line` at c22f7d9.
+**Scope.** I audited `main` at **c22f7d9** plus the unmerged `origin/ux-polish` (345fbfb) and `origin/flipper-module` (41b37a4). I measured on **the reference Recon** (Pi 4 8 GB, R828D on Debian librtlsdr 0.6.0-4) from a detached worktree at `/tmp/audit-tech`, serving on 127.0.0.1:8028. I didn't touch the kiosk checkout or port 8008. Code citations are `file:line` at c22f7d9.
 
 **After the audit, `origin/main` moved to 3538592.** It gained a server service (#7), a fix for the kiosk respawn storm (#9) and `deploy/provision.sh` (#10, #11). Branch `instrument-honesty` (4151223, not merged) fixes T-02. I didn't re-audit any of these. I mark findings they may touch.
 
-**The measurement window was polluted.** From 21:05 to 21:20 PST (nomad-b clock) the coordinator's kiosk-Chromium respawn storm drove load to 20.8. **I re-took every CPU, RSS, latency and diskstats number below after load fell below 1.2 (21:23 onward).** That covers the idle/spectrum/provenance runs, all 17 route scenarios and the events-scaling timings. The decoder and other-route scenarios ran at load 1.3–3.9, because other sessions' Chromium renders were still running. Per-process numbers barely move with that load, but latency figures carry the caveat.
+**The measurement window was polluted.** From 21:05 to 21:20 PST (the reference Recon's clock) the coordinator's kiosk-Chromium respawn storm drove load to 20.8. **I re-took every CPU, RSS, latency and diskstats number below after load fell below 1.2 (21:23 onward).** That covers the idle/spectrum/provenance runs, all 17 route scenarios and the events-scaling timings. The decoder and other-route scenarios ran at load 1.3–3.9, because other sessions' Chromium renders were still running. Per-process numbers barely move with that load, but latency figures carry the caveat.
 
 Measurements I did **not** re-take (none of them depend on timing):
 - The H1 pixel render, at about 21:18.
@@ -16,7 +16,7 @@ Measurements I did **not** re-take (none of them depend on timing):
 
 | ID | Sev | Finding | Evidence type | Cost |
 |---|---|---|---|---|
-| T-01 | **S0** | Dead decoder child shows as LIVE and empty, respawns every poll. **Flock is in this state on nomad-b right now.** | live + code + probe | M |
+| T-01 | **S0** | Dead decoder child shows as LIVE and empty, respawns every poll. **Flock is in this state on the reference Recon right now.** | live + code + probe | M |
 | T-02 | **S0** | Waterfall canvas is smoothed: 94% of pixels on a scanline are blends no bin measured (H1) | live render | S |
 | T-03 | **S0** | Rows contain synthetic bins: duplicated value at every hop join plus a trailing duplicate; real first bins are dropped; DC-null copies are unmarked (M1) | live capture + rtl_power.c | S |
 | T-04 | **S0** | M12 RDS decodes "96.0 MHz, the strong local station", which is actually a narrowband spur comb. 96.0 is not a US FM channel. | live RF measurement | S–M |
@@ -53,7 +53,7 @@ All four trees ran green on the droplet. Coverage is enforced at 80%.
 
 Integration conflicts: none. `STATUS.md`, `static/app.css` and `templates/console.html` auto-merged. Test counts come from the dot rows, because pytest.ini's `-q` plus the Makefile's `-q` suppress the summary line. **No test covers any S0 above.** Every one of them passes the suite.
 
-### Measurements on nomad-b (clean re-run, at the panel JS cadence)
+### Measurements on the reference Recon (clean re-run, at the panel JS cadence)
 
 | Route (cadence) | uvicorn CPU avg / 1 s max | uvicorn RSS | Child CPU | Latency p50 / p95 | Payload | events.jsonl growth |
 |---|---|---|---|---|---|---|
@@ -80,7 +80,7 @@ Integration conflicts: none. `STATUS.md`, `static/app.css` and `templates/consol
 
 ## S0
 
-### T-01 Dead decoder shows LIVE, respawns silently (H2; Flock dead on nomad-b now)
+### T-01 Dead decoder shows LIVE, respawns silently (H2; Flock dead on the reference Recon now)
 
 **Evidence**
 - **Live, Flock.** `/api/flock` returned `200 {"available":true,"interface":"wlan1","detections":[]}` 21 times in 30 s, and events.jsonl gained 21 `flock_start` lines, one per poll. That is 42 of the 180 events in the audit log.
@@ -123,7 +123,7 @@ Integration conflicts: none. `STATUS.md`, `static/app.css` and `templates/consol
 **Evidence**
 - **Primary source.** In osmocom rtl-sdr v0.6.0 `csv_dbm()` (the Debian 0.6.0-4 binary on the box), the loop `for (i=i1; i<=i2; i++)` prints every bin, then `dbm = ts->avg[i2]...; fprintf(file, "%.2f\n", dbm);` prints the last bin a second time. Every CSV line therefore carries len+1 values, and **the last two are always identical**. The research notes have the verbatim source.
 - `merge_chunks` (spectrum.py:265–267) keeps that duplicate and throws away the next hop's first value (`chunk.dbm[1:]`). That first value is the only real bin at that frequency.
-- **Live capture** of 40 rows × 257 bins on nomad-b, FM 88–108:
+- **Live capture** of 40 rows × 257 bins on the reference Recon, FM 88–108:
   - At the hop-join indices (i % 32 == 0): **320 of 320 equal the previous bin**. Other neighbours: 383 of 9,920 (3.9%).
   - Final bin equals the penultimate bin: **40 of 40**.
   - rtl_power's own DC null (`avg[0]=avg[1]`, rotated to each hop's centre) shows as index 17 equal to index 16 in **320 of 320** hops.
@@ -363,7 +363,7 @@ Integration conflicts: none. `STATUS.md`, `static/app.css` and `templates/consol
 
 **T-19 Device provisioning gaps (partly fixed after the audit)**
 - At audit time satdump, sstv, sox and dsd-fme were absent, so M24/M25/M27 return honest 503s on the device.
-- Main now has `deploy/provision.sh --with-optional` (#10/#11), not yet run on nomad-b.
+- Main now has `deploy/provision.sh --with-optional` (#10/#11), not yet run on the reference Recon.
 - **Still open:** `dvb_usb_rtl28xxu`, `r820t` and `rtl2832_sdr` are loaded and not blacklisted (`/etc/modprobe.d` has no rule, and provision.sh has none). Every SDR hand-off detaches and reattaches the kernel driver ("Detached/Reattached kernel driver").
 - Fix: add `blacklist dvb_usb_rtl28xxu` to provisioning. Cost S.
 
@@ -407,7 +407,7 @@ Integration conflicts: none. `STATUS.md`, `static/app.css` and `templates/consol
 |---|---|---|---|
 | SSTV 145.800 MHz | sstv.py:32, pack 25 | **OUTDATED**: ISS SSTV is 437.550 MHz Robot36 (T-05) | ariss.org/contact-the-iss.html; ariss.org/upcoming-sstv-events.html |
 | APT 137.100 = NOAA-19 (also 137.62 / 137.9125) | apt.py:29, 45–49 | Historically right, **dead**: NOAA-18 off 2025-06-06, 19 off 2025-08-13, 15 off 2025-08-19. 137.1 is now Meteor LRPT (T-11) | nesdis.noaa.gov decommissioning notice; WMO OSCAR; SatDump 1.2.2 pipelines |
-| acarsdec `-g 49.6` | acars.py:116 | **CORRECT** for the 3.7 build on the box: "-g gain : set rtl gain in db (0 to 49.6 ...)" | `acarsdec` usage output on nomad-b |
+| acarsdec `-g 49.6` | acars.py:116 | **CORRECT** for the 3.7 build on the box: "-g gain : set rtl gain in db (0 to 49.6 ...)" | `acarsdec` usage output on the reference Recon |
 | AIS 161.975 / 162.025 MHz | ais.py:22–23 | **CORRECT** | 47 CFR 80.393; 71 FR 60067 (Ch 87B/88B); rtl_ais defaults |
 | APRS 144.390 MHz | aprs.py:23 | **CORRECT** (North America) | ARRL Letter 2022-02-10 |
 | ACARS 131.550 MHz | acars.py:22 | **CORRECT**, primary worldwide SITA channel (secondary sources) | airframes.io; RadioReference |
@@ -422,9 +422,9 @@ Integration conflicts: none. `STATUS.md`, `static/app.css` and `templates/consol
 ## Not verified, and why
 
 - **LoRa freeze (T-13):** restarting meshtasticd was off limits.
-- **APT/SSTV/DMR live behaviour (T-11):** the tools are not installed on nomad-b.
+- **APT/SSTV/DMR live behaviour (T-11):** the tools are not installed on the reference Recon.
 - **The full `/api/tune` 100 Hz payload (T-18):** a leaked rtl_fm held the dongle during that drill.
-- **The +164 ppm LO claim (T-14):** no stereo pilot at nomad-b, and the 2 kHz-resolution midpoint method was too coarse. The HIL step is in T-14.
+- **The +164 ppm LO claim (T-14):** no stereo pilot at the reference Recon, and the 2 kHz-resolution midpoint method was too coarse. The HIL step is in T-14.
 - **The bias tee (T-20):** needs a meter.
 - **The source of the 1.2 MHz comb:** whether it is the dongle or the Nomad board needs a shielded or second-SDR comparison.
 - **Rayhunter (T-21):** no Orbic was reachable.

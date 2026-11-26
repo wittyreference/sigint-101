@@ -1,10 +1,10 @@
 # SIGINT 101 — STATUS
 
 ## NEXT ACTION (resume here)
-**First, on nomad-b** (reachable again as of 2026-11-16, as reported):
+**First, on the reference Recon** (reachable again as of 2026-11-16, as reported):
 1. Clear the scratch (see follow-ups).
-2. Deploy `main` to nomad-b. As reported on 2026-11-16, it runs 4ac1e67 (ux-polish's tip, the
-   same tree as #15's `02c2095`), so it has everything up to #46 and is missing #47–#53.
+2. Deploy `main` to the reference Recon. As reported on 2026-11-16, it runs 4ac1e67 (ux-polish's
+   tip, the same tree as #15's `02c2095`), so it has everything up to #46 and is missing #47–#53.
    Deploying restarts the server, so only when MC isn't using the panel.
 3. Run the L1, L2 and L8 key captures (`docs/audit/captures/2026-11-03/`), with the course closed
    and inside the SDR flock.
@@ -34,8 +34,8 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
 - **Sprint base:** `ux-polish` with main merged in. Sprint branches stacked on it. ux-polish
   itself merged to main on 2026-11-16 (UTC): PR #15, squash `02c2095`. Its last merges were #45
   (two environment-dependent tests fixed) and #46 (a page's words withheld on every frequency).
-- **The sprint is complete on `ux-polish` @494e268, deployed to the nomad-b kiosk.** All of the
-  cut line except item 19:
+- **The sprint is complete on `ux-polish` @494e268, deployed to the reference Recon's kiosk.** All
+  of the cut line except item 19:
   - #18 exam: 0 hidden Commit/Next across all 409 questions, plus Skip and answers that are final.
   - #19 shell: two-way nav and resume, no concept wall, room for narration, teaching-order
     codes, hardware badges, touch targets.
@@ -66,22 +66,23 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
   SIGINT 101** closes it, leaving the desktop: Wi-Fi menu, terminal, files, on-screen keyboard.
   A **SIGINT 101** desktop icon and menu entry reopen it. The watchdog reopens only after a crash,
   never after Exit. Built on `desktop-exit` (PR against ux-polish). **Pending: the coordinator's
-  switch on nomad-b, with MC's OK**: pull, `deploy/install.sh`,
+  switch on the reference Recon, with MC's OK**: pull, `deploy/install.sh`,
   `sudo raspi-config nonint do_boot_behaviour B4`, reboot.
 - **Since the sprint (2026-11-02/03; its code went into `ux-polish`, in main since #15):**
-  - #29 provision: Flock monitor mode is opt-in (`--with-flock-adapter`). On nomad-b the
+  - #29 provision: Flock monitor mode is opt-in (`--with-flock-adapter`). On the reference Recon the
     RTL8821CU dongle in monitor mode browned out USB (192 over-current events in 2 min, 23
     touch-panel resets). It needs a powered hub; MC unplugged it.
   - #32 **desktop + course on top** (MC's call: "Desktop + course on top (Recommended)").
     - lightdm desktop autologin (B4), with the course opened by an XDG-autostart watchdog.
     - Home's Back is now **Exit SIGINT 101**: it closes the course to the Pi desktop.
     - A desktop icon and menu entry reopen it.
-    - HIL on nomad-b: cold boot opens the course, Exit lands on the desktop, the icon reopens it.
+    - HIL on the reference Recon: cold boot opens the course, Exit lands on the desktop, the icon
+      reopens it.
   - #33 **desktop theme** (MC's call, 2026-11-03):
     - phosphor wallpaper (an LED-matrix ☭ over "ШЭLСФМЭ СФМЯДDЭ");
     - a black bar with a green rule, green frames and labels, a green-on-black terminal;
     - the course icon in Soviet red.
-    - Applied live on nomad-b; MC saw it on the panel.
+    - Applied live on the reference Recon; MC saw it on the panel.
   - Flipper: firmware 1.5.1; the 7 approved apps are installed (#31, `docs/flipper-apps.md`).
   - **Flipper app cleanup** (MC, 2026-11-03: "just remove any apps that aren't ours or directly
     related to the Elmer stuff"):
@@ -101,11 +102,11 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
       `-if02` port and live frames are untested.
   - Antennas (MC, field kit): the ANT500 moved to the SDR jack, and a 915 MHz whip went on LoRa.
     FM SNR fell from 27 dB to 5.5 dB. Re-measure with the ANT500 fully extended.
-  - MC ran `provision.sh` on nomad-b (2026-11-02).
+  - MC ran `provision.sh` on the reference Recon (2026-11-02).
 - **Also merged into `ux-polish`, 2026-11-03:**
   - #36: the bar's green rule runs the full width.
   - #37: the real battery from the UPS daemon.
-    - Open question for MC: the daemon is custom to nomad-b, so the gift box shows "—".
+    - Open question for MC: the daemon is custom to the reference Recon, so the gift box shows "—".
   - #38: Flipper module U10/M29. It supersedes #5, which is closed.
   - #39: explains ≤120 words and narration ≤60, enforced by a test.
   - #40: the Marauder Flock source.
@@ -128,9 +129,9 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
     - **#43:** L1, L2, L3, L7 and L8 rewritten. All pass the lint with no waivers.
   - **Keys still provisional (NOT VERIFIED on the real waterfall):**
     - L1 "Narrower", L2 "Rises with it" and L8 "Released push-to-talk". The kiosk held the dongle,
-      and then nomad-b went offline.
-    - The capture scripts are in `docs/audit/captures/2026-11-03/`. Run them when nomad-b is
-      reachable and the course is closed. If the data disagrees, re-key to match the data.
+      and then the reference Recon went offline.
+    - The capture scripts are in `docs/audit/captures/2026-11-03/`. Run them when the reference
+      Recon is reachable and the course is closed. If the data disagrees, re-key to match the data.
     - L3 "No, they look alike" needs MC's antenna-off step (see Needed from MC).
   - Not yet re-rendered after the merge: L2, L7 and L8's new chips under #42's reveal header.
 - **Known small follow-ups (not in the cut line):**
@@ -144,7 +145,7 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
   - the M19 Rayhunter panel shows raw urlopen error text, which overflows its box by 30 px;
   - in the tcpdump Flock path, a pcap parse error ends the reader while tcpdump keeps running,
     so the panel reads LIVE with nothing reading;
-  - scratch to remove on nomad-b once it's back:
+  - scratch to remove on the reference Recon once it's back:
     - the `/tmp/theme-wt` worktree, `/tmp/fapchk` and `/tmp/items-iq`;
     - an agent's headless Chromium with profile `/tmp/items-prof`, if it's still running (kill by
       PID, never `pkill chromium`).
@@ -162,11 +163,12 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
 3. Extend the ANT500 fully. Claude then re-measures FM SNR.
 4. One look at the panel, to confirm #15's work there. It was PR #15's gate, in the PR's
    words "Draft until MC confirms on the panel (MC's gate)"; #15 merged to main on 2026-11-16
-   (UTC) with no look recorded on the PR. As reported on 2026-11-16, nomad-b runs 4ac1e67, so it
-   has everything up to #46, #15's work included; #47–#53 are not deployed there yet.
-5. Battery on the gift box: ship nomad-b's daemon, or read the INA219 directly (read-only).
-6. The recipient Recon's arrival date, and a spare SD card for nomad-b. The provision proof is
-   triage item 19.
+   (UTC) with no look recorded on the PR. As reported on 2026-11-16, the reference Recon runs
+   4ac1e67, so it has everything up to #46, #15's work included; #47–#53 are not deployed there yet.
+5. Battery on the gift box: ship the reference Recon's daemon, or read the INA219 directly
+   (read-only).
+6. The recipient Recon's arrival date, and a spare SD card for the reference Recon. The provision
+   proof is triage item 19.
 7. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
 
 ## Current state (observed 2026-11-02)
@@ -176,8 +178,8 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
   - #10, #11: `provision.sh` and the quick-start
   - #12: status bar never invents readings; waterfall pixelated
   - #13: audit reports
-- **Kiosk cold boot PASSED (observed 2026-11-02 22:18 PST).** After a reboot, nomad-b came
-  up with the server service and labwc, ran one kiosk browser, and showed the course home on
+- **Kiosk cold boot PASSED (observed 2026-11-02 22:18 PST).** After a reboot, the reference Recon
+  came up with the server service and labwc, ran one kiosk browser, and showed the course home on
   the panel (grim screenshot). The persistent journal kept the previous boot.
 - **Open branches:** none on 2026-11-16 (UTC): no pull request is open, and each remote branch
   has a merged or closed one or is already in main. What became of the three it listed:
@@ -187,7 +189,7 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
     closed: #38 superseded it.
   - `flipper-module-refresh` (#38, merged into ux-polish 11-03 UTC, so in main since #15) merges
     ux-polish into #5 and supersedes it; HIL waits on the Flipper.
-- **nomad-b health:**
+- **Reference Recon health:**
   - No crash since the 11-01 reboot. Configs intact: meshtasticd `config.yaml`, `config.txt`
     (gpio4, pps-gpio 17, miniuart-bt), root fs clean.
   - The earlier crash left no log because the journal was volatile; it is persistent now.
@@ -195,7 +197,7 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
 
 ## Unfinished-work register (found 2026-11-02; disposition set at triage)
 These are plan deliverables that were promised but never built, and mostly never mentioned
-again. Sources: `~/.claude/plans/eager-spinning-frost.md`, CLAUDE.md, the transcripts.
+again. Sources: the owner's private plan, CLAUDE.md, the transcripts.
 
 | Item | Where promised | State | Disposition |
 |---|---|---|---|
@@ -217,13 +219,14 @@ again. Sources: `~/.claude/plans/eager-spinning-frost.md`, CLAUDE.md, the transc
 | M8 predict 1px over at 800x480 | M8 HIL | open | fix sprint |
 | Flipper Companion FAP (Track E) | 10-29 roadmap | superseded 10-31 by the USB-CLI live mirror (`flipper-module` spec §11) | confirm dropped at triage |
 | Kit add-ons (DS3231 RTC, nRF52840, hub) | plan hardware | not bought | MC |
-| Cold-boot panel fix, LoRa pin fix | plan arch | status unknown on nomad-b | check |
+| Cold-boot panel fix, LoRa pin fix | plan arch | status unknown on the reference Recon | check |
 | SD baseline image | flipper spec §6a | does not exist | MC-gated |
 | Garden → rack → field (command strip, `/operate`, field card, solos) | MC's question 2026-11-02 | designed in the plan of record | triage |
 
 ## Deferred live HIL (hardware or physical, not code)
-Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture needs:
-- **ADS-B M13:** a 1090 MHz antenna (nomad-b's is deaf there: 0 CRC-valid of 411k preambles).
+Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live capture needs:
+- **ADS-B M13:** a 1090 MHz antenna (the reference Recon's is deaf there: 0 CRC-valid of 411k
+  preambles).
 - **APRS M14:** a 2m antenna, plus local traffic.
 - **POCSAG M15:** a pager-band antenna, plus traffic.
 - **ACARS M16:** VHF traffic. The chain is already proven with acarsdec's own `test.wav`.
@@ -260,9 +263,9 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 | Separate request | — | `63eb64c` #52 identity guard checks the name too |
 | Separate request | — | `545a207` #53 Wi-Fi capture, weather-sensor ID and Flipper name in the test fixtures made up |
 
-## nomad-b / kiosk operations
-- **Access:** `ssh spec5@<nomad-b tailnet address>`. Login user is `spec5`, host `spec5b`. Registry:
-  the private `machines` repository, `hosts/nomad-b.md`.
+## Reference Recon / kiosk operations
+- **Access:** `ssh <user>@<reference Recon's address>`. Its login user, host name and address
+  are in the owner's private host notes.
 - **The panel is self-starting** (`deploy/install.sh`, idempotent; re-run it after changing
   `deploy/`).
   - The lesson server is the user unit `sigint101.service` on 127.0.0.1:8008, with linger.
@@ -272,8 +275,8 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
     `$XDG_RUNTIME_DIR/sigint101-kiosk-exited`. It removes the tty1 kiosk it set up before #15
     (the `~/.profile` hook and `~/.local/bin/sigint101-kiosk`, labwc + a looping Chromium).
     `provision.sh` boots the box to the desktop with autologin.
-  - On `ux-polish` (#32, live on nomad-b), the box autologs in to the Pi desktop. The XDG
-    autostart runs `/usr/local/bin/sigint101-course watch`, which reopens the kiosk Chromium
+  - On `ux-polish` (#32, live on the reference Recon), the box autologs in to the Pi desktop. The
+    XDG autostart runs `/usr/local/bin/sigint101-course watch`, which reopens the kiosk Chromium
     (profile `~/.config/chromium-kiosk`) unless Exit wrote
     `$XDG_RUNTIME_DIR/sigint101-kiosk-exited`. The desktop icon runs `sigint101-course open`.
   - **Restart the course browser:** kill the kiosk Chromium by PID and the watchdog reopens it.
@@ -282,7 +285,7 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
   - **Restart the server:** `systemctl --user restart sigint101`, which also reloads lesson
     YAML.
   - **Manual server on 8008:** `systemctl --user stop sigint101` first.
-- **Deploy a branch:** push it, then on nomad-b
+- **Deploy a branch:** push it, then on the reference Recon
   `cd ~/sigint-101 && git fetch origin <branch> && git checkout -f -B <branch> FETCH_HEAD`,
   then restart the server. The clone has no `origin/<branch>` refs: use FETCH_HEAD.
 - **Screenshot the real panel:**
@@ -298,7 +301,7 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 - **Recipe:**
   1. Run the server from the worktree with the harness background runner (a `nohup` from a
      tool call dies when the call returns): `--host <droplet tailnet address> --port 80xx`.
-  2. On nomad-b, start a separate headless Chromium:
+  2. On the reference Recon, start a separate headless Chromium:
      `--headless=new --no-sandbox --disable-gpu --password-store=basic --remote-allow-origins=*
      --remote-debugging-port=93xx --user-data-dir=/tmp/<you>-prof --disk-cache-size=1`.
      **`--password-store=basic` is mandatory.** Without it the kiosk session's GNOME keyring
@@ -310,19 +313,20 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 - **Always `Network.setCacheDisabled`.**
 - **Reach sealed stages** by POSTing a prediction first:
   `curl -X POST ".../api/predict?lesson_id=N" -d "prediction=<key>" -H "content-type: application/x-www-form-urlencoded"`.
-- **A LIVE dynamic panel** (lit waterfall) needs the server on nomad-b and the real-sleep CDP
-  capture recipe in `.claude/learnings.md`. `--virtual-time-budget` snapshots an empty panel.
+- **A LIVE dynamic panel** (lit waterfall) needs the server on the reference Recon and the
+  real-sleep CDP capture recipe in `.claude/learnings.md`. `--virtual-time-budget` snapshots an
+  empty panel.
 
 ## HIL targets
-- **nomad-b** (`spec5b`, user `spec5`) is PRIMARY. It is a stock Nomad 2 Recon
+- **The reference Recon** is PRIMARY. It is a stock Nomad 2 Recon
   twin: RTL2832U (now on the ANT500; deaf at 1090 and 2m), MeshAdv HAT (`/dev/ttyAMA0`) with a
   915 MHz whip on the LoRa jack, and the Flipper (fw 1.5.1, Marauder devboard on its GPIO) on
   `/dev/ttyACM0` when plugged in. The RTL8821CU dongle is unplugged: it browns out USB without a
   powered hub.
-- **spec5** is the secondary. Its LoRa jack is not dead, and its broken antenna has been replaced
-  (MC, 2026-11-16). Transmit is off and meshtasticd is disabled until MC re-enables them. Its
-  reception since the new antenna is not tested.
-- **pi5** (user `mc`) has an ESP32 on `/dev/ttyACM1`. No Flipper.
+- **The owner's second Recon** is the secondary. Its LoRa jack is not dead, and its broken antenna
+  has been replaced (MC, 2026-11-16). Transmit is off and meshtasticd is disabled until MC
+  re-enables them. Its reception since the new antenna is not tested.
+- **A lab Pi** has an ESP32 on `/dev/ttyACM1`. No Flipper.
 
 ## Gotchas (durable)
 - All `sigint101/` edits go through a worktree. Merge with `--squash`, passing
@@ -333,7 +337,7 @@ Every pipeline below is HIL-proven "honest-empty" on nomad-b. A live capture nee
 - `pkill -f`/`pgrep -f` over ssh match the ssh command's own argv. Kill by PID, or use the
   `[u]vicorn` bracket trick.
 - `rtl_power` printing "[R82XX] PLL not locked!" and "User cancel, exiting" is benign.
-- ☭ (U+262D) renders via a system-font fallback (DejaVu on nomad-b), not our bundled fonts.
-  Confirm it on the recipient image or bundle an SVG.
+- ☭ (U+262D) renders via a system-font fallback (DejaVu on the reference Recon), not our bundled
+  fonts. Confirm it on the recipient image or bundle an SVG.
 - Predict is the tightest screen at 800x480: keep prompts to ~35–40 words. Reading stages
   scroll (on main since #15); instrument stages must fit (CLAUDE.md Corrections).

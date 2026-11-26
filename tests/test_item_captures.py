@@ -1,4 +1,4 @@
-# ABOUTME: Tests the tier-C key check over real nomad-b waterfall captures: how it measures stripe
+# ABOUTME: Tests the tier-C key check over real Recon waterfall captures: how it measures stripe
 # ABOUTME: width, the gain floor and airband gaps, and that each capture backs its pack's answer.
 
 import importlib.util

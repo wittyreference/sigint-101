@@ -14,7 +14,7 @@ For scale: answering at random, the chance of 0/4 on these items is 8/81, about 
 - Every sweep draws one row per second.
 - The colour scale re-fits each row to its own minimum and maximum.
 
-**Not checked:** any live capture on nomad-b.
+**Not checked:** any live capture on the reference Recon.
 
 ---
 
@@ -89,7 +89,7 @@ Run the tiers in order. Tiers A, B and C are automated or scripted. Tier D needs
 | **A. Lint** (deterministic) | Check each pack's predict: exactly one key, or a written `multi_key_reason`; stem ≤ 45 words; the stem doesn't pose an "X or Y" binary over 3 chips; no chip label's content words appear in frame/demo/try (giveaway heuristic); chip lengths within 2× of each other (longest-answer cue, HDR guideline 28); key position spread across the course. | Automated, inside `make selftest` | Every commit | Seconds | All checks green, or a waiver line in the pack |
 | **B1. Rubric review** | An LLM reviewer applies the 7-criterion rubric (§1.1) to the changed pack and returns OK/MINOR/BROKEN plus a reason per criterion. It also checks that the try doesn't make the learner do what the predict asks them to predict (L2's bug). | Automated | Every change to a pack | ~1 min | No BROKEN; MINORs either fixed or acknowledged |
 | **B2. Simulated-learner panel** | 3 personas × 10 samples each: "hacker, new to radio", "licensed ham", "RF engineer". Each sees *only* the screens before the question and returns a chip, a one-line reason and a confidence. | Automated | Every change to a predict | ~2 min | No key ambiguity: the RF engineer persona picks the key ≥ 9/10, and no persona argues a *defensible* non-key. Not a giveaway: novice persona < 9/10 on the key. No dead chip: every chip is picked at least once with a reason. |
-| **C. HIL key check** | Run the predict's observe step on nomad-b. Commit the CSV rows and a screenshot to the repo. A script asserts the key against the data, for example: L1 counts lit bins per stripe; L2 compares the floor dB at middle and maximum gain. | Scripted. MC only if a physical step is needed (e.g. swapping an antenna). | Every change to an instrument predict, and every change to `spectrum.py` or `waterfall.js` | ~10 min | Key equals what the capture shows; the capture lives in the repo next to the pack. |
+| **C. HIL key check** | Run the predict's observe step on the reference Recon. Commit the CSV rows and a screenshot to the repo. A script asserts the key against the data, for example: L1 counts lit bins per stripe; L2 compares the floor dB at middle and maximum gain. | Scripted. MC only if a physical step is needed (e.g. swapping an antenna). | Every change to an instrument predict, and every change to `spectrum.py` or `waterfall.js` | ~10 min | Key equals what the capture shows; the capture lives in the repo next to the pack. |
 | **D1. Expert cold answer** | One radio-literate person (ham/SDR) answers each new predict cold, at the console, and says whether they could defend another chip. | Real person | Batched per unit, for new or rewritten predicts | ~10 min per unit | 100% on the key. Any expert miss, or any "I could argue B", makes the item BROKEN. |
 | **D2. Cognitive interview** | 2–3 people who match the learner profile think aloud while answering, then take retrospective probes (script below). MC counts as participant 1. | Real people | Per unit, before hand-over, and after any BROKEN fix | ~20 min per person per unit | No misread stems, no "that was a trick", no missing-prerequisite codes left unfixed |
 | **D3. Field log** | Record chip, confidence, time to commit, the post-check result and a one-tap "fair question?" rating. The progress DB already stores the prediction and `correct`. | Passive | Always | Free | Read as anecdotes until an item has around 30+ learners; only then compute statistics (§1.6). |
@@ -219,7 +219,7 @@ Each rewrite keeps 3 chips and about 40 words. For each key marked *provisional*
 - **Key:** Rises with it *(provisional)*
 - **Verdict:** "Rises with it: gain can't tell signal from noise, so it lifts both, and the gap between them, your SNR, barely moves. At the very top, overload can even shrink it."
 - **Pack edits:** The explain uses the learner's own readings ("your gap moved N dB") instead of asserting "barely moved".
-- **Tier C:** The meter floor at maximum is at least 3 dB above the floor at middle, in 3 runs on nomad-b. Set the threshold from that capture.
+- **Tier C:** The meter floor at maximum is at least 3 dB above the floor at middle, in 3 runs on the reference Recon. Set the threshold from that capture.
 
 ### L3: Know Your Instrument
 - **Stem (39 words):** "Two pictures of the same empty stretch of band: one from a healthy radio, one from a radio whose antenna cable has corroded through. From the pictures alone, could you tell which radio is deaf? Lock it in."
@@ -227,7 +227,7 @@ Each rewrite keeps 3 chips and about 40 words. For each key marked *provisional*
 - **Key:** No, they look alike *(provisional)*
 - **Verdict:** "They look alike: this screen rescales its colours to whatever noise it gets, so a deaf radio and an empty band both paint plain grass. Only your reference against the baseline tells them apart."
 - **Pack edits:** The observe stage shows a labelled *replay* of both captures, antenna on and off, over the same empty span outside FM. Or the learner unscrews the SDR antenna there: the SDR is receive-only, so this is safe.
-- **Tier C:** Capture both on nomad-b. Two people who don't know which picture is which pick the deaf radio at no better than chance over 5 pairs. If they can pick it (the floor drop shows), re-key to "Only by a faint dimming" and teach that the number moves even when the picture doesn't.
+- **Tier C:** Capture both on the reference Recon. Two people who don't know which picture is which pick the deaf radio at no better than chance over 5 pairs. If they can pick it (the floor drop shows), re-key to "Only by a faint dimming" and teach that the number moves even when the picture doesn't.
 
 ### L7: Build, Aim & Clean Up
 - **Stem (32 words):** "Your 915 MHz gadget reads weak. No FM tower is near, and your dipole legs are still cut for 1090. Will sliding in the FM-notch filter make 915 stronger? Lock it in."
@@ -243,7 +243,7 @@ Each rewrite keeps 3 chips and about 40 words. For each key marked *provisional*
 - **Verdict:** "Let go of push-to-talk: an AM carrier holds through the pauses between words. The column goes dark only when the transmitter stops."
 - **Pack edits:** The explain says plainly that this screen's one-second rows are too slow to show a word gap, so every dark stretch is a whole transmission ending.
 - **Optional observe upgrade:** If a local ATIS channel is in range (a looping recording on a continuous carrier), make it the observe target. Its column stays lit through every pause.
-- **Tier C:** Capture airband rows on nomad-b and confirm the dark gaps are at least one row long and line up with transmissions ending. Check this against a handheld scanner, or against an ATIS channel staying lit.
+- **Tier C:** Capture airband rows on the reference Recon and confirm the dark gaps are at least one row long and line up with transmissions ending. Check this against a handheld scanner, or against an ATIS channel staying lit.
 
 ---
 

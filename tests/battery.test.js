@@ -5,7 +5,7 @@ const test = require("node:test");
 const assert = require("node:assert");
 const b = require("../sigint101/static/battery.js");
 
-// A real /api/battery answer from nomad-b on charge (2026-11-03).
+// A real /api/battery answer from the reference Recon on charge (2026-11-03).
 const REAL = { present: true, percent: 92, voltage: 12.328, current_a: 0.114,
                charging: true, low: false };
 
