@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+# Through the module, so a name a later section adds fails only the tests that use it.
+import sigint101.spectrum as spectrum_module
 from sigint101.spectrum import (
     MAX_BINS,
     SPAN_GUARD_BINS,
@@ -502,14 +504,14 @@ def _fm_pass(n):
     return FM_LINES[first:first + 8]
 
 
-def _sweeping(clock):
+def _sweeping(clock, **settings):
     """A running sweep on an injected clock that has published two rows of the captured FM band.
 
     Its rtl_power stays alive and prints only what the test feeds procs[-1] next. The capture's
-    third pass is held, as every pass is, until the next one begins.
+    third pass is held, as every pass is, until the next one begins. `settings` go to the Sweeper.
     """
     procs = []
-    sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, clock=clock)
+    sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, clock=clock, **settings)
     sweeper.start()
     procs[-1].feed(FM_LINES)
     wait_for_rows(sweeper, 2)
@@ -1863,3 +1865,565 @@ def test_a_restart_during_the_readers_exit_wait_leaves_the_new_run_alone():
     assert sweeper.reading()[0] == _pass_row(_fm_pass(2))
     assert sweeper.error is None, sweeper.error
     assert sweeper.retry_in() is None
+
+
+# --- C24: the Restart sweep key ----------------------------------------------------------------
+# WHY: an rtl_power that stops sweeping without exiting still reads as running. C25 made the
+# waterfall say STALLED, but nothing ever ended that rtl_power: only a gain step, a retune or
+# another tool's claim stops a sweep. The owner's ruling is a Restart sweep key, shown only while
+# the waterfall says STALLED, and no automatic watchdog. A press stops the stalled rtl_power and
+# keeps its rows; the next poll starts a new one. From the press until a run after it publishes a
+# row the sweep reads "restarting", and a restarted run that brings no row within the stall limit
+# plus a start-up allowance reads "stalled" again, so the key comes back. A press on a sweep that
+# is not stalled, or that recovers inside the press, changes nothing.
+
+def _stall(clock, sweeper):
+    """A minute with no new pass from an rtl_power that is still alive."""
+    clock.now += 60
+    assert sweeper.newest()[1] == "stalled"
+
+
+def _wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert predicate(), f"not so after {timeout} s"
+
+
+class StoppedProc(WaitedProc):
+    """rtl_power stopped by SIGSTOP: it prints only what is fed, and a SIGTERM stays pending, so
+    terminate() changes nothing. kill() ends it (exit -9, pipe closed). `terminate_seen` is set by
+    the terminate, so a test can act while the stop is under way."""
+
+    def __init__(self):
+        super().__init__()
+        self.killed = False
+        self.terminate_seen = threading.Event()
+
+    def terminate(self):
+        self.terminated = True
+        self.terminate_seen.set()
+
+    def kill(self):
+        self.killed = True
+        self.die(-9)
+
+
+class HeldProc(StoppedProc):
+    """rtl_power stuck in the kernel on a wedged USB call: it survives kill() too, and so still
+    holds the dongle. free() ends it, so a test can clean up."""
+
+    def kill(self):
+        self.killed = True
+
+    def free(self):
+        self.die(-9)
+
+
+class _HookClock(_Clock):
+    """A clock whose next call from the thread that armed it runs a step first, once. The reader's
+    own calls (the time a row is published) never run it."""
+
+    def __init__(self):
+        super().__init__()
+        self._armed = None
+
+    def arm(self, step):
+        self._armed = (threading.get_ident(), step)
+
+    def __call__(self):
+        armed = self._armed
+        if armed is not None and armed[0] == threading.get_ident():
+            self._armed = None
+            armed[1]()
+        return self.now
+
+
+class _SpyLock:
+    """A real lock that runs a step once, just before the arming thread's n-th acquire."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._armed = None
+
+    def arm(self, n, step):
+        self._armed = [threading.get_ident(), n, step]
+
+    def __enter__(self):
+        armed = self._armed
+        if armed is not None and armed[0] == threading.get_ident():
+            armed[1] -= 1
+            if armed[1] == 0:
+                self._armed = None
+                armed[2]()
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc):
+        return self._lock.__exit__(*exc)
+
+
+def _flush_event(sweeper):
+    """An event set after every attempt the reader makes to publish a pass."""
+    done = threading.Event()
+    real = sweeper._flush
+
+    def spy(run, pending):
+        try:
+            real(run, pending)
+        finally:
+            done.set()
+
+    sweeper._flush = spy
+    return done
+
+
+def test_restart_stops_a_stalled_sweep_keeps_its_rows_and_the_next_start_is_a_new_run():
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    kept = _spans(sweeper.rows())
+    _stall(clock, sweeper)
+    age, error = sweeper.restart()
+    assert age > sweeper.stale_after()
+    assert error is None                           # the stalled run had recorded nothing
+    assert procs[0].terminated and not sweeper.running
+    assert _spans(sweeper.rows()) == kept          # real rows, kept as a gain step keeps them
+    sweeper.start()                                # the next poll
+    assert len(procs) == 2 and sweeper.running
+    sweeper.stop()
+
+
+def test_from_the_press_to_the_first_row_after_it_the_sweep_reads_restarting():
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    _stall(clock, sweeper)
+    sweeper.restart()
+    states = [sweeper.newest()[1]]                 # pressed, not started yet
+    sweeper.start()
+    states.append(sweeper.newest()[1])             # started, no row yet
+    procs[-1].die(1)                               # the new rtl_power dies before its first row
+    _wait_until(lambda: sweeper.error is not None)
+    states.append(sweeper.newest()[1])
+    clock.now += 3                                 # past the 2 s back-off
+    with pytest.raises(SpectrumUnavailable):
+        sweeper.start()                            # reports the death
+    sweeper.start()                                # spawns
+    states.append(sweeper.newest()[1])
+    procs[-1].feed(FM_LINES[:9])                   # one whole pass; the next begins
+    wait_for_rows(sweeper, 3)
+    states.append(sweeper.newest()[1])
+    assert states == ["restarting"] * 4 + [None]   # never "resuming": swept wholly after the press
+    assert sweeper.reading()[0] == sweeper.rows()[-1]
+    sweeper.stop()
+
+
+def test_a_restarted_run_with_no_row_reads_stalled_again_after_its_allowance():
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    _stall(clock, sweeper)
+    sweeper.restart()
+    sweeper.start()
+    bound = sweeper.stale_after() + sweeper.START_ALLOWANCE_S
+    clock.now += bound - 0.01
+    assert sweeper.newest()[1] == "restarting"
+    clock.now += 0.02
+    assert sweeper.newest()[1] == "stalled"        # so the key comes back
+    sweeper.restart()
+    sweeper.start()
+    assert len(procs) == 3
+    sweeper.stop()
+
+
+def _not_stalled(case):
+    """A sweep in one of the states a press must leave alone, and the state it should name."""
+    clock = _Clock()
+    if case in ("never", "waiting"):
+        procs = []
+        sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, clock=clock)
+        if case == "waiting":
+            sweeper.start()
+        return sweeper, procs, {"never": "stopped", "waiting": "waiting"}[case]
+    sweeper, procs = _sweeping(clock)
+    if case == "live":
+        return sweeper, procs, "live"
+    _stall(clock, sweeper)
+    if case == "resuming":
+        procs[-1].feed(_fm_pass(0))                # rtl_power recovers on its own
+        wait_for_rows(sweeper, 3)
+    elif case == "restarting":
+        sweeper.restart()                          # the first press
+        sweeper.start()
+    elif case == "gain":
+        sweeper.set_gain(0.0)
+        return sweeper, procs, "stopped"
+    elif case == "retune":
+        sweeper.retune(88_000_000, 93_000_000, 78_125)
+        return sweeper, procs, "stopped"
+    elif case == "released":
+        sweeper.release()
+    elif case == "died":
+        procs[-1].die(1)
+        _wait_until(lambda: sweeper.error is not None)
+        return sweeper, procs, "stopped"
+    return sweeper, procs, case
+
+
+def _snapshot(sweeper, procs):
+    return (len(procs), [proc.terminated for proc in procs], _spans(sweeper.rows()),
+            sweeper.gain, (sweeper.low, sweeper.high, sweeper.bin_size), sweeper.released,
+            sweeper.error, sweeper.retry_in(), sweeper.running)
+
+
+@pytest.mark.parametrize("case", ["never", "waiting", "live", "resuming", "restarting", "gain",
+                                  "retune", "released", "died"])
+def test_restart_changes_nothing_unless_the_sweep_is_stalled(case):
+    sweeper, procs, state = _not_stalled(case)
+    before = _snapshot(sweeper, procs)
+    with pytest.raises(spectrum_module.SweepNotStalled) as refused:
+        sweeper.restart()
+    assert refused.value.state == state
+    assert _snapshot(sweeper, procs) == before
+    sweeper.stop()
+
+
+def test_restart_kills_a_stalled_rtl_power_that_ignores_sigterm():
+    procs = []
+    clock = _Clock()
+    sweeper = Sweeper(spawn=_first_then_fed(StoppedProc, procs), radio_present=lambda: True,
+                      clock=clock)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    reader = sweeper._thread
+    procs[0].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    _stall(clock, sweeper)
+    sweeper.restart()
+    assert (procs[0].terminated, procs[0].killed) == (True, True)
+    reader.join(5)
+    assert not reader.is_alive()
+    assert (sweeper.error, sweeper.retry_in()) == (None, None)   # our own stop is no death
+    sweeper.stop()
+
+
+def test_a_restart_that_cannot_free_the_dongle_is_reported_once_by_the_next_start():
+    procs = []
+    clock = _Clock()
+    sweeper = Sweeper(spawn=_first_then_fed(HeldProc, procs), radio_present=lambda: True,
+                      clock=clock)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    _stall(clock, sweeper)
+    sweeper.restart()
+    assert procs[0].killed
+    assert sweeper.error == "rtl_power survived kill; the dongle may still be held"
+    with pytest.raises(SpectrumUnavailable, match="survived kill"):
+        sweeper.start()
+    assert len(procs) == 1                         # nothing spawned into the held dongle then
+    sweeper.start()
+    assert len(procs) == 2
+    assert sweeper.newest()[1] == "restarting"
+    procs[0].free()
+    sweeper.stop()
+
+
+def test_a_reader_left_from_the_stalled_run_publishes_nothing_into_the_restarted_one():
+    procs = []
+    clock = _Clock()
+    sweeper = Sweeper(spawn=_late_then_fed(procs), radio_present=lambda: True, clock=clock)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].feed(FM_LINES)                        # two passes published, the third held
+    wait_for_rows(sweeper, 2)
+    kept = _spans(sweeper.rows())
+    _stall(clock, sweeper)
+    sweeper.restart()
+    assert procs[0].reader.is_alive()              # the old reader outlived the stop
+    sweeper.start()
+    procs[1].feed(_fm_pass(0)[:4])                 # half of the restarted run's first pass
+    procs[0].feed(_fm_pass(1)[:1])                 # the old reader ends its held pass, begins one
+    procs[0].close_pipe()
+    procs[0].reader.join(5)
+    assert _spans(sweeper.rows()) == kept
+    procs[1].feed(_fm_pass(0)[4:] + _fm_pass(1)[:1])
+    wait_for_rows(sweeper, 3)
+    assert _spans(sweeper.rows()) == kept + [FM_SPAN]
+    sweeper.stop()
+
+
+def test_a_release_during_a_slow_restart_leaves_the_radio_released():
+    procs = []
+    clock = _Clock()
+    sweeper = Sweeper(spawn=_first_then_fed(StoppedProc, procs), radio_present=lambda: True,
+                      clock=clock)
+    sweeper.STOP_WAIT_S = 0.2
+    sweeper.start()
+    procs[0].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    _stall(clock, sweeper)
+    press = threading.Thread(target=sweeper.restart)
+    press.start()
+    assert procs[0].terminate_seen.wait(5)         # the press is inside its stop
+    claim = threading.Thread(target=sweeper.release)
+    claim.start()
+    press.join(5)
+    claim.join(5)
+    assert sweeper.released and not sweeper.running
+    with pytest.raises(SpectrumUnavailable, match="released"):
+        sweeper.start()
+    assert len(procs) == 1
+
+
+@pytest.mark.parametrize("how", ["gain", "retune"])
+def test_a_gain_step_or_retune_during_restarting_ends_it(how):
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    _stall(clock, sweeper)
+    sweeper.restart()
+    sweeper.start()
+    if how == "gain":
+        sweeper.set_gain(0.0)
+    else:
+        sweeper.retune(88_000_000, 93_000_000, 78_125)
+    sweeper.start()
+    assert sweeper.newest() == (None, None, None)  # the gain step's run, as today
+    sweeper.stop()
+
+
+def test_a_restart_after_a_pipe_failure_reports_it_once_then_starts():
+    procs = []
+    clock = _Clock()
+    sweeper = Sweeper(spawn=_first_then_fed(FailingPipeProc, procs), radio_present=lambda: True,
+                      clock=clock)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    procs[0].break_pipe(OSError("Input/output error"))
+    sweeper.drain()                                # rtl_power runs on, unread
+    _stall(clock, sweeper)
+    sweeper.restart()
+    assert procs[0].terminated
+    with pytest.raises(SpectrumUnavailable, match="Input/output error"):
+        sweeper.start()
+    sweeper.start()
+    assert len(procs) == 2
+    assert sweeper.newest()[1] == "restarting"
+    procs[1].feed(_fm_pass(0) + _fm_pass(1)[:1])
+    wait_for_reading(sweeper)
+    assert sweeper.reading()[0] == _pass_row(_fm_pass(0))
+    sweeper.stop()
+
+
+@pytest.mark.parametrize("history", [120, 2], ids=["room-in-the-buffer", "full-buffer"])
+def test_a_press_on_a_sweep_that_recovers_inside_it_changes_nothing(history):
+    # The reader takes only the row lock, and newest() lets go of it before it judges the age: a
+    # pass can be published after the judgement. The clock newest() reads then runs the step.
+    # The buffer keeps DEFAULT_HISTORY (120) rows and is full a couple of minutes into any sweep:
+    # then a new row evicts the oldest and the count does not change, so the press must tell a
+    # recovery by the newest row itself. history=2 is that buffer, full from the start.
+    clock = _HookClock()
+    sweeper, procs = _sweeping(clock, history=history)
+    _stall(clock, sweeper)
+    stalled_row = sweeper.rows()[-1]
+
+    def recover():
+        procs[0].feed(_fm_pass(0))                 # rtl_power resumes; its held pass is published
+        _wait_until(lambda: sweeper.rows()[-1] is not stalled_row)
+
+    clock.arm(recover)
+    with pytest.raises(spectrum_module.SweepNotStalled) as refused:
+        sweeper.restart()
+    assert refused.value.state == "resuming"
+    assert (procs[0].terminated, len(procs), sweeper.running) == (False, 1, True)
+    assert len(sweeper.rows()) == min(3, history)
+    # The refused press must leave the recovered sweep publishing: a press that marked the run
+    # stopped before it knew the sweep had recovered would freeze it, rows and all.
+    newest = sweeper.rows()[-1]
+    procs[0].feed(_fm_pass(1))                     # the next pass begins: pass 0 is published
+    _wait_until(lambda: sweeper.rows()[-1] is not newest)
+    sweeper.stop()
+
+
+def test_a_pass_published_before_the_mark_leaves_the_sweep_running():
+    # The re-check and the mark are one hold of the row lock. Re-checked outside it, or marked in a
+    # later hold, a pass published in between is missed and the recovered sweep is stopped. The row
+    # lock is swapped for one that runs the step just before the pressing thread's 3rd acquire:
+    # after the judged entry and newest(), that is the re-check's own hold.
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    sweeper.STOP_WAIT_S = 0.05
+    _stall(clock, sweeper)
+    flushed = _flush_event(sweeper)
+    spy = _SpyLock()
+    sweeper._lock = spy
+
+    def step():
+        flushed.clear()
+        procs[0].feed(_fm_pass(0))                 # rtl_power resumes; its held pass is published
+        assert flushed.wait(5)
+
+    spy.arm(3, step)
+    with pytest.raises(spectrum_module.SweepNotStalled):
+        sweeper.restart()
+    assert len(sweeper.rows()) == 3
+    assert not procs[0].terminated, "a sweep that had recovered was stopped"
+    sweeper.stop()
+
+
+def test_a_pass_that_completes_after_the_recheck_is_not_published():
+    # The press has re-checked the newest row and committed to stopping this run. A pass completed
+    # now must not be published. The row lock is swapped for one that runs the step just before the
+    # pressing thread's 4th acquire: after the judged entry, newest() and the re-check.
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    sweeper.STOP_WAIT_S = 0.05
+    _stall(clock, sweeper)
+    flushed = _flush_event(sweeper)
+    spy = _SpyLock()
+    sweeper._lock = spy
+    ran = []
+
+    def step():
+        ran.append(1)
+        assert sweeper._proc is not None, "the step ran after the stop began"
+        flushed.clear()
+        procs[0].feed(_fm_pass(0))                 # the held pass completes as the next begins
+        assert flushed.wait(5)
+
+    spy.arm(4, step)
+    sweeper.restart()
+    assert ran == [1]
+    assert len(sweeper.rows()) == 2, "a row of the stopped run was published after the re-check"
+    assert procs[0].terminated
+    sweeper.stop()
+
+
+class _SpyRLock:
+    """A real re-entrant lock that runs a step once, as soon as the arming thread has let go of it
+    fully (its last nested hold released)."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._armed = None
+        self._depth = 0
+
+    def arm(self, step):
+        self._armed = (threading.get_ident(), step)
+
+    def __enter__(self):
+        held = self._lock.__enter__()
+        if self._armed is not None and self._armed[0] == threading.get_ident():
+            self._depth += 1
+        return held
+
+    def __exit__(self, *exc):
+        let_go = self._lock.__exit__(*exc)
+        armed = self._armed
+        if armed is not None and armed[0] == threading.get_ident():
+            self._depth -= 1
+            if self._depth == 0:
+                self._armed = None
+                armed[1]()
+        return let_go
+
+
+def test_a_press_holds_the_lifecycle_lock_from_its_check_through_its_stop():
+    # A press judges the sweep stalled, then stops it. Let go of the lifecycle lock in between,
+    # and a gain step and a poll can stop the stalled run and start a fresh one, which the press
+    # would then stop: a press would end a sweep that was not stalled. So the first moment the
+    # press lets go of the lock must find its work done, and a gain step started then must run
+    # after it and keep its own run.
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    sweeper.STOP_WAIT_S = 0.05
+    _stall(clock, sweeper)
+    spy = _SpyRLock()
+    sweeper._life = spy
+    at_first_let_go = []
+
+    def gain_step_and_poll():
+        sweeper.set_gain(0.0)
+        sweeper.start()
+
+    gain = threading.Thread(target=gain_step_and_poll)
+
+    def step():
+        at_first_let_go.append((procs[0].terminated, sweeper._restarting))
+        gain.start()
+        gain.join(5)
+
+    spy.arm(step)
+    sweeper.restart()
+    assert at_first_let_go == [(True, True)], "the press let go of the lock before its stop"
+    assert (len(procs), procs[1].terminated, sweeper.running) == (2, False, True)
+    assert (sweeper.gain, sweeper.newest()[1]) == (0.0, None)   # the gain step's run, left alone
+    sweeper.stop()
+
+
+def test_the_restart_flag_dies_with_the_first_row_after_it():
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    _stall(clock, sweeper)
+    sweeper.restart()
+    sweeper.start()
+    procs[-1].feed(FM_LINES[:9])
+    wait_for_rows(sweeper, 3)
+    assert sweeper.newest()[1] is None
+    procs[-1].die(1)                               # later, with no press, rtl_power dies
+    _wait_until(lambda: sweeper.error is not None)
+    assert sweeper.newest() == (None, None, None)
+    clock.now += 3
+    with pytest.raises(SpectrumUnavailable):
+        sweeper.start()
+    sweeper.start()
+    assert len(procs) == 3
+    assert sweeper.newest() == (None, None, None)  # an ordinary new run, not "restarting"
+    sweeper.stop()
+
+
+def test_the_stopped_runs_reader_publishes_nothing_before_the_next_start():
+    procs = []
+    clock = _Clock()
+    sweeper = Sweeper(spawn=_late_then_fed(procs), radio_present=lambda: True, clock=clock)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    kept = _spans(sweeper.rows())
+    _stall(clock, sweeper)
+    sweeper.restart()
+    procs[0].feed(_fm_pass(1)[:1])                 # its held pass ends before any new start
+    procs[0].close_pipe()
+    procs[0].reader.join(5)
+    assert _spans(sweeper.rows()) == kept
+    assert sweeper.newest() == (None, "restarting", None)
+    sweeper.stop()
+
+
+def test_a_restart_after_an_exit_that_does_not_come_waits_out_its_back_off():
+    procs = []
+    clock = _Clock()
+    sweeper = Sweeper(spawn=_first_then_fed(WaitedProc, procs), radio_present=lambda: True,
+                      clock=clock)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].feed(FM_LINES)
+    wait_for_rows(sweeper, 2)
+    clock.now += 60
+    procs[0].close_pipe()                          # output closed, and no exit comes
+    _wait_until(lambda: sweeper.error is not None)
+    assert sweeper.error.startswith("rtl_power closed its output but did not exit")
+    assert sweeper.retry_in() == pytest.approx(2.0)
+    assert sweeper.newest()[1] == "stalled"
+    sweeper.restart()
+    assert procs[0].terminated
+    with pytest.raises(SpectrumUnavailable, match="did not exit"):
+        sweeper.start()                            # the back-off runs: reported, and kept
+    clock.now += 2.1
+    with pytest.raises(SpectrumUnavailable, match="did not exit"):
+        sweeper.start()                            # run out: reported once more, and cleared
+    sweeper.start()
+    assert len(procs) == 2
+    assert sweeper.newest()[1] == "restarting"
+    sweeper.stop()

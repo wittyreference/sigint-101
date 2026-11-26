@@ -481,3 +481,83 @@ test("a live meter eases in each fresh row, and keeps its reading between rows",
   assert.deepEqual(panel.meterState({ floor: -10, peak: 20 }, [], null),
                    { reading: { floor: -10, peak: 20 }, note: null });
 });
+
+// --- the Restart sweep key (C24) ------------------------------------------------------------------
+// Nothing ended an rtl_power that stopped sweeping without exiting. The owner's ruling: a Restart
+// sweep key, shown only while the waterfall says STALLED, and no watchdog. A press posts
+// /api/spectrum/restart, which stops the stalled rtl_power; the next poll starts a new one, and the
+// console reads "restarting" until that run's first row. The decisions are pure, so they are tested
+// here; the click and the screen are proven by rendering.
+
+const POLL = (stale) => ({ code: 200, body: { ...FM_BODY, stale } });
+
+test("a restarted sweep's badge reads restarting, not live, over the rows it kept", () => {
+  const badge = panel.sweepBadge({ ...FM_BODY, stale: "restarting" }, 57);
+  assert.deepEqual([badge.text, badge.kind], ["restarting", "sample"]);
+});
+
+test("the Restart sweep key shows only after a poll that says stalled", () => {
+  assert.deepEqual(panel.restartKey(POLL("stalled"), false), { shown: true, disabled: false });
+  for (const stale of [null, "resuming", "restarting", undefined]) {
+    assert.equal(panel.restartKey(POLL(stale), false).shown, false, String(stale));
+  }
+  // No radio, or the radio handed to another tool: a 503, whatever its body says.
+  const refused = { code: 503, body: { available: false, reason: "no radio", stale: "stalled" } };
+  assert.equal(panel.restartKey(refused, false).shown, false);
+  assert.equal(panel.restartKey(null, false).shown, false);          // lost contact
+});
+
+test("a pressed key stays shown but cannot be pressed again until the console answers", () => {
+  assert.deepEqual(panel.restartKey(POLL("stalled"), true), { shown: true, disabled: true });
+});
+
+test("a restarting sweep's meter drops its floor and peak", () => {
+  // A guard: meterState already gives any stale state its note.
+  assert.deepEqual(panel.meterState({ floor: -9.5, peak: 20.2 }, [], "restarting"),
+                   { reading: null, note: "restarting" });
+});
+
+test("a second press while the first is in flight sends nothing; pending runs from press to answer",
+  async () => {
+    const sent = [];
+    const pending = [];
+    const answers = [];
+    let answer = null;
+    const restarter = panel.makeRestarter({
+      send: () => { sent.push("POST"); return new Promise((res) => { answer = res; }); },
+      onPending: (p) => pending.push(p),
+      onResult: (res) => answers.push(res),
+    });
+    assert.equal(restarter.press(), true);
+    assert.equal(restarter.press(), false);
+    assert.deepEqual([sent, pending, answers], [["POST"], [true], []]);
+    answer({ ok: true, status: 200, restarted: true });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(pending, [true, false]);
+    assert.deepEqual(answers, [{ ok: true, status: 200, restarted: true }]);
+    assert.equal(restarter.press(), true);                          // free again once answered
+    assert.equal(sent.length, 2);
+  });
+
+test("a failed or lost press is said on the caption; a 200 or 409 says nothing", () => {
+  assert.equal(panel.restartNote({ ok: true, status: 200 }), null);
+  assert.equal(panel.restartNote({ ok: false, status: 409, reason: "the sweep is not stalled" }),
+               null);
+  assert.equal(panel.restartNote({ ok: false, status: 503, reason: "no RTL-SDR on the USB bus" }),
+               "not restarted: no RTL-SDR on the USB bus");
+  assert.equal(panel.restartNote({ ok: false, status: 0,
+                                   reason: "lost contact with the console: Failed to fetch" }),
+               "not restarted: lost contact with the console: Failed to fetch");
+});
+
+test("every meter note fits the meter: restarting reads '— starting —', none over 12 characters",
+  () => {
+    // Lesson 2's note box holds 12 characters of its 18 px mono face on one line, measured at
+    // 800x480; "— restarting —" (14) wrapped onto two.
+    assert.equal(panel.meterNoteText("restarting", "— no radio —"), "— starting —");
+    assert.equal(panel.meterNoteText("stalled", "— no radio —"), "— stalled —");
+    assert.equal(panel.meterNoteText(null, "— no radio —"), "— no radio —");
+    for (const note of ["stalled", "resuming", "restarting", "waiting"]) {
+      assert.ok(panel.meterNoteText(note, "").length <= 12, note);
+    }
+  });

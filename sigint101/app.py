@@ -77,6 +77,7 @@ from .spectrum import (
     DEFAULT_LOW,
     SpectrumUnavailable,
     Sweeper,
+    SweepNotStalled,
     TuneError,
     validate_gain,
     validate_span,
@@ -1293,10 +1294,37 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             # Whether the newest row is still a reading, by the rule the baseline panel's reading
             # follows (Sweeper.newest): null while it is; "stalled" once rtl_power has gone too
             # long without a pass; "resuming" for the first two passes after, which carry levels
-            # from before the stall. The rows are served either way: they are real.
+            # from before the stall; "restarting" from a Restart sweep press until a run after it
+            # has swept a pass. The rows are served either way: they are real.
             "stale": stale,
             "rows": [row.as_dict() for row in sweeper.rows(limit)],
         }
+
+    @app.post("/api/spectrum/restart")
+    def spectrum_restart():
+        """The waterfall's Restart sweep key: stop a stalled rtl_power; the next poll starts anew.
+
+        An rtl_power that stops sweeping without exiting still reads as running, and nothing else
+        would end it. Only a stalled sweep is stopped (Sweeper.restart); any other press is a 409
+        that changes nothing, and never takes the radio back from another tool. The answer and the
+        log carry the reason the stopped run had recorded, or the stop's own ("survived kill"),
+        since the poll that starts the next run reports it only once and the provenance poll can
+        use that report up unseen. restart() reads it under its own lock: a poll waiting through
+        the stop runs the moment that lock is let go, and could clear it before this route read it.
+        A plain def, so the stop (up to 9 s) runs in the threadpool, not on the event loop every
+        page's polls share.
+        """
+        sweeper = app.state.sweeper
+        try:
+            stalled_for, error = sweeper.restart()
+        except SweepNotStalled as exc:
+            log_event(app.state.events_path, "spectrum_restart_refused", {"state": exc.state})
+            return JSONResponse(status_code=409, content={
+                "restarted": False, "state": exc.state,
+                "reason": f"the sweep is not stalled ({exc.state}); nothing was changed"})
+        payload = {"stalled_for_s": round(stalled_for, 1), "error": error}
+        log_event(app.state.events_path, "spectrum_restart", payload)
+        return {"restarted": True, **payload}
 
     @app.get("/api/decode")
     def decode(limit: int | None = None):

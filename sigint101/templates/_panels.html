@@ -20,6 +20,9 @@
                           {% if tune_band %}data-tune-low="{{ tune_band.low_hz }}" data-tune-high="{{ tune_band.high_hz }}"{% if tune_band.bin_hz %} data-tune-bin="{{ tune_band.bin_hz }}"{% endif %}{% endif %}
                           aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
                   <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
+                  {# Restart sweep: hidden until waterfall.js reads STALLED from the console, the only
+                     state it shows in. A press stops the stalled rtl_power (/api/spectrum/restart). #}
+                  <button class="btn waterfall__restart" type="button" data-wf-restart hidden>Restart sweep</button>
                   {# Why the band is empty (no radio, radio busy), as page text over the canvas: text
                      drawn into the stretched canvas bitmap came out ~7 px tall. #}
                   <div class="waterfall__reason" data-wf-reason hidden><span></span></div>

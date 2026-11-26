@@ -78,6 +78,18 @@ class SpectrumUnavailable(RuntimeError):
     """The radio cannot be swept. Never a reason to synthesise data — the panel says so instead."""
 
 
+class SweepNotStalled(RuntimeError):
+    """A restart was asked of a sweep that is not stalled, so nothing was changed.
+
+    `state` says how the sweep stands instead: "live", "waiting" (running, no row of its own yet),
+    "resuming", "restarting", "stopped" (never started, stopped, or died) or "released".
+    """
+
+    def __init__(self, state: str):
+        super().__init__(state)
+        self.state = state
+
+
 class TuneError(ValueError):
     """The requested setting — span or gain — is not one this radio can do. Fails closed."""
 
@@ -489,6 +501,10 @@ class Sweeper:
         self._thread = None
         self._released = False
         self._interrupted = False
+        # A restart was asked (restart()) and no run since has published a row: newest() reads
+        # "restarting" meanwhile. Changed under the row lock; any other stop, and that first row,
+        # clear it.
+        self._restarting = False
         self.error = None
         # The respawn back-off the decoders get from childproc.ChildWatch: an rtl_power that dies
         # on its own is not relaunched on every poll, and each quick death doubles the wait.
@@ -802,6 +818,8 @@ class Sweeper:
             waits = ((now - last[1], last[2][0]) if last is not None and last[0] == run
                      else (None, None))
             self._rows.append((run, now, waits, row))
+            # A run's first row after a restart ends "restarting": newest() judges it from here.
+            self._restarting = False
 
     def drain(self, timeout: float = 5.0) -> None:
         """Wait for a finite source to be fully consumed. Real sweeps never end."""
@@ -847,11 +865,25 @@ class Sweeper:
         back when rtl_power stalled, and the second the one rtl_power was sweeping then, finished
         after. Both carry levels from before the stall. The reading, the Capture refusal and the
         waterfall all judge by this one rule.
+
+        After a restart (restart()), until a run publishes a row of its own, it is "restarting",
+        with no row and no age: the rows kept are from before the press. That holds while the
+        stalled rtl_power is stopped and the next has not started, and while a run started after
+        the press has no row yet, for stale_after() plus START_ALLOWANCE_S. A run that brings no
+        row in that time is "stalled" again, aged from its start, and can be restarted again.
         """
         with self._life:
             with self._lock:
                 run, published, waits, row = (self._rows[-1] if self._rows
                                               else (None, None, (None, None), None))
+                restarting = self._restarting
+            if restarting and (not self.running or run != self._run):
+                if not self.running:
+                    return None, "restarting", None
+                since = self._clock() - self._started_at
+                if since > self.stale_after() + self.START_ALLOWANCE_S:
+                    return None, "stalled", since
+                return None, "restarting", None
             if run != self._run or not self.running:
                 return None, None, None
             limit = self.stale_after()
@@ -927,6 +959,64 @@ class Sweeper:
     #: rtl_power to exit (_exit_status).
     STOP_WAIT_S = 3.0
 
+    #: How long, beyond stale_after(), a run started after a restart may go without its first row
+    #: before it reads "stalled" again (newest()). stale_after() already covers the passes before a
+    #: first row (one is published when the next begins); this covers rtl_power opening the dongle,
+    #: a second or two. Not yet timed on the kiosk, so generous: too long only brings the key back
+    #: later.
+    START_ALLOWANCE_S = 10.0
+
+    def restart(self) -> tuple:
+        """Stop a stalled rtl_power so the next poll starts a new one: the Restart sweep key.
+
+        Nothing else ends an rtl_power that stops sweeping without exiting: it still reads as
+        running. A press is honoured only while the sweep is "stalled" (newest()); otherwise it
+        raises SweepNotStalled and changes nothing. It stops the sweep as a gain step does, keeping
+        the rows, and starts nothing: the next poll starts the new run, through the one start path
+        with its refusals and back-off. From here until a run publishes a row the sweep reads
+        "restarting". Returns (age, error): how long the sweep had gone without a pass, and the
+        reason recorded as the stop left it (the stopped run's own, or the stop's "survived kill"),
+        or None. It is read before the lifecycle lock is let go, because the next start reports it
+        once and clears it, and a poll waiting on the lock through the stop may be that start.
+
+        The whole press holds the lifecycle lock, from the judgement through the stop: let go in
+        between, a gain step and a poll could replace the stalled run, and the press would stop
+        that fresh one. The reader takes only the row lock, and newest() lets go of it before it
+        judges the age, so a pass can be published after the judgement. So the newest entry is
+        noted before judging, and after a "stalled" verdict the same entry is checked again (the
+        entry, not the count: a full buffer drops its oldest row as it appends), and the run marked
+        stopped, in one hold of the row lock: a sweep that recovered in between is left running,
+        and once the run is marked no row of it can be published (_flush checks under that lock).
+        """
+        with self._life:
+            with self._lock:
+                judged = self._rows[-1] if self._rows else None
+            _, stale, age = self.newest()
+            if stale != "stalled":
+                raise SweepNotStalled(self._state(stale))
+            with self._lock:
+                still = (self._rows[-1] if self._rows else None) is judged
+                if still:
+                    self._interrupted = True
+            if not still:
+                raise SweepNotStalled(self._state(self.newest()[1]))
+            self._stop_locked()
+            with self._lock:
+                self._restarting = True
+            return age, self.error
+
+    def _state(self, stale) -> str:
+        """How a sweep that is not stalled stands, for a refused restart."""
+        if stale is not None:
+            return stale
+        if self._released:
+            return "released"
+        if not self.running:
+            return "stopped"
+        with self._lock:
+            own = bool(self._rows) and self._rows[-1][0] == self._run
+        return "live" if own else "waiting"
+
     def stop(self) -> None:
         """End the sweep and let go of the dongle."""
         with self._life:
@@ -940,9 +1030,11 @@ class Sweeper:
         """
         # Mark the interruption before the process dies, so the reader's final flush
         # knows the chunks it holds are an incomplete pass and drops them. Under the row
-        # lock, as a start changes it, so no row of this start is published after it.
+        # lock, as a start changes it, so no row of this start is published after it. Any stop
+        # also ends a restart's "restarting": restart() marks it again after its own stop.
         with self._lock:
             self._interrupted = True
+            self._restarting = False
         # Clear the handle first, in one step, so the sweeper reads as "not running" for
         # the whole of the slow shutdown below and nothing tries to kill it twice.
         proc, self._proc = self._proc, None
