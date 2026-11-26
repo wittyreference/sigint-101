@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ctypes
+import inspect
 import os
 import queue
 import shlex
@@ -370,6 +371,34 @@ def running_command(proc) -> str | None:
     return command_line(proc)
 
 
+def _accepts_provenance(hook) -> bool:
+    """True when `hook` accepts keyword `command` and `freq_hz` arguments (or **kwargs)."""
+    try:
+        params = inspect.signature(hook).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    kw_kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    return (
+        "command" in params and params["command"].kind in kw_kinds
+        and "freq_hz" in params and params["freq_hz"].kind in kw_kinds
+    )
+
+
+def emit_reception(hook, item: dict, *, command: str | None = None, freq_hz=None) -> None:
+    """Call `hook` with `item` and, when it accepts them, its run's `command` and `freq_hz`.
+
+    The console's reception hook takes `command` and `freq_hz` so a reader that stalls after
+    releasing its buffer lock still logs the item under its own run's provenance rather than a
+    replacement run's. Plain one-argument hooks (such as test helpers) still receive `item`.
+    """
+    if _accepts_provenance(hook):
+        hook(item, command=command, freq_hz=freq_hz)
+    else:
+        hook(item)
+
+
 class ChildWatch:
     """One decoder's record of its child: whether we stopped it, why it died, when to retry.
 
@@ -400,12 +429,32 @@ class ChildWatch:
         with self._lock:
             self._current = None
 
-    def ended(self, proc, *, tail=None) -> str | None:
-        """Record the child's death if it was not ours. Returns the reason the first time only."""
+    def ended(self, proc, *, tail=None, runs: RunGuard | None = None,
+              run: int | None = None) -> str | None:
+        """Record the child's death if it was not ours. Returns the reason the first time only.
+
+        Exit diagnostics (which can wait for the process's exit status) are computed outside both
+        the watch lock and any RunGuard lock. When `runs` is supplied, committing a death and its
+        retry deadline requires both that `run` is still current under `runs.lock` and that `proc`
+        is still the current child.
+        """
+        if proc is None:
+            return None
         with self._lock:
-            if proc is None or proc is not self._current:
+            if proc is not self._current:
                 return None
-            reason = exit_reason(proc, finite=self.finite, tail=tail, tool=self.tool)
+        reason = exit_reason(proc, finite=self.finite, tail=tail, tool=self.tool)
+        if runs is not None:
+            with runs:
+                if not runs.is_current(run):
+                    return None
+                return self._commit_end(proc, reason)
+        return self._commit_end(proc, reason)
+
+    def _commit_end(self, proc, reason: str | None) -> str | None:
+        with self._lock:
+            if proc is not self._current:
+                return None
             if reason is None:
                 if proc.poll() is not None:
                     self._current = None  # a finite capture's clean end: nothing to report
@@ -460,10 +509,12 @@ class RunGuard:
         """The active run number, handed to the reader a start() launches (under _life)."""
         return self._run
 
-    def end(self) -> int:
-        """End the current run under the lock so no reader from it can act again."""
+    def end(self, watch: ChildWatch | None = None) -> int:
+        """End the current run under the lock, and mark `watch` stopping in the same step."""
         with self.lock:
             self._run += 1
+            if watch is not None:
+                watch.stopping()
             return self._run
 
     def is_current(self, run: int) -> bool:

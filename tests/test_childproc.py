@@ -546,3 +546,67 @@ def test_run_guard_end_waits_for_a_holder_of_the_buffer_lock():
     assert ended.is_set()
     with guard:
         assert guard.is_current(first) is False
+
+
+def test_run_guard_end_marks_watch_stopping_and_blocks_stale_retry():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    proc = _Ended(["rtl_433"], 1, "usb_claim_interface error -6\n")
+    watch.spawned(proc)
+    guard.end(watch)
+    assert watch.ended(proc, runs=guard, run=first) is None
+    assert watch.stopped is False
+    assert watch.blocked() is None
+
+
+def test_watch_ended_requires_current_generation_to_commit_retry():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    proc = _Ended(["rtl_433"], 1, "usb_claim_interface error -6\n")
+    watch.spawned(proc)
+    guard.end()
+    # Even if stopping() has not cleared _current, a stale generation cannot commit a retry.
+    assert watch.ended(proc, runs=guard, run=first) is None
+    assert watch.stopped is False
+    assert watch.blocked() is None
+
+
+def test_watch_ended_computes_exit_diagnostics_outside_run_guard_lock():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    waiting, release = threading.Event(), threading.Event()
+    lock_free_during_wait = []
+
+    class _SlowExit(_Ended):
+        def __init__(self):
+            super().__init__(["rtl_433"], None, "usb_claim_interface error -6\n")
+
+        def wait(self, timeout=None):
+            free = guard.lock.acquire(blocking=False)
+            if free:
+                guard.lock.release()
+            lock_free_during_wait.append(free)
+            waiting.set()
+            release.wait(5)
+            self._code = 1
+            return 1
+
+    proc = _SlowExit()
+    watch.spawned(proc)
+    outcome = []
+    reader = threading.Thread(
+        target=lambda: outcome.append(watch.ended(proc, runs=guard, run=first)))
+    reader.start()
+    assert waiting.wait(5)
+    assert lock_free_during_wait == [True]
+    # Stop invalidates the run and watch while the reader is waiting on exit diagnostics.
+    guard.end(watch)
+    release.set()
+    reader.join(5)
+    assert not reader.is_alive()
+    assert outcome == [None]
+    assert watch.stopped is False
+    assert watch.blocked() is None
