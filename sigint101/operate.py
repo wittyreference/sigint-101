@@ -137,7 +137,7 @@ def validate_decoder_hz(inst: Instrument, value) -> int:
 def command_gain(command: str | None) -> str | None:
     """The tuner gain a live command line sets, exactly as written, or None if it sets none.
 
-    rtl_fm, rtl_power and acarsdec take `-g`, satdump `--general_gain`, and dsd-fme carries it
+    rtl_fm, rtl_power and acarsdec take `-g`, satdump `--gain`, and dsd-fme carries it
     as the fourth field of its rtl: selector (0 is the tuner's AGC). A tool given no gain runs on
     its own default, which the record leaves as None beside the command that shows it.
     """
@@ -149,7 +149,7 @@ def command_gain(command: str | None) -> str | None:
         except ValueError:
             continue
         for i, arg in enumerate(argv):
-            if arg in ("-g", "--general_gain") and i + 1 < len(argv):
+            if arg in ("-g", "--gain") and i + 1 < len(argv):
                 return argv[i + 1]
             if arg.startswith("rtl:"):
                 parts = arg.split(":")
