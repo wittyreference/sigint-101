@@ -896,7 +896,8 @@ class MarauderFlockDetector(FlockDetector):
             # false while it runs there; a pinned path may just be the wrong one. A pinned path is
             # named by the variable that pins it, not spelled out: a by-id name alone is some 50
             # to 60 characters, and spelled out it ran the message to a third line. Either way
-            # this fits the two lines of message lesson 18's panel has room for.
+            # this fits the two lines lesson 18's panel has at rest; after a death the countdown
+            # adds a third, which the panel grows for.
             looked_for = (f"no {MARAUDER_TTY_ENV} port" if self._tty
                           else "no bridge port on USB Channel 1")
             raise FlockUnavailable(
@@ -913,7 +914,12 @@ class MarauderFlockDetector(FlockDetector):
         try:
             fd = _open_marauder_port(self.interface)
         except (OSError, termios.error) as exc:
-            raise FlockUnavailable(f"cannot open {self.interface}: {exc}") from exc
+            # The system's own words with the port named once: an OSError from the open repeats
+            # the path it was given, and named twice a by-id name ran the refusal past the four
+            # lines lesson 18's panel shows.
+            why = (OSError(exc.errno, exc.strerror) if isinstance(exc, OSError) and exc.strerror
+                   else exc)
+            raise FlockUnavailable(f"cannot open {self.interface}: {why}") from exc
         link = MarauderLink(fd, self.interface, answer_timeout=self._answer_timeout)
         try:
             for line in (MARAUDER_STOP, MARAUDER_CHANNEL, MARAUDER_SNIFF):

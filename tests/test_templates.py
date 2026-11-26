@@ -1,6 +1,7 @@
 # ABOUTME: Renders the touch-console Jinja templates (base/console/home) with sample
 # ABOUTME: contexts and asserts the shell, the keyboard-free predict gate, and the seal.
 
+import math
 import re
 from pathlib import Path
 
@@ -1269,6 +1270,143 @@ def test_exam_results_not_passed_reads_not_yet():
         result=result, pass_mark=26, total=35, pct=57, pass_pct=74, breakdown=[]))
     assert "exam-results--fail" in html
     assert "NOT YET" in html
+
+
+# --- lesson 18's Flock panel in a refusal ---------------------------------------
+# A refusal's end (the cause, the remedy, the countdown) is what a learner acts on, and a long port
+# name ran it past the two lines the fixed 124 px panel holds. In a lesson the panel grows for a
+# refusal, up to a cap of lines, and scrolls past them. These read the stylesheet; the render at
+# 800x480 is what proves the layout.
+
+DECODER_PANEL_JS = TEMPLATES_DIR.parent / "static" / "decoder-panel.js"
+PANELS_HTML = TEMPLATES_DIR / "_panels.html"
+FITS_REFUSAL = "decoder--fits-refusal"
+REFUSAL_RULE_PREFIX = ".stage-panel--instrument .instrument > .decoder--fits-refusal:has("
+# The lines of message the fixed panel shows when no rule lets it grow (measured at 800x480).
+FIXED_PANEL_MESSAGE_LINES = 2
+# The panel head's height at 800x480 (title, badge, padding, rule), measured in the render: not one
+# CSS value, so it is held here. 124 px less the 6 px border, this head, the message's 20 px
+# padding and two 26.1 px lines leaves the 5.43 px a third line does not need.
+DECODER_HEAD_PX = 40.37
+# The lowest the lesson's Prev and Next keys may sit while a refusal grows the panel, and where
+# explain's Complete lesson sits (both measured at 800x480).
+KEYS_BOTTOM_LIMIT_PX = 414.77
+COMPLETE_LESSON_BOTTOM_PX = 468
+SCREEN_HEIGHT_PX = 480
+
+
+def _css_rules(css=None):
+    """Every top-level (selector, body) in app.css whose selector is on one line."""
+    css = APP_CSS.read_text() if css is None else css
+    return re.findall(r"\n([^\n{}]+) \{([^{}]*)\}", css)
+
+
+def _css_decl(selector, prop, css=None):
+    """The value of `prop` in any top-level rule for exactly this selector, else None."""
+    for sel, body in _css_rules(css):
+        if sel == selector:
+            m = re.search(r"(?:^|[;\s])" + re.escape(prop) + r":\s*([^;]+);", body)
+            if m:
+                return m.group(1).strip()
+    return None
+
+
+def _px(value):
+    return float(re.fullmatch(r"([\d.]+)px", value.split()[0]).group(1))
+
+
+def _refusal_rules(css=None):
+    """The lesson Flock panel's refusal rules: (panel rule, message rule), each (selector, body)
+    or None."""
+    panel = message = None
+    for sel, body in _css_rules(css):
+        if FITS_REFUSAL not in sel:
+            continue
+        if sel.endswith("> .decoder__empty"):
+            message = (sel, body)
+        else:
+            panel = (sel, body)
+    return panel, message
+
+
+def refusal_lines_shown(css=None):
+    """How many lines of a refusal lesson 18's Flock panel shows: the cap in its refusal rule, no
+    limit (inf) if the panel grows uncapped, or the fixed panel's lines if it does not grow."""
+    panel, message = _refusal_rules(css)
+    if panel is None or not re.search(r"(?:^|[;\s])height:\s*auto;", panel[1]):
+        return FIXED_PANEL_MESSAGE_LINES
+    cap = message and re.search(r"max-height:\s*calc\((\d+)lh \+ 20px\);", message[1])
+    return int(cap.group(1)) if cap else math.inf
+
+
+def test_only_a_refusal_grows_the_lesson_flock_panel():
+    panel, message = _refusal_rules()
+    assert panel is not None and message is not None, "no refusal rule for the lesson Flock panel"
+    for sel, _body in (panel, message):
+        # Lessons only: the rack's panel (.rack__panel > .decoder) and explain are outside it.
+        assert sel.startswith(REFUSAL_RULE_PREFIX), sel
+    # Exactly the badges a refusal gets (decoder-panel.js downState), never a live or starting one.
+    js = DECODER_PANEL_JS.read_text()
+    down = re.search(r"function downState\(.*?\n  \}\n", js, re.S).group(0)
+    live = re.search(r"function liveBadge\(.*?\n  \}\n", js, re.S).group(0)
+    refusal_badges = set(re.findall(r"decoder__status--[\w-]+", down))
+    live_badges = set(re.findall(r"decoder__status(?:--[\w-]+)?", live))
+    named = re.search(r":is\(([^)]*)\)", panel[0]).group(1)
+    badges = {b.strip().lstrip(".") for b in named.split(",")}
+    assert badges == refusal_badges, (badges, refusal_badges)
+    assert not badges & live_badges, badges
+    # At its size at rest for a short refusal, so only a long one changes anything.
+    assert re.search(r"(?:^|[;\s])height:\s*auto;", panel[1]), panel[1]
+    min_height = re.search(r"min-height:\s*([^;]+);", panel[1])
+    assert min_height and min_height.group(1).strip() == _css_decl(".decoder", "height"), panel[1]
+    # Only the Flock panel opts in.
+    html = PANELS_HTML.read_text()
+    in_class = r'class="[^"]*\b' + re.escape(FITS_REFUSAL) + r'\b'
+    flock_macro = re.search(r"\{% macro flock\(.*?\{% endmacro %\}", html, re.S).group(0)
+    assert re.search(in_class, flock_macro)
+    assert len(re.findall(in_class, html)) == 1
+
+
+def test_a_grown_refusal_keeps_the_lesson_keys_and_complete_on_screen():
+    lines = refusal_lines_shown()
+    assert lines != math.inf, "the refusal rule lets the panel grow without a cap"
+    bar = _px(_css_decl(".app", "--bar-h"))
+    rail = _px(_css_decl(".app", "--rail-h"))
+    touch = _px(_css_decl(".app", "--touch"))
+    pad = _px(_css_decl(".stage-panel", "padding"))
+    title = _px(_css_decl(".stage-panel__title", "font-size")) * float(
+        _css_decl(".stage-panel__title", "line-height"))
+    row_gap = _px(_css_decl(".stage-panel--instrument", "row-gap"))
+    gap = _px(_css_decl(".instrument", "gap"))
+    panel_h = _px(_css_decl(".decoder", "height"))
+    border = 2 * _px(_css_decl(".decoder", "border"))
+    msg_pad = 2 * _px(_css_decl(".decoder__empty", "padding"))
+    line_height = float(_css_decl("body", "line-height"))
+    msg_line = _px(_css_decl(".decoder__empty", "font-size")) * line_height
+    narr_line = _px(_css_decl(".stage-panel__body", "font-size")) * line_height
+    panel_top = bar + rail + pad + title + row_gap                    # 158 px at 800x480
+    band = SCREEN_HEIGHT_PX - pad - panel_top - panel_h - 2 * gap - touch   # the narration: 90
+    spare = panel_h - border - DECODER_HEAD_PX - msg_pad - 2 * msg_line
+    grown = panel_h if lines <= 2 else panel_h + (msg_line - spare) + (lines - 3) * msg_line
+    keys_bottom = panel_top + grown + gap + touch
+    assert round(keys_bottom, 2) <= KEYS_BOTTOM_LIMIT_PX, keys_bottom
+    assert round(band - (grown - panel_h), 2) >= round(narr_line, 2), "no narration line left"
+    # Explain holds Complete lesson in its footer at the stage's foot; the rules reach only the
+    # instrument stages (the prefix above), so it stays there. The render measures the 468 px.
+    assert round(SCREEN_HEIGHT_PX - pad, 2) == COMPLETE_LESSON_BOTTOM_PX
+    for rule in _refusal_rules():
+        if rule is not None:
+            assert rule[0].startswith(".stage-panel--instrument "), rule[0]
+
+
+def test_a_refusal_past_the_cap_scrolls_and_is_never_clipped():
+    panel, message = _refusal_rules()
+    assert panel is not None and message is not None, "no refusal rule for the lesson Flock panel"
+    assert re.search(r"max-height:\s*calc\(\d+lh \+ 20px\);", message[1]), message[1]
+    # auto, not scroll: a scroll track on every refusal would look as if something scrolled.
+    assert re.search(r"overflow-y:\s*auto;", message[1]), message[1]
+    # The panel itself (overflow: hidden at rest) always holds the whole capped box.
+    assert "max-height" not in panel[1] and "overflow" not in panel[1], panel[1]
 
 
 if __name__ == "__main__":  # pragma: no cover

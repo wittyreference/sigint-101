@@ -1059,7 +1059,8 @@ button.rail-pip:disabled {
    live by decode.js; an honest empty / no-radio line when nothing decodes. */
 .decoder {
   flex: 0 0 auto;
-  /* Leaves the narration under it a band of three lines at 800x480; any taller and it gets one. */
+  /* Leaves the narration under it a band of three lines at 800x480; any taller and it gets one.
+     A refusal grows the lesson's Flock panel (.decoder--fits-refusal), leaving one line at most. */
   height: 124px;
   display: flex;
   flex-direction: column;
@@ -1313,6 +1314,20 @@ button.rail-pip:disabled {
   color: var(--fg-dim);
   font-family: var(--font-mono);
   font-size: 18px;
+}
+/* A refusal says why the Flock panel is empty and what to do, and its end (the cause, the
+   remedy, the countdown) is the part a learner acts on. A long port name runs it past the two
+   lines the fixed panel holds, so in a lesson the panel grows for a refusal: the NO RADIO and
+   STOPPED badges decoder-panel.js sets. Listening or live, it keeps its 124 px. Up to four lines
+   of message: the narration under it keeps one line and the keys drop at most 47 px, still on
+   screen; anything longer scrolls inside those four lines. */
+.stage-panel--instrument .instrument > .decoder--fits-refusal:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) {
+  height: auto;
+  min-height: 124px;
+}
+.stage-panel--instrument .instrument > .decoder--fits-refusal:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) > .decoder__empty {
+  max-height: calc(4lh + 20px);
+  overflow-y: auto;
 }
 /* The image gallery (M24 APT, M25 SSTV): a decoded picture shown where the decoder list sits.
    The frame fills the panel band and the image scales to fit it (contain), so a tall weather
