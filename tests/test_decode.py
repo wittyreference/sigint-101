@@ -503,6 +503,102 @@ def test_an_old_readers_death_record_landing_after_the_next_start_is_not_the_new
     assert len(procs) == 3
 
 
+class _HeldLock:
+    """The decoder's buffer lock, able to hold one thread just before that thread takes it.
+
+    It forces the order a test needs across the lock: the old reader is held on its way into the
+    lock while the test retunes and starts the next run, then let in. The reader's run test must be
+    made inside the lock, or what it tested is out of date by the time it writes.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.held = None
+        self.arrived = threading.Event()
+        self.go_on = threading.Event()
+
+    def hold(self, thread):
+        self.held = thread
+
+    def __enter__(self):
+        if self.held is not None and threading.current_thread() is self.held:
+            self.held = None
+            self.arrived.set()
+            self.go_on.wait(5)
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+
+@pytest.fixture
+def held(late):
+    """The `late` decoder with a buffer lock that can hold its old reader at the door, and a child
+    watch on a clock the test runs, so a death's back-off can run out at once."""
+    dec, procs, heard = late
+    dec._lock = _HeldLock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=_Clock())
+    return dec, procs, heard
+
+
+def _restart_while_held(dec):
+    """With the old reader held at the buffer lock: retune, let any back-off run out, start the
+    next run, and only then let the old reader in."""
+    assert dec._lock.arrived.wait(5)
+    dec.retune(315_000_000)
+    dec.watch.clock.now += 60
+    dec.start()
+    dec._lock.go_on.set()
+
+
+def test_a_read_on_its_way_in_at_a_restart_is_not_listed_or_logged(held):
+    dec, procs, heard = held
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    dec._lock.hold(procs[0].reader)
+    procs[0].feed(FSK_LINE)                       # read, and held on its way to be listed
+    _restart_while_held(dec)
+    _end_pipe(procs[0])
+    assert dec.recent() == []
+    assert heard.log == [("Acurite-Tower", 433_920_000, _line(procs[0]))]
+    assert len(procs) == 2
+
+
+def test_a_pipe_failure_on_its_way_in_at_a_restart_is_not_the_new_runs(held):
+    dec, procs, heard = held
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    dec._lock.hold(procs[0].reader)
+    procs[0].break_pipe(OSError("old pipe failed"))   # held on its way to be recorded
+    _restart_while_held(dec)
+    procs[0].reader.join(5)
+    assert not procs[0].reader.is_alive()
+    assert dec.error is None
+    dec.stop()
+    dec.start()                                   # not refused with the old run's reason
+    assert len(procs) == 3
+
+
+def test_a_death_on_its_way_in_at_a_restart_is_not_the_new_runs(held):
+    dec, procs, heard = held
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    dec._lock.hold(procs[0].reader)
+    procs[0].die(1)                               # found, and held on its way to be recorded
+    procs[0].close_pipe()
+    _restart_while_held(dec)
+    procs[0].reader.join(5)
+    assert not procs[0].reader.is_alive()
+    assert dec.error is None
+    dec.stop()
+    dec.start()                                   # not refused with the old run's reason
+    assert len(procs) == 3
+
+
 @pytest.mark.parametrize("stand_down", ["retune", "stop"])
 @pytest.mark.parametrize("during", ["stopping", "terminate"])
 def test_what_an_old_reader_reads_during_its_stop_is_not_kept(late, during, stand_down):
