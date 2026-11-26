@@ -181,7 +181,7 @@ def main():
     print(MODE, "=>", json.dumps(r))
     if not isinstance(r, dict) or r.get("err"):
         print("VERDICT: FAIL -", (r or {}).get("err", "no result"))
-        return
+        sys.exit(1)
     if MODE == "explain":
         ok = (
             r["scrollable"]
@@ -192,6 +192,7 @@ def main():
     else:
         ok = r["overflowY"] in ("auto", "scroll") and r["tilesWithClippedMeta"] == 0
     print("VERDICT:", "PASS" if ok else "FAIL")
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
