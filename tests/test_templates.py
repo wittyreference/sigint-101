@@ -1129,9 +1129,7 @@ def test_home_puts_the_exam_and_operator_bars_side_by_side_in_one_row():
     assert 'href="/exam"' in inside and 'href="/operate"' in inside
 
 
-def test_every_screen_has_no_horizontal_overflow_affordance():
-    # Guard against a stray inline width that would break the 800x480 no-scroll rule;
-    # this is a smoke check that the templates render without raising.
+def test_base_console_and_home_templates_render_with_canvas_or_statusbar():
     for html in (_render("base.html", **_status()), _console(),
                  _render("home.html", **_status(), tiles=UNITS)):
         assert "<canvas" in html or "statusbar" in html
