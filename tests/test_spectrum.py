@@ -832,6 +832,283 @@ def test_the_running_sweep_still_records_its_own_pipe_failing():
     sweeper.stop()
 
 
+# --- C29: a reader whose pipe fails, or whose rtl_power dies, publishes no part of a pass -------
+# WHY: a pass is published when the next one begins, so the reader always holds the pass rtl_power
+# is sweeping. When its own pipe failed (an I/O error, or bytes that do not decode), the reader
+# recorded the failure and then published what it held as a row: part of the band, handed out as
+# the reading while rtl_power ran on. A death that poll() could not see yet did the same, as a
+# clean finish: a dying process's pipe ends before its exit status is ready, and Popen.poll() reads
+# None while another thread is reaping it. The held pass is now published only on a confirmed
+# clean exit: the pipe ends and rtl_power's exit status, waited for, is 0. An rtl_power that closes
+# its pipe and has not exited by the end of that wait is a failure too. Complete means what it
+# means in normal running: rtl_power prints a whole pass under one timestamp, lowest hop first (the
+# real capture: 8 lines per second), so a pass is known to be whole when the next one begins. A
+# pass held at a failure is not known to be whole, and is dropped.
+
+class WaitedProc(FedProc):
+    """rtl_power with Popen's wait(): it returns the exit status once the process has exited, and
+    otherwise waits up to `timeout` for it, then raises TimeoutExpired. Each timeout passed to it is
+    kept in `waits`. close_pipe() ends the pipe and exit() ends the process, each on its own; die()
+    does both."""
+
+    def __init__(self):
+        super().__init__()
+        self.waits = []
+        self._exited = threading.Event()
+        self._status = None
+
+    def exit(self, code):
+        self._status = code
+        self.returncode = code
+        self._exited.set()
+
+    def close_pipe(self):
+        self._lines.put(None)
+
+    def die(self, code):
+        self.exit(code)
+        self.close_pipe()
+
+    def terminate(self):
+        self.terminated = True
+        if not self._exited.is_set():
+            self.exit(-15)
+        self.close_pipe()
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if not self._exited.wait(timeout):
+            raise subprocess.TimeoutExpired("rtl_power", timeout)
+        return self._status
+
+
+class FailingPipeProc(WaitedProc):
+    """rtl_power whose pipe fails: an exception fed to it is raised by the read, as an I/O error or
+    bytes that do not decode are. The process itself runs on (poll() is None)."""
+
+    def __init__(self):
+        super().__init__()
+        self.stdout = self._stream()
+
+    def _stream(self):
+        for line in iter(self._lines.get, None):
+            if isinstance(line, Exception):
+                raise line
+            yield line
+
+    def break_pipe(self, error):
+        self._lines.put(error)
+
+
+class UnreapedProc(WaitedProc):
+    """rtl_power that has died but is not reaped yet: its pipe has ended, and poll() still reads
+    None, as Popen's can for a moment. wait() reaps it and returns its status."""
+
+    def exit(self, code):
+        self._status = code
+        self._exited.set()
+
+    def wait(self, timeout=None):
+        status = super().wait(timeout)
+        self.returncode = status
+        return status
+
+
+def _first_then_fed(first, procs):
+    """A spawn whose first rtl_power is a `first`; every later start gets a FedProc."""
+    def spawn(cmd):
+        procs.append(first() if not procs else FedProc())
+        return procs[-1]
+    return spawn
+
+
+def _pass_row(lines):
+    """The row one whole pass of these lines makes."""
+    return merge_chunks([parse_line(line) for line in lines])
+
+
+def wait_for_reading(sweeper, timeout=5.0):
+    """Wait for the running sweep's first row of its own: until then there is no reading."""
+    deadline = time.monotonic() + timeout
+    while sweeper.reading()[0] is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert sweeper.reading()[0] is not None, f"no reading after {timeout} s"
+
+
+FM_SPAN = (88_000_000, 108_000_000, 256)
+
+
+@pytest.mark.parametrize("held", [1, 4, 7], ids=["1-hop", "4-hops", "7-hops"])
+def test_a_pipe_that_fails_mid_pass_publishes_no_part_of_it(held):
+    # One pass is published as the next begins, `held` hops of the next are held, then the pipe
+    # fails. The published pass stays the reading; the hops held are no row.
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(FailingPipeProc, procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:held])
+    wait_for_rows(sweeper, 1)
+    procs[0].break_pipe(OSError("Input/output error"))
+    sweeper.drain()
+    assert _spans(sweeper.rows()) == [FM_SPAN]
+    assert sweeper.reading()[0] == _pass_row(_fm_pass(0))
+    assert sweeper.error == "Input/output error"  # recorded as before
+    assert procs[0].waits == []                   # rtl_power runs on: nothing to wait for
+    sweeper.stop()
+
+
+def test_bytes_that_do_not_decode_publish_no_part_of_the_pass_either():
+    # The other failure the reader catches: text that is not UTF-8 raises a ValueError mid-pass.
+    undecodable = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(FailingPipeProc, procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].break_pipe(undecodable)
+    sweeper.drain()
+    assert _spans(sweeper.rows()) == [FM_SPAN]
+    assert sweeper.error == str(undecodable)
+    assert procs[0].waits == []
+    sweeper.stop()
+
+
+def test_a_pass_the_next_had_not_begun_to_close_is_unfinished_at_a_failure():
+    # Where "complete" is decided. All eight hops of the second pass are held, but no line of a
+    # third has come, so nothing has shown that the second pass ended: at a failure it is dropped,
+    # as a death drops the pass it held. The first pass, closed by the second, stands.
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(FailingPipeProc, procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1))
+    wait_for_rows(sweeper, 1)
+    procs[0].break_pipe(OSError("Input/output error"))
+    sweeper.drain()
+    assert sweeper.rows() == [_pass_row(_fm_pass(0))]
+    sweeper.stop()
+
+
+def test_after_its_pipe_failed_the_next_run_s_first_row_is_its_own_whole_pass():
+    # rtl_power runs on after its pipe failed, so the sweep restarts at the next gain step, which
+    # first reports the failure once.
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(FailingPipeProc, procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].break_pipe(OSError("Input/output error"))
+    sweeper.drain()
+    sweeper.set_gain(0.0)
+    with pytest.raises(SpectrumUnavailable, match="Input/output error"):
+        sweeper.start()
+    sweeper.start()
+    procs[1].feed(_fm_pass(2) + _fm_pass(0)[:1])  # a whole pass of the new run; the next begins
+    wait_for_reading(sweeper)
+    assert sweeper.rows() == [_pass_row(_fm_pass(0)), _pass_row(_fm_pass(2))]
+    assert sweeper.reading()[0] == _pass_row(_fm_pass(2))
+    sweeper.stop()
+
+
+@pytest.mark.parametrize("first", [WaitedProc, UnreapedProc], ids=["reaped", "not-yet-reaped"])
+def test_an_rtl_power_that_dies_mid_pass_publishes_no_part_of_it(first):
+    # Its death is recorded and backs off as any death does, and once the back-off has run out the
+    # next run's first row is its own whole pass.
+    clock = _Clock()
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(first, procs), radio_present=lambda: True, clock=clock)
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].die(1)
+    sweeper.drain()
+    assert sweeper.rows() == [_pass_row(_fm_pass(0))]
+    assert sweeper.error == "the sweep stopped (rtl_power status 1)"
+    assert not sweeper.running
+    assert sweeper.retry_in() is not None
+    clock.now += sweeper.retry_in()
+    with pytest.raises(SpectrumUnavailable, match="rtl_power status 1"):
+        sweeper.start()
+    sweeper.start()
+    procs[1].feed(_fm_pass(2) + _fm_pass(0)[:1])
+    wait_for_reading(sweeper)
+    assert sweeper.rows() == [_pass_row(_fm_pass(0)), _pass_row(_fm_pass(2))]
+    sweeper.stop()
+
+
+def test_a_whole_pass_before_a_clean_end_is_still_published():
+    # The boundary on the other side: the pipe ends and rtl_power exits 0 after its last pass, as
+    # it does when its exit timer (-e) runs out. Read after the reap, that is a clean finish, and
+    # the last pass is published, as before.
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(UnreapedProc, procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1))
+    wait_for_rows(sweeper, 1)
+    procs[0].die(0)
+    sweeper.drain()
+    assert sweeper.rows() == [_pass_row(_fm_pass(0)), _pass_row(_fm_pass(1))]
+    assert sweeper.error is None
+
+
+def test_an_rtl_power_that_closes_its_pipe_and_does_not_exit_publishes_nothing_and_is_reported():
+    # The pipe ends holding part of a pass, and rtl_power has not exited when the wait for it runs
+    # out (a dying process whose close of the radio hangs on a wedged USB device is one way). That
+    # is no clean finish: the part pass is dropped, and the reason is recorded with the back-off a
+    # death gets, so when rtl_power exits at last the next start reports it before relaunching.
+    clock = _Clock()
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(WaitedProc, procs), radio_present=lambda: True,
+                      clock=clock)
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    procs[0].stderr = io.StringIO("Signal caught, exiting!\n")   # what rtl_power said last
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].close_pipe()
+    reason = "rtl_power closed its output but did not exit: Signal caught, exiting!"
+    try:
+        sweeper.drain()
+        assert procs[0].waits == [0.05]           # the reader waited, for STOP_WAIT_S and no more
+        assert sweeper.rows() == [_pass_row(_fm_pass(0))]
+        assert sweeper.error == reason            # with what rtl_power printed, as a death has
+        assert sweeper.retry_in() is not None
+    finally:
+        procs[0].exit(1)                          # a reader still waiting is let go
+    sweeper.drain()
+    assert sweeper.error == reason
+    assert not sweeper.running
+    clock.now += sweeper.retry_in()
+    with pytest.raises(SpectrumUnavailable, match="did not exit"):
+        sweeper.start()
+    sweeper.start()
+    procs[1].feed(_fm_pass(2) + _fm_pass(0)[:1])
+    wait_for_reading(sweeper)
+    assert sweeper.rows() == [_pass_row(_fm_pass(0)), _pass_row(_fm_pass(2))]
+    sweeper.stop()
+
+
+@pytest.mark.parametrize("code, reason, backs_off", [
+    (0, "Input/output error", False),
+    (1, "the sweep stopped (rtl_power status 1)", True),
+], ids=["exited-0", "exited-1"])
+def test_a_pipe_that_fails_after_rtl_power_exited_publishes_no_part_of_the_pass(
+        code, reason, backs_off):
+    # rtl_power has already exited when its pipe fails, so the reader reads its status at once. An
+    # exit 0 does not make the pass held whole: the pipe failed, and only the pipe error stands. A
+    # non-zero exit is a death, recorded with its back-off, as it was before C29.
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(FailingPipeProc, procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].exit(code)
+    procs[0].break_pipe(OSError("Input/output error"))
+    sweeper.drain()
+    assert sweeper.rows() == [_pass_row(_fm_pass(0))]
+    assert sweeper.error == reason
+    assert (sweeper.retry_in() is not None) == backs_off
+    assert not sweeper.running
+
+
 def test_a_sweeper_whose_process_exited_is_not_running():
     sweeper = Sweeper(spawn=lambda cmd: DeadProc([]), radio_present=lambda: True)
     sweeper.start()
@@ -1534,4 +1811,54 @@ def test_a_deliberate_stop_starts_no_back_off():
                       radio_present=lambda: True, clock=_Clock())
     sweeper.start()
     sweeper.stop()
+    assert sweeper.retry_in() is None
+
+
+# The reader asks whether its run is still current only AFTER the exit wait. A stop that comes
+# while the reader waits ends the run and kills the process: the status it then reads (-15) is our
+# own stop's, not a death, and must not be recorded or start a back-off. Asking before the wait
+# would record it. (The engineering manager's gate check, PR 87.)
+
+def _reader_waiting(proc, timeout=2.0):
+    """Wait until the reader is inside its wait for the exit status."""
+    deadline = time.monotonic() + timeout
+    while not proc.waits and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert proc.waits, "the reader never waited for the exit status"
+
+
+def test_a_stop_during_the_readers_exit_wait_records_nothing():
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(WaitedProc, procs), radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 1.0
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].close_pipe()
+    _reader_waiting(procs[0])
+    t0 = time.monotonic()
+    sweeper.stop()
+    took = time.monotonic() - t0
+    assert sweeper.rows() == [_pass_row(_fm_pass(0))]
+    assert sweeper.error is None, sweeper.error
+    assert sweeper.retry_in() is None
+    assert took < 0.5, took
+
+
+def test_a_restart_during_the_readers_exit_wait_leaves_the_new_run_alone():
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(WaitedProc, procs), radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 1.0
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].close_pipe()
+    _reader_waiting(procs[0])
+    sweeper.stop()                       # as a gain step or a retune does: stop, then start
+    sweeper.start()                      # refused if the old run's end was taken for a death
+    assert len(procs) == 2
+    procs[1].feed(_fm_pass(2) + _fm_pass(3))
+    wait_for_reading(sweeper)
+    assert sweeper.reading()[0] == _pass_row(_fm_pass(2))
+    assert sweeper.error is None, sweeper.error
     assert sweeper.retry_in() is None

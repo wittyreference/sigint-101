@@ -646,32 +646,53 @@ class Sweeper:
         Once its start is stopped or replaced, it publishes and records nothing (_current).
         """
         pending = []
+        ended = False
         try:
             for raw in proc.stdout:
                 chunk = parse_line(raw)
                 if chunk is not None:
                     self._absorb(chunk, run, pending)
+            ended = True
         except (OSError, ValueError) as exc:  # loud, never silent
             if self._current(run):
                 self.error = str(exc)
         finally:
-            # A deliberate stop() cuts rtl_power off mid-pass, so its in-flight chunks cover a
-            # fraction of the band — publishing them would hand the panel a row whose SNR and
-            # axis both lie. Any other death is not ours: rtl_power exiting 0, or a finite
-            # source ending on its own (poll() is None, as the tests feed), is a clean finish
-            # whose last pass is published; but a non-zero exit — a positive rtl_power error, or
-            # a negative signal from an external SIGTERM/SIGKILL, a USB wedge, or an OOM kill —
-            # cut the pass short, so its chunks are dropped rather than merged into a full-looking
-            # row, and the reason is recorded so /api/spectrum reports the block. Our own stop's
-            # SIGTERM never reaches this branch: _interrupted is set before the process is killed,
-            # and in production the read above blocks on the pipe until that kill closes it. Nor
-            # does a reader whose start a later one replaced: the sweep is another process now.
+            # The chunks held are the pass rtl_power was sweeping: a pass is known to be whole
+            # only when the next one begins (_absorb). So they are published only on a confirmed
+            # clean finish: the pipe ended and rtl_power's exit status, waited for, is 0. Anything
+            # else drops them rather than merging them into a full-looking row, and records why so
+            # /api/spectrum reports the block:
+            # - a pipe that failed (an I/O error, or bytes that do not decode) leaves them a pass
+            #   not known to be whole, while rtl_power runs on (the error is recorded above);
+            # - a non-zero exit (a positive rtl_power error, or a signal from an external
+            #   SIGTERM/SIGKILL, a USB wedge or an OOM kill) cut the pass short;
+            # - an rtl_power that closed its pipe and has not exited by the end of the wait is no
+            #   clean finish either.
+            # A deliberate stop() cuts the pass short too, but it records nothing: _interrupted is
+            # set before the process is killed, and in production the read above blocks on the
+            # pipe until that kill closes it. Nor does a reader whose start a later one replaced:
+            # the sweep is another process now.
+            code = self._exit_status(proc) if ended else proc.poll()
             if self._current(run):
-                code = proc.poll()
-                if code is None or code == 0:
+                if ended and code == 0:
                     self._flush(run, pending)
-                else:
+                elif ended or code:
                     self._record_abnormal_death(code, proc)
+
+    def _exit_status(self, proc):
+        """rtl_power's exit status once its pipe has ended, or None if it has not exited in time.
+
+        poll() alone can read None for a process that has died: the kernel closes a dying
+        process's pipe before its exit status is ready, and Popen.poll() reads None while another
+        thread (a request asking `running`) is reaping it. Taken for a clean finish, that published
+        the pass the death cut short. A process whose pipe has ended is exiting, so this waits for
+        it, as long as stop() waits. One that has still not exited then is not a clean finish
+        (_record_abnormal_death).
+        """
+        try:
+            return proc.wait(timeout=self.STOP_WAIT_S)
+        except subprocess.TimeoutExpired:
+            return None
 
     def _current(self, run: int) -> bool:
         """Is `run` the start running now, neither stopped nor replaced by a later start?
@@ -690,9 +711,13 @@ class Sweeper:
         never reaches here, so a signal at this point is external — a SIGTERM/SIGKILL from
         another process, an OOM kill, or a USB wedge that took the process down. Either way
         the pass was cut short, so the reason is recorded rather than a truncated in-flight
-        pass merged into a full-looking row and served as `available: true`.
+        pass merged into a full-looking row and served as `available: true`. No status (None) is
+        an rtl_power that closed its output and had not exited by the end of the wait for it
+        (_exit_status): no clean finish either, so it is recorded and backed off the same way.
         """
-        if code > 0:
+        if code is None:
+            self.error = f"rtl_power closed its output but did not exit{self._stderr_tail(proc)}"
+        elif code > 0:
             self.error = f"the sweep stopped (rtl_power status {code}){self._stderr_tail(proc)}"
         else:
             self.error = (f"the sweep was killed mid-pass (signal {-code})"
@@ -703,8 +728,9 @@ class Sweeper:
         lived = now - self._started_at if self._started_at is not None else 0.0
         self._deaths = 1 if lived >= STABLE_AFTER_S else self._deaths + 1
         self._retry_at = now + min(FIRST_RETRY_S * 2 ** (self._deaths - 1), MAX_RETRY_S)
-        # Nothing more will be written: the process is reaped. Closing here frees the
-        # handle now rather than at the next start(), and the temporary file with it.
+        # Nothing more of it will be read: its tail is in the reason. Closing here frees the
+        # handle now rather than at the next start(), and the temporary file with it (a process
+        # not yet exited keeps writing to its own handle, not this one).
         self._close_stderr(proc)
 
     @staticmethod
@@ -897,7 +923,8 @@ class Sweeper:
 
     #: How long stop() waits, in seconds, at each of its three steps: for rtl_power to exit after
     #: SIGTERM, again after SIGKILL, and for the reader to end. A reader can outlive the last
-    #: wait; it then publishes nothing (_read).
+    #: wait; it then publishes nothing (_read). A reader whose pipe has ended waits as long for
+    #: rtl_power to exit (_exit_status).
     STOP_WAIT_S = 3.0
 
     def stop(self) -> None:
