@@ -1227,13 +1227,20 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     last_refusal = {}
 
     def _refused(kind: str, exc, empty: dict, watch=None):
-        """A 503 that says why. A tool that died on its own reads as stopped, with its retry."""
+        """A 503 that says why. A tool that died on its own reads as stopped, with its retry.
+
+        Only the death itself reads stopped: the refusal that carries the death's own reason.
+        The watch keeps that record until the next spawn, and any other refusal in that time (no
+        radio, two radios, a tool that cannot run) is what it says. Badged stopped, it read
+        "retrying now" for as long as the radio stayed away, though nothing was retrying.
+        """
         reason = str(exc)
         if last_refusal.get(kind) != reason:
             last_refusal[kind] = reason
             log_event(app.state.events_path, f"{kind}_blocked", {"reason": reason})
         body = {"available": False, "reason": reason, "command": None, **empty}
-        if watch is not None and watch.stopped:
+        death = watch.reason if watch is not None else None
+        if death is not None and reason == death:
             retry = watch.retry_in()
             body["state"] = "stopped"
             body["retry_in"] = round(retry, 1) if retry is not None else 0

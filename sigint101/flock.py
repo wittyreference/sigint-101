@@ -911,8 +911,8 @@ class MarauderFlockDetector(FlockDetector):
             # false while it runs there; a pinned path may just be the wrong one. A pinned path is
             # named by the variable that pins it, not spelled out: a by-id name alone is some 50
             # to 60 characters, and spelled out it ran the message to a third line. Either way
-            # this fits the two lines lesson 18's panel has at rest; after a death the countdown
-            # adds a third, which the panel grows for.
+            # this fits the two lines lesson 18's panel has at rest, after a death too: only the
+            # death itself reads STOPPED with a countdown, never this refusal.
             looked_for = (f"no {MARAUDER_TTY_ENV} port" if self._tty
                           else "no bridge port on USB Channel 1")
             raise FlockUnavailable(
