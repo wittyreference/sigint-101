@@ -33,7 +33,7 @@ DEFAULT_APT_HZ = 137_100_000
 # find and track the carrier; ~1 MS/s is comfortable for an RTL-SDR and is what APT captures use.
 APT_SAMPLE_RATE_HZ = 1_024_000
 
-# RTL-SDR tuner gain handed to satdump (its --general_gain). Near the top of the RTL range, matching
+# RTL-SDR tuner gain handed to satdump (its --gain). Near the top of the RTL range, matching
 # the other high-band lessons — a weak 137 MHz pass needs the front end wide open.
 APT_GAIN = 49
 
@@ -59,14 +59,14 @@ def satellite_for(freq_hz: int) -> str:
     return NOAA_APT_FREQUENCIES.get(int(freq_hz), "NOAA")
 
 
-def _popen(freq_hz: int, device: int, output_dir: Path):
+def _popen(freq_hz: int, source_id: str | None, output_dir: Path):
     """Launch satdump on the NOAA APT pipeline, writing decoded image products into output_dir."""
-    return spawn(
-        [SATDUMP, "live", APT_PIPELINE, str(output_dir),
-         "--source", "rtlsdr", "--source_id", str(device),
-         "--samplerate", str(APT_SAMPLE_RATE_HZ), "--frequency", str(freq_hz),
-         "--general_gain", str(APT_GAIN), "--timeout", str(APT_PASS_TIMEOUT_S)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    argv = [SATDUMP, "live", APT_PIPELINE, str(output_dir), "--source", "rtlsdr"]
+    if source_id:
+        argv += ["--source_id", source_id]
+    argv += ["--samplerate", str(APT_SAMPLE_RATE_HZ), "--frequency", str(freq_hz),
+             "--gain", str(APT_GAIN), "--timeout", str(APT_PASS_TIMEOUT_S)]
+    return spawn(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class AptDecoder:
@@ -118,13 +118,17 @@ class AptDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
+    def _choose_device(self) -> tuple[int, str | None]:
+        """Resolve the index for reception metadata and the USB serial for SatDump."""
         if self._list_devices is None:
-            return self.device
+            return self.device, self.serial
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            devices = self._list_devices()
+            index = select_rtlsdr_index(self.serial, devices=devices)
         except DeviceSelectionError as exc:
             raise AptUnavailable(str(exc)) from exc
+        # Without a pinned serial, selection succeeds only for a single radio.
+        return index, self.serial or devices[0].serial or None
 
     def release(self) -> None:
         """Hand the dongle to another program (the sweeper) and stay off it until resumed.
@@ -165,11 +169,11 @@ class AptDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise AptUnavailable(blocked)
-        self.device = self._choose_device()
+        self.device, source_id = self._choose_device()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._before_pass = set(self._pngs())
         try:
-            self._proc = self._spawn(self.freq_hz, self.device, self.output_dir)
+            self._proc = self._spawn(self.freq_hz, source_id, self.output_dir)
         except (OSError, ValueError) as exc:
             self._proc = None
             self._before_pass = None
