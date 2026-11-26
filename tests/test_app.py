@@ -2856,6 +2856,84 @@ def test_a_refused_pool_is_logged_once_however_often_the_trainer_is_asked(tmp_pa
     assert logged == [{"reason": "pool has 300 questions, expected 409"}]
 
 
+# An OSError need not carry a strerror: one raised with free text only, or with no text at all,
+# has none, and its free text may hold the pool's whole path.
+@pytest.mark.parametrize("error", [
+    lambda path: OSError(f"short read on {path}"),
+    lambda path: OSError(),
+    lambda path: TimeoutError(f"timed out reading {path}"),
+], ids=["text-naming-the-path", "no-text", "subclass-naming-the-path"])
+def test_an_unreadable_pool_without_a_strerror_still_says_so_and_names_no_folder(
+        tmp_path, monkeypatch, error):
+    # The reason must still read as a sentence (no colon left dangling with nothing after it)
+    # and must name no folder, on every exam page and in the log alike.
+    pool = tmp_path / "pool.json"
+
+    def refuse(path=None):
+        raise error(pool)
+
+    monkeypatch.setattr("sigint101.app.load_pool", refuse)
+    with _client(tmp_path, pool_path=pool) as client:
+        pages = _ask_every_exam_route(client)
+    logged = [e["payload"]["reason"] for e in read_events(tmp_path / "events.jsonl")
+              if e["kind"] == "exam_disabled"]
+    assert len(logged) == 1
+    reason = logged[0]
+    for (_, url), page in zip(_EXAM_ROUTES, pages):
+        assert page.status_code == 503, url
+        found = re.search(r'class="error-screen__detail">(.*?)</p>', page.text, re.S)
+        assert found, url
+        assert unescape(found.group(1)).strip() == reason.strip(), url
+    assert reason.startswith("pool file cannot be read"), reason
+    assert not reason.rstrip().endswith(":"), reason
+    assert "None" not in reason, reason
+    assert not _ABSOLUTE_PATH.search(reason), reason
+    assert str(tmp_path) not in reason, reason
+    assert "/home/" not in reason, reason
+
+
+# --- A44: the home screen's exam bar while the trainer is off --------------------------------
+# The bar stays a link, so the reason stays one tap away. While the pool stands refused its
+# subtitle says so, in the refusal page's own words, instead of inviting the learner to practise.
+
+def _exam_bar(home):
+    """The home screen's link to the trainer: its title and subtitle as the learner reads them."""
+    link = re.search(r'<a\b[^>]*\bhref="/exam"[^>]*>(.*?)</a>', home.text, re.S)
+    assert link, "home links to the trainer"
+
+    def words(part):
+        found = re.search(rf'class="[^"]*\bexam-cta__{part}\b[^"]*"[^>]*>(.*?)</span>',
+                          link.group(1), re.S)
+        assert found, f"the bar's {part} sits inside its link"
+        return " ".join(unescape(found.group(1)).split())
+
+    return words("title"), words("sub")
+
+
+def test_home_exam_bar_invites_practice_while_the_pool_is_good(tmp_path):
+    with _client(tmp_path) as client:
+        home = client.get("/")
+        card = client.get("/exam")
+    assert card.status_code == 200          # the shipped pool passes its check: the trainer is on
+    assert _exam_bar(home) == ("Licence exam", "Technician practice")
+    assert "trainer disabled" not in unescape(home.text).lower()
+
+
+@pytest.mark.parametrize("write", [_short_pool, _no_pool_file, _pool_that_is_a_directory])
+def test_home_exam_bar_says_trainer_disabled_while_the_pool_is_refused(tmp_path, write):
+    with _client(tmp_path, pool_path=_pool_file(tmp_path, write)) as client:
+        home = client.get("/")
+        card = client.get("/exam")
+    assert home.status_code == 200
+    assert card.status_code == 503
+    heading = re.search(r"<h1\b[^>]*>(.*?)</h1>", card.text, re.S)
+    shown = " ".join(unescape(heading.group(1)).split())
+    assert shown == "Trainer disabled"
+    # The bar is still the link in, and its subtitle is the refusal page's heading, word for word.
+    assert _exam_bar(home) == ("Licence exam", shown)
+    assert "technician practice" not in unescape(home.text).lower()
+
+
 # --- provenance panel (M3): the radio's account of itself + baseline (deaf vs. empty) ---------
 
 
