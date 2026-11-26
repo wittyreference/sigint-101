@@ -335,9 +335,10 @@
    OUI + IE fingerprint; the title names that source's tool. flock.js polls /api/flock and lists
    each detected device with its evidence tier. No monitor radio / no capture tool / no camera in
    range shows an honest empty list, never a fabricated detection — no alert never means no
-   camera. ---- #}
+   camera. In a lesson the panel grows to show a refusal whole (app.css, .decoder--fits-refusal):
+   a long port name runs one past the two lines it holds at rest. ---- #}
 {% macro flock(tool, head_command=true) %}
-              <div class="decoder" data-flock-panel aria-label="Live Flock camera detections">
+              <div class="decoder decoder--fits-refusal" data-flock-panel aria-label="Live Flock camera detections">
                 <div class="decoder__head">
                   <span class="decoder__title">{{ tool }} &middot; Flock detector</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}

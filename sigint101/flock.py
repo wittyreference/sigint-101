@@ -712,6 +712,21 @@ MARAUDER_BOOT = b"ESP-IDF version is: "
 MARAUDER_MARKER_TAIL = max(len(MARAUDER_BEGIN), len(MARAUDER_BOOT)) - 1
 
 
+def _os_reason(exc) -> str:
+    """Why opening the port failed, in the system's own words and without the path.
+
+    An OSError from the open repeats the path it was given, and named twice a by-id name ran the
+    refusal past the four lines lesson 18's panel shows; the refusal names the port itself. A
+    termios.error is no OSError, and as itself it reads as a Python tuple, so it is worded the
+    same way: "[Errno 25] Inappropriate ioctl for device". Anything else keeps its own words.
+    """
+    if isinstance(exc, OSError) and exc.strerror:
+        return str(OSError(exc.errno, exc.strerror))
+    if isinstance(exc, termios.error) and len(exc.args) == 2:
+        return str(OSError(*exc.args))
+    return str(exc)
+
+
 def _open_marauder_port(path: str) -> int:
     """Open the bridge's port raw at Marauder's baud, with any stale input dropped.
 
@@ -896,7 +911,8 @@ class MarauderFlockDetector(FlockDetector):
             # false while it runs there; a pinned path may just be the wrong one. A pinned path is
             # named by the variable that pins it, not spelled out: a by-id name alone is some 50
             # to 60 characters, and spelled out it ran the message to a third line. Either way
-            # this fits the two lines of message lesson 18's panel has room for.
+            # this fits the two lines lesson 18's panel has at rest; after a death the countdown
+            # adds a third, which the panel grows for.
             looked_for = (f"no {MARAUDER_TTY_ENV} port" if self._tty
                           else "no bridge port on USB Channel 1")
             raise FlockUnavailable(
@@ -913,7 +929,7 @@ class MarauderFlockDetector(FlockDetector):
         try:
             fd = _open_marauder_port(self.interface)
         except (OSError, termios.error) as exc:
-            raise FlockUnavailable(f"cannot open {self.interface}: {exc}") from exc
+            raise FlockUnavailable(f"cannot open {self.interface}: {_os_reason(exc)}") from exc
         link = MarauderLink(fd, self.interface, answer_timeout=self._answer_timeout)
         try:
             for line in (MARAUDER_STOP, MARAUDER_CHANNEL, MARAUDER_SNIFF):

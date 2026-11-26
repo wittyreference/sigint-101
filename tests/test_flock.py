@@ -1,14 +1,17 @@
 # ABOUTME: Tests the Flock ALPR detector — parsing real 802.11 mgmt frames and matching signatures.
 # ABOUTME: A real off-air wlan1 capture, also wrapped as Marauder's serial; tcpdump and tty faked.
 
+import errno
 import hashlib
 import io
+import math
 import os
 import re
 import select
 import shlex
 import struct
 import subprocess
+import termios
 import textwrap
 import time
 import zlib
@@ -16,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+import sigint101.flock as flock_module
 from sigint101 import childproc
 from sigint101.flock import (
     FLOCK_IE_SIGNATURE,
@@ -36,6 +40,7 @@ from sigint101.flock import (
 )
 from tests.child_fakes import Child
 from tests.test_app import _client
+from tests.test_templates import refusal_lines_shown
 
 # A real off-air capture: tcpdump -i wlan1 -s 512 -w off wlan1 in monitor mode, 2026-10-29.
 # Its network and device names, serial number, LAN address and hardware addresses were then
@@ -994,6 +999,194 @@ def test_the_no_port_refusal_names_what_it_looked_for(tmp_path, pinned):
         assert "SIGINT101_MARAUDER_TTY" in looked_for, looked_for
     else:
         assert re.search(r"\bUSB Channel 1\b", looked_for), looked_for
+
+
+# Every refusal the Marauder path can show must be whole in lesson 18's panel: as many lines as the
+# panel shows for a refusal (refusal_lines_shown, read from app.css), at the panel's 66 characters.
+# A refusal comes in two forms: before any link died, and after one did, when the console badges it
+# STOPPED with the countdown (childproc's ChildWatch stays stopped until the next spawn). Port
+# names reach the detector through its glob, never as a real pin, and every open is doubled or
+# lands on the test's pty, so no test opens a /dev/serial name. A by-id name is 44 + 2n characters
+# for an n-character Flipper name, and the firmware caps n at 8.
+BY_ID = "/dev/serial/by-id/usb-Flipper_Devices_Inc._Flipper_{0}_flip_{0}-if02"
+REFUSAL_PORTS = {
+    "by-id3": BY_ID.format("Aaa"),
+    "by-id8": BY_ID.format("Abcdefgh"),
+    "by-path": "/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.2",
+    "acm": "/dev/ttyACM1",
+}
+TWO_BRIDGES = {
+    "by-id3": (BY_ID.format("Aaa"), BY_ID.format("Bbb")),
+    "by-id8": (BY_ID.format("Abcdefgh"), BY_ID.format("Hgfedcba")),
+}
+REMEDY = "GPIO → USB-UART Bridge, USB Channel 1"
+OPEN_CAUSES = ("eacces", "ebusy", "enoent", "eio", "termios-eio")
+WRITE_CAUSES = ("eio", "eagain")
+ERRNOS = {"eacces": errno.EACCES, "ebusy": errno.EBUSY, "enoent": errno.ENOENT,
+          "eio": errno.EIO, "eagain": errno.EAGAIN}
+
+
+def _cause(kind, path=None):
+    """The error a port gives: an OSError as os.open raises it (with the path), or termios's."""
+    if kind == "termios-eio":
+        return termios.error(errno.EIO, os.strerror(errno.EIO))
+    code = ERRNOS[kind]
+    return OSError(code, os.strerror(code), path) if path else OSError(code, os.strerror(code))
+
+
+def _system_words(exc):
+    """What the system said, taken from the exception itself."""
+    if isinstance(exc, OSError) and exc.strerror:
+        return exc.strerror
+    if isinstance(exc, termios.error) and len(exc.args) == 2:
+        return exc.args[1]
+    return str(exc)
+
+
+def _panel_text(body):
+    """The refusal as lesson 18's panel shows it; a stopped one with the longest countdown."""
+    if body.get("state") == "stopped":
+        return f"{body['reason']} · retrying in {math.ceil(childproc.MAX_RETRY_S)} s"
+    return body["reason"]
+
+
+REFUSAL_CASES = []
+for _form in ("never-died", "after-death"):
+    REFUSAL_CASES += [("no-port-search", None, None, _form), ("no-port-pinned", None, None, _form)]
+    REFUSAL_CASES += [("two-bridges", port, None, _form) for port in TWO_BRIDGES]
+    REFUSAL_CASES += [("cannot-open", port, cause, _form)
+                      for port in REFUSAL_PORTS for cause in OPEN_CAUSES]
+    REFUSAL_CASES += [("cannot-write", port, cause, _form)
+                      for port in REFUSAL_PORTS for cause in WRITE_CAUSES]
+REFUSAL_CASES += [(row, port, None, "the-death")
+                  for row in ("no-answer", "link-closed") for port in REFUSAL_PORTS]
+REFUSAL_CASES += [(row, "by-id8", None, "the-death") for row in ("restarted", "linktype")]
+
+
+def _served_refusal(tmp_path, monkeypatch, bridge, row, port, cause, form):
+    """Drive the console to one refusal; return its /api/flock body and the words it must keep."""
+    name = REFUSAL_PORTS.get(port) or REFUSAL_PORTS["by-id8"]
+    names = [] if row == "no-port-search" and form == "never-died" else [name]
+    real_open = _open_marauder_port
+    monkeypatch.setattr(flock_module, "_open_marauder_port", lambda path: real_open(bridge.path))
+    quick = row == "no-answer" or form == "after-death"
+    if row == "no-port-pinned":
+        pin = tmp_path / "ttyACM1"
+        if form == "after-death":
+            pin.symlink_to(bridge.path)
+        dec = MarauderFlockDetector(tty=str(pin), answer_timeout=0.05)
+    else:
+        dec = MarauderFlockDetector(glob=lambda pattern: list(names),
+                                    answer_timeout=0.05 if quick else 5.0)
+    with _client(tmp_path, flock_factory=lambda: dec) as client:
+        if form != "never-died":
+            first = client.get("/api/flock").json()
+            assert first["available"] is True, first
+        if form == "after-death":
+            dec.drain()   # Marauder never answers on the pty: the link dies
+            died = client.get("/api/flock").json()
+            assert died.get("state") == "stopped" and died["reason"].startswith("no answer"), died
+        words = [name]
+        if row == "no-port-search":
+            names.clear()
+            words = [REMEDY]
+        elif row == "no-port-pinned":
+            if pin.is_symlink():
+                pin.unlink()
+            words = [REMEDY]
+        elif row == "two-bridges":
+            names[:] = TWO_BRIDGES[port]
+            words = [os.path.basename(p) for p in TWO_BRIDGES[port]]   # as the refusal names them
+        elif row == "cannot-open":
+            exc = _cause(cause, name)
+
+            def refuse_open(path):
+                raise exc
+            monkeypatch.setattr(flock_module, "_open_marauder_port", refuse_open)
+            words = [name, _system_words(exc)]
+        elif row == "cannot-write":
+            exc = _cause(cause)
+
+            def refuse_write(self, line):
+                raise exc
+            monkeypatch.setattr(MarauderLink, "send", refuse_write)
+            words = [name, _system_words(exc)]
+        elif row == "no-answer":
+            dec.drain()
+        elif row == "link-closed":
+            bridge.hang_up()
+            dec.drain()
+        elif row == "restarted":
+            bridge.say(marauder_stream([]))
+            wait_for(lambda: dec._proc.answered)
+            bridge.say(b"ESP-IDF version is: v4.4.4\r\n")
+            dec.drain()
+            words = ["restarted"]
+        elif row == "linktype":
+            bridge.say(MARAUDER_STARTUP + marauder_chunk(marauder_header(linktype=1)))
+            dec.drain()
+            words = ["linktype"]
+        if form == "after-death" and row in ("cannot-open", "cannot-write"):
+            time.sleep(0.15)   # reached only once the back-off has passed
+        body = client.get("/api/flock").json()
+    return body, words
+
+
+@pytest.mark.parametrize("row,port,cause,form", REFUSAL_CASES,
+                         ids=["-".join(p for p in case if p) for case in REFUSAL_CASES])
+def test_every_marauder_refusal_shows_whole_in_the_lesson_panel(
+        tmp_path, monkeypatch, bridge, row, port, cause, form):
+    monkeypatch.setattr(flock_module, "LINK_POLL_S", 0.01)
+    monkeypatch.setattr(childproc, "FIRST_RETRY_S", 0.05)
+    body, words = _served_refusal(tmp_path, monkeypatch, bridge, row, port, cause, form)
+    assert body["available"] is False, body
+    if form == "never-died":
+        assert "state" not in body, body       # refused, never stopped
+    else:
+        assert body.get("state") == "stopped", body
+    text = _panel_text(body)
+    lines = textwrap.wrap(text, PANEL_MESSAGE_CHARS)
+    assert len(lines) <= refusal_lines_shown(), lines
+    for word in words:
+        assert word in text, (word, text)
+
+
+# "cannot open" names the port once, whatever the error that stopped the open carries: os.open's
+# OSError repeats the path it was given, and named twice a by-id name ran the refusal past the lines
+# the panel shows. The port comes from the detector, so no form may lose it either.
+CANNOT_OPEN_FORMS = ("eacces", "ebusy", "enoent", "eio", "no-filename", "message-only",
+                     "termios-eio", "real-missing-path", "real-regular-file")
+
+
+@pytest.mark.parametrize("form", CANNOT_OPEN_FORMS)
+def test_every_cannot_open_names_the_port_once(tmp_path, monkeypatch, form):
+    if form == "real-missing-path":
+        port = str(tmp_path / "ttyACM-missing")        # os.open raises FileNotFoundError
+    elif form == "real-regular-file":
+        port = str(tmp_path / "ttyACM-file")           # tty.setraw raises termios.error 25
+        Path(port).write_bytes(b"")
+    else:
+        port = REFUSAL_PORTS["by-id8"]
+        exc = {"no-filename": OSError(errno.EIO, os.strerror(errno.EIO)),
+               "message-only": OSError("device went away")}.get(form) or _cause(form, port)
+
+        def refuse_open(path):
+            raise exc
+        monkeypatch.setattr(flock_module, "_open_marauder_port", refuse_open)
+    dec = MarauderFlockDetector(glob=lambda pattern: [port])
+    with pytest.raises(FlockUnavailable) as refused:
+        dec.start()
+    text = str(refused.value)
+    cause = refused.value.__cause__
+    assert text.startswith("cannot open "), text
+    assert text.count(port) == 1, text
+    assert _system_words(cause) in text, text
+    # A cause with an error number reads the same whichever kind it is: termios.error is no OSError,
+    # and as itself it showed a Python tuple, "(25, 'Inappropriate ioctl for device')".
+    code = cause.errno if isinstance(cause, OSError) else (
+        cause.args[0] if isinstance(cause, termios.error) and len(cause.args) == 2 else None)
+    if code is not None:
+        assert f"[Errno {code}] {_system_words(cause)}" in text, text
 
 
 # --------------------------------------------------------------------------- the logged reception
