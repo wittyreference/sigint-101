@@ -712,6 +712,21 @@ MARAUDER_BOOT = b"ESP-IDF version is: "
 MARAUDER_MARKER_TAIL = max(len(MARAUDER_BEGIN), len(MARAUDER_BOOT)) - 1
 
 
+def _os_reason(exc) -> str:
+    """Why opening the port failed, in the system's own words and without the path.
+
+    An OSError from the open repeats the path it was given, and named twice a by-id name ran the
+    refusal past the four lines lesson 18's panel shows; the refusal names the port itself. A
+    termios.error is no OSError, and as itself it reads as a Python tuple, so it is worded the
+    same way: "[Errno 25] Inappropriate ioctl for device". Anything else keeps its own words.
+    """
+    if isinstance(exc, OSError) and exc.strerror:
+        return str(OSError(exc.errno, exc.strerror))
+    if isinstance(exc, termios.error) and len(exc.args) == 2:
+        return str(OSError(*exc.args))
+    return str(exc)
+
+
 def _open_marauder_port(path: str) -> int:
     """Open the bridge's port raw at Marauder's baud, with any stale input dropped.
 
@@ -914,12 +929,7 @@ class MarauderFlockDetector(FlockDetector):
         try:
             fd = _open_marauder_port(self.interface)
         except (OSError, termios.error) as exc:
-            # The system's own words with the port named once: an OSError from the open repeats
-            # the path it was given, and named twice a by-id name ran the refusal past the four
-            # lines lesson 18's panel shows.
-            why = (OSError(exc.errno, exc.strerror) if isinstance(exc, OSError) and exc.strerror
-                   else exc)
-            raise FlockUnavailable(f"cannot open {self.interface}: {why}") from exc
+            raise FlockUnavailable(f"cannot open {self.interface}: {_os_reason(exc)}") from exc
         link = MarauderLink(fd, self.interface, answer_timeout=self._answer_timeout)
         try:
             for line in (MARAUDER_STOP, MARAUDER_CHANNEL, MARAUDER_SNIFF):

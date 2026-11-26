@@ -1177,9 +1177,16 @@ def test_every_cannot_open_names_the_port_once(tmp_path, monkeypatch, form):
     with pytest.raises(FlockUnavailable) as refused:
         dec.start()
     text = str(refused.value)
+    cause = refused.value.__cause__
     assert text.startswith("cannot open "), text
     assert text.count(port) == 1, text
-    assert _system_words(refused.value.__cause__) in text, text
+    assert _system_words(cause) in text, text
+    # A cause with an error number reads the same whichever kind it is: termios.error is no OSError,
+    # and as itself it showed a Python tuple, "(25, 'Inappropriate ioctl for device')".
+    code = cause.errno if isinstance(cause, OSError) else (
+        cause.args[0] if isinstance(cause, termios.error) and len(cause.args) == 2 else None)
+    if code is not None:
+        assert f"[Errno {code}] {_system_words(cause)}" in text, text
 
 
 # --------------------------------------------------------------------------- the logged reception

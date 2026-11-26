@@ -1291,8 +1291,8 @@ DECODER_HEAD_PX = 40.37
 # The lowest the lesson's Prev and Next keys may sit while a refusal grows the panel, and where
 # explain's Complete lesson sits (both measured at 800x480).
 KEYS_BOTTOM_LIMIT_PX = 414.77
-COMPLETE_LESSON_BOTTOM_PX = 468
 SCREEN_HEIGHT_PX = 480
+CONSOLE_HTML = TEMPLATES_DIR / "console.html"
 
 
 def _css_rules(css=None):
@@ -1329,6 +1329,42 @@ def _refusal_rules(css=None):
     return panel, message
 
 
+def _rule_heads_naming(name, css=None):
+    """(selector list, depth) for every rule in app.css whose selector names `name`, nested or
+    not. Comments and strings are blanked first, then braces are counted; depth 0 is top level."""
+    css = APP_CSS.read_text() if css is None else css
+    css = re.sub(r"/\*.*?\*/", " ", css, flags=re.S)
+    css = re.sub(r"\"[^\"\n]*\"|'[^'\n]*'", '""', css)
+    found, depth, start = [], 0, 0
+    for i, ch in enumerate(css):
+        if ch == "{":
+            head = " ".join(css[start:i].split())
+            if name in head:
+                found.append((head, depth))
+            depth, start = depth + 1, i + 1
+        elif ch in "};":
+            depth, start = depth - (ch == "}"), i + 1
+    return found
+
+
+def _selectors(head):
+    """A selector list split at its top-level commas (not those inside :is(...) or :has(...))."""
+    parts, depth, cur = [], 0, ""
+    for ch in head:
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth == 0:
+            parts.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    return parts + [cur.strip()]
+
+
+def _decls(body):
+    """A rule body's declarations as {property: value}."""
+    return {p: v.strip() for p, v in re.findall(r"([\w-]+)\s*:\s*([^;]+);", body)}
+
+
 def refusal_lines_shown(css=None):
     """How many lines of a refusal lesson 18's Flock panel shows: the cap in its refusal rule, no
     limit (inf) if the panel grows uncapped, or the fixed panel's lines if it does not grow."""
@@ -1342,9 +1378,15 @@ def refusal_lines_shown(css=None):
 def test_only_a_refusal_grows_the_lesson_flock_panel():
     panel, message = _refusal_rules()
     assert panel is not None and message is not None, "no refusal rule for the lesson Flock panel"
-    for sel, _body in (panel, message):
-        # Lessons only: the rack's panel (.rack__panel > .decoder) and explain are outside it.
-        assert sel.startswith(REFUSAL_RULE_PREFIX), sel
+    # Lessons only: EVERY rule that names the class, at any depth and in any selector list, is the
+    # lesson's refusal rule, so the rack's panel (.rack__panel > .decoder) and explain stay out of
+    # it whatever order the rules are in. A rule inside @media or another at-rule fails too.
+    heads = _rule_heads_naming(FITS_REFUSAL)
+    for head, depth in heads:
+        assert depth == 0, f"nested in an at-rule: {head}"
+        for sel in _selectors(head):
+            assert sel.startswith(REFUSAL_RULE_PREFIX), sel
+    assert len(heads) == 2, heads      # the panel rule and the message rule, nothing else
     # Exactly the badges a refusal gets (decoder-panel.js downState), never a live or starting one.
     js = DECODER_PANEL_JS.read_text()
     down = re.search(r"function downState\(.*?\n  \}\n", js, re.S).group(0)
@@ -1391,12 +1433,23 @@ def test_a_grown_refusal_keeps_the_lesson_keys_and_complete_on_screen():
     keys_bottom = panel_top + grown + gap + touch
     assert round(keys_bottom, 2) <= KEYS_BOTTOM_LIMIT_PX, keys_bottom
     assert round(band - (grown - panel_h), 2) >= round(narr_line, 2), "no narration line left"
-    # Explain holds Complete lesson in its footer at the stage's foot; the rules reach only the
-    # instrument stages (the prefix above), so it stays there. The render measures the 468 px.
-    assert round(SCREEN_HEIGHT_PX - pad, 2) == COMPLETE_LESSON_BOTTOM_PX
-    for rule in _refusal_rules():
-        if rule is not None:
-            assert rule[0].startswith(".stage-panel--instrument "), rule[0]
+    # The figure holds only if the refusal rules add nothing but the growth and the cap: a padding
+    # or margin there would move the keys without changing the line count above.
+    panel, message = _refusal_rules()
+    if panel is not None:
+        assert _decls(panel[1]) == {"height": "auto",
+                                    "min-height": _css_decl(".decoder", "height")}, panel[1]
+    if message is not None:
+        assert set(_decls(message[1])) == {"max-height", "overflow-y"}, message[1]
+    # Explain holds Complete lesson (468 px, measured in the render, not computed here). What keeps
+    # the rules off it is their .stage-panel--instrument prefix (test above) and that console.html
+    # gives that class only to the stages in its INSTRUMENT list, which explain is not in.
+    html = CONSOLE_HTML.read_text()
+    instrument = re.search(r"\{% set INSTRUMENT = \[([^\]]*)\] %\}", html).group(1)
+    assert "'explain'" not in instrument, instrument
+    gives = re.findall(r"\{% if ([^%]*) %\} stage-panel--instrument\{% endif %\}", html)
+    assert gives == ["stage in INSTRUMENT and lesson.needs_hardware"], gives
+    assert html.count("stage-panel--instrument") == 1
 
 
 def test_a_refusal_past_the_cap_scrolls_and_is_never_clipped():
