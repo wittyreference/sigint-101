@@ -1288,8 +1288,8 @@ FIXED_PANEL_MESSAGE_LINES = 2
 # CSS value, so it is held here. 124 px less the 6 px border, this head, the message's 20 px
 # padding and two 26.1 px lines leaves the 5.43 px a third line does not need.
 DECODER_HEAD_PX = 40.37
-# The lowest the lesson's Prev and Next keys may sit while a refusal grows the panel, and where
-# explain's Complete lesson sits (both measured at 800x480).
+# The lowest the lesson's Prev and Next keys may sit while a refusal grows the panel (measured at
+# 800x480 with a four-line refusal).
 KEYS_BOTTOM_LIMIT_PX = 414.77
 SCREEN_HEIGHT_PX = 480
 CONSOLE_HTML = TEMPLATES_DIR / "console.html"
@@ -1361,17 +1361,25 @@ def _selectors(head):
 
 
 def _decls(body):
-    """A rule body's declarations as {property: value}."""
-    return {p: v.strip() for p, v in re.findall(r"([\w-]+)\s*:\s*([^;]+);", body)}
+    """A rule body's declarations as {property: value}, comments dropped. The last declaration
+    counts with or without its semicolon (CSS needs none there, and Chrome applies it); a part
+    with no colon is kept under its own text, so it can never pass as nothing."""
+    decls = {}
+    for part in re.sub(r"/\*.*?\*/", " ", body, flags=re.S).split(";"):
+        prop, colon, value = part.partition(":")
+        if part.strip():
+            decls[prop.strip() if colon else part.strip()] = value.strip()
+    return decls
 
 
 def refusal_lines_shown(css=None):
     """How many lines of a refusal lesson 18's Flock panel shows: the cap in its refusal rule, no
     limit (inf) if the panel grows uncapped, or the fixed panel's lines if it does not grow."""
     panel, message = _refusal_rules(css)
-    if panel is None or not re.search(r"(?:^|[;\s])height:\s*auto;", panel[1]):
+    if panel is None or _decls(panel[1]).get("height") != "auto":
         return FIXED_PANEL_MESSAGE_LINES
-    cap = message and re.search(r"max-height:\s*calc\((\d+)lh \+ 20px\);", message[1])
+    cap = message and re.fullmatch(r"calc\((\d+)lh \+ 20px\)",
+                                   _decls(message[1]).get("max-height", ""))
     return int(cap.group(1)) if cap else math.inf
 
 
@@ -1398,9 +1406,9 @@ def test_only_a_refusal_grows_the_lesson_flock_panel():
     assert badges == refusal_badges, (badges, refusal_badges)
     assert not badges & live_badges, badges
     # At its size at rest for a short refusal, so only a long one changes anything.
-    assert re.search(r"(?:^|[;\s])height:\s*auto;", panel[1]), panel[1]
-    min_height = re.search(r"min-height:\s*([^;]+);", panel[1])
-    assert min_height and min_height.group(1).strip() == _css_decl(".decoder", "height"), panel[1]
+    decls = _decls(panel[1])
+    assert decls.get("height") == "auto", panel[1]
+    assert decls.get("min-height") == _css_decl(".decoder", "height"), panel[1]
     # Only the Flock panel opts in.
     html = PANELS_HTML.read_text()
     in_class = r'class="[^"]*\b' + re.escape(FITS_REFUSAL) + r'\b'
@@ -1455,11 +1463,12 @@ def test_a_grown_refusal_keeps_the_lesson_keys_and_complete_on_screen():
 def test_a_refusal_past_the_cap_scrolls_and_is_never_clipped():
     panel, message = _refusal_rules()
     assert panel is not None and message is not None, "no refusal rule for the lesson Flock panel"
-    assert re.search(r"max-height:\s*calc\(\d+lh \+ 20px\);", message[1]), message[1]
+    message_decls, panel_decls = _decls(message[1]), _decls(panel[1])
+    assert re.fullmatch(r"calc\(\d+lh \+ 20px\)", message_decls.get("max-height", "")), message[1]
     # auto, not scroll: a scroll track on every refusal would look as if something scrolled.
-    assert re.search(r"overflow-y:\s*auto;", message[1]), message[1]
+    assert message_decls.get("overflow-y") == "auto", message[1]
     # The panel itself (overflow: hidden at rest) always holds the whole capped box.
-    assert "max-height" not in panel[1] and "overflow" not in panel[1], panel[1]
+    assert not {"max-height", "overflow", "overflow-y"} & set(panel_decls), panel[1]
 
 
 if __name__ == "__main__":  # pragma: no cover
