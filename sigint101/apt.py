@@ -66,6 +66,9 @@ def _popen(freq_hz: int, source_id: str | None, output_dir: Path):
         argv += ["--source_id", source_id]
     argv += ["--samplerate", str(APT_SAMPLE_RATE_HZ), "--frequency", str(freq_hz),
              "--gain", str(APT_GAIN), "--timeout", str(APT_PASS_TIMEOUT_S)]
+    # Always pass the local path (data/apt/tle.txt by default) to skip SatDump's catalog fetch.
+    # The file may be absent until pass prediction populates it. APT still decodes without it.
+    argv += ["--tle_override", str(output_dir / "tle.txt")]
     return spawn(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
