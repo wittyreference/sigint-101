@@ -1,5 +1,5 @@
-# ABOUTME: Measures the primary-button bottom of a lesson's demo+predict stages at a forced
-# ABOUTME: 800x480 over the DevTools Protocol (stdlib websocket). Also saves a screenshot.
+# ABOUTME: Checks that demo and predict controls fit the forced 800x480 DevTools viewport.
+# ABOUTME: Reports the primary-button positions and saves a screenshot of the predict stage.
 import base64
 import json
 import os
@@ -9,25 +9,27 @@ import sys
 import time
 import urllib.request
 
-HOST, PORT = "127.0.0.1", 9222
+HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "9222"))
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8008/lesson/29"
 SHOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/flipper_m29_predict.png"
 
 
 def page_ws():
-    data = json.load(urllib.request.urlopen(f"http://{HOST}:{PORT}/json"))
+    with urllib.request.urlopen(f"http://{HOST}:{PORT}/json", timeout=5) as response:
+        data = json.load(response)
     for t in data:
         if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
             return t["webSocketDebuggerUrl"]
     # No page target yet: open one.
-    new = json.load(urllib.request.urlopen(f"http://{HOST}:{PORT}/json/new?about:blank"))
-    return new["webSocketDebuggerUrl"]
+    new_page = f"http://{HOST}:{PORT}/json/new?about:blank"
+    with urllib.request.urlopen(new_page, timeout=5) as response:
+        return json.load(response)["webSocketDebuggerUrl"]
 
 
 class CDP:
     def __init__(self, ws_url):
         path = ws_url.split(f"{HOST}:{PORT}", 1)[1]
-        self.sock = socket.create_connection((HOST, PORT))
+        self.sock = socket.create_connection((HOST, PORT), timeout=15)
         key = base64.b64encode(os.urandom(16)).decode()
         self.sock.sendall(
             f"GET {path} HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nUpgrade: websocket\r\n"
@@ -102,13 +104,73 @@ class CDP:
 
 
 MEASURE = """(function(st){
-  document.querySelectorAll('.stage-panel').forEach(function(p){p.hidden=true;});
-  var t=document.querySelector('.stage-panel[data-stage="'+st+'"]');
-  if(!t) return -1; t.hidden=false;
-  var btn=t.querySelector('.btn--primary');
-  if(!btn) return -2;
-  return Math.round(btn.getBoundingClientRect().bottom);
+  document.querySelectorAll('.stage-panel').forEach(panel => { panel.hidden = true; });
+  const panel = document.querySelector('.stage-panel[data-stage="' + st + '"]');
+  if (!panel) return {err: 'missing stage panel'};
+  panel.hidden = false;
+  if (window.innerWidth !== 800 || window.innerHeight !== 480) {
+    return {err: `viewport is ${window.innerWidth}x${window.innerHeight}, expected 800x480`};
+  }
+
+  const buttons = [...panel.querySelectorAll('button')].filter(button =>
+    button.getClientRects().length && getComputedStyle(button).visibility === 'visible');
+  const primary = buttons.find(button => button.matches('.btn--primary'));
+  if (!primary) return {err: 'no visible primary button'};
+  const chips = panel.querySelectorAll('.predict-chip, .predict-chip__key, .predict-chip__label');
+
+  function isClipped(control, bounds) {
+    const style = getComputedStyle(control);
+    if (style.visibility !== 'visible' ||
+        (style.overflowX !== 'visible' && control.scrollWidth > control.clientWidth) ||
+        (style.overflowY !== 'visible' && control.scrollHeight > control.clientHeight)) {
+      return true;
+    }
+    // An overflow container clips to the client box, inside its borders and scrollbars.
+    for (let parent = control.parentElement; parent; parent = parent.parentElement) {
+      const {overflowX, overflowY} = getComputedStyle(parent);
+      if (overflowX === 'visible' && overflowY === 'visible') continue;
+      const box = parent.getBoundingClientRect();
+      const clipLeft = box.left + parent.clientLeft;
+      const clipTop = box.top + parent.clientTop;
+      if ((overflowX !== 'visible' &&
+           (bounds.left < clipLeft || bounds.right > clipLeft + parent.clientWidth)) ||
+          (overflowY !== 'visible' &&
+           (bounds.top < clipTop || bounds.bottom > clipTop + parent.clientHeight))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const controls = [...buttons, ...chips].map(control => {
+    const bounds = control.getBoundingClientRect();
+    const {left, top, right, bottom} = bounds;
+    const label = control.getAttribute('aria-label') || control.textContent;
+    const name = label.trim().replace(/\\s+/g, ' ') || control.tagName.toLowerCase();
+    return {name, left, top, right, bottom, clipped: isClipped(control, bounds)};
+  });
+  return {primaryBottom: Math.round(primary.getBoundingClientRect().bottom), controls};
 })(%r)"""
+
+
+def fit_failures(stage, measurement):
+    if not isinstance(measurement, dict):
+        return [f"{stage}: no measurement"]
+    if measurement.get("err"):
+        return [f"{stage}: {measurement['err']}"]
+    if not measurement.get("controls"):
+        return [f"{stage}: no controls measured"]
+
+    failures = []
+    for control in measurement["controls"]:
+        label = f"{stage}: {control['name']}"
+        bounds = (control["left"], control["top"], control["right"], control["bottom"])
+        left, top, right, bottom = bounds
+        if not (0 <= left < right <= 800 and 0 <= top < bottom <= 480):
+            failures.append(f"{label} is outside 800x480 {bounds}")
+        elif control["clipped"]:
+            failures.append(f"{label} is clipped")
+    return failures
 
 
 def main():
@@ -126,14 +188,28 @@ def main():
         time.sleep(0.2)
     demo = cdp.evaluate(MEASURE % "demo")
     predict = cdp.evaluate(MEASURE % "predict")
-    print(f"800x480  demo Next bottom = {demo}px  predict Commit bottom = {predict}px  (max 480)")
+    demo_bottom, predict_bottom = (
+        result.get("primaryBottom", "?") if isinstance(result, dict) else "?"
+        for result in (demo, predict)
+    )
+    print(f"800x480  demo Next bottom = {demo_bottom}px  predict Commit bottom = "
+          f"{predict_bottom}px  (max 480)")
     # Screenshot the predict stage (left visible by the last measure).
     shot = cdp.call("Page.captureScreenshot", {"format": "png"})
     if shot.get("data"):
         with open(SHOT, "wb") as f:
             f.write(base64.b64decode(shot["data"]))
         print(f"screenshot: {SHOT}")
+    failures = fit_failures("demo", demo) + fit_failures("predict", predict)
+    if failures:
+        print("VERDICT: FAIL - " + " | ".join(failures))
+        sys.exit(1)
+    print("VERDICT: PASS")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except OSError as error:
+        sys.exit(f"Cannot complete fit check: {error}")

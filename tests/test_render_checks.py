@@ -4,11 +4,13 @@
 import base64
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
 import sys
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -28,15 +30,6 @@ FAST = (
     "runpy.run_path(script, run_name='__main__')\n"
 )
 
-# Fit uses a fixed Chrome port. Run its main against the fake's ephemeral port.
-FIT_ON_FAKE_PORT = (
-    "import os, runpy, sys\n"
-    "script = sys.argv.pop(1)\n"
-    "main = runpy.run_path(script)['main']\n"
-    "main.__globals__['PORT'] = int(os.environ['CDP_PORT'])\n"
-    "main()\n"
-)
-
 # An expression that throws in the page: Chrome answers with exceptionDetails and no value.
 THROWS = object()
 
@@ -45,6 +38,8 @@ EXPLAIN = 'data-stage="explain"'
 HOME = "querySelector('.tiles')"
 CARD = "exam-figure__open"
 OVERLAY = "exam-figure:target"
+DEMO_FIT = "})('demo')"
+PREDICT_FIT = "})('predict')"
 
 EXPLAIN_OK = {"hasBody": True, "overflowY": "auto", "scrollH": 900, "clientH": 400,
               "scrollable": True, "hasCompleteBtn": True, "btnBottom": 470, "viewportH": 480}
@@ -53,6 +48,15 @@ HOME_OK = {"overflowY": "auto", "gridAutoRows": "auto", "tiles": 12, "tilesWithC
 CARD_OK = {"theme": "dark", "commitBottom": 470, "openW": 200, "openH": 80, "docScroll": 480,
            "vh": 480}
 OVERLAY_OK = {"imgW": 700, "imgH": 400, "barBottom": 470, "barH": 40, "loaded": 1200}
+NEXT_FITS = {"name": "Next step", "left": 520, "top": 404, "right": 800, "bottom": 480,
+             "clipped": False}
+CHOICE_FITS = {"name": "A Screen + storage", "left": 0, "top": 320, "right": 250,
+               "bottom": 396, "clipped": False}
+COMMIT_FITS = {**NEXT_FITS, "name": "Commit prediction"}
+DEMO_FITS = {"primaryBottom": 480, "controls": [NEXT_FITS]}
+PREDICT_FITS = {"primaryBottom": 480, "controls": [CHOICE_FITS, COMMIT_FITS]}
+PREDICT_KEY_BELOW = {**PREDICT_FITS,
+                     "controls": [{**CHOICE_FITS, "bottom": 480.25}, COMMIT_FITS]}
 
 
 def _ws_frame(payload):
@@ -206,9 +210,7 @@ def _closed_port():
 
 def run(script, *args, port, fast=True, timeout=60):
     env = dict(os.environ, CDP_PORT=str(port), no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
-    if script == FIT:
-        cmd = [sys.executable, "-c", FIT_ON_FAKE_PORT, str(script), *args]
-    elif fast:
+    if fast:
         cmd = [sys.executable, "-c", FAST, str(script), *args]
     else:
         cmd = [sys.executable, str(script), *args]
@@ -232,6 +234,50 @@ def assert_no_pass(proc):
     """An error ends the check non-zero, and it never claims a PASS."""
     assert proc.returncode != 0, proc.stdout
     assert "VERDICT: PASS" not in proc.stdout
+
+
+FIT_CASES = {
+    "pass": (DEMO_FITS, PREDICT_FITS, 0, "VERDICT: PASS"),
+    "choice-below-screen": (
+        DEMO_FITS, PREDICT_KEY_BELOW, 1,
+        "VERDICT: FAIL - predict: A Screen + storage is outside 800x480 (0, 320, 250, 480.25)",
+    ),
+    "button-right-of-screen": (
+        {**DEMO_FITS, "controls": [{**NEXT_FITS, "right": 800.25}]}, PREDICT_FITS, 1,
+        "VERDICT: FAIL - demo: Next step is outside 800x480 (520, 404, 800.25, 480)",
+    ),
+    "clipped-choice": (
+        DEMO_FITS, {**PREDICT_FITS, "controls": [{**CHOICE_FITS, "clipped": True}, COMMIT_FITS]}, 1,
+        "VERDICT: FAIL - predict: A Screen + storage is clipped",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", FIT_CASES.values(), ids=FIT_CASES.keys())
+def test_render_fit_exits_0_only_when_all_controls_fit(devtools, tmp_path, case):
+    demo, predict, status, verdict = case
+    shot = tmp_path / "predict.png"
+    port = devtools({DEMO_FIT: demo, PREDICT_FIT: predict})
+    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(shot), port=port)
+    assert_ends(proc, status, verdict)
+    assert "800x480  demo Next bottom = 480px  predict Commit bottom = 480px" in proc.stdout
+    assert shot.is_file()
+
+
+@pytest.mark.parametrize("predict", [THROWS, {"err": "missing stage panel"}],
+                         ids=["no-result", "no-stage"])
+def test_render_fit_cannot_pass_without_a_measurement(devtools, tmp_path, predict):
+    port = devtools({DEMO_FIT: DEMO_FITS, PREDICT_FIT: predict})
+    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"), port=port)
+    assert_no_pass(proc)
+    assert proc.returncode == 1
+    assert _verdicts(proc)[0].startswith("VERDICT: FAIL - predict:")
+
+
+def test_render_fit_cannot_pass_without_devtools(tmp_path):
+    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"),
+               port=_closed_port(), timeout=3)
+    assert_no_pass(proc)
 
 
 SCROLL_CASES = {
@@ -324,3 +370,125 @@ def test_render_figure_errors_exit_non_zero(devtools, tmp_path):
                        port=devtools({CARD: CARD_OK, OVERLAY: OVERLAY_OK})))
     # No page address given.
     assert_no_pass(run(FIGURE, port=_closed_port()))
+
+
+@pytest.fixture
+def console_url():
+    class Console(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path == "/" else 404)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Console) as server:
+        worker = threading.Thread(target=server.serve_forever)
+        worker.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}"
+        finally:
+            server.shutdown()
+            worker.join()
+
+
+@pytest.fixture
+def render_make(tmp_path, console_url, devtools):
+    """Exercise the repo's Makefile and runner with stand-ins for the browser and checks."""
+    screen = tmp_path / "tools" / "render"
+    screen.mkdir(parents=True)
+    (screen / "render_check.py").symlink_to(REPO / "tools" / "render" / "render_check.py")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(sys.executable)
+    path = tmp_path / "bin"
+    path.mkdir()
+    chromium = path / "chromium"
+    chromium.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "profile = next(arg.split('=', 1)[1] for arg in sys.argv[1:]\n"
+        "               if arg.startswith('--user-data-dir='))\n"
+        "if os.environ.get('CHROMIUM_EXITS'):\n"
+        "    sys.exit(3)\n"
+        "Path(profile).mkdir()\n"
+        "(Path(profile) / 'DevToolsActivePort').write_text(os.environ['FAKE_CDP_PORT'] + '\\n')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    chromium.chmod(0o755)
+    for script in (FIT, SCROLL, FIGURE):
+        (screen / script.name).write_text(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "name = Path(__file__).name\n"
+            "assert os.environ['CDP_PORT'] == os.environ['FAKE_CDP_PORT']\n"
+            "if name == 'render_scroll.py':\n"
+            "    assert sys.argv[2] == 'home'\n"
+            "print('ran', name, sys.argv[1], flush=True)\n"
+            "sys.exit(7 if name == os.environ.get('FAILING_CHECK') else 0)\n",
+            encoding="utf-8",
+        )
+    make = shutil.which("make")
+    assert make, "the render-check tests require make"
+
+    def run_make(*, has_chromium=True, fit_answers=None, **overrides):
+        if not has_chromium:
+            chromium.unlink()
+        if fit_answers is not None:
+            (screen / FIT.name).unlink()
+            (screen / FIT.name).symlink_to(FIT)
+        env = dict(os.environ, PATH=str(path), RENDER_URL=console_url, TMPDIR=str(tmp_path),
+                   FAKE_CDP_PORT=str(devtools(fit_answers or {})),
+                   no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
+        env.update(overrides)
+        return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
+                               "render-check"], cwd=tmp_path, env=env, capture_output=True,
+                              text=True, timeout=15)
+
+    return run_make
+
+
+def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
+    proc = render_make(fit_answers={DEMO_FIT: DEMO_FITS, PREDICT_FIT: PREDICT_KEY_BELOW})
+    assert proc.returncode != 0, proc.stdout
+    assert "render_fit.py exited with status 1" in proc.stderr
+    assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
+
+
+@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name],
+                         ids=["all-pass", "fit-fails", "scroll-fails", "figure-fails"])
+def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
+    proc = render_make(FAILING_CHECK=failing)
+    assert proc.stdout.splitlines() == [
+        f"ran {FIT.name} {console_url}/lesson/29",
+        f"ran {SCROLL.name} {console_url}/",
+        f"ran {FIGURE.name} {console_url}/exam/review/T6C02",
+    ], (proc.stdout, proc.stderr)
+    if failing:
+        assert proc.returncode != 0
+        assert f"{failing} exited with status 7" in proc.stderr
+    else:
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stderr == ""
+
+
+@pytest.mark.parametrize("overrides, expected", [
+    ({"has_chromium": False}, "Chromium executable not found"),
+    ({"CHROMIUM_EXITS": "1"}, "Cannot reach Chromium DevTools"),
+], ids=["chromium-missing", "chromium-exits-before-devtools"])
+def test_make_render_check_fails_clearly_when_chromium_is_unreachable(
+    render_make, overrides, expected
+):
+    proc = render_make(**overrides)
+    assert proc.returncode != 0
+    assert expected in proc.stderr, proc.stderr
+    assert "ran " not in proc.stdout
+
+
+def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make):
+    proc = render_make(RENDER_URL=f"http://127.0.0.1:{_closed_port()}")
+    assert proc.returncode != 0
+    assert "Cannot reach the console" in proc.stderr, proc.stderr
+    assert "ran " not in proc.stdout
