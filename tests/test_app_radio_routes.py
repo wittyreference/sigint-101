@@ -563,3 +563,33 @@ def test_provenance_poll_does_not_reread_the_event_log(tmp_path):
         # ...while what is appended after is still picked up.
         log_event(events, "baseline_sample", {"ref_db": -22.0, **setup})
         assert client.get("/api/provenance").json()["baseline"]["n_samples"] == 3
+
+
+# --- A47: an RTL-SDR decoder's empty-bus refusal never names a waterfall ----------------------
+
+SDR_DECODER_ROUTES = [r for r in ROUTES if r[0] != "/api/flock"]
+SDR_DECODER_IDS = [r[0] for r in SDR_DECODER_ROUTES]
+
+
+@pytest.mark.parametrize("path,factory,build,key,kind", SDR_DECODER_ROUTES, ids=SDR_DECODER_IDS)
+def test_decoder_empty_bus_refusal_names_no_waterfall_and_fits_64_chars(
+        tmp_path, path, factory, build, key, kind):
+    def build_empty_bus():
+        dec = build(lambda *_: Child(["tool"]), tmp_path)
+        dec._list_devices = lambda: ()
+        return dec
+
+    with _client(tmp_path, probe=_present, **{factory: build_empty_bus}) as client:
+        resp = client.get(path)
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    reason = body["reason"]
+    assert "no RTL-SDR on the USB bus" in reason
+    assert "SIGINT 101 will not fake" in reason
+    assert "waterfall" not in reason.lower()
+    assert len(reason) <= 64
+
+    shown = _panel_shows(kind, [body])[0]
+    assert shown["badge"] == "NO RADIO"
+    assert shown["reason"] == reason

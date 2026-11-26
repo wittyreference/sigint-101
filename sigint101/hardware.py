@@ -171,7 +171,7 @@ def select_rtlsdr_index(serial, *, devices) -> int:
     """
     if not devices:
         raise DeviceSelectionError(
-            "no RTL-SDR on the USB bus — SIGINT 101 will not fake a waterfall")
+            "no RTL-SDR on the USB bus — SIGINT 101 will not fake a signal")
     if serial:
         for device in devices:
             if device.serial == serial:
