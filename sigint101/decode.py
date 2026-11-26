@@ -178,12 +178,16 @@ class Decoder:
         # transmission report once (RepeatFilter); the panel's buffer keeps every copy printed.
         self.on_reception = None
         self._repeats = RepeatFilter()
-        # Two locks, same discipline as the sweeper: _lock guards the buffer the reader writes,
-        # _life guards start/stop/release so two request threads cannot race over the dongle.
+        # Two locks, same discipline as the sweeper: _lock guards the buffer the reader writes, and
+        # which run may write to it; _life guards start/stop/release so two request threads cannot
+        # race over the dongle.
         self._lock = threading.Lock()
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
+        # The run a reader may list, report and record into. start() hands it to the reader it
+        # starts; every stop moves it on, so a reader that outlives its stop is shut out (_read).
+        self._run = 0
         self._released = False
         self.error = None
         # Who ended the child, and when the console may launch it again after it died on its own.
@@ -282,38 +286,62 @@ class Decoder:
             raise DecodeUnavailable(f"cannot run {RTL_433}: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+        # Only a stop moves the run on, and stop and start both hold _life, so this is the run
+        # now, and it stays this reader's until the next stop.
+        self._thread = threading.Thread(target=self._read, args=(self._proc, self._run),
                                         name="sigint101-decoder", daemon=True)
         self._thread.start()
 
-    def _read(self, proc) -> None:
-        """Consume rtl_433's JSON on a background thread until the process ends."""
+    def _read(self, proc, run: int) -> None:
+        """Consume rtl_433's JSON on a background thread until the process ends.
+
+        The reader can outlive its stop: an rtl_433 that is not reaped keeps the pipe open past
+        stop()'s wait, and by then a retune may have the next run decoding on another frequency.
+        So each read is listed and reported only while `run` is still the run now, tested under
+        the buffer lock that every stop takes to move it on. After that the reader reads on to the
+        end of its pipe, and lists, reports and records nothing.
+        """
         try:
             for raw in proc.stdout:
                 decode = parse_decode_line(raw)
-                if decode is not None:
-                    with self._lock:
-                        self._reads.append(decode)
-                        repeat = self._repeats.is_repeat(decode, time.monotonic())
-                    report = self.on_reception
-                    if report is not None and not repeat:
-                        report(decode.as_dict())
+                if decode is None:
+                    continue
+                with self._lock:
+                    if run != self._run:
+                        continue
+                    self._reads.append(decode)
+                    repeat = self._repeats.is_repeat(decode, time.monotonic())
+                report = self.on_reception
+                if report is not None and not repeat:
+                    report(decode.as_dict())
         except (OSError, ValueError) as exc:  # loud, never silent
-            self.error = str(exc)
+            with self._lock:
+                if run == self._run:
+                    self.error = str(exc)
         finally:
-            self._note_end(proc)
+            self._note_end(proc, run)
 
-    def _note_end(self, proc) -> None:
-        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
+    def _note_end(self, proc, run: int) -> None:
+        """Record why the child ended, if it was not us, so the next poll reports it as stopped.
+
+        The reason is found outside the buffer lock, as finding it can wait for an exit status,
+        and recorded only if `run` is still the run now, so it never becomes a later run's.
+        """
         reason = self.watch.ended(proc)
-        if reason and self.error is None:
-            self.error = reason
+        if reason:
+            with self._lock:
+                if run == self._run and self.error is None:
+                    self.error = reason
 
     def _settle(self) -> None:
         """Account for a child that ended since the last poll, then clear away what it left."""
         if self._proc is not None:
-            self._note_end(self._proc)
+            self._note_end(self._proc, self._run)
             self._stop_locked()
+
+    #: How long stop() waits, in seconds, for the reader to end once rtl_433 is stopped. A reader
+    #: can outlive the wait; it then lists, reports and records nothing (_read).
+    STOP_WAIT_S = 3.0
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -321,13 +349,18 @@ class Decoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
-        # Marked first, so the reader seeing the output end never reports our stop as a death.
+        # The run ends first, under the buffer lock, so nothing its reader reads from here on is
+        # listed, reported or recorded, however long that reader outlives this stop.
+        with self._lock:
+            self._run += 1
+        # Marked before the kill, so the reader seeing the output end never reports our stop as a
+        # death.
         self.watch.stopping()
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "rtl_433 survived kill; the dongle may still be held"
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
 
     def drain(self, timeout: float = 5.0) -> None:
