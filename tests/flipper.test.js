@@ -66,6 +66,14 @@ test("a good status with a body that is not JSON is no reading either", async ()
   assertNoReading(await showPoll(200, "<html>a captive page</html>"), "200");
 });
 
+test("a good status with no device in it is no reading, never a device card", async () => {
+  // Drawn as a reading, {} showed LIVE and a card named "Flipper" that no device reported.
+  for (const body of [{}, [], { available: true }, { available: true, device: null },
+                      { available: true, device: "Flipper" }, { device: {} }]) {
+    assertNoReading(await showPoll(200, JSON.stringify(body)), "200");
+  }
+});
+
 test("no answer at all shows that the console was not reached", async () => {
   assertNoReading(await showPoll(null, ""), "lost contact with the console");
 });

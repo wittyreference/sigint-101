@@ -105,8 +105,8 @@ def probe_flipper(*, glob=_glob.glob) -> FlipperProbe:
 
 def _port_name(port: str) -> str:
     """The port as a refusal names it: a by-id name without its directory, as the two-Flipper
-    refusal names them, and any other path whole. Spelled out, /dev/serial/by-id/ ran the name to
-    one unbroken word wider than the Flipper panel's line."""
+    refusal names them, and any other path whole. Spelled out, /dev/serial/by-id/ cost the
+    refusal a third line, which the Flipper panel cuts off."""
     if os.path.dirname(port) == os.path.dirname(BY_ID_GLOB):
         return os.path.basename(port)
     return port

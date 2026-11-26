@@ -410,6 +410,42 @@ def test_a_release_that_fails_after_a_good_read_keeps_the_reading():
     assert channel.closed is True
 
 
+class _Bug(TypeError):
+    """A fault in the code, not the port: what a broad catch would hide as "lost the Flipper"."""
+
+
+# Where a fault that is no port error can arise, and how: it must escape as itself, never be
+# reworded as a refusal or swallowed, so a bug still shows as a bug.
+NOT_PORT_ERRORS = {
+    "the-open": lambda: FlipperCli(port=LONG_PORT, opener=_opener_raising(_Bug("opener bug"))),
+    "the-banner-wait": lambda: FlipperCli(
+        port=LONG_PORT, opener=lambda port: FailingChannel("read", 1, _Bug("read bug"))),
+    "a-read": lambda: FlipperCli(
+        port=LONG_PORT, opener=lambda port: FailingChannel("read", 3, _Bug("read bug"))),
+    "a-write": lambda: FlipperCli(
+        port=LONG_PORT, opener=lambda port: FailingChannel("write", 1, _Bug("write bug"))),
+    "the-release": lambda: FlipperCli(
+        port=LONG_PORT, opener=lambda port: FailingChannel("read", 0, None,
+                                                           close_exc=_Bug("close bug"))),
+}
+
+
+@pytest.mark.parametrize("where", NOT_PORT_ERRORS)
+def test_a_fault_that_is_no_port_error_escapes_as_itself(where):
+    with pytest.raises(_Bug) as escaped:
+        with NOT_PORT_ERRORS[where]() as cli:
+            cli.command("device_info")
+    assert not isinstance(escaped.value, FlipperError)
+
+
+def test_an_error_with_words_but_no_number_does_not_show_errno_none():
+    exc, words = OPEN_FAILURES["strerror-no-errno"]
+    with pytest.raises(FlipperError) as refused:
+        FlipperCli(port=LONG_PORT, opener=_opener_raising(exc)).command("device_info")
+    assert "Errno None" not in str(refused.value), str(refused.value)
+    assert words in str(refused.value)
+
+
 def _open_fds():
     return len(os.listdir("/proc/self/fd"))
 
