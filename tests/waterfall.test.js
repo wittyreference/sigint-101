@@ -438,6 +438,12 @@ test("before the first pass the badge reads waiting", () => {
   assert.equal(badge.title, "sweeping 88.0 MHz–108.0 MHz, waiting for the first pass");
 });
 
+test("the badge reads waiting over old rows until the current sweep has a pass", () => {
+  const badge = panel.sweepBadge({ ...FM_BODY, stale: "waiting" }, 57);
+  assert.deepEqual(badge, { text: "waiting", kind: "sample",
+                            title: "sweeping 88.0 MHz–108.0 MHz, waiting for the first pass" });
+});
+
 test("a stalled sweep's badge reads stalled, not live, over the rows it kept", () => {
   // In the colour of a tool that stopped (a decoder's STOPPED), not of one getting going.
   const badge = panel.sweepBadge({ ...FM_BODY, stale: "stalled" }, 57);
@@ -472,6 +478,11 @@ test("a meter with no reading and no row to read says it is waiting, not stalled
   // A gain step out of a stall restarts the sweep: nothing is stalled while the new gain's first
   // pass is on its way, and the meter has nothing to read yet.
   assert.deepEqual(panel.meterState(null, [], null), { reading: null, note: "waiting" });
+});
+
+test("a waiting sweep leaves the gain meter's reading visible between passes", () => {
+  const reading = { floor: -10, peak: 20 };
+  assert.deepEqual(panel.meterState(reading, [], "waiting"), { reading, note: null });
 });
 
 test("a live meter eases in each fresh row, and keeps its reading between rows", () => {

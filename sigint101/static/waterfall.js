@@ -189,7 +189,8 @@
   // covers only its newest row, and one painted before it in the same poll may be stale; with no
   // row to read yet it is waiting. A meter with a reading eases it through each fresh row.
   function meterState(prev, fresh, stale) {
-    if (stale) return { reading: null, note: stale };
+    // While the badge waits for a first pass, the meter keeps its usual between-pass behavior.
+    if (stale && stale !== "waiting") return { reading: null, note: stale };
     var reading = prev;
     (prev ? fresh : fresh.slice(-1)).forEach(function (row) {
       reading = meterReading(reading, row);
@@ -214,7 +215,7 @@
       return { text: "restarting", kind: "sample",
                title: "rtl_power was restarted after a stall: the rows shown are from before it" };
     }
-    if (!total) {
+    if (body.stale === "waiting" || !total) {
       return { text: "waiting", kind: "sample",
                title: "sweeping " + formatMHz(body.freq_low) + "–" + formatMHz(body.freq_high) +
                       ", waiting for the first pass" };

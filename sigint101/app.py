@@ -1281,7 +1281,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # target is measured), else the span's middle.
         target = getattr(sweeper, "target", None)
         # Judged before the rows are read, so a row published in between is judged on the next poll.
-        _, stale, _ = sweeper.newest()
+        newest_row, stale, _ = sweeper.newest()
+        if newest_row is None and stale is None:
+            stale = "waiting"
         return {
             "available": True,
             "freq_low": sweeper.low,
@@ -1295,7 +1297,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             # follows (Sweeper.newest): null while it is; "stalled" once rtl_power has gone too
             # long without a pass; "resuming" for the first two passes after, which carry levels
             # from before the stall; "restarting" from a Restart sweep press until a run after it
-            # has swept a pass. The rows are served either way: they are real.
+            # has swept a pass. With neither a row nor a state, the current run is "waiting" for
+            # its first pass. The rows are served either way: they are real.
             "stale": stale,
             "rows": [row.as_dict() for row in sweeper.rows(limit)],
         }

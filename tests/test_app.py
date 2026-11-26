@@ -3278,6 +3278,62 @@ def test_the_spectrum_route_marks_a_stall_by_the_rule_the_reading_follows(tmp_pa
                      (True, 5, None, True)]
 
 
+@pytest.mark.parametrize("path,payload,restart_first", [
+    pytest.param("/api/gain", {"gain": 29.7}, False, id="gain"),
+    pytest.param("/api/tune", {"low": DEFAULT_LOW, "high": DEFAULT_HIGH, "bin_size": DEFAULT_BIN},
+                 False, id="same-span-retune"),
+    pytest.param(None, None, False, id="crash"),
+    pytest.param("/api/ppm/measure", None, False, id="ppm"),
+    pytest.param("/api/gain", {"gain": 29.7}, True, id="restart-then-gain"),
+])
+def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload, restart_first):
+    procs, bus, now = [], ["AAAA"], [1000.0]
+
+    def measure(**kw):
+        return {"hz": kw["hz"], "ppm": 10.0, "reason": ""}
+
+    with _client(tmp_path, probe=_present, ppm_measure=measure,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
+        sweeper = client.app.state.sweeper
+
+        def poll():
+            response = client.get("/api/spectrum")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["available"] is True
+            return body
+
+        starting = poll()
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        before = poll()
+        assert before["stale"] is None
+        if restart_first:
+            now[0] += sweeper.stale_after() + 1
+            assert client.post("/api/spectrum/restart").status_code == 200
+            assert poll()["stale"] == "restarting"
+        if path is None:
+            procs[-1].die(1)
+            sweeper.drain()
+            now[0] += 60  # past back-off; report the death once before starting again
+            assert client.get("/api/spectrum").status_code == 503
+        else:
+            assert client.post(path, json=payload).status_code == 200
+
+        waiting = poll()
+        now[0] += sweeper.stale_after() + sweeper.START_ALLOWANCE_S + 0.01
+        still_waiting = poll()
+        kept = [] if path in ("/api/tune", "/api/ppm/measure") else before["rows"]
+        procs[-1].feed(_fm_pass(2) + _fm_pass(0))
+        wait_for_rows(sweeper, len(kept) + 1)
+        live = poll()
+
+    assert (waiting["stale"], still_waiting["stale"], live["stale"]) == ("waiting", "waiting", None)
+    assert (starting["stale"], starting["rows"]) == ("waiting", [])
+    assert waiting["rows"] == still_waiting["rows"] == kept
+    assert live["rows"][:-1] == kept
+
+
 # --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------
 
 
