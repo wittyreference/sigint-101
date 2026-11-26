@@ -1,9 +1,12 @@
 # ABOUTME: A radio tool at the process boundary for tests: argv, output, and how (or if) it ends.
 # ABOUTME: Shared by the decoder-lifecycle and route tests; never used by the product itself.
 
+import io
+import queue
 import signal
 import subprocess
 import tempfile
+import threading
 
 # What rtl_fm and friends print when another process already holds the dongle.
 USB_BUSY = "usb_claim_interface error -6\nFailed to open rtlsdr device #0.\n"
@@ -61,3 +64,54 @@ class Child:
         if self.code is None:
             raise subprocess.TimeoutExpired("tool", timeout)
         return self.code
+
+
+class LateProc:
+    """A child whose pipe outlives it, so its reader is still reading after the process ended.
+
+    It prints only what a test feeds it. terminate() and die() end the process but not the pipe;
+    only close_pipe() or break_pipe() ends what the reader reads. `reader` is the thread reading.
+    """
+
+    def __init__(self, cmd):
+        self.args = list(cmd)
+        self.returncode = None
+        self.terminated = False
+        self.reader = None
+        self.stderr = io.StringIO("")
+        self._lines = queue.Queue()
+        self.stdout = self._stream()
+
+    def _stream(self):
+        self.reader = threading.current_thread()
+        for line in iter(self._lines.get, None):
+            if isinstance(line, OSError):
+                raise line
+            yield line
+
+    def feed(self, *lines):
+        for line in lines:
+            self._lines.put(line)
+
+    def close_pipe(self):
+        self._lines.put(None)
+
+    def break_pipe(self, error):
+        self._lines.put(error)
+
+    def die(self, code):
+        self.returncode = code
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        if self.returncode is None:
+            self.returncode = -15
+
+    def kill(self):
+        self.terminate()
+
+    def wait(self, timeout=None):
+        return self.returncode

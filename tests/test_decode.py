@@ -1,8 +1,6 @@
 # ABOUTME: Tests the rtl_433 decode backend — JSON-line parsing and the Decoder lifecycle.
 # ABOUTME: The process is a fake at the boundary; no radio or no rtl_433 is an honest refusal.
 
-import io
-import queue
 import shlex
 import threading
 from collections import deque
@@ -18,6 +16,7 @@ from sigint101.decode import (
     RepeatFilter,
     parse_decode_line,
 )
+from tests.child_fakes import LateProc
 
 # Real rtl_433 -F json output shapes. The ASK line is one captured live on the reference Recon
 # from an Acurite-Tower weather sensor; the FSK line is rtl_433's documented FSK shape, which
@@ -288,57 +287,6 @@ def test_the_decoder_reports_one_reception_per_burst_but_lists_every_copy():
 # or its death, could set the decoder's error while the next rtl_433 ran, and the start after that
 # one's stop refused with the old reason. A reader now lists, reports and records nothing once its
 # run is stopped.
-
-class LateProc:
-    """rtl_433 whose pipe outlives it, so its reader is still reading after the process ended.
-
-    It prints only what a test feeds it. terminate() and die() end the process but not the pipe;
-    only close_pipe() or break_pipe() ends what the reader reads. `reader` is the thread reading.
-    """
-
-    def __init__(self, cmd):
-        self.args = list(cmd)
-        self.returncode = None
-        self.terminated = False
-        self.reader = None
-        self.stderr = io.StringIO("")
-        self._lines = queue.Queue()
-        self.stdout = self._stream()
-
-    def _stream(self):
-        self.reader = threading.current_thread()
-        for line in iter(self._lines.get, None):
-            if isinstance(line, OSError):
-                raise line
-            yield line
-
-    def feed(self, *lines):
-        for line in lines:
-            self._lines.put(line)
-
-    def close_pipe(self):
-        self._lines.put(None)
-
-    def break_pipe(self, error):
-        self._lines.put(error)
-
-    def die(self, code):
-        self.returncode = code
-
-    def poll(self):
-        return self.returncode
-
-    def terminate(self):
-        self.terminated = True
-        if self.returncode is None:
-            self.returncode = -15
-
-    def kill(self):
-        self.terminate()
-
-    def wait(self, timeout=None):
-        return self.returncode
-
 
 class _Heard:
     """The console's reception hook in small: each reception is logged with the frequency and the
