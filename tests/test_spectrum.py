@@ -2236,6 +2236,37 @@ def test_a_press_on_a_sweep_that_recovers_inside_it_changes_nothing(history):
     assert refused.value.state == "resuming"
     assert (procs[0].terminated, len(procs), sweeper.running) == (False, 1, True)
     assert len(sweeper.rows()) == min(3, history)
+    # The refused press must leave the recovered sweep publishing: a press that marked the run
+    # stopped before it knew the sweep had recovered would freeze it, rows and all.
+    newest = sweeper.rows()[-1]
+    procs[0].feed(_fm_pass(1))                     # the next pass begins: pass 0 is published
+    _wait_until(lambda: sweeper.rows()[-1] is not newest)
+    sweeper.stop()
+
+
+def test_a_pass_published_before_the_mark_leaves_the_sweep_running():
+    # The re-check and the mark are one hold of the row lock. Re-checked outside it, or marked in a
+    # later hold, a pass published in between is missed and the recovered sweep is stopped. The row
+    # lock is swapped for one that runs the step just before the pressing thread's 3rd acquire:
+    # after the judged entry and newest(), that is the re-check's own hold.
+    clock = _Clock()
+    sweeper, procs = _sweeping(clock)
+    sweeper.STOP_WAIT_S = 0.05
+    _stall(clock, sweeper)
+    flushed = _flush_event(sweeper)
+    spy = _SpyLock()
+    sweeper._lock = spy
+
+    def step():
+        flushed.clear()
+        procs[0].feed(_fm_pass(0))                 # rtl_power resumes; its held pass is published
+        assert flushed.wait(5)
+
+    spy.arm(3, step)
+    with pytest.raises(spectrum_module.SweepNotStalled):
+        sweeper.restart()
+    assert len(sweeper.rows()) == 3
+    assert not procs[0].terminated, "a sweep that had recovered was stopped"
     sweeper.stop()
 
 
