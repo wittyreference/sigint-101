@@ -143,8 +143,8 @@ step_preflight() {
 }
 
 # The panel JavaScript tests use mock.timers.enable({ apis: ... }), which landed in Node 21.2 and
-# was backported to 20.11. Debian Bookworm's apt nodejs is 18.x, so provision.sh checks Node up
-# front and stops clearly rather than adding an unpinned third-party apt repository.
+# was backported to 20.11. The kiosk itself never runs Node, and Debian Bookworm's apt nodejs is
+# 18.x, so step_node warns and carries on (or reports pending under --check) rather than stopping.
 NODE_FLOOR_TEXT="Node.js 20.11+ (21.2+ on the 21 line)"
 
 node_version_ok() {
@@ -160,23 +160,40 @@ node_version_ok() {
   fi
 }
 
+node_report_gap() {
+  local detail="$1"
+  if [ "$CHECK" = 1 ]; then
+    would "need $NODE_FLOOR_TEXT ($detail; only the JS panel tests need it)"
+  else
+    warn "$detail; only the JS panel tests need $NODE_FLOOR_TEXT (kiosk runs without it) — continuing"
+  fi
+}
+
 step_node() {
-  step "Node.js (make selftest needs $NODE_FLOOR_TEXT for the panel tests)"
+  step "Node.js (only the JS panel tests need $NODE_FLOOR_TEXT)"
   local node_bin ver major minor
   node_bin="$(command -v node || true)"
   if [ -z "$node_bin" ]; then
-    die "node is not on PATH; make selftest needs $NODE_FLOOR_TEXT. Debian Bookworm's apt nodejs is 18.x (too old) — install $NODE_FLOOR_TEXT (for example from nodejs.org) and re-run."
+    node_report_gap "node is not on PATH"
+    return 0
   fi
-  ver="$("$node_bin" --version 2>&1)" ||
-    die "could not read node version from $node_bin ($ver); make selftest needs $NODE_FLOOR_TEXT."
+  if ! ver="$("$node_bin" --version 2>&1)"; then
+    ver="${ver//$'\r'/}"
+    ver="${ver%%$'\n'*}"
+    node_report_gap "could not read node version from $node_bin (${ver:-no output})"
+    return 0
+  fi
   ver="${ver//$'\r'/}"
   if [[ ! "$ver" =~ ^v?([0-9]+)\.([0-9]+)\.[0-9]+([-+].*)?$ ]]; then
-    die "unreadable node version '$ver' from $node_bin; make selftest needs $NODE_FLOOR_TEXT."
+    ver="${ver%%$'\n'*}"
+    node_report_gap "unreadable node version '$ver' from $node_bin"
+    return 0
   fi
   major=$((10#${BASH_REMATCH[1]}))
   minor=$((10#${BASH_REMATCH[2]}))
   if ! node_version_ok "$major" "$minor"; then
-    die "node $ver at $node_bin is too old; make selftest needs $NODE_FLOOR_TEXT. Debian Bookworm's apt nodejs is 18.x — install $NODE_FLOOR_TEXT (for example from nodejs.org) and re-run."
+    node_report_gap "node $ver at $node_bin is too old"
+    return 0
   fi
   ok "node $ver at $node_bin (meets $NODE_FLOOR_TEXT)"
 }

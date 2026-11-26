@@ -1,6 +1,7 @@
 # ABOUTME: Tests deploy/provision.sh in a throwaway HOME with stubs on PATH, so nothing changes
-# ABOUTME: on the host: missing or old Node stops with a clear message; suitable Node is idempotent.
+# ABOUTME: on the host: missing or old Node warns and continues (or reports pending under --check).
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -114,38 +115,90 @@ def box(tmp_path):
     return ProvisionBox(tmp_path)
 
 
-@pytest.mark.parametrize("args", [(), ("--check",)], ids=["apply", "check"])
-def test_missing_node_stops_with_a_clear_message_naming_the_floor(box, args):
-    result = box.run(*args)
-    assert result.returncode != 0, result.stdout + result.stderr
-    assert "node" in result.stderr.lower() and "20.11" in result.stderr, result.stderr
-    assert "raspi-config" not in box.calls()
-    assert "apt-get" not in box.calls()
-    assert "install.sh" not in box.calls()
+def _node_section(stdout: str) -> list[str]:
+    """Return the output lines emitted inside step_node."""
+    found = re.search(r"^==> Node\.js[^\n]*\n(.*?)(?=^==> |\Z)", stdout, re.MULTILINE | re.DOTALL)
+    assert found, f"no Node.js section in output:\n{stdout}"
+    return [line for line in found.group(1).splitlines() if line.strip()]
+
+
+def _pending_count(stdout: str) -> int:
+    match = re.search(r"^check: (\d+) change\(s\) pending,", stdout, re.MULTILINE)
+    assert match, f"no check summary line in output:\n{stdout}"
+    return int(match.group(1))
+
+
+def test_missing_node_warns_and_provisioning_continues(box):
+    result = box.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = _node_section(result.stdout)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert line.startswith("  WARN   "), line
+    assert "node" in line.lower() and "20.11" in line, line
+    assert "panel tests" in line.lower(), line
+    assert "install.sh" in box.calls(), "provisioning did not continue past step_node"
+
+
+def test_missing_node_under_check_is_reported_as_pending_without_failing(box):
+    missing = box.run("--check")
+    assert missing.returncode == 0, missing.stdout + missing.stderr
+    lines = _node_section(missing.stdout)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert line.startswith("  would  "), line
+    assert "node" in line.lower() and "20.11" in line, line
+    assert "panel tests" in line.lower(), line
+
+    box.set_node("v22.0.0")
+    present = box.run("--check")
+    assert present.returncode == 0, present.stdout + present.stderr
+    assert _pending_count(missing.stdout) == _pending_count(present.stdout) + 1
 
 
 @pytest.mark.parametrize("version", ["v18.19.0", "v20.10.0", "v20.10.9", "v21.0.0", "v21.1.9"])
-@pytest.mark.parametrize("args", [(), ("--check",)], ids=["apply", "check"])
-def test_old_node_stops_with_a_clear_message_naming_version_and_floor(box, version, args):
+def test_old_node_warns_and_provisioning_continues(box, version):
     box.set_node(version)
-    result = box.run(*args)
-    assert result.returncode != 0, result.stdout + result.stderr
-    assert version in result.stderr, result.stderr
-    assert "20.11" in result.stderr, result.stderr
-    assert "raspi-config" not in box.calls()
-    assert "apt-get" not in box.calls()
-    assert "install.sh" not in box.calls()
+    result = box.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = _node_section(result.stdout)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert line.startswith("  WARN   "), line
+    assert version in line and "20.11" in line, line
+    assert "panel tests" in line.lower(), line
+    assert "install.sh" in box.calls(), "provisioning did not continue past step_node"
+
+
+@pytest.mark.parametrize("version", ["v18.19.0", "v20.10.0", "v20.10.9", "v21.0.0", "v21.1.9"])
+def test_old_node_under_check_is_reported_as_pending_without_failing(box, version):
+    box.set_node(version)
+    result = box.run("--check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = _node_section(result.stdout)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert line.startswith("  would  "), line
+    assert version in line and "20.11" in line, line
+    assert "panel tests" in line.lower(), line
 
 
 @pytest.mark.parametrize("body", [
     'echo "not-a-version"; exit 0',
     'echo "broken" >&2; exit 1',
 ], ids=["unreadable", "nonzero"])
-def test_broken_node_version_stops_with_a_clear_message(box, body):
+@pytest.mark.parametrize("args, prefix", [
+    ((), "  WARN   "),
+    (("--check",), "  would  "),
+], ids=["apply", "check"])
+def test_broken_node_version_warns_or_reports_pending_without_failing(box, body, args, prefix):
     box.set_node_script(body)
-    result = box.run("--check")
-    assert result.returncode != 0, result.stdout + result.stderr
-    assert "20.11" in result.stderr, result.stderr
+    result = box.run(*args)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = _node_section(result.stdout)
+    assert len(lines) == 1, lines
+    assert lines[0].startswith(prefix) and "20.11" in lines[0], lines[0]
+    assert "panel tests" in lines[0].lower(), lines[0]
 
 
 @pytest.mark.parametrize("version", ["v20.11.0", "v20.18.1", "v21.2.0", "v22.0.0", "v24.0.0-rc.1"])
@@ -153,14 +206,18 @@ def test_supported_node_passes_and_provision_runs_to_completion(box, version):
     box.set_node(version)
     result = box.run("--check")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"ok     node {version}" in result.stdout, result.stdout
+    lines = _node_section(result.stdout)
+    assert len(lines) == 1, lines
+    assert lines[0].startswith(f"  ok     node {version}"), lines[0]
 
 
-def test_provision_with_supported_node_is_idempotent_across_two_runs(box):
-    box.set_node("v22.0.0")
+@pytest.mark.parametrize("version", [None, "v18.19.0", "v22.0.0"],
+                         ids=["missing", "old", "supported"])
+def test_provision_node_check_is_idempotent_across_two_runs(box, version):
+    if version is not None:
+        box.set_node(version)
     first = box.run()
     second = box.run()
     assert first.returncode == 0, first.stdout + first.stderr
     assert second.returncode == 0, second.stdout + second.stderr
-    assert "ok     node v22.0.0" in first.stdout
-    assert "ok     node v22.0.0" in second.stdout
+    assert _node_section(first.stdout) == _node_section(second.stdout)
