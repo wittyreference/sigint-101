@@ -6,8 +6,10 @@ from __future__ import annotations
 import glob as _glob
 import os
 import select
+import termios
 import time
 import tty
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 # Flipper Devices' CDC port, addressed by the stable by-id name rather than a ttyACM number.
@@ -101,6 +103,30 @@ def probe_flipper(*, glob=_glob.glob) -> FlipperProbe:
     return FlipperProbe(True, "serial-by-id", port)
 
 
+def _port_name(port: str) -> str:
+    """The port as a refusal names it: a by-id name without its directory, as the two-Flipper
+    refusal names them, and any other path whole. Spelled out, /dev/serial/by-id/ ran the name to
+    one unbroken word wider than the Flipper panel's line."""
+    if os.path.dirname(port) == os.path.dirname(BY_ID_GLOB):
+        return os.path.basename(port)
+    return port
+
+
+def _system_words(exc) -> str:
+    """What the system said, as "[Errno 5] Input/output error", without the path.
+
+    An OSError from os.open repeats the path it was given, and the refusal names the port itself.
+    A termios.error is no OSError, and as itself it reads as a Python tuple, so it is worded the
+    same way (as flock.py words a Marauder bridge's port). Anything else keeps its own words, or
+    its kind when it has none.
+    """
+    if isinstance(exc, OSError) and exc.strerror:
+        return str(OSError(exc.errno, exc.strerror)) if exc.errno is not None else exc.strerror
+    if isinstance(exc, termios.error) and len(exc.args) == 2:
+        return str(OSError(*exc.args))
+    return str(exc) or type(exc).__name__
+
+
 class _TtyChannel:
     """The real byte channel: a USB CDC port in raw mode.
 
@@ -111,7 +137,13 @@ class _TtyChannel:
 
     def __init__(self, port: str):
         self._fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
-        tty.setraw(self._fd)
+        try:
+            tty.setraw(self._fd)
+        except BaseException:
+            # A path that opens but is no terminal: the descriptor goes with the failure, or each
+            # poll of a wrong port would leak one more.
+            os.close(self._fd)
+            raise
 
     def write(self, data: bytes) -> None:
         """Put bytes on the wire, looping because a large write can be accepted in parts."""
@@ -147,6 +179,7 @@ class FlipperCli:
         self._opener = opener
         self._timeout = timeout
         self._channel = None
+        self._name = None
 
     def __enter__(self):
         self._open()
@@ -162,9 +195,28 @@ class FlipperCli:
             port = self._port or find_flipper_port()
             if port is None:
                 raise FlipperError("no Flipper attached")
-            self._channel = self._opener(port)
-            self._settle()
+            self._name = _port_name(port)
+            # An OSError or a termios.error is no FlipperError, and the route answered one with a
+            # bare 500 that left the panel reading forever. The system's words come first and the
+            # port last, so the cause stays in the two lines the Flipper panel shows.
+            try:
+                self._channel = self._opener(port)
+            except (OSError, termios.error) as exc:
+                raise FlipperError(
+                    f"cannot open the Flipper: {_system_words(exc)} ({self._name})") from exc
+            with self._talking():
+                self._settle()
         return self._channel
+
+    @contextmanager
+    def _talking(self):
+        """A port that fails once open (unplugged mid-read, gone under the console) is a refusal
+        with the system's words and the port, and the session lets the port go."""
+        try:
+            yield
+        except (OSError, termios.error) as exc:
+            self.close()
+            raise FlipperError(f"lost the Flipper: {_system_words(exc)} ({self._name})") from exc
 
     def _settle(self):
         """Wait out the connect banner before treating the session as ready.
@@ -193,10 +245,18 @@ class FlipperCli:
                     return
 
     def close(self) -> None:
-        """Release the port if this session ever opened one."""
-        if self._channel is not None:
-            self._channel.close()
-            self._channel = None
+        """Release the port if this session ever opened one.
+
+        A close that fails still releases it: on Linux close(2) frees the descriptor whatever it
+        returns. A gone device's EIO here would otherwise replace the reason a read failed, or a
+        good reading, with a bare OSError.
+        """
+        channel, self._channel = self._channel, None
+        if channel is not None:
+            try:
+                channel.close()
+            except (OSError, termios.error):
+                pass
 
     def _drain(self) -> None:
         """Discard anything already buffered before issuing a command.
@@ -215,9 +275,10 @@ class FlipperCli:
         would rather report a partial reading than stall the lesson.
         """
         channel = self._open()
-        self._drain()
-        channel.write(text.encode() + TERMINATOR)
-        raw = self._read_until_prompt(channel, wait)
+        with self._talking():
+            self._drain()
+            channel.write(text.encode() + TERMINATOR)
+            raw = self._read_until_prompt(channel, wait)
         return self._strip(raw.decode("utf-8", "replace"), text)
 
     @staticmethod
@@ -246,22 +307,23 @@ class FlipperCli:
         legitimately contain the prompt, a CR, or the marker text itself.
         """
         channel = self._open()
-        self._drain()
-        channel.write(f"storage read_chunks {path} {size}".encode() + TERMINATOR)
-        # The deadline scales with the transfer: a 100 KB .fap cannot arrive in the few seconds
-        # that suffice for a one-line text reply, and a fixed timeout would truncate large
-        # captures while looking like a device fault.
-        buf, deadline = b"", time.monotonic() + max(self._timeout, size / 4096.0)
-        while time.monotonic() < deadline:
-            chunk = channel.read(4096, 0.1)
-            if chunk:
-                buf += chunk
-            # Stop on having the marker plus the declared count — not on a quiet channel, which
-            # a mid-transfer stall would imitate, and not on the prompt, which the payload can
-            # contain outright.
-            start = buf.find(READY_MARKER)
-            if start >= 0 and len(buf) - (start + len(READY_MARKER)) >= size:
-                break
+        with self._talking():
+            self._drain()
+            channel.write(f"storage read_chunks {path} {size}".encode() + TERMINATOR)
+            # The deadline scales with the transfer: a 100 KB .fap cannot arrive in the few
+            # seconds that suffice for a one-line text reply, and a fixed timeout would truncate
+            # large captures while looking like a device fault.
+            buf, deadline = b"", time.monotonic() + max(self._timeout, size / 4096.0)
+            while time.monotonic() < deadline:
+                chunk = channel.read(4096, 0.1)
+                if chunk:
+                    buf += chunk
+                # Stop on having the marker plus the declared count — not on a quiet channel,
+                # which a mid-transfer stall would imitate, and not on the prompt, which the
+                # payload can contain outright.
+                start = buf.find(READY_MARKER)
+                if start >= 0 and len(buf) - (start + len(READY_MARKER)) >= size:
+                    break
         start = buf.find(READY_MARKER)
         if start < 0:
             raise FlipperError(
