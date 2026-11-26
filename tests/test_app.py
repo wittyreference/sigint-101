@@ -36,6 +36,7 @@ from sigint101.spectrum import (
     DEFAULT_BIN,
     DEFAULT_HIGH,
     DEFAULT_LOW,
+    SpectrumUnavailable,
     Sweeper,
     SweepRow,
     validate_span,
@@ -3482,4 +3483,38 @@ def test_a_reason_the_provenance_poll_uses_up_is_kept_in_the_restart_log(tmp_pat
         polled = client.get("/api/spectrum")
     assert (pressed.status_code, pressed.json()["error"]) == (200, "Input/output error")
     assert (polled.status_code, polled.json()["stale"]) == (200, "restarting")
+    assert _kinds(tmp_path, "spectrum_restart")[0]["error"] == "Input/output error"
+
+
+def test_a_poll_that_starts_the_sweep_as_the_press_returns_cannot_take_its_reason(tmp_path):
+    # A poll waiting on the lifecycle lock through the stop (up to 9 s) runs the moment restart()
+    # lets go of it. If it is a provenance-style start, it reports the old run's reason once,
+    # swallows it, and clears it. The press's answer and log line must still carry it, so the reason
+    # is read under the same hold as the stop, not after. Forced: such a start runs right there.
+    procs, bus, now = [], ["AAAA"], [1000.0]
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _first_fed_sweeper(FailingPipeProc, procs, bus, now)
+                 ) as client:
+        sweeper = client.app.state.sweeper
+        client.get("/api/spectrum")
+        procs[0].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        procs[0].break_pipe(OSError("Input/output error"))
+        sweeper.drain()
+        now[0] += 60
+        press = sweeper.restart
+
+        def press_then_a_waiting_poll_starts():
+            pressed = press()
+            try:
+                sweeper.start()                     # as _reading() does: the refusal is swallowed
+            except SpectrumUnavailable:
+                pass
+            return pressed
+
+        sweeper.restart = press_then_a_waiting_poll_starts
+        answer = client.post("/api/spectrum/restart")
+        swallowed = sweeper.error
+    assert swallowed is None                        # the poll did use the report up
+    assert (answer.status_code, answer.json()["error"]) == (200, "Input/output error")
     assert _kinds(tmp_path, "spectrum_restart")[0]["error"] == "Input/output error"

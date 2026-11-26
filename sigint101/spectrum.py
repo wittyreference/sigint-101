@@ -966,7 +966,7 @@ class Sweeper:
     #: later.
     START_ALLOWANCE_S = 10.0
 
-    def restart(self) -> float:
+    def restart(self) -> tuple:
         """Stop a stalled rtl_power so the next poll starts a new one: the Restart sweep key.
 
         Nothing else ends an rtl_power that stops sweeping without exiting: it still reads as
@@ -974,13 +974,19 @@ class Sweeper:
         raises SweepNotStalled and changes nothing. It stops the sweep as a gain step does, keeping
         the rows, and starts nothing: the next poll starts the new run, through the one start path
         with its refusals and back-off. From here until a run publishes a row the sweep reads
-        "restarting". Returns how long the sweep had gone without a pass.
+        "restarting". Returns (age, error): how long the sweep had gone without a pass, and the
+        reason recorded as the stop left it (the stopped run's own, or the stop's "survived kill"),
+        or None. It is read before the lifecycle lock is let go, because the next start reports it
+        once and clears it, and a poll waiting on the lock through the stop may be that start.
 
-        The reader takes only the row lock, and newest() lets go of it before it judges the age, so
-        a pass can be published after the judgement. So the newest entry is noted before judging,
-        and after a "stalled" verdict the same entry is checked again, and the run marked stopped,
-        in one hold of the row lock: a sweep that recovered in between is left running, and once
-        the run is marked no row of it can be published (_flush checks under that lock).
+        The whole press holds the lifecycle lock, from the judgement through the stop: let go in
+        between, a gain step and a poll could replace the stalled run, and the press would stop
+        that fresh one. The reader takes only the row lock, and newest() lets go of it before it
+        judges the age, so a pass can be published after the judgement. So the newest entry is
+        noted before judging, and after a "stalled" verdict the same entry is checked again (the
+        entry, not the count: a full buffer drops its oldest row as it appends), and the run marked
+        stopped, in one hold of the row lock: a sweep that recovered in between is left running,
+        and once the run is marked no row of it can be published (_flush checks under that lock).
         """
         with self._life:
             with self._lock:
@@ -997,7 +1003,7 @@ class Sweeper:
             self._stop_locked()
             with self._lock:
                 self._restarting = True
-            return age
+            return age, self.error
 
     def _state(self, stale) -> str:
         """How a sweep that is not stalled stands, for a refused restart."""

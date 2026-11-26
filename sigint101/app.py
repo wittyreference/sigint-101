@@ -1302,18 +1302,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         that changes nothing, and never takes the radio back from another tool. The answer and the
         log carry the reason the stopped run had recorded, or the stop's own ("survived kill"),
         since the poll that starts the next run reports it only once and the provenance poll can
-        use that report up unseen. A plain def, so the stop (up to 9 s) runs in the threadpool, not
-        on the event loop every page's polls share.
+        use that report up unseen. restart() reads it under its own lock: a poll waiting through
+        the stop runs the moment that lock is let go, and could clear it before this route read it.
+        A plain def, so the stop (up to 9 s) runs in the threadpool, not on the event loop every
+        page's polls share.
         """
         sweeper = app.state.sweeper
         try:
-            stalled_for = sweeper.restart()
+            stalled_for, error = sweeper.restart()
         except SweepNotStalled as exc:
             log_event(app.state.events_path, "spectrum_restart_refused", {"state": exc.state})
             return JSONResponse(status_code=409, content={
                 "restarted": False, "state": exc.state,
                 "reason": f"the sweep is not stalled ({exc.state}); nothing was changed"})
-        error = sweeper.error
         payload = {"stalled_for_s": round(stalled_for, 1), "error": error}
         log_event(app.state.events_path, "spectrum_restart", payload)
         return {"restarted": True, **payload}
