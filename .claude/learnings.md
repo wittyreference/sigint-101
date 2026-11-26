@@ -651,8 +651,8 @@ either. Each test leaned on something its host supplied.
   (`# fail 0`). From node 23 it prints the spec report (`ℹ fail 0`), piped or not. The wrapper in
   `tests/test_js_panels.py` read the default, so it failed with all 127 panel tests passing.
 - **A `*.test.js` with no tests in it is reported as one passing test** (`# tests 1`,
-  `# pass 1`, exit 0; seen on node 26.13). The wrapper's "discovered nothing" guard fires only
-  when node runs no file at all, so an empty test file still reads as covered. Not fixed.
+  `# pass 1`, exit 0; seen on node 24.20 and 26.13). Fixed 2026-11-26: the wrapper runs each file
+  on its own and takes that stand-in off the pass count, so a file must pass a test of its own.
 **How to apply.**
 - To stage "tool X is not installed", build a PATH with no X on it (`_path_without_fontconfig` in
   `tests/test_desktop_theme.py`) and assert X is absent before the run. Never rely on the dev
