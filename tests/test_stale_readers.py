@@ -6,13 +6,20 @@ from __future__ import annotations
 import shlex
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 import pytest
+from fastapi.testclient import TestClient
 
 from sigint101 import acars, aprs, dmr, pocsag, rds
+from sigint101.app import create_app
 from sigint101.childproc import ChildWatch
+from sigint101.events import read_events
+from sigint101.hardware import RadioProbe
 from tests.child_fakes import LateProc
+
+FIXTURE_PACKS = Path(__file__).resolve().parent / "fixtures" / "lesson_packs"
 
 # Representative valid output lines (two distinct receptions per module).
 ACARS_1 = (
@@ -146,7 +153,10 @@ SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
 
 
 class _Heard:
-    """The console's reception hook in small: logs (key, freq_hz, live_command) as each arrives."""
+    """The console's reception hook in small: logs (key, freq_hz, command) as each arrives.
+
+    Mirrors app.py's S-b hook: explicit `command` and `freq_hz` win over the live attributes.
+    """
 
     def __init__(self, dec, item_key):
         self.dec = dec
@@ -154,9 +164,11 @@ class _Heard:
         self.log = []
         self._changed = threading.Condition()
 
-    def __call__(self, item):
+    def __call__(self, item, *, command=None, freq_hz=None):
+        freq = freq_hz if freq_hz is not None else self.dec.freq_hz
+        cmd = command if command is not None else self.dec.live_command()
         with self._changed:
-            self.log.append((self.item_key(item), self.dec.freq_hz, self.dec.live_command()))
+            self.log.append((self.item_key(item), freq, cmd))
             self._changed.notify_all()
 
     def wait_for(self, count, timeout=5.0):
@@ -491,8 +503,8 @@ def test_stop_moves_the_run_on_inside_the_buffer_lock(late_factory, spec):
     procs[0].feed(spec.line1)
     heard.wait_for(1)
 
-    def hook(item):
-        heard(item)
+    def hook(item, *, command=None, freq_hz=None):
+        heard(item, command=command, freq_hz=freq_hz)
         procs[0].close_pipe()
 
     dec.on_reception = hook
@@ -532,7 +544,10 @@ def test_what_an_old_reader_reads_during_its_stop_is_not_kept(
         setattr(owner, during, plain)              # once, for this stop only
         old.feed(spec.line2)
         old.break_pipe(OSError("old pipe failed during the stop"))
-        old.reader.join(5)
+        if during != "stopping":
+            # stopping() runs inside the run-guard critical section, so the reader cannot acquire
+            # the buffer lock until stopping() returns; stop()/retune() joins it right after.
+            old.reader.join(5)
         return result
 
     setattr(owner, during, mid_stop)
@@ -540,6 +555,7 @@ def test_what_an_old_reader_reads_during_its_stop_is_not_kept(
         dec.retune(spec.other_hz)
     else:
         dec.stop()
+    old.reader.join(5)
     assert not old.reader.is_alive()
     assert heard.log == [(spec.key1, spec.home_hz, _line(old))]
     assert spec.key2 not in spec.listed(dec)
@@ -620,3 +636,257 @@ def test_pocsag_late_page_is_dropped_and_words_stay_withheld(late_factory):
     assert dec.pages()[0]["text"] is None
     assert dec.pages()[0]["text_withheld"] is True
     assert POCSAG_SECRET not in repr(dec.pages())
+
+
+# --- Round 2: stalled hook provenance, natural-death drain, atomic stop/watch invalidation ----
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_reader_stalled_after_unlocking_still_logs_old_runs_frequency_and_command(
+        late_factory, spec):
+    # Pause the old reader right after it releases the run guard (e.g. stalled on the console's
+    # reception lock) past STOP_WAIT_S until the retuned replacement has started. The accepted
+    # item must still log under the old run's frequency and command, never the replacement's.
+    dec, procs, heard, _ = late_factory(spec)
+    paused, go_on = threading.Event(), threading.Event()
+    armed = [False]
+    lock_free_at_hook = []
+
+    def gated_hook(item, **kw):
+        if armed[0]:
+            armed[0] = False
+            free = dec._runs.lock.acquire(blocking=False)
+            if free:
+                dec._runs.lock.release()
+            lock_free_at_hook.append(free)
+            paused.set()
+            go_on.wait(5)
+        heard(item, **kw)
+
+    dec.on_reception = gated_hook
+    dec.start()
+    procs[0].feed(spec.line1)
+    heard.wait_for(1)
+
+    armed[0] = True
+    procs[0].feed(spec.line2)
+    assert paused.wait(5)
+    assert lock_free_at_hook == [True]
+
+    dec.retune(spec.other_hz)
+    dec.start()
+    assert len(procs) == 2
+    assert dec.freq_hz == spec.other_hz
+    assert dec.live_command() == _line(procs[1])
+    assert procs[0].reader.is_alive()
+
+    go_on.set()
+    heard.wait_for(2)
+    _end_pipe(procs[0])
+    assert heard.log == [
+        (spec.key1, spec.home_hz, _line(procs[0])),
+        (spec.key2, spec.home_hz, _line(procs[0])),
+    ]
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_app_reception_hook_logs_old_provenance_when_reader_stalls_past_retune(tmp_path, spec):
+    # End-to-end through app.py's _heard hook: when a reader stalls right after releasing the run
+    # guard until the retuned replacement has started, events.jsonl and /api/receptions still
+    # record the old run's frequency and command.
+    procs = []
+
+    def spawn(freq_hz, device):
+        proc = LateProc([spec.tool, "-f", str(freq_hz), "-d", str(device)])
+        procs.append(proc)
+        return proc
+
+    def factory():
+        dec = spec.build(spawn)
+        dec.STOP_WAIT_S = 0.05
+        return dec
+
+    def present():
+        return RadioProbe(True, "lsusb", "RTL2832U 0bda:2838 on USB bus")
+    app = create_app(
+        pack_dir=FIXTURE_PACKS, data_dir=tmp_path, probe=present,
+        **{f"{spec.name}_factory": factory},
+    )
+    first_done = threading.Event()
+    paused, go_on = threading.Event(), threading.Event()
+    seen = [0]
+    instrument = "pager" if spec.name == "pocsag" else spec.name
+    try:
+        with TestClient(app) as client:
+            dec = getattr(app.state, spec.name)
+            real_hook = dec.on_reception
+
+            def gated_hook(item, **kw):
+                seen[0] += 1
+                if seen[0] == 2:
+                    paused.set()
+                    go_on.wait(5)
+                real_hook(item, **kw)
+                if seen[0] == 1:
+                    first_done.set()
+
+            dec.on_reception = gated_hook
+            dec.start()
+            procs[0].feed(spec.line1)
+            assert first_done.wait(5)
+
+            procs[0].feed(spec.line2)
+            assert paused.wait(5)
+
+            dec.retune(spec.other_hz)
+            dec.start()
+            assert len(procs) == 2
+            assert dec.freq_hz == spec.other_hz
+            assert dec.live_command() == _line(procs[1])
+
+            go_on.set()
+            _end_pipe(procs[0])
+
+            receptions = client.get(f"/api/receptions?instrument={instrument}").json()["receptions"]
+        events = [e for e in read_events(tmp_path / "events.jsonl") if e["kind"] == "reception"]
+        assert len(events) == 2
+        second = events[1]["payload"]
+        assert spec.item_key(second["item"]) == spec.key2
+        assert second["freq_hz"] == spec.home_hz
+        assert second["command"] == _line(procs[0])
+        assert receptions[0]["payload"]["freq_hz"] == spec.home_hz
+        assert receptions[0]["payload"]["command"] == _line(procs[0])
+    finally:
+        go_on.set()
+        for proc in procs:
+            proc.close_pipe()
+        for proc in procs:
+            if proc.reader is not None:
+                proc.reader.join(5)
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_natural_death_lets_retiring_reader_drain_complete_item_with_its_provenance(
+        late_factory, spec):
+    # A child dies with a complete item already read from its pipe. The next poll calls _settle(),
+    # which must give the retiring reader a bounded chance to finish and log that item under the
+    # dead run's provenance when no replacement starts.
+    dec, procs, heard, _ = late_factory(spec)
+    lock = _HeldLock()
+    dec._runs.lock = lock
+    dec.STOP_WAIT_S = 2.0
+    dec.start()
+    procs[0].feed(spec.line1)
+    heard.wait_for(1)
+
+    lock.hold(procs[0].reader)
+    procs[0].feed(spec.line2)
+    procs[0].die(1)
+    procs[0].close_pipe()
+    assert lock.arrived.wait(5)
+
+    real_thread = dec._thread
+    joined = threading.Event()
+
+    class _ReleaseOnJoin:
+        def join(self, timeout=None):
+            joined.set()
+            lock.go_on.set()
+            return real_thread.join(timeout)
+
+    dec._thread = _ReleaseOnJoin()
+
+    with pytest.raises(spec.unavailable, match="status 1"):
+        dec.start()
+    assert joined.is_set()
+    assert not real_thread.is_alive()
+    assert len(procs) == 1
+    assert spec.key2 in spec.listed(dec)
+    assert heard.log == [
+        (spec.key1, spec.home_hz, _line(procs[0])),
+        (spec.key2, spec.home_hz, _line(procs[0])),
+    ]
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_eof_during_stop_cannot_commit_retry_and_block_retuned_start(late_factory, spec):
+    # If the old child exits and its reader handles EOF right as _runs.end() completes, the
+    # watch's stop marker must already be set so ChildWatch.ended() never commits a retry
+    # deadline that refuses the retuned start.
+    dec, procs, heard, _ = late_factory(spec)
+    dec.start()
+    procs[0].feed(spec.line1)
+    heard.wait_for(1)
+
+    plain_end = dec._runs.end
+    old = procs[0]
+
+    def end_with_eof(*args, **kw):
+        result = plain_end(*args, **kw)
+        dec._runs.end = plain_end
+        old.die(1)
+        old.close_pipe()
+        old.reader.join(5)
+        return result
+
+    dec._runs.end = end_with_eof
+    dec.retune(spec.other_hz)
+    assert not old.reader.is_alive()
+    assert dec.watch.stopped is False
+    assert dec.watch.blocked() is None
+    assert dec.error is None
+    # Without advancing the clock, the retuned start must succeed immediately.
+    dec.start()
+    assert len(procs) == 2
+    assert dec.running
+    assert dec.freq_hz == spec.other_hz
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_during_stop(
+        late_factory, spec):
+    # The old reader has reached EOF and is waiting inside exit_reason() for the child's exit
+    # status while retune() stops the run. Computing exit diagnostics must not hold the buffer
+    # lock, and once retune() invalidates the run and watch, the old reader cannot commit a retry.
+    dec, procs, heard, _ = late_factory(spec)
+    dec.start()
+    procs[0].feed(spec.line1)
+    heard.wait_for(1)
+
+    old = procs[0]
+    waiting, release = threading.Event(), threading.Event()
+    lock_free_during_wait = []
+    plain_wait = old.wait
+
+    def slow_wait(timeout=None):
+        if threading.current_thread() is old.reader:
+            free = dec._runs.lock.acquire(blocking=False)
+            if free:
+                dec._runs.lock.release()
+            lock_free_during_wait.append(free)
+            waiting.set()
+            release.wait(5)
+            old.die(1)
+            return 1
+        return plain_wait(timeout=timeout)
+
+    old.wait = slow_wait
+    old.close_pipe()
+    assert waiting.wait(5)
+    assert lock_free_during_wait == [True]
+
+    dec.retune(spec.other_hz)
+    dec.start()
+    assert len(procs) == 2
+    assert dec.running
+
+    release.set()
+    old.reader.join(5)
+    assert not old.reader.is_alive()
+    assert dec.watch.stopped is False
+    assert dec.watch.blocked() is None
+    assert dec.error is None
+    dec.stop()
+    dec.start()
+    assert len(procs) == 3
+    assert dec.running

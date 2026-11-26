@@ -10,7 +10,15 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 
-from .childproc import ChildWatch, RunGuard, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    RunGuard,
+    command_line,
+    emit_reception,
+    running_command,
+    spawn,
+    stop_process,
+)
 from .childproc import Pipeline as _Pipeline
 from .hardware import (
     MULTIMON,
@@ -258,6 +266,8 @@ class PocsagDecoder:
         if blocked:
             raise PocsagUnavailable(blocked)
         self.device = self._choose_device()
+        # End any retiring reader from an earlier natural death before starting its replacement.
+        self._runs.end(self.watch)
         try:
             self._proc = self._spawn(self.freq_hz, self.device)
         except (OSError, ValueError) as exc:
@@ -283,9 +293,12 @@ class PocsagDecoder:
                     if not self._runs.is_current(run):
                         continue
                     self._log.add(page)
-                report = self.on_reception
+                    item = page.as_dict()
+                    freq_hz = self.freq_hz
+                    cmd = command_line(proc)
+                    report = self.on_reception
                 if report is not None:
-                    report(page.as_dict())
+                    emit_reception(report, item, command=cmd, freq_hz=freq_hz)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):
@@ -295,17 +308,26 @@ class PocsagDecoder:
 
     def _note_end(self, proc, run: int) -> None:
         """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc)
+        reason = self.watch.ended(proc, runs=self._runs, run=run)
         if reason:
             with self._runs:
                 if self._runs.is_current(run) and self.error is None:
                     self.error = reason
 
     def _settle(self) -> None:
-        """Account for a child that ended since the last poll, then clear away what it left."""
-        if self._proc is not None:
-            self._note_end(self._proc, self._runs.current)
-            self._stop_locked()
+        """Account for a child that ended since the last poll, letting its reader drain before
+        clearing away what it left.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        self._note_end(proc, self._runs.current)
+        self.watch.stopping()
+        if not stop_process(proc):
+            self.error = "the POCSAG pipeline survived kill; the dongle may still be held"
+        if self._thread is not None:
+            self._thread.join(timeout=self.STOP_WAIT_S)
+            self._thread = None
 
     #: How long stop() waits, in seconds, for the reader to end once the pipeline is stopped.
     STOP_WAIT_S = 3.0
@@ -316,12 +338,9 @@ class PocsagDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
-        # End the run first under the buffer lock, so nothing its reader reads from here on is
-        # listed, reported or recorded, however long that reader outlives this stop.
-        self._runs.end()
-        # Marked before the kill, so the reader seeing the output end never reports our stop as a
-        # death.
-        self.watch.stopping()
+        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
+        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
+        self._runs.end(self.watch)
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "the POCSAG pipeline survived kill; the dongle may still be held"

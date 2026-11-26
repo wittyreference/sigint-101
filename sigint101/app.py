@@ -1787,14 +1787,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         Called from the receiver's reader thread. It never raises: a reception that cannot be
         written is reported through /api/receptions rather than ending the live decode.
         """
-        def hook(item: dict) -> None:
-            freq = getattr(receiver, "freq_hz", None)
+        def hook(item: dict, *, command: str | None = None, freq_hz=None) -> None:
+            freq = freq_hz if freq_hz is not None else getattr(receiver, "freq_hz", None)
             if freq is None and inst.fixed_hz:
                 freq = inst.fixed_hz[0] if len(inst.fixed_hz) == 1 else list(inst.fixed_hz)
-            live_command = getattr(receiver, "live_command", None)
+            if command is None:
+                live_command = getattr(receiver, "live_command", None)
+                command = live_command() if live_command else None
             record = reception_record(
                 inst, item, freq_hz=freq,
-                command=live_command() if live_command else None,
+                command=command,
                 # A receiver that names its own tool (the Flock detector's source) is logged
                 # under it, so the record names the tool that ran its command.
                 tool=getattr(receiver, "tool", None),
