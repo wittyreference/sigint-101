@@ -1869,12 +1869,12 @@ def test_a_restart_during_the_readers_exit_wait_leaves_the_new_run_alone():
 # --- C24: the Restart sweep key ----------------------------------------------------------------
 # WHY: an rtl_power that stops sweeping without exiting still reads as running. C25 made the
 # waterfall say STALLED, but nothing ever ended that rtl_power: only a gain step, a retune or
-# another tool's claim stops a sweep. The owner's ruling is a Restart sweep key, shown only while the
-# waterfall says STALLED, and no automatic watchdog. A press stops the stalled rtl_power and keeps
-# its rows; the next poll starts a new one. From the press until a run after it publishes a row the
-# sweep reads "restarting", and a restarted run that brings no row within the stall limit plus a
-# start-up allowance reads "stalled" again, so the key comes back. A press on a sweep that is not
-# stalled, or that recovers inside the press, changes nothing.
+# another tool's claim stops a sweep. The owner's ruling is a Restart sweep key, shown only while
+# the waterfall says STALLED, and no automatic watchdog. A press stops the stalled rtl_power and
+# keeps its rows; the next poll starts a new one. From the press until a run after it publishes a
+# row the sweep reads "restarting", and a restarted run that brings no row within the stall limit
+# plus a start-up allowance reads "stalled" again, so the key comes back. A press on a sweep that
+# is not stalled, or that recovers inside the press, changes nothing.
 
 def _stall(clock, sweeper):
     """A minute with no new pass from an rtl_power that is still alive."""
