@@ -38,6 +38,8 @@ EXPLAIN = 'data-stage="explain"'
 HOME = "querySelector('.tiles')"
 CARD = "exam-figure__open"
 OVERLAY = "exam-figure:target"
+DEMO_FIT = "})('demo')"
+PREDICT_FIT = "})('predict')"
 
 EXPLAIN_OK = {"hasBody": True, "overflowY": "auto", "scrollH": 900, "clientH": 400,
               "scrollable": True, "hasCompleteBtn": True, "btnBottom": 470, "viewportH": 480}
@@ -46,6 +48,15 @@ HOME_OK = {"overflowY": "auto", "gridAutoRows": "auto", "tiles": 12, "tilesWithC
 CARD_OK = {"theme": "dark", "commitBottom": 470, "openW": 200, "openH": 80, "docScroll": 480,
            "vh": 480}
 OVERLAY_OK = {"imgW": 700, "imgH": 400, "barBottom": 470, "barH": 40, "loaded": 1200}
+NEXT_FITS = {"name": "Next step", "left": 520, "top": 404, "right": 800, "bottom": 480,
+             "clipped": False}
+CHOICE_FITS = {"name": "A Screen + storage", "left": 0, "top": 320, "right": 250,
+               "bottom": 396, "clipped": False}
+COMMIT_FITS = {**NEXT_FITS, "name": "Commit prediction"}
+DEMO_FITS = {"primaryBottom": 480, "controls": [NEXT_FITS]}
+PREDICT_FITS = {"primaryBottom": 480, "controls": [CHOICE_FITS, COMMIT_FITS]}
+PREDICT_KEY_BELOW = {**PREDICT_FITS,
+                     "controls": [{**CHOICE_FITS, "bottom": 480.25}, COMMIT_FITS]}
 
 
 def _ws_frame(payload):
@@ -225,6 +236,50 @@ def assert_no_pass(proc):
     assert "VERDICT: PASS" not in proc.stdout
 
 
+FIT_CASES = {
+    "pass": (DEMO_FITS, PREDICT_FITS, 0, "VERDICT: PASS"),
+    "choice-below-screen": (
+        DEMO_FITS, PREDICT_KEY_BELOW, 1,
+        "VERDICT: FAIL - predict: A Screen + storage is outside 800x480 (0, 320, 250, 480.25)",
+    ),
+    "button-right-of-screen": (
+        {**DEMO_FITS, "controls": [{**NEXT_FITS, "right": 800.25}]}, PREDICT_FITS, 1,
+        "VERDICT: FAIL - demo: Next step is outside 800x480 (520, 404, 800.25, 480)",
+    ),
+    "clipped-choice": (
+        DEMO_FITS, {**PREDICT_FITS, "controls": [{**CHOICE_FITS, "clipped": True}, COMMIT_FITS]}, 1,
+        "VERDICT: FAIL - predict: A Screen + storage is clipped",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", FIT_CASES.values(), ids=FIT_CASES.keys())
+def test_render_fit_exits_0_only_when_all_controls_fit(devtools, tmp_path, case):
+    demo, predict, status, verdict = case
+    shot = tmp_path / "predict.png"
+    port = devtools({DEMO_FIT: demo, PREDICT_FIT: predict})
+    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(shot), port=port)
+    assert_ends(proc, status, verdict)
+    assert "800x480  demo Next bottom = 480px  predict Commit bottom = 480px" in proc.stdout
+    assert shot.is_file()
+
+
+@pytest.mark.parametrize("predict", [THROWS, {"err": "missing stage panel"}],
+                         ids=["no-result", "no-stage"])
+def test_render_fit_cannot_pass_without_a_measurement(devtools, tmp_path, predict):
+    port = devtools({DEMO_FIT: DEMO_FITS, PREDICT_FIT: predict})
+    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"), port=port)
+    assert_no_pass(proc)
+    assert proc.returncode == 1
+    assert _verdicts(proc)[0].startswith("VERDICT: FAIL - predict:")
+
+
+def test_render_fit_cannot_pass_without_devtools(tmp_path):
+    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"),
+               port=_closed_port(), timeout=3)
+    assert_no_pass(proc)
+
+
 SCROLL_CASES = {
     "explain-pass": ("explain", {EXPLAIN: EXPLAIN_OK}, 0, "VERDICT: PASS"),
     "explain-not-scrollable": ("explain", {EXPLAIN: {**EXPLAIN_OK, "scrollable": False}}, 1,
@@ -378,17 +433,28 @@ def render_make(tmp_path, console_url, devtools):
     make = shutil.which("make")
     assert make, "the render-check tests require make"
 
-    def run_make(*, has_chromium=True, **overrides):
+    def run_make(*, has_chromium=True, fit_answers=None, **overrides):
         if not has_chromium:
             chromium.unlink()
+        if fit_answers is not None:
+            (screen / FIT.name).unlink()
+            (screen / FIT.name).symlink_to(FIT)
         env = dict(os.environ, PATH=str(path), RENDER_URL=console_url, TMPDIR=str(tmp_path),
-                   FAKE_CDP_PORT=str(devtools({})), no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
+                   FAKE_CDP_PORT=str(devtools(fit_answers or {})),
+                   no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
         env.update(overrides)
         return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
                                "render-check"], cwd=tmp_path, env=env, capture_output=True,
                               text=True, timeout=15)
 
     return run_make
+
+
+def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
+    proc = render_make(fit_answers={DEMO_FIT: DEMO_FITS, PREDICT_FIT: PREDICT_KEY_BELOW})
+    assert proc.returncode != 0, proc.stdout
+    assert "render_fit.py exited with status 1" in proc.stderr
+    assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
 
 
 @pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name],
