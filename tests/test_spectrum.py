@@ -1060,19 +1060,21 @@ def test_an_rtl_power_that_closes_its_pipe_and_does_not_exit_publishes_nothing_a
                       clock=clock)
     sweeper.STOP_WAIT_S = 0.05
     sweeper.start()
+    procs[0].stderr = io.StringIO("Signal caught, exiting!\n")   # what rtl_power said last
     procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
     wait_for_rows(sweeper, 1)
     procs[0].close_pipe()
+    reason = "rtl_power closed its output but did not exit: Signal caught, exiting!"
     try:
         sweeper.drain()
         assert procs[0].waits == [0.05]           # the reader waited, for STOP_WAIT_S and no more
         assert sweeper.rows() == [_pass_row(_fm_pass(0))]
-        assert sweeper.error == "rtl_power closed its output but did not exit"
+        assert sweeper.error == reason            # with what rtl_power printed, as a death has
         assert sweeper.retry_in() is not None
     finally:
         procs[0].exit(1)                          # a reader still waiting is let go
     sweeper.drain()
-    assert sweeper.error == "rtl_power closed its output but did not exit"
+    assert sweeper.error == reason
     assert not sweeper.running
     clock.now += sweeper.retry_in()
     with pytest.raises(SpectrumUnavailable, match="did not exit"):
@@ -1082,6 +1084,29 @@ def test_an_rtl_power_that_closes_its_pipe_and_does_not_exit_publishes_nothing_a
     wait_for_reading(sweeper)
     assert sweeper.rows() == [_pass_row(_fm_pass(0)), _pass_row(_fm_pass(2))]
     sweeper.stop()
+
+
+@pytest.mark.parametrize("code, reason, backs_off", [
+    (0, "Input/output error", False),
+    (1, "the sweep stopped (rtl_power status 1)", True),
+], ids=["exited-0", "exited-1"])
+def test_a_pipe_that_fails_after_rtl_power_exited_publishes_no_part_of_the_pass(
+        code, reason, backs_off):
+    # rtl_power has already exited when its pipe fails, so the reader reads its status at once. An
+    # exit 0 does not make the pass held whole: the pipe failed, and only the pipe error stands. A
+    # non-zero exit is a death, recorded with its back-off, as it was before C29.
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(FailingPipeProc, procs), radio_present=lambda: True)
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].exit(code)
+    procs[0].break_pipe(OSError("Input/output error"))
+    sweeper.drain()
+    assert sweeper.rows() == [_pass_row(_fm_pass(0))]
+    assert sweeper.error == reason
+    assert (sweeper.retry_in() is not None) == backs_off
+    assert not sweeper.running
 
 
 def test_a_sweeper_whose_process_exited_is_not_running():
