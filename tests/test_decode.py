@@ -5,6 +5,7 @@ import io
 import queue
 import shlex
 import threading
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -597,6 +598,88 @@ def test_a_death_on_its_way_in_at_a_restart_is_not_the_new_runs(held):
     dec.stop()
     dec.start()                                   # not refused with the old run's reason
     assert len(procs) == 3
+
+
+class _HeldAppend(deque):
+    """The decoder's list of reads; one append, once armed, waits inside the buffer lock."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.armed = False
+        self.inside = threading.Event()
+        self.go_on = threading.Event()
+
+    def append(self, item):
+        if self.armed:
+            self.armed = False
+            self.inside.set()
+            self.go_on.wait(5)
+        super().append(item)
+
+
+class _TellingLock(_HeldLock):
+    """The buffer lock, telling when one given thread first tries to take it."""
+
+    def __init__(self):
+        super().__init__()
+        self.watch_for = None
+        self.tried = threading.Event()
+
+    def __enter__(self):
+        if self.watch_for is not None and threading.current_thread() is self.watch_for:
+            self.watch_for = None
+            self.tried.set()
+        return super().__enter__()
+
+
+class _OutlivedReader:
+    """The reader's thread as stop() sees it: while the reader is held at its append, the stop's
+    wait gives up at once, as it does for a reader that outlives it; otherwise it waits for the
+    reader to end."""
+
+    def __init__(self, thread, reads):
+        self.thread, self.reads = thread, reads
+
+    def join(self, timeout=None):
+        if self.reads.inside.is_set() and not self.reads.go_on.is_set():
+            return
+        self.thread.join(5)
+
+
+def test_the_stop_moves_the_run_on_inside_the_buffer_lock(late):
+    # The old reader has passed its run test and is held inside the buffer lock, at the append,
+    # while a retune runs in another thread. The stop must move the run on under that lock, so it
+    # waits for the held reader: the read is then the old run's, listed and cleared by the retune,
+    # and logged on the old frequency. A stop that moved the run on without the lock would go on
+    # past the held reader, retune, and only then let it in, to be logged at 315 MHz.
+    dec, procs, heard = late
+    dec._lock = _TellingLock()
+    dec._reads = _HeldAppend(maxlen=dec._reads.maxlen)
+    dec.start()
+    dec._thread = _OutlivedReader(dec._thread, dec._reads)
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+
+    def hook(item):                               # the console's hook, then the old pipe ends
+        heard(item)
+        procs[0].close_pipe()
+
+    dec.on_reception = hook
+    dec._reads.armed = True
+    procs[0].feed(FSK_LINE)
+    assert dec._reads.inside.wait(5)              # past its run test, holding the lock
+    retune = threading.Thread(target=dec.retune, args=(315_000_000,))
+    dec._lock.watch_for = retune
+    retune.start()
+    assert dec._lock.tried.wait(5)                # the retune now waits on the lock
+    dec._reads.go_on.set()
+    retune.join(10)
+    assert not retune.is_alive()
+    procs[0].reader.join(5)
+    assert not procs[0].reader.is_alive()
+    assert [(model, freq) for model, freq, _ in heard.log] == [
+        ("Acurite-Tower", 433_920_000), ("LaCrosse-TX141THBv2", 433_920_000)]
+    assert dec.recent() == []
 
 
 @pytest.mark.parametrize("stand_down", ["retune", "stop"])
