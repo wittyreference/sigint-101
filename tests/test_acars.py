@@ -11,20 +11,21 @@ from sigint101.acars import (
     parse_acars_message,
 )
 
-# Real acarsdec 3.7 '-o 4' JSON lines, captured by decoding acarsdec's own test.wav on nomad-b.
+# Real acarsdec 3.7 '-o 4' JSON lines, captured by decoding acarsdec's own test.wav on
+# the reference Recon (its station_id renamed).
 # One message carries free text (an H1 report from AF7728); the link-test/ack messages carry none.
 WITH_TEXT = (
-    '{"timestamp":1793151825.5348461,"station_id":"spec5b","channel":0,"freq":131.550,'
+    '{"timestamp":1793151825.5348461,"station_id":"recon","channel":0,"freq":131.550,'
     '"level":-8.5,"error":0,"mode":"G","label":"H1","block_id":"3","ack":false,'
     '"tail":"F-GTAE","flight":"AF7728","msgno":"D65C",'
     '"text":"#DFB00000/V206,05,124,183,02,00,00000/V7044,078,00081,22222222222111/",'
     '"app":{"name":"acarsdec","ver":"3.7"}}')
 NO_TEXT = (
-    '{"timestamp":1793151825.53618,"station_id":"spec5b","channel":1,"freq":131.725,'
+    '{"timestamp":1793151825.53618,"station_id":"recon","channel":1,"freq":131.725,'
     '"level":-23.0,"error":0,"mode":"E","label":"5V","block_id":"4","ack":false,'
     '"tail":"PH-BXR","flight":"KL1681","msgno":"S53A","app":{"name":"acarsdec","ver":"3.7"}}')
 LINK_TEST = (
-    '{"timestamp":1793151825.5393629,"station_id":"spec5b","channel":3,"freq":131.825,'
+    '{"timestamp":1793151825.5393629,"station_id":"recon","channel":3,"freq":131.825,'
     '"level":-17.4,"error":0,"mode":"2","label":"Q0","block_id":"4","ack":false,'
     '"tail":"LN-DYY","flight":"DY083J","msgno":"S46A","app":{"name":"acarsdec","ver":"3.7"}}')
 

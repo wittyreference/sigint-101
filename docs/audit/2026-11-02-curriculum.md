@@ -79,7 +79,7 @@ V3+dipole add-on kit, the Flipper, and the Orbic.
 | C9 | Flipper capture and analysis | Find the frequency, Read RAW, save, analyse the pulse train, RFID/NFC/IR/iButton | A paired field tool, and U10 is in progress |
 | C10 | Troubleshoot from the internals | Recognise overload, images, aliases, DC spike, ppm drift, a dead decoder | This is what separates "it's broken" from "I know which stage is lying" |
 | C11 | Licence path | Pass Technician, then know Part 97 well enough to transmit | It is the on-ramp to the TX half of the gift (D16) |
-| C12 | Operate the real tools outside the console | rtl_power/rtl_fm/rtl_433/dump1090/multimon-ng/satdump/SDR++/meshtastic CLI over SSH | Leaving the garden. The learner already lives in terminals (abstract-soaring-bunny §Course architecture) |
+| C12 | Operate the real tools outside the console | rtl_power/rtl_fm/rtl_433/dump1090/multimon-ng/satdump/SDR++/meshtastic CLI over SSH | Leaving the garden. The learner already lives in terminals (the private architecture plan, §Course architecture) |
 
 ## 2. Competency matrix: teach / practise / assess, and the layer each is practised at
 
@@ -282,7 +282,7 @@ LII = law.cornell.edu. Line numbers are re-checked against the packs.
 | X5 | 06:58 | "a quarter-wave in centimetres is 300 over the frequency in MHz, then quartered" | It is metres; the concept line, 06:10, has it right | arithmetic | **S0** |
 | X6 | 09:12, 09:25, 09:27; 10:12, 10:29 | 433.92 is "the little ISM band"; "garage remotes … half the 433 MHz band" | 433.05-434.79 is ISM only in ITU Region 1 (RR 5.138); it is not on the US list (47 CFR 18.301). US devices run under 15.231 inside the 70 cm ham band. US garage remotes are mostly 300-390 MHz (Security+ 2.0: 310/315/390); car fobs are mostly 315 MHz | LII cfr 47/18.301, 47/15.231; LiftMaster compatibility chart | S1 |
 | X7 | 10:12, 10:33, 10:56 | "a weather sensor often reads FSK" on 433 | rtl_433 decodes Acurite and LaCrosse TX141 at 433.92 as OOK. US FSK sensors mostly sit on 915 MHz. **M10's try ("Find one FSK read") may be impossible in the US** (MC's own HIL saw only ASK) | github.com/merbanan/rtl_433 `src/devices/acurite.c`, `lacrosse_tx141x.c` | S1 |
-| X8 | 17:25-27; 18:10-12, 18:24-25 | The camera "phones home" over the radio whose WiFi fingerprint you catch | Flock uploads over **LTE**. The WiFi radio is separate (station-mode probes about every 125 ms); that is what flock-you fingerprints. The plan said the same (eager-spinning-frost:241) | github.com/colonelpanichacks/flock-you README | S1 |
+| X8 | 17:25-27; 18:10-12, 18:24-25 | The camera "phones home" over the radio whose WiFi fingerprint you catch | Flock uploads over **LTE**. The WiFi radio is separate (station-mode probes about every 125 ms); that is what flock-you fingerprints. The plan said the same (the private plan, line 241) | github.com/colonelpanichacks/flock-you README | S1 |
 | X9 | 19:21-23 | The phone-tower conversation "never touches the open air you can sweep" | LTE signalling *is* over the air. SIBs are unencrypted (EFF's own heuristics doc), and LTE-Cell-Scanner finds cells with an RTL dongle. The barrier is a 5-20 MHz carrier plus a full LTE stack | github.com/EFForg/rayhunter `doc/heuristics.md`; github.com/Evrytania/LTE-Cell-Scanner | S1 |
 | X10 | 04:21-23 | The pilot is "at exactly 19 kHz above its center" | The pilot is a baseband subcarrier at 19 kHz in the *demodulated* audio, held to ±2 Hz. It is not an RF tone above the carrier. **The code is right** (`ppm.py:19-25` demodulates with `rtl_fm -M fm` and measures the tone in audio); only the copy is wrong | LII cfr 47/73.322 | S1 |
 | X11 | 12:9-10, 12:25-27, 12:52-56, 12:63 | A waterfall "can never show" PSK; "the Wi-Fi and satellite links … hide there" | A PSK signal fills about its symbol rate in bandwidth and shows plainly as energy (WiFi is a 20 MHz block). The waterfall can't show *which phase*, i.e. the bits. RDS is invisible only because it is a small subcarrier inside the FM baseband | LII cfr 47/73.322 | S1 |
@@ -749,9 +749,9 @@ Where R3 (real tune and gain) lands, the M1/M2/M6/M7 originals mostly stand. Onl
 - Branches: `origin/flipper-module` (`lesson_packs/29-meet-flipper.yaml`, the design spec) and
   `origin/ux-polish` (diff).
 - Plans:
-  - `eager-spinning-frost.md` (Curriculum, Assessment)
-  - the educator amendment `…-agent-adcde0e12f27f43c3.md` (§0-§8)
-  - the ports survey `…-agent-a7b69cfb5fa8bac25.md`
-  - `abstract-soaring-bunny.md` (Course architecture)
+  - the owner's private plan (Curriculum, Assessment)
+  - its educator amendment (§0-§8)
+  - its ports survey
+  - a second private plan (Course architecture)
 - Word counts were computed from the YAML. The §5 fact-check used the primary sources cited in
   that section.

@@ -1,6 +1,6 @@
 # Adversarial verification of the 2026-11-02 technical audit
 
-**Scope.** I tried to refute each S0 and S1 finding (T-01 to T-14) in `2026-11-02-technical.md`. Code was read at **c22f7d9** with `git archive` (line numbers below are at that commit). Upstream sources were fetched fresh. I made no edits to the repo or to nomad-b and ran nothing on nomad-b. Live claims are judged against the saved `d-*` and `m-*` files only.
+**Scope.** I tried to refute each S0 and S1 finding (T-01 to T-14) in `2026-11-02-technical.md`. Code was read at **c22f7d9** with `git archive` (line numbers below are at that commit). Upstream sources were fetched fresh. I made no edits to the repo or to the reference Recon and ran nothing on it. Live claims are judged against the saved `d-*` and `m-*` files only.
 
 **Verdict labels**
 - **CONFIRMED**: the claim stands as written.
@@ -66,7 +66,7 @@ Counts: CONFIRMED 8, CONFIRMED-corrected 6 (T-03, T-05, T-06, T-08, T-10, T-11),
 - **Primary source.** I fetched rtl_power.c three ways:
   - osmocom `v0.6.0` (`raw.githubusercontent.com/osmocom/rtl-sdr/v0.6.0/src/rtl_power.c`);
   - osmocom master;
-  - **Debian's own 0.6.0-4** (`sources.debian.org/data/main/r/rtl-sdr/0.6.0-4/src/rtl_power.c`, the bookworm package on nomad-b).
+  - **Debian's own 0.6.0-4** (`sources.debian.org/data/main/r/rtl-sdr/0.6.0-4/src/rtl_power.c`, the bookworm package on the reference Recon).
   `csv_dbm()` is byte-identical in all three.
   - Line 722 nukes DC: `ts->avg[0] = ts->avg[1];`
   - Lines 724-728 do the 180° rotation.

@@ -14,7 +14,8 @@ from sigint101.rds import (
     parse_rds_group,
 )
 
-# Real redsea 1.3.1 output, captured by decoding redsea's own mpx-testfile-yksi.flac on nomad-b.
+# Real redsea 1.3.1 output, captured by decoding redsea's own mpx-testfile-yksi.flac on the
+# reference Recon.
 YKSI_0A = ('{"pi":"0x6201","group":"0A","tp":false,"prog_type":"Serious classical",'
            '"di":{"stereo":true},"ta":true,"is_music":true}')
 YKSI_1A = '{"pi":"0x6201","group":"1A","tp":false,"prog_type":"Serious classical"}'

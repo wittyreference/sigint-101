@@ -17,7 +17,8 @@ busy in the waterfall capture. Each 50 ms frame is Fourier transformed (20 Hz bi
 
     iq_carrier.py IQ.cu8 RATE CHANNEL_OFFSET_HZ OUT.csv
 
-Needs numpy; nomad-b's system python3 has it. The recording itself is not kept in the repo.
+Needs numpy; the reference Recon's system python3 has it. The recording itself is not kept in
+the repo.
 """
 
 import csv

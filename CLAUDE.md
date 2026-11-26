@@ -4,7 +4,7 @@ A self-contained, touch-screen, learn-by-doing SIGINT course that takes a beginn
 signals-intelligence fundamentals by driving the real radios of a SpecFive Nomad 2 Recon paired
 with a Flipper Zero.
 
-Authoritative detail lives in the plan (`~/.claude/plans/eager-spinning-frost.md`) and
+Authoritative detail lives in the owner's private plan (kept outside this repository) and
 `STATUS.md` (living state). This file is the lean agreement; when they disagree, the plan wins.
 
 ## Dev pipeline
@@ -71,9 +71,10 @@ capable instrument, not a locked toy.
 
 ## Infra & workflow
 
-- **Dev runs on the droplet** (D14). spec5 (SDR) and pi5 (Flipper) are **acceptance-test targets
-  only**, reached over SSH — never dev hosts. No Claude session runs on the Pis; the droplet runs
-  the hardware command remotely and captures the output back.
+- **Dev runs on the droplet** (D14). The owner's lab boxes (a Recon for the SDR, a Pi for the
+  Flipper) are **acceptance-test targets only**, reached over SSH — never dev hosts. No Claude
+  session runs on the Pis; the droplet runs the hardware command remotely and captures the
+  output back.
 - **All repo edits go through linked worktrees.** The global pre-write hook blocks writes to the
   main checkout. Create a worktree, edit there, commit there, then remove it from main.
 - **Stage files by name** — never `git add -A`.
@@ -88,7 +89,7 @@ capable instrument, not a locked toy.
 - **Repo:** github.com/wittyreference/sigint-101 (public, MIT). Nothing personal to MC committed.
 - **Git identity:** wittyreference <mc8805@outlook.com>. Check `git config user.name` and
   `git config user.email` before your first commit each session; if it differs, stop and say so.
-- **Plan:** `~/.claude/plans/eager-spinning-frost.md` (authoritative detail).
+- **Plan:** the owner's private plan, kept outside this repository (authoritative detail).
 - **Living state:** `STATUS.md` (NEXT ACTION first, then done, blockers). Keep it true after every
   merge or push.
 - **Stack:** FastAPI + Jinja2 + polling JS + offline CSS + SQLite progress + append-only JSONL
@@ -106,7 +107,7 @@ capable instrument, not a locked toy.
     go?" — just do it and report. Default to **subagent-heavy** execution: fan research and
     independent chunks out to subagents. Ending a turn with "Want me to go?" is the exact ping-pong
     MC called out. One unavoidable tap remains (EnterWorktree); flag it, then stay heads-down.
-- **nomad-b (user `spec5`, host `spec5b`) is the WORKING HIL target**; spec5
+- **The reference Recon is the WORKING HIL target**; the owner's second Recon
   is the deaf one (busted RX antenna). Don't conflate them. (Session 2026-10-26.)
 - **Lesson copy ALWAYS shrinks to fit the fixed 800x480 — never scroll, never ask.** When a stage
   overflows (the Next/Commit button pushed past 480px), trim the prose and the concept banner until
@@ -131,7 +132,7 @@ capable instrument, not a locked toy.
   nothing or rip that scroll out. And lessons must be COMPLETABLE: the last stage carries a
   "Complete lesson" button wired to `POST /api/complete`. (Session 2026-11-01, MC.)
 - **Know the kit; look it up before asking MC to.** The Nomad has a physical keyboard. Its jacks,
-  ports and antenna layout are in the hardware research (`eager-spinning-frost-agent-ports.md`
-  beside the plan) and the vendor's docs. Read those, and try every remote fix (an esptool reset,
+  ports and antenna layout are in the hardware research (a ports survey kept
+  beside the private plan) and the vendor's docs. Read those, and try every remote fix (an esptool reset,
   an ssh command), before handing MC a check or step in the real world. (Session 2026-11-02, MC:
   "why do you need me to do something IRL".)

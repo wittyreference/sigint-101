@@ -53,7 +53,7 @@ MC put the rack in the 11-08 cut line: **"1–19 plus operator mode"**.
 - TDD the routes (`/operate`, `/operate/{instrument}`, the decoder tune routes with their band
   limits) and the reception-log writes.
 - Render-verify every instrument view at 800x480 in dark and red-night.
-- HIL on nomad-b inside the SDR flock (see `docs/plans/…` sprint brief): retune the waterfall,
+- HIL on the reference Recon inside the SDR flock (see `docs/plans/…` sprint brief): retune the waterfall,
   retune one decoder, and see a real reception land in the log (FM, or the local Acurite sensor
   on rtl_433).
 

@@ -31,7 +31,7 @@ OPTIONAL=0
 FLOCK_ADAPTER=0
 
 # --- Source builds, pinned --------------------------------------------------------------------
-# Core decoders. Each pin is the commit nomad-b (the reference Recon) runs, read from its build
+# Core decoders. Each pin is the commit the reference Recon runs, read from its build
 # checkouts on 2026-11-02.
 DUMP1090_REPO="https://github.com/flightaware/dump1090"
 DUMP1090_PIN="465e06330372ab0586a6a5063c66b60a8750f2b6"  # master just after v11.1 (M13 ADS-B)
@@ -39,13 +39,15 @@ ACARSDEC_REPO="https://github.com/TLeconte/acarsdec"
 ACARSDEC_PIN="339f63eb91a890cfe5b199ad70814cfe86702d1e"  # 3.7, the archived repo's last commit (M16)
 REDSEA_REPO="https://github.com/windytan/redsea"
 REDSEA_PIN="7555c9f6259d50718697ee8c9f218ea012c6892c"    # 1.3.1 plus CI-only commits (M12 RDS)
-# nomad-b's rtl-ais checkout is gone. Its binary has the -U option (added 2026-08-05) and was
-# built 2026-10-29; master's head (the -U merge) is the only commit that fits.
+# The reference Recon's rtl-ais checkout is gone. Its binary has the -U option (added
+# 2026-08-05) and was built 2026-10-29; master's head (the -U merge) is the only commit that
+# fits.
 RTL_AIS_REPO="https://github.com/dgiardini/rtl-ais"
 RTL_AIS_PIN="d84764bd20d93de68d3275e4914f897adfb353cc"   # master, 2026-08-05 (M26 AIS)
 
-# Optional decoders (--with-optional). nomad-b has none of them, so its lessons answer with an
-# honest 503. These pins are current upstream releases, not anything proven on nomad-b.
+# Optional decoders (--with-optional). The reference Recon has none of them, so its lessons
+# answer with an honest 503. These pins are current upstream releases, not anything proven
+# on it.
 MBELIB_REPO="https://github.com/lwvmobile/mbelib"
 MBELIB_PIN="30dc79074ca022366a27d705b8023011d9600339"    # ambe_tones branch, as dsd-fme requires
 DSD_FME_REPO="https://github.com/lwvmobile/dsd-fme"
@@ -62,7 +64,7 @@ SSTV_VENV="/opt/sigint101/sstv"
 # font that carries U+262D (the bundled fonts don't), and the kiosk's browser and compositor.
 APT_RUNTIME=(rtl-sdr rtl-433 multimon-ng tcpdump libcap2-bin iw usbutils fonts-dejavu-core
              git curl python3-venv chromium labwc)
-# What the pinned core builds need (the set nomad-b built them with).
+# What the pinned core builds need (the set the reference Recon built them with).
 APT_BUILD=(build-essential cmake pkg-config meson ninja-build librtlsdr-dev libncurses-dev
            libsndfile1-dev libliquid-dev)
 # What the optional builds need: sox (SSTV), dsd-fme's list, SatDump's headless list.
@@ -434,10 +436,10 @@ monitor_adapters() {
 
 step_monitor_mode() {
   step "Monitor mode for the RTL8821CU adapter at boot (Flock, M18)"
-  # Opt-in, because of power. On nomad-b, bringing the adapter up in monitor mode on the Nomad's
-  # own USB port drew more than the port supplies: 192 over-current events in two minutes, each
-  # resetting the adapter and the touch panel that shares the hub. It needs a self-powered USB
-  # hub, so only a box that has one asks for it with --with-flock-adapter.
+  # Opt-in, because of power. On the reference Recon, bringing the adapter up in monitor mode on
+  # the Nomad's own USB port drew more than the port supplies: 192 over-current events in two
+  # minutes, each resetting the adapter and the touch panel that shares the hub. It needs a
+  # self-powered USB hub, so only a box that has one asks for it with --with-flock-adapter.
   if [ "$FLOCK_ADAPTER" != 1 ]; then
     skip "not enabled: the adapter needs a powered USB hub (--with-flock-adapter turns it on)"
     return 0

@@ -8,7 +8,7 @@
 >   plus the choices. It had no keys, no verdicts and no lesson packs.
 > - **One assumption is wrong.** Where it says "RTL-SDR Blog V4", it assumed the R828D dongle is a
 >   V4. The Nomad's built-in radio is not:
->   - nomad-b measured about +164 ppm, not a 1 ppm crystal;
+>   - The reference Recon measured about +164 ppm, not a 1 ppm crystal;
 >   - nothing shows the V4's built-in FM filtering.
 >
 >   So its L4 point ("learners read 0 to 2 ppm") and its V4-specific L7 reasoning don't apply. L7 is

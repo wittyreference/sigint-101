@@ -22,9 +22,9 @@ USB CLI and shows what it is doing on the 800×480 panel — the Flipper becomes
 instrument*, driven over USB instead of over an SDR (MC's call, 2026-10-31). No on-device C /
 FAP in the core; that is a possible later extension, explicitly out of scope here.
 
-## 2. Ground truth (observed 2026-10-31, nomad-b)
+## 2. Ground truth (observed 2026-10-31, the reference Recon)
 
-- Flipper Zero on nomad-b (`spec5b`), `/dev/ttyACM0`, USB id `0483:5740`.
+- Flipper Zero on the reference Recon, `/dev/ttyACM0`, USB id `0483:5740`.
 - **Official firmware 1.4.3** (build 05-12-2025), US region, BLE radio alive. Stock firmware,
   not a custom distro — the restore/update section targets official-firmware paths.
 - Text CLI reachable over the serial port (115200, USB-CDC). Command surface includes:
@@ -51,18 +51,19 @@ FAP in the core; that is a possible later extension, explicitly out of scope her
   `edge_count`, `width_histogram()`). **Nothing is wired to the kiosk yet.** So the transport and
   M30's Sub-GHz parsing already exist; this module adds the product layer on top and reuses
   `FlipperError` (no new exception type).
-- Access: the droplet reaches nomad-b directly as user **`spec5`** (`ssh spec5@<nomad-b tailnet address>`);
-  the `spec5->claude-factory` key in nomad-b's `authorized_keys` is the droplet's. `spec5` is in
-  `dialout`, so it can open `/dev/ttyACM0`. (Registry: `machines/hosts/nomad-b.md`.)
+- Access: the droplet reaches the reference Recon directly as its login user
+  (`ssh <user>@<reference Recon's address>`); the droplet's key is in the Recon's
+  `authorized_keys`. The login user is in `dialout`, so it can open `/dev/ttyACM0`. (Registry:
+  the owner's private host notes.)
 
 ## 3. Where the code runs, and the dev loop
 
-The kiosk/console app (FastAPI, the 800×480 panel) runs **on nomad-b**, where the Flipper and the
-radios live. `FlipperLink` opens the **local** `/dev/ttyACM0` on nomad-b — no networked serial.
+The kiosk/console app (FastAPI, the 800×480 panel) runs **on the reference Recon**, where the Flipper and the
+radios live. `FlipperLink` opens the **local** `/dev/ttyACM0` on the reference Recon — no networked serial.
 
-Dev loop (same as the SDR tracks): author in this droplet worktree → push the branch → on nomad-b
+Dev loop (same as the SDR tracks): author in this droplet worktree → push the branch → on the reference Recon
 `git fetch && git checkout -f` the branch and run uvicorn → HIL against the real Flipper over SSH
-as `spec5`. Acceptance evidence is real device output captured from nomad-b.
+as the login user. Acceptance evidence is real device output captured from the reference Recon.
 
 ## 4. The unit: U10 "Flipper", lessons M29–M38
 
@@ -148,21 +149,21 @@ as parser fixtures before writing each capability lesson's parser.
 ## 6. M37 — console rig: diagnose · restore · update (whole rig)
 
 Covers the whole SpecFive Nomad bench, Flipper included. Delivered as a committed **runbook**
-(`docs/runbook.md`, the authoritative recovery doc, cross-linking `machines/hosts/nomad-b.md` as
+(`docs/runbook.md`, the authoritative recovery doc, cross-linking the owner's private host notes as
 the inventory of record) **plus** the M37 console lesson that walks the high points.
 
 - **Diagnose:** won't boot / panel dark (the HDMI EDID pin, `cmdline.txt`), kiosk app down, an
   SDR/radio missing, Flipper not mounting, `meshtasticd`, the battery/UPS daemon, tailnet
   reachability, the `lab-guard` firewall.
-- **Restore:** SD backup & restore, config restore from `machines/hosts/nomad-b.md` + the
-  meshtastic node identity (already exported on spec5 at `~/backups/meshtastic/nomadB-*`),
+- **Restore:** SD backup & restore, config restore from the owner's private host notes + the
+  meshtastic node identity (already exported to a backup on the second Recon),
   re-flash, re-pair.
 - **Update:** RPi OS / apt, the kiosk app, Flipper firmware (official 1.4.3 → update via qFlipper /
   web updater / `update` CLI).
 
 ### 6a. Prerequisite with a cost (separately approvable) — the SD baseline image
 
-`machines/hosts/nomad-b.md` is explicit: **no disk image of the SD card exists anywhere**, and the
+The owner's private host notes are explicit: **no disk image of the SD card exists anywhere**, and the
 root partition was never expanded (~26 G of the 58 G card unallocated). A genuine *restore* has
 nothing to restore *from*. So a real restore story requires **creating that baseline image first**:
 
@@ -180,7 +181,7 @@ nothing to restore *from*. So a real restore story requires **creating that base
   double is a fake serial port at the hardware boundary. Acceptance is real device output.
 - **TDD** for logic: the parsers (`device_info`, a tag read, `storage list`) are test-first against
   **real captured CLI output** used as fixtures (the way AIS used the published gpsd vectors). A
-  fixture corpus is captured from the real Flipper on nomad-b.
+  fixture corpus is captured from the real Flipper on the reference Recon.
 - ABOUTME 2-line headers on `.py`; evergreen names; lint clean.
 
 ## 8. Testing & acceptance
@@ -195,7 +196,7 @@ nothing to restore *from*. So a real restore story requires **creating that base
   SDR-arbitration contract list.
 - **Lesson:** `tests/test_lesson_m29.py` … `m38.py` (pack structure + panels). `tests/test_units.py`
   updated: 10 units, partition covers 1..38.
-- **HIL on nomad-b (named device-output acceptance):** the panel shows real `device_info`; at least
+- **HIL on the reference Recon (named device-output acceptance):** the panel shows real `device_info`; at least
   one capability live-reads a real object (present an RFID fob / NFC tag / IR remote → the console
   shows it). Per-lesson demo+predict render at a forced 800×480 (Next 423 / Commit 474). Lint green.
 

@@ -66,7 +66,7 @@ def test_exit_flags_the_exit_then_terminates_only_the_kiosk_browser(tmp_path):
 
 def test_exit_finds_the_browser_under_chromiums_rewritten_process_title(tmp_path):
     """Chromium retitles itself: /proc shows its whole command line as ONE space-joined string
-    (measured on nomad-b, 2026-11-03), not one argv element per flag."""
+    (measured on the reference Recon, 2026-11-03), not one argv element per flag."""
     retitled = [
         (101, ["/usr/lib/chromium/chromium --load-extension --kiosk --ozone-platform=wayland "
                f"{PROFILE_ARG} --app=http://127.0.0.1:8008 --noerrdialogs"]),

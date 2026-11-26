@@ -4,17 +4,17 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
-## 2026-10-27: M12 decodes RDS (PSK) with rtl_fm|redsea — but nomad-b's FM antenna can't hear it
+## 2026-10-27: M12 decodes RDS (PSK) with rtl_fm|redsea — but the reference Recon's FM antenna can't hear it
 **Finding.** RDS is the data on an FM station's 57 kHz subcarrier (PSK — phase, which the waterfall
 can never show). M12 decodes it with `rtl_fm -M fm -l 0 -A std -s 171k -F 9 -f <hz> | redsea -r
 171000` (171 kHz MPX keeps the 57 kHz subcarrier). `redsea` is NOT in apt — built from source on
-nomad-b (meson/ninja + libsndfile1-dev + libliquid-dev), installed to `/usr/local/bin`. redsea 1.3.1
+the reference Recon (meson/ninja + libsndfile1-dev + libliquid-dev), installed to `/usr/local/bin`. redsea 1.3.1
 works: it decoded real RDS from its own test MPX recording (`pi:0x6201`, `prog_type`, groups 0A/1A).
 `sigint101/rds.py` mirrors the rtl_433 Decoder: `parse_rds_group` (one redsea JSON line → a group),
 `RDSStation` assembles pi/ps/radiotext/prog_type across groups, `RDSDecoder` runs the pipeline (two
 Popens wrapped as `_Pipeline`) with release/resume — a THIRD SDR-exclusive tool now shares the dongle
 with the sweeper and rtl_433 decoder, so every exclusive start releases the other two and
-/api/spectrum resumes the sweep. **BLOCKER (same as M4's ppm): nomad-b's FM reception can't recover
+/api/spectrum resumes the sweep. **BLOCKER (same as M4's ppm): the reference Recon's FM reception can't recover
 the subcarrier.** Strongest station 96.0 MHz at ~29 dB over the sweep floor, but a full-band scan
 decoded RDS on NONE of the 4 audible stations, and /api/rds runs the live pipeline to an honest-empty
 station (group_count 0). M4 saw the same (no 19 kHz stereo pilot there). It is the FM antenna — the
@@ -35,9 +35,9 @@ python lib's `TCPInterface(hostname, portNumber=4403)` plus a `pub.subscribe(_on
 "meshtastic.receive")`; each MeshPacket dict carries `rxSnr`/`rxRssi`, and a *negative* rxSnr that
 still decoded is the lesson. The LoRa radio is separate from the RTL-SDR, so there is NO contention
 with the sweeper/decoder (no release/resume). Added `meshtastic` to requirements and installed it
-into both venvs (the droplet's shared one and nomad-b's own). lazy-import it inside the connect so
+into both venvs (the droplet's shared one and the reference Recon's own). lazy-import it inside the connect so
 the pure parser tests run without the lib. **node B = the M5 Cardputer** (ESP32-S3, USB id
-`303a:1001`, on `/dev/ttyACM0` where the Flipper used to be; `spec5` is in `plugdev`). It is itself a
+`303a:1001`, on `/dev/ttyACM0` where the Flipper used to be; the login user is in `plugdev`). It is itself a
 Meshtastic node (US region 1, LongFast preset 0, default primary channel) so its packets decode on
 node A. Drive it from the droplet with `meshtastic.serial_interface.SerialInterface(devPath=
 "/dev/ttyACM0")` then `iface.sendText("...")`. **HIL-verified end to end:** node B sent 3 texts,
@@ -62,7 +62,7 @@ reception always carries `rxSnr`, so filter on it. To drive node B, SerialInterf
 
 ## 2026-10-27: headless --window-size is NOT a faithful 800x480 — force the viewport or the fit lies
 **Finding.** `chromium --headless=new --window-size=800,480 --screenshot` lays the page out in a
-viewport whose height is NOT 480 (measured `window.innerHeight` = 337 on nomad-b), then scales the
+viewport whose height is NOT 480 (measured `window.innerHeight` = 337 on the reference Recon), then scales the
 shot — so a render that "fits" there is checked against a shorter screen than the real kiosk, and a
 render that overflows the true 480 can still look fine. This is why earlier predict-fit checks were
 unreliable: re-measured at a *forced* 800x480, M9's shipped predict put its Commit button at 513 px
@@ -90,8 +90,8 @@ exclusively, so `/api/decode` calls `sweeper.release()` (release, not stop — a
 would otherwise reclaim it mid-decode) before starting the decoder, and `/api/spectrum` releases the
 decoder and `resume()`s the sweeper to take the dongle back. The console renders the decode panel
 instead of the waterfall when `lesson.uses_decoder`, driven by `static/decode.js`. **HIL-verified on
-nomad-b:** the live panel listed a real ambient Acurite-Tower sensor (18.2 °C, 51 % RH, mod ASK) —
-the decoder instrument works end to end. **But ambient 433 at nomad-b is all ASK/OOK** (Acurite temp,
+the reference Recon:** the live panel listed a real ambient Acurite-Tower sensor (18.2 °C, 51 % RH, mod ASK) —
+the decoder instrument works end to end. **But ambient 433 at the reference Recon is all ASK/OOK** (Acurite temp,
 Smoke-GS558 beacon), so the FSK-specific two-tone read is NOT captured — it needs an actual FSK
 transmitter on-frequency (a real FSK sensor, or a crafted Flipper 2-FSK via `tx_from_file`), the same
 way M9's blink needed a live OOK source.
@@ -101,8 +101,8 @@ back, or the lazy /api/spectrum restart steals the dongle. For M10's FSK payoff 
 real FSK source — ambient ISM here won't oblige.
 
 ## 2026-10-27: the Flipper CLI drives sub-GHz TX from the droplet — it WAS the charge-only cable
-**Finding.** Swapping the Flipper's USB cable for a data cable made it enumerate on nomad-b exactly
-as predicted: `0483:5740` in `lsusb`, `/dev/ttyACM0` (root:dialout 660; `spec5` is in `dialout`),
+**Finding.** Swapping the Flipper's USB cable for a data cable made it enumerate on the reference Recon exactly
+as predicted: `0483:5740` in `lsusb`, `/dev/ttyACM0` (root:dialout 660; the login user is in `dialout`),
 a clean `cdc_acm` attach in `dmesg`, product "Flipper <the Flipper's device name>". System `python3` has `pyserial`
 3.5 (the `.venv` does NOT — use system python for serial). Full CLI works over 115200: `device_info`
 (Flipper Zero, official fw 1.4.3, region US, `radio_alive: true`) and, crucially, `subghz tx <3-byte
@@ -111,7 +111,7 @@ key hex> <freq Hz> <te us> <repeat> <device: 0=CC1101_INT>` — e.g. `subghz tx 
 when the serial port is closed can leave a command pending; send `\x03` (Ctrl-C) + CR to abort and
 confirm the `>: ` prompt returns before trusting the device is idle (it was not stuck keying — the
 PA stops at burst end — but the CLI read was mid-command).**
-**How to apply.** Flipper-over-USB features are now unblocked on nomad-b. Open `/dev/ttyACM0` with
+**How to apply.** Flipper-over-USB features are now unblocked on the reference Recon. Open `/dev/ttyACM0` with
 system `python3`+`pyserial`; drive the CLI by writing `<cmd>\r\n` and reading after a short settle.
 Only one process can hold the port — stop any background TX task before a script that needs it.
 
@@ -122,7 +122,7 @@ the page's `setTimeout` polls but does NOT wait for the real `rtl_power` sweeps 
 over the network, so 0 rows are painted at snapshot. (The prior empty-band captures looked fine only
 because empty is empty regardless of row count.) Pre-warming the buffer doesn't help either —
 `waterfall.js` auto-POSTs `/api/tune` on load and `retune()` ALWAYS clears the buffer (no same-band
-short-circuit), wiping the warm rows. The fix that worked: drive DevTools directly. nomad-b has no
+short-circuit), wiping the warm rows. The fix that worked: drive DevTools directly. The reference Recon has no
 node/wscat/websocket libs, so a ~60-line **pure-stdlib WebSocket client** (raw socket, manual
 `Sec-WebSocket-Key` handshake, masked client frames, 126/127 length + continuation reassembly) sends
 `Page.captureScreenshot` after a genuine `time.sleep`. One foreground ssh runs: launch chromium with
@@ -152,22 +152,22 @@ route passes centre/step/edges, the live waterfall canvas carries `data-tune-low
 `waterfall.js` POSTs `/api/tune` once on load (reusing the existing retune-clears-the-canvas path).
 **How to apply.** Any lesson off the FM band MUST declare `tune:` or it silently shows FM. The pure
 bit (`parseTuneBand`) is node-tested; the DOM read + POST is browser-only (verified by HIL render).
-To HIL-verify the retune: run the server ON nomad-b (live SDR), commit a prediction to unseal
+To HIL-verify the retune: run the server ON the reference Recon (live SDR), commit a prediction to unseal
 observe, render `/lesson/N` — the axis + dial read the band. The *empty* band is the honest state
 when nothing is keying; a signal needs a real transmitter on that frequency.
 
-## 2026-10-27: the Flipper does not enumerate as USB CDC on nomad-b (charge-only cable suspected)
-**Finding.** With the Flipper "plugged in" to nomad-b there was no `/dev/ttyACM*` and `lsusb` showed
+## 2026-10-27: the Flipper does not enumerate as USB CDC on the reference Recon (charge-only cable suspected)
+**Finding.** With the Flipper "plugged in" to the reference Recon there was no `/dev/ttyACM*` and `lsusb` showed
 only the RTL-SDR (`0bda:2838`) and the MeshAdv HAT (`0484:5750`) — not the Flipper's `0483:5740`
 (STM32 virtual COM) — and `dmesg` logged no recent CDC attach. Almost always a charge-only USB
 cable (very common with the Flipper) or USB not "connected" on its screen. M9's live OOK demo does
 NOT need the CDC: the Flipper transmits at 433.92 over the air and the RTL-SDR hears it over the air,
 so hand-operating it works; the USB link only matters to drive its TX from the droplet (the plan's
-host-driven FAP / an automated blink capture). **433 ISM at nomad-b:** ambient OOK is intermittent —
+host-driven FAP / an automated blink capture). **433 ISM at the reference Recon:** ambient OOK is intermittent —
 a 15s `rtl_power` sweep caught one +40 dB burst above floor, otherwise quiet; `rtl_433` is NOT
 installed there (M10's dependency, a system install).
 **How to apply.** For a Flipper-over-USB feature, first confirm `0483:5740` in `lsusb` and a
-`/dev/ttyACM*` on nomad-b — if absent, it is the cable, not the code. For an OOK blink capture you
+`/dev/ttyACM*` on the reference Recon — if absent, it is the cable, not the code. For an OOK blink capture you
 need a real transmitter on-frequency during the render window; don't expect ambient 433 to oblige.
 
 ## 2026-10-27: the instrument narration is a ~27-65px scroll band — the eyebrow concept was eating it
@@ -188,7 +188,7 @@ not eliminate it.
 the fixed vertical budget carefully — don't repeat chrome (like the concept) on stages that already
 showed it. To measure a stage's real scroll, render a throwaway same-origin fit-view (iframe to
 `/lesson/N`, flip the target `data-stage` panel visible, print `body.scrollHeight - body.clientHeight`)
-and screenshot it on nomad-b. **Delete the fit-view before committing.**
+and screenshot it on the reference Recon. **Delete the fit-view before committing.**
 
 ## 2026-10-26: Harness installed
 
@@ -220,7 +220,7 @@ chip. (The guard is bool-only — numeric keys still str-coerce; eyeball those.)
 
 ## 2026-10-26: ☭ (U+262D) renders via system fallback, not our bundled fonts
 **Finding.** The eyebrow/predict hammer-and-sickle (`content:"\262D"` / `&#9773;`) renders fine on
-nomad-b, but NOT because of our self-hosted fonts: the PT Mono @font-face `unicode-range` lists only
+the reference Recon, but NOT because of our self-hosted fonts: the PT Mono @font-face `unicode-range` lists only
 Latin/Cyrillic blocks and excludes U+262D, so the browser uses a system monospace fallback (DejaVu
 Sans Mono, which has the glyph). The offline-font guarantee does not cover it.
 **How to apply.** A glyph outside every bundled @font-face `unicode-range` depends on the renderer's
@@ -244,22 +244,22 @@ the ~360px stage area, leaving almost nothing for a multi-line title.
 the title at the 18px floor (predict-scoped font-size), and reclaim chrome height (statusbar
 `--bar-h` 72→66, rail `--rail-h` 48→40). Render-check every new lesson's predict screen at 800x480.
 
-## 2026-10-26: HIL render recipe for a LIVE panel (server on nomad-b, not the droplet)
+## 2026-10-26: HIL render recipe for a LIVE panel (server on the reference Recon, not the droplet)
 **Finding.** The waterfall and the gain meter are LIVE (poll `/api/spectrum`). A droplet-served
 render shows the honest "no radio" state — the droplet has no SDR. To see a live panel with real
-data the server must run ON nomad-b (its checkout is `~/sigint-101`, has a `.venv` and
-`rtl_power`). Recipe that worked: (1) on nomad-b `git fetch origin <branch> && git checkout -b
+data the server must run ON the reference Recon (its checkout is `~/sigint-101`, has a `.venv` and
+`rtl_power`). Recipe that worked: (1) on the reference Recon `git fetch origin <branch> && git checkout -b
 <branch> FETCH_HEAD`; (2) hold the server open as a droplet background task:
-`ssh spec5@<nomad-b tailnet address> 'cd ~/sigint-101 && exec .venv/bin/uvicorn sigint101.app:app
+`ssh <user>@<reference Recon's address> 'cd ~/sigint-101 && exec .venv/bin/uvicorn sigint101.app:app
 --host 127.0.0.1 --port 8008'` (backgrounding uvicorn *inside* a one-shot ssh fails with exit 255 —
 hold the connection open instead); (3) warm the sweep: `curl /api/spectrum` then wait ~8s for real
 rows; (4) to show a hidden instrument stage, POST a prediction (`/api/predict?lesson_id=N`) so the
 first SEALED stage (observe) becomes the visible one, then screenshot `/lesson/N` DIRECTLY — a
-headless iframe wrapper renders blank, but a real stage renders; (5) restore nomad-b: kill procs,
-`git checkout main && git branch -D <branch>`, remove any scp'd wrapper. ssh to nomad-b is flaky on
+headless iframe wrapper renders blank, but a real stage renders; (5) restore the reference Recon: kill procs,
+`git checkout main && git branch -D <branch>`, remove any scp'd wrapper. ssh to the reference Recon is flaky on
 long/compound commands (intermittent 255) — keep each ssh call simple and retry.
 **How to apply.** Any live-data panel (gain/provenance/ppm, the waterfall) is a HIL check — verify
-structure + no-radio on the droplet, then the live reading on nomad-b with this recipe.
+structure + no-radio on the droplet, then the live reading on the reference Recon with this recipe.
 
 ## 2026-10-26: the demo/try/observe instrument stages were over-subscribed at 800x480
 **Finding.** Only home/FRAME/predict were ever render-verified. The instrument stages (waterfall +
@@ -282,7 +282,7 @@ canvases, so a hidden stage is already correct when you step to it).
 exactly like waterfall.js — a lesson shows the same panel on each of its instrument stages.
 
 ## 2026-10-28: M13 ADS-B — a 4th SDR-exclusive instrument, and the 1090 MHz antenna wall
-**Finding.** dump1090-fa builds cleanly from source on nomad-b (Bookworm/aarch64) with just
+**Finding.** dump1090-fa builds cleanly from source on the reference Recon (Bookworm/aarch64) with just
 `librtlsdr-dev` + `libncurses-dev` and `make BLADERF=no`; it is not in Debian's repos. It serves a
 line-oriented BaseStation (SBS-1) feed on TCP 30003 — one CSV message per decoded Mode S frame — so
 the backend reuses the exact parse→accumulate→reader-thread pattern of the RDS/rtl_433 decoders, with
@@ -292,7 +292,7 @@ one aircraft. The authoritative field layout (incl. the trailing `H` on a geomet
 rate-mismatched IQ sample (the classic antirez `modes1.bin` is 2 MHz; dump1090-fa demods at a fixed
 2.4 MSPS, so it decodes 0 frames). dump1090 becomes a **4th** SDR-exclusive consumer — every
 exclusive start releases the other three (sweeper, rtl_433, rtl_fm), and /api/spectrum releases it.
-**The antenna wall:** nomad-b hears **411k Mode-S preambles but 0 pass CRC** at 1090 MHz, peak signal
+**The antenna wall:** the reference Recon hears **411k Mode-S preambles but 0 pass CRC** at 1090 MHz, peak signal
 power blank — i.e. noise triggering the preamble detector, no real aircraft. This is a UHF antenna
 problem (1090 MHz), **independent of the FM antenna** that blocks M4/M12. Gain is not the lever (0 of
 2M candidate frames is not a gain miss). So M13's live capture defers like M9/M10/M12; the pipeline
@@ -315,7 +315,7 @@ multimon-ng's TNC2 monitor output. The exact output format — the "APRS: " pref
 SRC>DST,DIGI,...:info shape, SSID shown only when nonzero, a repeated digi's trailing '*', and the
 UI/CRC gating — is in multimon-ng's hdlc.c (aprs_disp_packet); reading that nailed the fixtures
 without needing a decodable WAV. One `multimon-ng` apt package covers BOTH APRS (AFSK1200) and the
-upcoming M15 POCSAG. nomad-b is deaf at 2m too (0 packets on 144.390 in 50s), so APRS live capture
+upcoming M15 POCSAG. The reference Recon is deaf at 2m too (0 packets on 144.390 in 50s), so APRS live capture
 defers like ADS-B/RDS; the pipeline is HIL-proven honest-empty. The APRS roster reuses the existing
 `.decoder__list` panel + `.decoder__item` grid, so M14 needed no new CSS. Predict-fit bit again: a
 3-line prompt + a chip that wrapped to 3 lines pushed Commit to y=488 (8px over); trimmed to a 2-line
@@ -339,7 +339,7 @@ traffic is a stream of one-off events, not stations that beacon, so the accumula
 newest-first `PageLog` (deque) rather than a per-key roster — pick the data structure from whether the
 signal is "who is on the air" (roster) or "what just came through" (log). Applying the predict-fit
 rule preemptively (2-line prompt + one-phrase chips) meant both gates fit at 800x480 on the first
-render (Commit=474, Next=423) — no second iteration. nomad-b heard no pages (silent/deaf), so live
+render (Commit=474, Next=423) — no second iteration. The reference Recon heard no pages (silent/deaf), so live
 capture defers; pipeline HIL-proven honest-empty. The dongle arbitration is now **6 consumers** — the
 `claim()` helper refactor flagged under M14 is increasingly worth doing (still gated on MC's OK).
 **How to apply.** A second lesson on the same decoder tool is mostly a new parser + panel + pack; reuse
@@ -365,7 +365,7 @@ render. **Unit 5 Decode (M13-M16) is complete; 7 SDR-exclusive consumers now sha
 **How to apply.** Prefer a decoder's own test asset + its file-input mode for real fixtures and a real
 populated render; inject it through the existing `*_factory` seam rather than changing production code.
 
-## 2026-11-02: kiosk autostart on nomad-b — two traps a reboot test would have hidden
+## 2026-11-02: kiosk autostart on the reference Recon — two traps a reboot test would have hidden
 **Finding.** `deploy/install.sh` makes the panel self-starting. The server is a systemd *user*
 unit with linger, and tty1 autologin runs `~/.profile`, which execs `~/.local/bin/sigint101-kiosk`
 (labwc plus a looping kiosk Chromium). Two traps turned up on the first real run:
@@ -379,7 +379,7 @@ unit with linger, and tty1 autologin runs `~/.profile`, which execs `~/.local/bi
 A third trap only showed up after several minutes:
 - **`/usr/bin/chromium` returns before the browser exits.** A `while true; do chromium …; done`
   relaunch loop therefore fires every few seconds. Each launch hands off to the running browser
-  as another window, and nomad-b reached load 20 with about 260 chromium processes.
+  as another window, and the reference Recon reached load 20 with about 260 chromium processes.
 - Orphaned autostart loops also outlive their labwc.
 - The launcher is now a watchdog: it relaunches only when no
   `[u]ser-data-dir=…/chromium-kiosk` process is alive. Crash-tested by killing the browser: it
@@ -395,7 +395,7 @@ A third trap only showed up after several minutes:
 - The server now owns port 8008: `systemctl --user stop sigint101` before running a manual
   server there.
 
-## 2026-11-02: headless Chromium on nomad-b needs --password-store=basic
+## 2026-11-02: headless Chromium on the reference Recon needs --password-store=basic
 **Finding.**
 - **What broke:** once the kiosk session existed (tty1 autologin starts `gnome-keyring-daemon`,
   and linger keeps a user D-Bus up), every *freshly launched* headless Chromium hung on its
@@ -418,19 +418,19 @@ A third trap only showed up after several minutes:
 - If a tab goes silent while the browser endpoint answers, suspect a blocking OS prompt (keyring,
   dialog) before suspecting the protocol client.
 
-## 2026-11-02: provisioning inventory — what nomad-b's hand setup actually was
-**Finding.** `deploy/provision.sh --check` on nomad-b, plus a read-only inventory, showed:
+## 2026-11-02: provisioning inventory — what the reference Recon's hand setup actually was
+**Finding.** `deploy/provision.sh --check` on the reference Recon, plus a read-only inventory, showed:
 - **wlan1 is back in managed mode.** Monitor mode was a manual step, so the 11-01 reboot undid
-  it, and the Flock lesson on nomad-b can't capture until monitor mode comes back.
+  it, and the Flock lesson on the reference Recon can't capture until monitor mode comes back.
   `provision.sh` now persists it with an NM unmanaged rule (driver `rtw_8821cu`), a udev rule,
   and a `sigint101-monitor@.service` oneshot.
-- **The kiosk depends on raspi-config's "console autologin" (B2).** nomad-b's `default.target`,
+- **The kiosk depends on raspi-config's "console autologin" (B2).** The reference Recon's `default.target`,
   `getty@tty1` `autologin.conf` and `lightdm.conf` all share one timestamp (2026-09-08 22:02),
   which is a B2 run. `install.sh` assumes it, but a stock Recon probably boots to the desktop.
   `provision.sh` sets B2.
 - **A tcpdump upgrade drops its file caps.** apt replaces the binary. An apt `DPkg::Post-Invoke`
   hook re-applies `cap_net_raw,cap_net_admin+eip`.
-- **`iw`, `getcap` and `setcap` live in /usr/sbin**, which is off `spec5`'s PATH over
+- **`iw`, `getcap` and `setcap` live in /usr/sbin**, which is off the login user's PATH over
   non-login SSH. `command -v iw` says "missing" even though iw is installed. Check
   `/usr/sbin` before calling a tool absent.
 - **Build provenance:** the checkouts in `~` are shallow and have no tags. They give the pins
@@ -498,7 +498,7 @@ lives; stop paths `shutdown(SHUT_RDWR)` before `close()`.
 ## 2026-11-02: a span centred on a target puts the target on rtl_power's one unmeasured bin
 **Finding.** rtl_power cuts a span into the fewest equal hops <= 2.8 MHz and each hop's centre bin
 is its DC copy (kept as None). Centred on 433.92 MHz, M9's 2 MHz span is one hop, so the carrier
-sat exactly on the gap: measured on nomad-b, the 433.92 bin read None with -17.9/-18.2 dB either
+sat exactly on the gap: measured on the reference Recon, the 433.92 bin read None with -17.9/-18.2 dB either
 side. An even hop count (the 20 MHz FM default) puts a tap on a hop edge instead, in the roll-off.
 `spectrum.hop_plan` reproduces the hop/bin arithmetic (checked against the three real captures,
 including the downsampled <1 MHz path: bins = smallest power of two with hop/bins <= bin), and
@@ -520,7 +520,7 @@ Expect reception counts in threes from that sensor; deduplicating repeats is a f
 
 ## 2026-11-02: the RTL8821CU in monitor mode browns out the Nomad's USB
 **Finding.**
-- On nomad-b, `provision.sh` brought wlan1 (RTL8821CU, `rtw_8821cu`) up in monitor mode at
+- On the reference Recon, `provision.sh` brought wlan1 (RTL8821CU, `rtw_8821cu`) up in monitor mode at
   10:26:27. Within two minutes `dmesg` showed 192 `usb 1-1-port3: over-current change` events.
 - Each event reset the adapter: it came back in "Driver CDROM Mode" `0bda:1a2b` and then
   re-enumerated, 34 times.
@@ -533,17 +533,17 @@ Expect reception counts in threes from that sensor; deduplicating repeats is a f
 - The Flock adapter needs a **self-powered USB hub** on a Nomad.
 - `provision.sh` makes monitor mode opt-in (`--with-flock-adapter`), and the quick-start says
   to use the hub.
-- On nomad-b, the udev rule is parked at
+- On the reference Recon, the udev rule is parked at
   `/etc/udev/rules.d/70-sigint101-monitor.rules.disabled` until a hub is in place.
 - After any USB or radio change, grep `dmesg` for `over-current` before calling it done.
 
 ## 2026-11-03: course on the Pi desktop — Chromium retitles itself; pcmanfm trusts only /usr/share
 **Finding.**
-- **Chromium rewrites its process title.** On nomad-b, `/proc/<pid>/cmdline` for every kiosk
+- **Chromium rewrites its process title.** On the reference Recon, `/proc/<pid>/cmdline` for every kiosk
   Chromium process is ONE space-joined string with a single trailing NUL, not one element per
   flag. `pgrep -f` still matches (it searches the joined line). A test double that served neat
   argv lists passed, but an exact argv-element match found nothing on the real box. Only a dry
-  run of `request_exit` against nomad-b's real `/proc`, with signals recorded rather than sent,
+  run of `request_exit` against the reference Recon's real `/proc`, with signals recorded rather than sent,
   caught it.
 - **pcmanfm prompts before running a desktop entry.** On a double-tap of a `Type=Application`
   `.desktop` in `~/Desktop`, libfm 1.3.2 (rpt18) treats any readable desktop entry as executable.
@@ -582,7 +582,7 @@ because the verdict box and the concept paragraph ride in the same scroll.
 - **`/usr/bin/labwc-pi` runs `rm ~/.config/gtk-3.0/gtk.css` at every login.** A user gtk.css
   disappears on the next boot. A named theme in `~/.themes/<name>/gtk-3.0/gtk.css`, selected with
   `gsettings set org.gnome.desktop.interface gtk-theme`, survives.
-- **On Wayland pcmanfm reads one desktop file per screen.** On nomad-b that file is
+- **On Wayland pcmanfm reads one desktop file per screen.** On the reference Recon that file is
   `~/.config/pcmanfm/LXDE-pi/desktop-items-HDMI-A-1.conf`. A wallpaper written only to
   `desktop-items-0.conf` never shows. `apply-theme.sh` sets the keys in every
   `desktop-items-*.conf`.
@@ -603,11 +603,11 @@ command, not a stub that prints one line.
   download mode over the S2's native USB, so the board stays in the bootloader until someone
   presses its RESET button.
 - A full-flash read for a backup (`read_flash 0 ALL`) stalled at byte 159744 on every attempt,
-  chunked reads included. The same run showed over-current events climbing on nomad-b's bus
+  chunked reads included. The same run showed over-current events climbing on the reference Recon's bus
   (`overcurrent=177`), so power is a suspect, not proven.
 - The official rollback image is the stock Blackmagic firmware from lab.flipper.net, used instead
   of a local backup.
-- With the board on the Flipper's GPIO and the Flipper's USB-UART bridge on channel 1, nomad-b has
+- With the board on the Flipper's GPIO and the Flipper's USB-UART bridge on channel 1, the reference Recon has
   not yet shown the second CDC port.
 **How to apply.**
 - Budget one physical RESET press after any devboard flash.

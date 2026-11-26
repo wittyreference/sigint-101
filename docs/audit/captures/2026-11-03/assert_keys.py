@@ -1,4 +1,4 @@
-# ABOUTME: Checks the L1, L2 and L8 predict keys against real nomad-b waterfall rows (capture.py):
+# ABOUTME: Checks the L1, L2 and L8 predict keys against real Recon waterfall rows (capture.py):
 # ABOUTME: stripe width by brightness, the meter floor across the gain ladder, and airband gaps.
 """Tier-C key check (docs/audit/2026-11-03-item-review.md §1.4, §3).
 

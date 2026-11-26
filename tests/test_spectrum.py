@@ -27,7 +27,8 @@ from sigint101.spectrum import (
     validate_span,
 )
 
-# Real rtl_power output, captured on nomad-b (Debian rtl-sdr 0.6.0-4, R828D) on 2026-11-01:
+# Real rtl_power output, captured on the reference Recon (Debian rtl-sdr 0.6.0-4, R828D) on
+# 2026-11-01:
 #   fm-88-108-125k.csv          rtl_power -f 88000000:108000000:125000 -i 1 -e 3   (8 hops x 32)
 #   adsb-1089-1091-31k.csv      rtl_power -f 1089000000:1091000000:31250 -i 1 -1   (1 hop x 64)
 #   fm-narrow-95.9-96.3-10k.csv rtl_power -f 95900000:96300000:10000 -i 1 -1       (1 hop x 64,

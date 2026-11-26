@@ -538,10 +538,11 @@ def test_a_reader_error_is_recorded_not_swallowed():
 
 # --------------------------------------------------------------------------- Marauder serial
 
-# CONSTRUCTED FROM MARAUDER'S SOURCE, NOT CAPTURED. No devboard has streamed over nomad-b's bridge
-# yet, so this wraps the real probe requests of flock_ch1.pcap byte for byte the way ESP32
-# Marauder v1.20.0 says it emits them over serial; a real on-air capture through the Flipper's
-# bridge replaces it at HIL. Each piece cites what it reproduces (esp32_marauder/ at v1.20.0):
+# CONSTRUCTED FROM MARAUDER'S SOURCE, NOT CAPTURED. No devboard has streamed over the reference
+# Recon's bridge yet, so this wraps the real probe requests of flock_ch1.pcap byte for byte the
+# way ESP32 Marauder v1.20.0 says it emits them over serial; a real on-air capture through the
+# Flipper's bridge replaces it at HIL. Each piece cites what it reproduces (esp32_marauder/ at
+# v1.20.0):
 # - the console echoes a command as "#<cmd>", prints its reply, then the "> " prompt
 #   (CommandLine.cpp:270, :87); println ends a line with CRLF;
 # - a pcap opens with a 24-byte global header, linktype 105, snaplen 4096 on the Flipper build

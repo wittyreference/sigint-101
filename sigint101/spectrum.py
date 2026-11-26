@@ -186,8 +186,8 @@ def hop_plan(low, high, bin_size) -> HopPlan:
 
     The fewest equal hops no wider than 2.8 MHz, each centred half a hop in; the bins per hop the
     smallest power of two that keeps a bin no wider than asked. A giant bin (1 MHz or more) is one
-    bin a hop, as wide as asked. Checked against real captures from nomad-b, including the
-    downsampled path a span under 1 MHz takes.
+    bin a hop, as wide as asked. Checked against real captures from the reference Recon,
+    including the downsampled path a span under 1 MHz takes.
     """
     low, high, bin_size = int(low), int(high), int(bin_size)
     span = high - low
