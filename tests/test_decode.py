@@ -1,10 +1,15 @@
 # ABOUTME: Tests the rtl_433 decode backend — JSON-line parsing and the Decoder lifecycle.
 # ABOUTME: The process is a fake at the boundary; no radio or no rtl_433 is an honest refusal.
 
+import io
+import queue
+import shlex
+import threading
 from pathlib import Path
 
 import pytest
 
+from sigint101.childproc import ChildWatch
 from sigint101.decode import (
     DEFAULT_DECODE_HZ,
     Decoder,
@@ -269,3 +274,256 @@ def test_the_decoder_reports_one_reception_per_burst_but_lists_every_copy():
     assert heard[0]["readings"]["temperature_C"] == pytest.approx(16.0)
     # The panel still shows what rtl_433 printed: three copies of the tower, then the LaCrosse.
     assert len(dec.recent()) == 4
+
+
+# --- C28: a reader that outlives its stop hears nothing into the next run ----------------------
+# WHY: a reader can outlive stop()'s wait for it: an rtl_433 that is not reaped keeps its pipe
+# open, and a reader slowed on a loaded Pi can still be reading after its process has gone. It went
+# on listing and reporting what it read. After a retune the console then logged a reception under
+# the new frequency and the new rtl_433's command, the panel listed it among the new frequency's
+# reads, and it could mark the new run's next copy of that reading as a repeat. Its pipe failing,
+# or its death, could set the decoder's error while the next rtl_433 ran, and the start after that
+# one's stop refused with the old reason. A reader now lists, reports and records nothing once its
+# run is stopped.
+
+class LateProc:
+    """rtl_433 whose pipe outlives it, so its reader is still reading after the process ended.
+
+    It prints only what a test feeds it. terminate() and die() end the process but not the pipe;
+    only close_pipe() or break_pipe() ends what the reader reads. `reader` is the thread reading.
+    """
+
+    def __init__(self, cmd):
+        self.args = list(cmd)
+        self.returncode = None
+        self.terminated = False
+        self.reader = None
+        self.stderr = io.StringIO("")
+        self._lines = queue.Queue()
+        self.stdout = self._stream()
+
+    def _stream(self):
+        self.reader = threading.current_thread()
+        for line in iter(self._lines.get, None):
+            if isinstance(line, OSError):
+                raise line
+            yield line
+
+    def feed(self, *lines):
+        for line in lines:
+            self._lines.put(line)
+
+    def close_pipe(self):
+        self._lines.put(None)
+
+    def break_pipe(self, error):
+        self._lines.put(error)
+
+    def die(self, code):
+        self.returncode = code
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        if self.returncode is None:
+            self.returncode = -15
+
+    def kill(self):
+        self.terminate()
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+class _Heard:
+    """The console's reception hook in small: each reception is logged with the frequency and the
+    command the decoder reports at that moment, read as the console's own hook reads them."""
+
+    def __init__(self, dec):
+        self.dec = dec
+        self.log = []
+        self._changed = threading.Condition()
+
+    def __call__(self, item):
+        with self._changed:
+            self.log.append((item["model"], self.dec.freq_hz, self.dec.live_command()))
+            self._changed.notify_all()
+
+    def wait_for(self, count, timeout=5.0):
+        with self._changed:
+            assert self._changed.wait_for(lambda: len(self.log) >= count, timeout), self.log
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 5000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _line(proc):
+    """The command a process runs, as the decoder reports it while that process is live."""
+    return shlex.join(proc.args)
+
+
+@pytest.fixture
+def late():
+    """A decoder whose every rtl_433 has a pipe that outlives it, and whose stop() stops waiting
+    for the reader at once; its receptions are logged as the console logs them."""
+    procs = []
+
+    def spawn(cmd):
+        procs.append(LateProc(cmd))
+        return procs[-1]
+
+    dec = Decoder(spawn=spawn, radio_present=lambda: True, which=lambda name: "/usr/bin/" + name)
+    dec.STOP_WAIT_S = 0.05
+    heard = _Heard(dec)
+    dec.on_reception = heard
+    yield dec, procs, heard
+    for proc in procs:
+        proc.close_pipe()
+    for proc in procs:
+        if proc.reader is not None:
+            proc.reader.join(5)
+
+
+def _end_pipe(proc):
+    """Let a reader come to the end of its pipe, and wait until it has."""
+    proc.close_pipe()
+    proc.reader.join(5)
+    assert not proc.reader.is_alive()
+
+
+def test_a_reader_that_outlives_a_retune_logs_nothing_under_the_new_frequency(late):
+    dec, procs, heard = late
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    dec.retune(315_000_000)
+    assert procs[0].reader.is_alive()             # the old reader outlived the stop
+    dec.start()
+    procs[0].feed(FSK_LINE)                       # read from the old pipe after the restart
+    _end_pipe(procs[0])
+    assert heard.log == [("Acurite-Tower", 433_920_000, _line(procs[0]))]
+    assert dec.recent() == []
+    # The new run hears its own reception, and the old reader did not make it a repeat.
+    procs[1].feed(FSK_LINE)
+    heard.wait_for(2)
+    assert heard.log[1:] == [("LaCrosse-TX141THBv2", 315_000_000, _line(procs[1]))]
+    assert "315000000" in _line(procs[1])
+    assert [r.model for r in dec.recent()] == ["LaCrosse-TX141THBv2"]
+
+
+@pytest.mark.parametrize("stand_down, kept", [
+    (lambda dec: dec.retune(315_000_000), []),
+    (lambda dec: dec.release(), []),
+    (lambda dec: dec.stop(), ["Acurite-Tower"]),
+], ids=["retune", "release", "stop"])
+def test_a_reader_that_outlives_its_stop_hears_nothing_before_the_next_start(
+        late, stand_down, kept):
+    # Between a stop and the next start no run is current. After a retune that lasts until the
+    # next poll; after a release, as long as the other program holds the radio. The old reader
+    # reads on in that gap; nothing it reads may be listed or logged, then or after the start.
+    dec, procs, heard = late
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    stand_down(dec)
+    assert procs[0].reader.is_alive()
+    procs[0].feed(FSK_LINE)
+    _end_pipe(procs[0])
+    assert heard.log == [("Acurite-Tower", 433_920_000, _line(procs[0]))]
+    assert [r.model for r in dec.recent()] == kept
+    dec.resume()
+    dec.start()
+    procs[1].feed(FSK_LINE)
+    heard.wait_for(2)
+    assert heard.log[1:] == [("LaCrosse-TX141THBv2", dec.freq_hz, _line(procs[1]))]
+    assert [r.model for r in dec.recent()] == kept + ["LaCrosse-TX141THBv2"]
+
+
+def test_an_old_readers_pipe_failing_after_a_retune_is_not_the_new_runs_failure(late):
+    dec, procs, heard = late
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    dec.retune(315_000_000)
+    assert procs[0].reader.is_alive()
+    dec.start()
+    procs[0].break_pipe(OSError("old pipe failed"))
+    procs[0].reader.join(5)
+    assert not procs[0].reader.is_alive()
+    assert dec.error is None
+    assert dec.running
+    dec.stop()
+    dec.start()                                   # not refused with the old run's reason
+    assert len(procs) == 3
+    assert dec.running
+
+
+def test_an_old_readers_death_record_landing_after_the_next_start_is_not_the_new_runs(late):
+    # The old reader finds its rtl_433 dead, and is held there before it records why. Meanwhile
+    # the next poll reports the death itself, and once the back-off has run out a new run starts.
+    # Only then does the old reader's record land: it must not become the new run's failure.
+    dec, procs, heard = late
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    found_ended = dec.watch.ended
+    found, go_on = threading.Event(), threading.Event()
+
+    def ended(proc, **kw):
+        reason = found_ended(proc, **kw)
+        if reason is not None and proc is procs[0]:
+            found.set()
+            go_on.wait(5)                         # held between finding the death and recording it
+        return reason
+
+    dec.watch.ended = ended
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    procs[0].die(1)
+    procs[0].close_pipe()
+    assert found.wait(5)
+    with pytest.raises(DecodeUnavailable, match="status 1"):
+        dec.start()                               # the next poll reports the death, then backs off
+    clock.now += 60
+    dec.start()
+    assert len(procs) == 2
+    go_on.set()
+    procs[0].reader.join(5)
+    assert not procs[0].reader.is_alive()
+    assert dec.error is None
+    dec.stop()
+    dec.start()                                   # not refused with the old run's reason
+    assert len(procs) == 3
+
+
+@pytest.mark.parametrize("end, reason", [
+    (lambda proc: proc.break_pipe(OSError("new pipe failed")), "new pipe failed"),
+    (lambda proc: (proc.die(1), proc.close_pipe()), "status 1"),
+], ids=["pipe", "death"])
+def test_the_run_after_a_retune_still_records_its_own_failure(late, end, reason):
+    # The other side of the guard: with an old reader still reading, the run started after the
+    # retune hears its own receptions and records its own failure, and the next start reports it.
+    dec, procs, heard = late
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    dec.retune(315_000_000)
+    assert procs[0].reader.is_alive()
+    dec.start()
+    procs[1].feed(FSK_LINE)
+    heard.wait_for(2)
+    assert heard.log[1] == ("LaCrosse-TX141THBv2", 315_000_000, _line(procs[1]))
+    end(procs[1])
+    procs[1].reader.join(5)
+    assert not procs[1].reader.is_alive()
+    assert reason in dec.error
+    dec.stop()
+    with pytest.raises(DecodeUnavailable, match=reason):
+        dec.start()
