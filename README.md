@@ -24,6 +24,9 @@ make selftest    # the whole test suite, with the 80% coverage gate
 make run         # the console at http://127.0.0.1:8008
 ```
 
+With `make run` active and Chromium installed, run `make render-check` in another terminal for the 800×480 layout checks.
+Use `make render-check RENDER_URL=http://127.0.0.1:8009` for a console on a different port.
+
 ### A fresh Recon
 On the Recon's stock Debian Bookworm, with a network connection, as the user the desktop logs in
 as (not root):

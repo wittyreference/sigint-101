@@ -9,7 +9,7 @@ import sys
 import time
 import urllib.request
 
-HOST, PORT = "127.0.0.1", 9222
+HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "9222"))
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8008/lesson/29"
 SHOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/flipper_m29_predict.png"
 

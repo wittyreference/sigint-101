@@ -4,11 +4,13 @@
 import base64
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
 import sys
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -26,15 +28,6 @@ FAST = (
     "time.sleep = lambda seconds: None\n"
     "script = sys.argv.pop(1)\n"
     "runpy.run_path(script, run_name='__main__')\n"
-)
-
-# Fit uses a fixed Chrome port. Run its main against the fake's ephemeral port.
-FIT_ON_FAKE_PORT = (
-    "import os, runpy, sys\n"
-    "script = sys.argv.pop(1)\n"
-    "main = runpy.run_path(script)['main']\n"
-    "main.__globals__['PORT'] = int(os.environ['CDP_PORT'])\n"
-    "main()\n"
 )
 
 # An expression that throws in the page: Chrome answers with exceptionDetails and no value.
@@ -206,9 +199,7 @@ def _closed_port():
 
 def run(script, *args, port, fast=True, timeout=60):
     env = dict(os.environ, CDP_PORT=str(port), no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
-    if script == FIT:
-        cmd = [sys.executable, "-c", FIT_ON_FAKE_PORT, str(script), *args]
-    elif fast:
+    if fast:
         cmd = [sys.executable, "-c", FAST, str(script), *args]
     else:
         cmd = [sys.executable, str(script), *args]
@@ -324,3 +315,114 @@ def test_render_figure_errors_exit_non_zero(devtools, tmp_path):
                        port=devtools({CARD: CARD_OK, OVERLAY: OVERLAY_OK})))
     # No page address given.
     assert_no_pass(run(FIGURE, port=_closed_port()))
+
+
+@pytest.fixture
+def console_url():
+    class Console(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path == "/" else 404)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Console) as server:
+        worker = threading.Thread(target=server.serve_forever)
+        worker.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}"
+        finally:
+            server.shutdown()
+            worker.join()
+
+
+@pytest.fixture
+def render_make(tmp_path, console_url, devtools):
+    """Exercise the repo's Makefile and runner with stand-ins for the browser and checks."""
+    screen = tmp_path / "tools" / "render"
+    screen.mkdir(parents=True)
+    (screen / "render_check.py").symlink_to(REPO / "tools" / "render" / "render_check.py")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(sys.executable)
+    path = tmp_path / "bin"
+    path.mkdir()
+    chromium = path / "chromium"
+    chromium.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "profile = next(arg.split('=', 1)[1] for arg in sys.argv[1:]\n"
+        "               if arg.startswith('--user-data-dir='))\n"
+        "if os.environ.get('CHROMIUM_EXITS'):\n"
+        "    sys.exit(3)\n"
+        "Path(profile).mkdir()\n"
+        "(Path(profile) / 'DevToolsActivePort').write_text(os.environ['FAKE_CDP_PORT'] + '\\n')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    chromium.chmod(0o755)
+    for script in (FIT, SCROLL, FIGURE):
+        (screen / script.name).write_text(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "name = Path(__file__).name\n"
+            "assert os.environ['CDP_PORT'] == os.environ['FAKE_CDP_PORT']\n"
+            "if name == 'render_scroll.py':\n"
+            "    assert sys.argv[2] == 'home'\n"
+            "print('ran', name, sys.argv[1], flush=True)\n"
+            "sys.exit(7 if name == os.environ.get('FAILING_CHECK') else 0)\n",
+            encoding="utf-8",
+        )
+    make = shutil.which("make")
+    assert make, "the render-check tests require make"
+
+    def run_make(*, has_chromium=True, **overrides):
+        if not has_chromium:
+            chromium.unlink()
+        env = dict(os.environ, PATH=str(path), RENDER_URL=console_url, TMPDIR=str(tmp_path),
+                   FAKE_CDP_PORT=str(devtools({})), no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
+        env.update(overrides)
+        return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
+                               "render-check"], cwd=tmp_path, env=env, capture_output=True,
+                              text=True, timeout=15)
+
+    return run_make
+
+
+@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name],
+                         ids=["all-pass", "fit-fails", "scroll-fails", "figure-fails"])
+def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
+    proc = render_make(FAILING_CHECK=failing)
+    assert proc.stdout.splitlines() == [
+        f"ran {FIT.name} {console_url}/lesson/29",
+        f"ran {SCROLL.name} {console_url}/",
+        f"ran {FIGURE.name} {console_url}/exam/review/T6C02",
+    ], (proc.stdout, proc.stderr)
+    if failing:
+        assert proc.returncode != 0
+        assert f"{failing} exited with status 7" in proc.stderr
+    else:
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stderr == ""
+
+
+@pytest.mark.parametrize("overrides, expected", [
+    ({"has_chromium": False}, "Chromium executable not found"),
+    ({"CHROMIUM_EXITS": "1"}, "Cannot reach Chromium DevTools"),
+], ids=["chromium-missing", "chromium-exits-before-devtools"])
+def test_make_render_check_fails_clearly_when_chromium_is_unreachable(
+    render_make, overrides, expected
+):
+    proc = render_make(**overrides)
+    assert proc.returncode != 0
+    assert expected in proc.stderr, proc.stderr
+    assert "ran " not in proc.stdout
+
+
+def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make):
+    proc = render_make(RENDER_URL=f"http://127.0.0.1:{_closed_port()}")
+    assert proc.returncode != 0
+    assert "Cannot reach the console" in proc.stderr, proc.stderr
+    assert "ran " not in proc.stdout
