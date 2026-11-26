@@ -1,5 +1,5 @@
 # ABOUTME: Tests bootstrap.sh in a throwaway copy whose PATH holds stubs only, so nothing installs:
-# ABOUTME: a missing node gets a warning naming make selftest, and setup still runs to the end.
+# ABOUTME: a missing node or jq gets a warning naming what fails, and setup still runs to the end.
 
 import shutil
 import subprocess
@@ -23,8 +23,8 @@ class Box:
 
     python3, git and the venv's pip, ruff and pytest are stubs that record their arguments, so no
     venv is made, nothing is downloaded and no real git config changes. The venv's bin/ is made
-    up front, as a venv that already exists; bootstrap.sh re-runs over one anyway. node is on the
-    PATH only when a test puts it there.
+    up front, as a venv that already exists; bootstrap.sh re-runs over one anyway. node and jq are
+    on the PATH only when a test puts them there.
     """
 
     def __init__(self, tmp_path: Path):
@@ -46,6 +46,9 @@ class Box:
 
     def add_node(self):
         _stub(self.bin / "node", f'echo "node $*" >> "{self.log}"\necho v22.0.0')
+
+    def add_jq(self):
+        _stub(self.bin / "jq", f'echo "jq $*" >> "{self.log}"\necho jq-1.7')
 
     def run(self):
         result = subprocess.run([BASH, str(self.root / "bootstrap.sh")], cwd=self.root,
@@ -83,3 +86,25 @@ def test_with_node_on_the_path_there_is_no_node_warning(box):
     result, calls = box.run()
     _setup_ran(result, calls)
     assert "node" not in result.stderr.lower(), result.stderr
+
+
+def test_a_missing_jq_gets_a_warning_that_names_what_fails_without_it(box):
+    # The git hooks bootstrap.sh arms run on git and bash alone, but the Claude Code safety hooks
+    # in .claude/hooks/ read JSON with jq (pre-write-validate.sh blocks every write without it),
+    # and make selftest's credential-check tests run those hooks. Setup still finishes.
+    box.add_node()
+    result, calls = box.run()
+    _setup_ran(result, calls)
+    warned = [line for line in result.stderr.lower().splitlines() if "jq" in line]
+    assert warned, "no warning on stderr naming jq:\n" + result.stderr
+    text = " ".join(warned)
+    for consequence in (".claude/hooks", "make selftest"):
+        assert consequence in text, f"the jq warning does not name {consequence}:\n{text}"
+
+
+def test_with_jq_on_the_path_there_is_no_jq_warning(box):
+    box.add_node()
+    box.add_jq()
+    result, calls = box.run()
+    _setup_ran(result, calls)
+    assert "jq" not in result.stderr.lower(), result.stderr
