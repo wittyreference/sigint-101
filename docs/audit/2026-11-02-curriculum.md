@@ -752,6 +752,6 @@ Where R3 (real tune and gain) lands, the M1/M2/M6/M7 originals mostly stand. Onl
   - the owner's private plan (Curriculum, Assessment)
   - its educator amendment (§0-§8)
   - its ports survey
-  - a second private plan (Course architecture)
+  - the private architecture plan (Course architecture)
 - Word counts were computed from the YAML. The §5 fact-check used the primary sources cited in
   that section.

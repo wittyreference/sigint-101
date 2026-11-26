@@ -3,8 +3,8 @@
 ## NEXT ACTION (resume here)
 **First, on the reference Recon** (reachable again as of 2026-11-16, as reported):
 1. Clear the scratch (see follow-ups).
-2. Deploy `main` to the reference Recon. As reported on 2026-11-16, it runs 4ac1e67 (ux-polish's tip, the
-   same tree as #15's `02c2095`), so it has everything up to #46 and is missing #47–#53.
+2. Deploy `main` to the reference Recon. As reported on 2026-11-16, it runs 4ac1e67 (ux-polish's
+   tip, the same tree as #15's `02c2095`), so it has everything up to #46 and is missing #47–#53.
    Deploying restarts the server, so only when MC isn't using the panel.
 3. Run the L1, L2 and L8 key captures (`docs/audit/captures/2026-11-03/`), with the course closed
    and inside the SDR flock.
@@ -34,8 +34,8 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
 - **Sprint base:** `ux-polish` with main merged in. Sprint branches stacked on it. ux-polish
   itself merged to main on 2026-11-16 (UTC): PR #15, squash `02c2095`. Its last merges were #45
   (two environment-dependent tests fixed) and #46 (a page's words withheld on every frequency).
-- **The sprint is complete on `ux-polish` @494e268, deployed to the reference Recon's kiosk.** All of the
-  cut line except item 19:
+- **The sprint is complete on `ux-polish` @494e268, deployed to the reference Recon's kiosk.** All
+  of the cut line except item 19:
   - #18 exam: 0 hidden Commit/Next across all 409 questions, plus Skip and answers that are final.
   - #19 shell: two-way nav and resume, no concept wall, room for narration, teaching-order
     codes, hardware badges, touch targets.
@@ -76,7 +76,8 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
     - lightdm desktop autologin (B4), with the course opened by an XDG-autostart watchdog.
     - Home's Back is now **Exit SIGINT 101**: it closes the course to the Pi desktop.
     - A desktop icon and menu entry reopen it.
-    - HIL on the reference Recon: cold boot opens the course, Exit lands on the desktop, the icon reopens it.
+    - HIL on the reference Recon: cold boot opens the course, Exit lands on the desktop, the icon
+      reopens it.
   - #33 **desktop theme** (MC's call, 2026-11-03):
     - phosphor wallpaper (an LED-matrix ☭ over "ШЭLСФМЭ СФМЯДDЭ");
     - a black bar with a green rule, green frames and labels, a green-on-black terminal;
@@ -129,8 +130,8 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
   - **Keys still provisional (NOT VERIFIED on the real waterfall):**
     - L1 "Narrower", L2 "Rises with it" and L8 "Released push-to-talk". The kiosk held the dongle,
       and then the reference Recon went offline.
-    - The capture scripts are in `docs/audit/captures/2026-11-03/`. Run them when the reference Recon is
-      reachable and the course is closed. If the data disagrees, re-key to match the data.
+    - The capture scripts are in `docs/audit/captures/2026-11-03/`. Run them when the reference
+      Recon is reachable and the course is closed. If the data disagrees, re-key to match the data.
     - L3 "No, they look alike" needs MC's antenna-off step (see Needed from MC).
   - Not yet re-rendered after the merge: L2, L7 and L8's new chips under #42's reveal header.
 - **Known small follow-ups (not in the cut line):**
@@ -162,11 +163,12 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
 3. Extend the ANT500 fully. Claude then re-measures FM SNR.
 4. One look at the panel, to confirm #15's work there. It was PR #15's gate, in the PR's
    words "Draft until MC confirms on the panel (MC's gate)"; #15 merged to main on 2026-11-16
-   (UTC) with no look recorded on the PR. As reported on 2026-11-16, the reference Recon runs 4ac1e67, so it
-   has everything up to #46, #15's work included; #47–#53 are not deployed there yet.
-5. Battery on the gift box: ship the reference Recon's daemon, or read the INA219 directly (read-only).
-6. The recipient Recon's arrival date, and a spare SD card for the reference Recon. The provision proof is
-   triage item 19.
+   (UTC) with no look recorded on the PR. As reported on 2026-11-16, the reference Recon runs
+   4ac1e67, so it has everything up to #46, #15's work included; #47–#53 are not deployed there yet.
+5. Battery on the gift box: ship the reference Recon's daemon, or read the INA219 directly
+   (read-only).
+6. The recipient Recon's arrival date, and a spare SD card for the reference Recon. The provision
+   proof is triage item 19.
 7. Paste the 11-01 written feedback list. Only 2 items from it made it into the record.
 
 ## Current state (observed 2026-11-02)
@@ -176,8 +178,8 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
   - #10, #11: `provision.sh` and the quick-start
   - #12: status bar never invents readings; waterfall pixelated
   - #13: audit reports
-- **Kiosk cold boot PASSED (observed 2026-11-02 22:18 PST).** After a reboot, the reference Recon came
-  up with the server service and labwc, ran one kiosk browser, and showed the course home on
+- **Kiosk cold boot PASSED (observed 2026-11-02 22:18 PST).** After a reboot, the reference Recon
+  came up with the server service and labwc, ran one kiosk browser, and showed the course home on
   the panel (grim screenshot). The persistent journal kept the previous boot.
 - **Open branches:** none on 2026-11-16 (UTC): no pull request is open, and each remote branch
   has a merged or closed one or is already in main. What became of the three it listed:
@@ -223,7 +225,8 @@ again. Sources: the owner's private plan, CLAUDE.md, the transcripts.
 
 ## Deferred live HIL (hardware or physical, not code)
 Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live capture needs:
-- **ADS-B M13:** a 1090 MHz antenna (the reference Recon's is deaf there: 0 CRC-valid of 411k preambles).
+- **ADS-B M13:** a 1090 MHz antenna (the reference Recon's is deaf there: 0 CRC-valid of 411k
+  preambles).
 - **APRS M14:** a 2m antenna, plus local traffic.
 - **POCSAG M15:** a pager-band antenna, plus traffic.
 - **ACARS M16:** VHF traffic. The chain is already proven with acarsdec's own `test.wav`.
@@ -272,8 +275,8 @@ Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live
     `$XDG_RUNTIME_DIR/sigint101-kiosk-exited`. It removes the tty1 kiosk it set up before #15
     (the `~/.profile` hook and `~/.local/bin/sigint101-kiosk`, labwc + a looping Chromium).
     `provision.sh` boots the box to the desktop with autologin.
-  - On `ux-polish` (#32, live on the reference Recon), the box autologs in to the Pi desktop. The XDG
-    autostart runs `/usr/local/bin/sigint101-course watch`, which reopens the kiosk Chromium
+  - On `ux-polish` (#32, live on the reference Recon), the box autologs in to the Pi desktop. The
+    XDG autostart runs `/usr/local/bin/sigint101-course watch`, which reopens the kiosk Chromium
     (profile `~/.config/chromium-kiosk`) unless Exit wrote
     `$XDG_RUNTIME_DIR/sigint101-kiosk-exited`. The desktop icon runs `sigint101-course open`.
   - **Restart the course browser:** kill the kiosk Chromium by PID and the watchdog reopens it.
@@ -310,8 +313,9 @@ Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live
 - **Always `Network.setCacheDisabled`.**
 - **Reach sealed stages** by POSTing a prediction first:
   `curl -X POST ".../api/predict?lesson_id=N" -d "prediction=<key>" -H "content-type: application/x-www-form-urlencoded"`.
-- **A LIVE dynamic panel** (lit waterfall) needs the server on the reference Recon and the real-sleep CDP
-  capture recipe in `.claude/learnings.md`. `--virtual-time-budget` snapshots an empty panel.
+- **A LIVE dynamic panel** (lit waterfall) needs the server on the reference Recon and the
+  real-sleep CDP capture recipe in `.claude/learnings.md`. `--virtual-time-budget` snapshots an
+  empty panel.
 
 ## HIL targets
 - **The reference Recon** is PRIMARY. It is a stock Nomad 2 Recon
@@ -319,9 +323,9 @@ Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live
   915 MHz whip on the LoRa jack, and the Flipper (fw 1.5.1, Marauder devboard on its GPIO) on
   `/dev/ttyACM0` when plugged in. The RTL8821CU dongle is unplugged: it browns out USB without a
   powered hub.
-- **The owner's second Recon** is the secondary. Its LoRa jack is not dead, and its broken antenna has been replaced
-  (MC, 2026-11-16). Transmit is off and meshtasticd is disabled until MC re-enables them. Its
-  reception since the new antenna is not tested.
+- **The owner's second Recon** is the secondary. Its LoRa jack is not dead, and its broken antenna
+  has been replaced (MC, 2026-11-16). Transmit is off and meshtasticd is disabled until MC
+  re-enables them. Its reception since the new antenna is not tested.
 - **A lab Pi** has an ESP32 on `/dev/ttyACM1`. No Flipper.
 
 ## Gotchas (durable)
@@ -333,7 +337,7 @@ Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live
 - `pkill -f`/`pgrep -f` over ssh match the ssh command's own argv. Kill by PID, or use the
   `[u]vicorn` bracket trick.
 - `rtl_power` printing "[R82XX] PLL not locked!" and "User cancel, exiting" is benign.
-- ☭ (U+262D) renders via a system-font fallback (DejaVu on the reference Recon), not our bundled fonts.
-  Confirm it on the recipient image or bundle an SVG.
+- ☭ (U+262D) renders via a system-font fallback (DejaVu on the reference Recon), not our bundled
+  fonts. Confirm it on the recipient image or bundle an SVG.
 - Predict is the tightest screen at 800x480: keep prompts to ~35–40 words. Reading stages
   scroll (on main since #15); instrument stages must fit (CLAUDE.md Corrections).

@@ -9,9 +9,9 @@ already shows hand-over-level problems, so the audits feed a triage → fix spri
 Flipper Phase 2 waits behind them (recommendation below).
 
 ## Live state (observed 2026-11-02 04:12 UTC, ssh to the reference Recon as its login user)
-- **The reference Recon healthy, no repeat crash:** up ~5.5 h, 32.6 °C, throttled=0x0, root ext4 clean, dmesg
-  errors = one benign hid-multitouch line. The crash itself left **no log** (journal is volatile);
-  the Oct 9 boot has no shutdown record → it died between Oct 31 and Nov 1 01:16.
+- **The reference Recon healthy, no repeat crash:** up ~5.5 h, 32.6 °C, throttled=0x0, root ext4
+  clean, dmesg errors = one benign hid-multitouch line. The crash itself left **no log** (journal is
+  volatile); the Oct 9 boot has no shutdown record → it died between Oct 31 and Nov 1 01:16.
 - **Configs intact (STATUS NEXT 1):** meshtasticd active (2.7.26 beta); `config.yaml` mtime Jul 19
   (the gpsfix edit, not replaced; `.dpkg-dist` is the old Jun 29 one); `config.txt` has `spi0-0cs`,
   `enable_uart=1`, `gpio=4=op,dh`, `pps-gpio,gpiopin=17`, `miniuart-bt`. Oct 31 `apt upgrade` +
@@ -109,11 +109,11 @@ Unit 6 theory displaced.
 1. **Rescue /tmp-only assets** into a `chore-rescue` worktree: extract `image1-3.jpeg` from the
    NCVEC docx → the exam's figure path (wire T-1/T-2/T-3); move `render_scroll.py`, `render_fit.py`,
    `hil.sh` into `tools/render/` with ABOUTME headers + a `make render-check` target. Commit, push.
-2. **Persistent journald on the reference Recon** (`/var/log/journal`, `Storage=persistent`) so a repeat crash
-   leaves evidence. Reversible one-line system change.
-3. **Kiosk autostart on the reference Recon** (plan P0 DoD "boots into kiosk"): commit `~/start-kiosk.sh` to the
-   repo as `deploy/kiosk/` + a getty-autologin/labwc autostart unit; reboot-test it. Gets the panel up
-   for your ux-polish look without a trip to the device tty.
+2. **Persistent journald on the reference Recon** (`/var/log/journal`, `Storage=persistent`) so a
+   repeat crash leaves evidence. Reversible one-line system change.
+3. **Kiosk autostart on the reference Recon** (plan P0 DoD "boots into kiosk"): commit
+   `~/start-kiosk.sh` to the repo as `deploy/kiosk/` + a getty-autologin/labwc autostart unit;
+   reboot-test it. Gets the panel up for your ux-polish look without a trip to the device tty.
 4. **STATUS.md rewrite** (docs worktree → main): NEXT ACTION first, one true current-state section,
    the unfinished-work register as a table with a disposition column, stale sections deleted.
 
@@ -127,14 +127,14 @@ update-track. Then one adversarial verifier subagent re-checks every S0/S1 cold 
 
 **1a Technical.** Verify H/M findings as failing tests (they become the fixes' first tests).
 Settle the rtl_power duplicate-bin question against `rtl_power.c` + a real capture. Measure on
-the reference Recon, not by estimate: uvicorn CPU/RSS during each instrument lesson's polling (60 s pidstat),
-`/api/spectrum` payload + latency, ppm wall time, events.jsonl growth + SD write rate. Robustness
-drills: SIGSTOP/SIGKILL a decoder child → what the UI shows; kill -9 uvicorn → orphaned rtl_* still
-holding the dongle?; concurrent `_claim_sdr`. Suite health: `make selftest` + `make lint` on main,
-ux-polish, flipper-module, and a trial integration of both (contract conflicts per
-worktree-invariants). RF constants in code (SSTV 145.800, APT 137.1/NOAA-19, acarsdec gain units,
-bias-tee claim, R828D). Duplication: the ~84%-identical decoder lifecycle — scope a shared base only
-as an S3 recommendation (rewrite needs your OK).
+the reference Recon, not by estimate: uvicorn CPU/RSS during each instrument lesson's polling (60 s
+pidstat), `/api/spectrum` payload + latency, ppm wall time, events.jsonl growth + SD write rate.
+Robustness drills: SIGSTOP/SIGKILL a decoder child → what the UI shows; kill -9 uvicorn → orphaned
+rtl_* still holding the dongle?; concurrent `_claim_sdr`. Suite health: `make selftest` +
+`make lint` on main, ux-polish, flipper-module, and a trial integration of both (contract conflicts
+per worktree-invariants). RF constants in code (SSTV 145.800, APT 137.1/NOAA-19, acarsdec gain
+units, bias-tee claim, R828D). Duplication: the ~84%-identical decoder lifecycle — scope a shared
+base only as an S3 recommendation (rewrite needs your OK).
 
 **1b UI/UX.** Extend the render harness into a sweep: every route × every lesson stage × 3 themes
 at a forced 800×480. Programmatic asserts: action button bottom ≤480; reading stages scroll,
@@ -180,8 +180,9 @@ Likely clusters, final set from triage:
    panels with real tune/gain + a reception log. TDD the argv exposure; render-verify the rack.
 6. **CLAUDE.md truthfulness** — invariants that name unbuilt features (badges, TX guard) either get
    built or reworded as "when built".
-7. **Hand-over readiness — the recipient's own Recon ships (MC's call 2026-11-02); the reference Recon stays
-   our rig.** Start this cluster in parallel with Phase 1, because it's the long pole. Work:
+7. **Hand-over readiness — the recipient's own Recon ships (MC's call 2026-11-02); the reference
+   Recon stays our rig.** Start this cluster in parallel with Phase 1, because it's the long pole.
+   Work:
    - An idempotent `deploy/provision.sh` covering the course, the venv and every system tool. Apt:
      rtl-433, multimon-ng, tcpdump. Built from source and pinned: dump1090-fa, acarsdec, redsea,
      rtl_ais.
@@ -208,5 +209,6 @@ M30–M34 when you present real objects; merge PR #5 after ux-polish.
 ## Verification
 - Every fix: failing test first, `make selftest` (≥80% cov) + `make lint` pristine.
 - UI: `make render-check` sweep green at 800×480 × 3 themes, screenshots in the contact sheet.
-- HIL on the reference Recon, captured back into the repo; kiosk survives a cold reboot into the course.
+- HIL on the reference Recon, captured back into the repo; kiosk survives a cold reboot into the
+  course.
 - Audit docs + STATUS committed and pushed; each phase ends with STATUS true and a resume prompt.

@@ -58,12 +58,14 @@ FAP in the core; that is a possible later extension, explicitly out of scope her
 
 ## 3. Where the code runs, and the dev loop
 
-The kiosk/console app (FastAPI, the 800×480 panel) runs **on the reference Recon**, where the Flipper and the
-radios live. `FlipperLink` opens the **local** `/dev/ttyACM0` on the reference Recon — no networked serial.
+The kiosk/console app (FastAPI, the 800×480 panel) runs **on the reference Recon**, where the
+Flipper and the radios live. `FlipperLink` opens the **local** `/dev/ttyACM0` on the reference
+Recon — no networked serial.
 
-Dev loop (same as the SDR tracks): author in this droplet worktree → push the branch → on the reference Recon
-`git fetch && git checkout -f` the branch and run uvicorn → HIL against the real Flipper over SSH
-as the login user. Acceptance evidence is real device output captured from the reference Recon.
+Dev loop (same as the SDR tracks): author in this droplet worktree → push the branch → on the
+reference Recon `git fetch && git checkout -f` the branch and run uvicorn → HIL against the real
+Flipper over SSH as the login user. Acceptance evidence is real device output captured from the
+reference Recon.
 
 ## 4. The unit: U10 "Flipper", lessons M29–M38
 
@@ -163,8 +165,8 @@ the inventory of record) **plus** the M37 console lesson that walks the high poi
 
 ### 6a. Prerequisite with a cost (separately approvable) — the SD baseline image
 
-The owner's private host notes are explicit: **no disk image of the SD card exists anywhere**, and the
-root partition was never expanded (~26 G of the 58 G card unallocated). A genuine *restore* has
+The owner's private host notes are explicit: **no disk image of the SD card exists anywhere**, and
+the root partition was never expanded (~26 G of the 58 G card unallocated). A genuine *restore* has
 nothing to restore *from*. So a real restore story requires **creating that baseline image first**:
 
 - It is its own task, with a real cost: imaging an 8.8 G-used card (physical card-reader capture,
@@ -196,9 +198,10 @@ nothing to restore *from*. So a real restore story requires **creating that base
   SDR-arbitration contract list.
 - **Lesson:** `tests/test_lesson_m29.py` … `m38.py` (pack structure + panels). `tests/test_units.py`
   updated: 10 units, partition covers 1..38.
-- **HIL on the reference Recon (named device-output acceptance):** the panel shows real `device_info`; at least
-  one capability live-reads a real object (present an RFID fob / NFC tag / IR remote → the console
-  shows it). Per-lesson demo+predict render at a forced 800×480 (Next 423 / Commit 474). Lint green.
+- **HIL on the reference Recon (named device-output acceptance):** the panel shows real
+  `device_info`; at least one capability live-reads a real object (present an RFID fob / NFC tag /
+  IR remote → the console shows it). Per-lesson demo+predict render at a forced 800×480 (Next 423 /
+  Commit 474). Lint green.
 
 ## 9. Plan shape (ship the small core first)
 
@@ -217,7 +220,7 @@ Each phase is independently shippable; STATUS updated and the branch pushed at e
 - MC's call (2026-10-31): live mirror is the integration centerpiece; no on-device FAP in the core.
 - MC's call (2026-10-31): troubleshoot/restore covers the whole rig, not just the Flipper.
 - Assumption (stated, correct me): runbook lives in `sigint-101/docs/runbook.md` cross-linking the
-  `machines` repo, rather than in `machines` itself.
+  owner's private host notes, rather than in those notes themselves.
 - Open: whether to pair down the capability lessons (M30–M36) — building the full set unless told.
 
 ## 11. Out of scope

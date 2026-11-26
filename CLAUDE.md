@@ -107,8 +107,8 @@ capable instrument, not a locked toy.
     go?" — just do it and report. Default to **subagent-heavy** execution: fan research and
     independent chunks out to subagents. Ending a turn with "Want me to go?" is the exact ping-pong
     MC called out. One unavoidable tap remains (EnterWorktree); flag it, then stay heads-down.
-- **The reference Recon is the WORKING HIL target**; the owner's second Recon
-  is the deaf one (busted RX antenna). Don't conflate them. (Session 2026-10-26.)
+- **The reference Recon is the WORKING HIL target**; the owner's second Recon is the deaf one
+  (busted RX antenna). Don't conflate them. (Session 2026-10-26.)
 - **Lesson copy ALWAYS shrinks to fit the fixed 800x480 — never scroll, never ask.** When a stage
   overflows (the Next/Commit button pushed past 480px), trim the prose and the concept banner until
   it fits; do not add scrolling and do not ask scroll-vs-trim — the answer is always trim. Fit at
@@ -132,7 +132,7 @@ capable instrument, not a locked toy.
   nothing or rip that scroll out. And lessons must be COMPLETABLE: the last stage carries a
   "Complete lesson" button wired to `POST /api/complete`. (Session 2026-11-01, MC.)
 - **Know the kit; look it up before asking MC to.** The Nomad has a physical keyboard. Its jacks,
-  ports and antenna layout are in the hardware research (a ports survey kept
-  beside the private plan) and the vendor's docs. Read those, and try every remote fix (an esptool reset,
-  an ssh command), before handing MC a check or step in the real world. (Session 2026-11-02, MC:
+  ports and antenna layout are in the hardware research (a ports survey kept beside the private
+  plan) and the vendor's docs. Read those, and try every remote fix (an esptool reset, an ssh
+  command), before handing MC a check or step in the real world. (Session 2026-11-02, MC:
   "why do you need me to do something IRL".)

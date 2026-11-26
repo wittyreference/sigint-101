@@ -77,8 +77,7 @@ PRIVATE_NAME_DIGESTS = frozenset({
     "8f1a5687a544653f0041f3646266aceae2e756ab861ddb60d867bb387a94e50f",
     # the second Recon's host name, which is also the login user on both Recons
     "f5e490b5eaf7c3c5ffd36b16c5e459e965b8a96b22ead6e86a0c54728ad9127c",
-    # a lab Pi's host name, and the droplet's
-    "53a7ec63ba41c8d283a99da30e48a150155ab63ada966535147e2f39359fce18",
+    # the droplet's host name
     "f2e0cb61d7cc17f8411aa030d6f3d551812656778da67b2233ba534b71fba9ec",
     # the file names of two private plans, without their .md
     "f8602ae151c4e0f55718ce8da2f6adb3b9e56a2f575e5506d5626e4aff1bc83d",
@@ -92,9 +91,16 @@ WORD_RUN = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")
 # What the name guard cannot see, so a person still has to look:
 #   - a name written another way: split by a space, a dot or a slash, misspelt, or with letters
 #     swapped for look-alikes;
-#   - a machine or plan the list does not hold: a new host's name has to be added as a digest;
+#   - a hyphenated name split across a line end: each line is read on its own;
+#   - a name of several words run together with no separator, or in CamelCase: only the
+#     reference Recon's one-word spelling is listed;
+#   - a machine or plan the list does not hold: a new host's name has to be added as a digest. A
+#     name that is also a common word (a lab host named after its board, the owner's host
+#     registry) is not listed, as it would flag fair text, so it is left to a person;
 #   - the owner's own name (see above), user names other than the one listed, and binary files;
 #   - git history: it reads the checked-out tree only.
+# And the other way round: a fair word that happens to spell a listed name is flagged too (a
+# false alarm); the failure message says how to get past it.
 
 
 def tailnet_address_lines(text: str) -> list:
@@ -313,7 +319,9 @@ def test_no_tracked_file_names_the_owners_machines_or_private_plans():
     found = private_name_findings()
     assert not found, ("tracked files name one of the owner's machines or private plans; write "
                        "what it is instead (\"the reference Recon\", \"a lab Pi\", \"the private "
-                       "plan\"). Where (the names are withheld): " + ", ".join(found))
+                       "plan\"). If a line holds no such name, a fair word there spells one: write "
+                       "it another way, for example with a space before a model number. Where "
+                       "(the names are withheld): " + ", ".join(found))
 
 
 # The commit the name guard was made against: main as it stood when the item was confirmed. Its
@@ -524,6 +532,8 @@ def test_a_line_that_names_no_private_machine_or_plan_is_left_alone(line):
     "Dev runs on the droplet",
     "the owner's private plan, kept outside this repository",
     "a stock SpecFive Nomad 2 Recon on a Raspberry Pi 5 or a Pi 4",
+    "a Raspberry " + "Pi" + "5" + " with 8 GB",            # the board's one-word shorthand
+    ("Pi" + "5").upper() + "-kiosk.service",
     "lesson_packs/38-nomad-bench.yaml",                 # a lesson's file name
     "~/.claude/plans/INDEX.md",                         # the planning tools' own index
 ])
