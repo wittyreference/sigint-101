@@ -24,6 +24,8 @@
       makeTuner: makeTuner, nextGain: nextGain, formatGain: formatGain,
       makeGainStepper: makeGainStepper, meterReading: meterReading,
       meterLabelTops: meterLabelTops, sweepBadge: sweepBadge, meterState: meterState,
+      restartKey: restartKey, makeRestarter: makeRestarter, restartNote: restartNote,
+      meterNoteText: meterNoteText,
     };
     return;
   }
@@ -208,12 +210,63 @@
       return { text: "resuming", kind: "sample",
                title: "the first passes after a stall carry levels from before it" };
     }
+    if (body.stale === "restarting") {
+      return { text: "restarting", kind: "sample",
+               title: "rtl_power was restarted after a stall: the rows shown are from before it" };
+    }
     if (!total) {
       return { text: "waiting", kind: "sample",
                title: "sweeping " + formatMHz(body.freq_low) + "–" + formatMHz(body.freq_high) +
                       ", waiting for the first pass" };
     }
     return { text: "live · " + total, kind: "live", title: "live sweep" };
+  }
+
+  // The meter's note in place of a floor and a peak, or its own empty line with no note. Lesson 2's
+  // note box holds 12 characters of its mono face on one line, so "restarting" reads "starting"
+  // there ("— restarting —" wrapped onto two), while the badge says RESTARTING.
+  function meterNoteText(note, emptyText) {
+    if (!note) return emptyText;
+    return "— " + (note === "restarting" ? "starting" : note) + " —";
+  }
+
+  // The Restart sweep key after a poll: shown only when the console answered and said the sweep has
+  // stalled (the owner's ruling), never on a refusal (503: no radio, or the radio handed to another
+  // tool) or lost contact (poll null); disabled while a press is in flight.
+  //   poll: {code, body} as the last poll answered, or null
+  function restartKey(poll, pending) {
+    var shown = !!poll && poll.code === 200 && !!poll.body && poll.body.stale === "stalled";
+    return { shown: shown, disabled: !!pending };
+  }
+
+  // A press on the key: one request at a time. press() sends nothing while one is in flight and says
+  // so (false); otherwise it marks the key pending, sends, and hands on the console's answer.
+  //   opts.send()        -> Promise of the answer ({ok, status, ...}); never rejects
+  //   opts.onPending(p)  -> true when the request goes, false when it is answered
+  //   opts.onResult(res) -> the answer
+  function makeRestarter(opts) {
+    var busy = false;
+    return {
+      press: function () {
+        if (busy) return false;
+        busy = true;
+        opts.onPending(true);
+        opts.send().then(function (res) {
+          busy = false;
+          opts.onPending(false);
+          opts.onResult(res);
+        });
+        return true;
+      },
+    };
+  }
+
+  // What a press's answer puts on the tune caption: nothing for a restart (200) or a press that
+  // found nothing to restart (409), since the next poll shows how the sweep stands; the reason
+  // otherwise, a lost console included.
+  function restartNote(answer) {
+    if (answer.ok || answer.status === 409) return null;
+    return "not restarted: " + (answer.reason || "refused");
   }
 
   // The colour-scale bounds of one row: its weakest and strongest measured bins, or null when it
@@ -366,6 +419,7 @@
       badge: wrap.querySelector(".badge"),
       axis: wrap.querySelector(".waterfall__axis"),
       reason: wrap.querySelector("[data-wf-reason]"),
+      restart: wrap.querySelector("[data-wf-restart]"),
       meter: buildMeterRefs(wrap),
       floorDbm: null, ceilDbm: null, reading: null, geometry: null, sized: false
     });
@@ -483,7 +537,7 @@
     p.geometry = null;
     if (!m) return;
     if (m.empty) {
-      m.empty.textContent = note ? "— " + note + " —" : m.emptyText;
+      m.empty.textContent = meterNoteText(note, m.emptyText);
       m.empty.hidden = false;
     }
     [m.peak, m.floor, m.gap].forEach(function (el) { if (el) el.hidden = true; });
@@ -517,9 +571,10 @@
   var pendingNote = null;   // "tuning to …" while taps are gathered or a request is in flight
   var tuneNote = null;      // why the last retune was refused, until the next tap
   var radioNote = null;     // why nothing is tuned (no radio), until the radio answers
+  var restartNoteText = null;   // why a Restart sweep press was refused, until a later poll answers
 
   function renderCaptions() {
-    var text = pendingNote || tuneNote || radioNote;
+    var text = pendingNote || restartNoteText || tuneNote || radioNote;
     strips.forEach(function (s) {
       if (!s.caption) return;
       s.caption.textContent = text || s.base;
@@ -640,6 +695,62 @@
       var geom = lastRow || { low: live.low, high: live.high, bins: 0 };
       tuneNote = null;
       tuner.tapTo(tapToHz((ev.clientX - rect.left) / rect.width, geom.low, geom.high, geom.bins));
+    });
+  });
+
+  // ---- Restart sweep: a key on each waterfall, shown only while the console says STALLED --------
+  // The key is redrawn from each poll's answer (tick), and disabled at once when pressed. The press's
+  // answer clears the pending state without a redraw, so the key stays disabled until a poll
+  // answers: normally that poll reads "restarting" and hides it.
+  var lastPoll = null;        // the last poll's {code, body}, or null after lost contact
+  var restartPending = false;
+  var pollSeq = 0;            // polls sent so far
+  var restartNoteSeq = 0;     // the polls sent when the refusal note went up
+
+  function renderRestart() {
+    var key = restartKey(lastPoll, restartPending);
+    panels.forEach(function (p) {
+      if (!p.restart) return;
+      p.restart.hidden = !key.shown;
+      p.restart.disabled = key.disabled;
+      if (key.disabled) p.restart.setAttribute("aria-busy", "true");
+      else p.restart.removeAttribute("aria-busy");
+    });
+  }
+
+  function postRestart() {
+    return fetch("/api/spectrum/restart", { method: "POST", cache: "no-store" })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          body.ok = res.ok;
+          body.status = res.status;
+          return body;
+        });
+      }).catch(function (err) {
+        return { ok: false, status: 0, reason: "lost contact with the console: " + err.message };
+      });
+  }
+
+  var restarter = makeRestarter({
+    send: postRestart,
+    onPending: function (pending) {
+      restartPending = pending;
+      if (pending) renderRestart();
+    },
+    onResult: function (res) {
+      var note = restartNote(res);
+      if (!note) return;
+      restartNoteText = note;
+      restartNoteSeq = pollSeq;
+      renderCaptions();
+    },
+  });
+
+  panels.forEach(function (p) {
+    if (!p.restart) return;
+    p.restart.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      restarter.press();
     });
   });
 
@@ -767,11 +878,18 @@
 
   function tick() {
     if (stopped) return;
+    var seq = ++pollSeq;
     fetch("/api/spectrum?limit=40", { cache: "no-store" })
       .then(function (res) {
         return res.json().then(function (body) { return { code: res.status, body: body }; });
       })
       .then(function (result) {
+        lastPoll = result;
+        renderRestart();
+        if (restartNoteText && seq > restartNoteSeq) {
+          restartNoteText = null;
+          renderCaptions();
+        }
         if (result.code === 503) {
           // An honest refusal, reported verbatim — but keep checking, because the radio usually
           // comes back (another program borrows the dongle and hands it back). The reason is shown
@@ -831,6 +949,8 @@
         say(badge.text, badge.kind, badge.title);
       })
       .catch(function (err) {
+        lastPoll = null;
+        renderRestart();
         say("no console", "na", "lost contact with the console: " + err.message);
       })
       .then(function () {

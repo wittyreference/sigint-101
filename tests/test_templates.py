@@ -9,7 +9,8 @@ import pytest
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from sigint101 import exam
-from sigint101.lessons import parse_lesson
+from sigint101.lessons import load_lessons, parse_lesson
+from sigint101.operate import INSTRUMENTS, instrument
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "sigint101" / "templates"
 
@@ -1469,6 +1470,63 @@ def test_a_refusal_past_the_cap_scrolls_and_is_never_clipped():
     assert message_decls.get("overflow-y") == "auto", message[1]
     # The panel itself (overflow: hidden at rest) always holds the whole capped box.
     assert not {"max-height", "overflow", "overflow-y"} & set(panel_decls), panel[1]
+
+
+# --- C24: the Restart sweep key ----------------------------------------------------------------
+# The owner's ruling: a Restart sweep key on every live waterfall, shown only while it says
+# STALLED (waterfall.js decides), and hidden until then. It rides the waterfall macro, so every
+# lesson and rack view that draws a live waterfall carries one per waterfall, and nothing else does.
+
+REAL_PACKS = TEMPLATES_DIR.parent.parent / "lesson_packs"
+_OTHER_INSTRUMENTS = ("uses_decoder", "uses_lora", "uses_rds", "uses_adsb", "uses_aprs",
+                      "uses_pocsag", "uses_acars", "uses_ais", "uses_dmr", "uses_apt", "uses_sstv",
+                      "uses_flock", "uses_rayhunter", "uses_flipper")
+_RESTART_KEY = re.compile(r"<button[^>]*data-wf-restart[^>]*>([^<]*)</button>")
+
+
+def _check_restart_keys(html, where):
+    """One hidden Restart sweep key per live waterfall, between its badge and its reason slot."""
+    wraps = re.findall(r'class="waterfall-wrap">(.*?)</div>\s*</div>', html, re.S)
+    assert wraps, f"{where}: no live waterfall"
+    keys = _RESTART_KEY.findall(html)
+    assert len(keys) == len(wraps), f"{where}: {len(keys)} keys for {len(wraps)} waterfalls"
+    for wrap in wraps:
+        key = _RESTART_KEY.search(wrap)
+        assert key, f"{where}: a waterfall without its key"
+        assert key.group(1).strip() == "Restart sweep"
+        assert " hidden" in key.group(0) and 'type="button"' in key.group(0)
+        assert wrap.index("badge") < key.start() < wrap.index("data-wf-reason")
+
+
+def test_every_live_waterfall_carries_one_hidden_restart_sweep_key():
+    lessons = load_lessons(REAL_PACKS)
+    waterfall_lessons = [lid for lid, lesson in lessons.items() if lesson.needs_hardware
+                         and not any(getattr(lesson, flag) for flag in _OTHER_INSTRUMENTS)]
+    assert sorted(waterfall_lessons, key=int) == [1, 2, 3, 4, 6, 7, 8, 9]
+    for lid, lesson in lessons.items():
+        committed = _console(lesson=lesson, prediction_committed=True, current_stage="explain")
+        gate = _console(lesson=lesson, current_stage="predict")
+        if lid in waterfall_lessons:
+            _check_restart_keys(committed, f"lesson {lid}")
+            _check_restart_keys(gate, f"lesson {lid} before the commit")
+        else:
+            assert "data-wf-restart" not in committed + gate, f"lesson {lid}"
+    for key in ("waterfall", "clock", "health"):
+        html = _render("operate.html", **_status(), instruments=INSTRUMENTS, inst=instrument(key),
+                       freq_hz=98_000_000, flock_tool="tcpdump", text_withheld=False)
+        _check_restart_keys(html, f"rack {key}")
+    for inst in INSTRUMENTS:
+        if inst.api != "spectrum":
+            html = _render("operate.html", **_status(), instruments=INSTRUMENTS, inst=inst,
+                           freq_hz=98_000_000, flock_tool="tcpdump", text_withheld=False)
+            assert "data-wf-restart" not in html, f"rack {inst.key}"
+
+
+def test_the_restart_key_stays_hidden_until_waterfall_js_shows_it():
+    # The key is a house key (.btn), whose display: inline-flex beats the hidden attribute: without
+    # its own [hidden] rule it would show on every waterfall, stalled or not.
+    assert re.search(r"display:\s*none", _css_rule(".waterfall__restart[hidden]"))
+    assert re.search(r"position:\s*absolute", _css_rule(".waterfall__restart"))
 
 
 if __name__ == "__main__":  # pragma: no cover

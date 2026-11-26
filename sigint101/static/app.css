@@ -1032,6 +1032,24 @@ button.rail-pip:disabled {
   display: none;
 }
 
+/* Restart sweep: a house key over the top right of a STALLED waterfall, the only state it shows
+   in. At its full 76 px it fits every live waterfall at 800x480: 5 px clear of the axis on a
+   lesson's 120 px row, and 16 px clear of the badge on the rack's narrowest (Health), with 12 px
+   side padding where the house 20 px left it 0.07 px. Pressed, it is disabled (.btn:disabled)
+   until the console answers. */
+.waterfall__restart {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+/* .btn's display: inline-flex beats the hidden attribute, so the key says it again here. */
+.waterfall__restart[hidden] {
+  display: none;
+}
+
 /* The instrument's main row: the waterfall fills it; a declared panel (the gain meter) rides
    alongside at a fixed width so both share the one 800x480 instrument band. A stage with no
    panel has a single child here, so the waterfall still spans the full width. */
