@@ -247,11 +247,16 @@ def _pool_refusal(exc: Exception) -> str:
     OSError; one that is not JSON, or not shaped like a pool (a question has lost a field, or a
     list or string stands where an object belongs), as the loader's ValueError, KeyError,
     TypeError or AttributeError. Those are put into words here.
+
+    An OSError gives only its strerror, the system's own words ("Permission denied"). One without
+    a strerror carries free text at most, which may hold the file's whole path, so it is left out.
     """
     if isinstance(exc, PoolError):
         return str(exc)
     if isinstance(exc, OSError):
-        return f"pool file cannot be read: {exc.strerror or exc}"
+        if exc.strerror:
+            return f"pool file cannot be read: {exc.strerror}"
+        return "pool file cannot be read"
     if isinstance(exc, KeyError):
         return f"pool file is malformed: a question has no {exc} field"
     return f"pool file is malformed: {exc}"
@@ -605,13 +610,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
-        """The front page: a tile per curriculum unit, with how far the learner has got."""
+        """The front page: a tile per curriculum unit, with how far the learner has got.
+
+        The exam bar is told whether the pool stands refused, so it does not invite the learner
+        to practise on a trainer that is off.
+        """
         tiles = _unit_tiles(app.state.lessons, app.state.progress)
         return templates.TemplateResponse(
             request=request,
             name="home.html",
             context={"title": "SIGINT 101", "back_href": "/", "back_label": "Home",
-                     "exit_to_desktop": True, "tiles": tiles},
+                     "exit_to_desktop": True, "tiles": tiles,
+                     "exam_disabled": app.state.exam_disabled_reason is not None},
         )
 
     @app.post("/api/kiosk/exit")
