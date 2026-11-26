@@ -1812,3 +1812,53 @@ def test_a_deliberate_stop_starts_no_back_off():
     sweeper.start()
     sweeper.stop()
     assert sweeper.retry_in() is None
+
+
+# The reader asks whether its run is still current only AFTER the exit wait. A stop that comes
+# while the reader waits ends the run and kills the process: the status it then reads (-15) is our
+# own stop's, not a death, and must not be recorded or start a back-off. Asking before the wait
+# would record it. (The engineering manager's gate check, PR 87.)
+
+def _reader_waiting(proc, timeout=2.0):
+    """Wait until the reader is inside its wait for the exit status."""
+    deadline = time.monotonic() + timeout
+    while not proc.waits and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert proc.waits, "the reader never waited for the exit status"
+
+
+def test_a_stop_during_the_readers_exit_wait_records_nothing():
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(WaitedProc, procs), radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 1.0
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].close_pipe()
+    _reader_waiting(procs[0])
+    t0 = time.monotonic()
+    sweeper.stop()
+    took = time.monotonic() - t0
+    assert sweeper.rows() == [_pass_row(_fm_pass(0))]
+    assert sweeper.error is None, sweeper.error
+    assert sweeper.retry_in() is None
+    assert took < 0.5, took
+
+
+def test_a_restart_during_the_readers_exit_wait_leaves_the_new_run_alone():
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(WaitedProc, procs), radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 1.0
+    sweeper.start()
+    procs[0].feed(_fm_pass(0) + _fm_pass(1)[:4])
+    wait_for_rows(sweeper, 1)
+    procs[0].close_pipe()
+    _reader_waiting(procs[0])
+    sweeper.stop()                       # as a gain step or a retune does: stop, then start
+    sweeper.start()                      # refused if the old run's end was taken for a death
+    assert len(procs) == 2
+    procs[1].feed(_fm_pass(2) + _fm_pass(3))
+    wait_for_reading(sweeper)
+    assert sweeper.reading()[0] == _pass_row(_fm_pass(2))
+    assert sweeper.error is None, sweeper.error
+    assert sweeper.retry_in() is None
