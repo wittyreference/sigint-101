@@ -83,6 +83,24 @@ def test_popen_omits_source_id_without_a_serial(tmp_path, monkeypatch):
     assert "--source_id" not in argv
 
 
+def test_start_passes_local_tle_override_even_when_file_is_missing(tmp_path, monkeypatch):
+    commands = []
+
+    def capture(argv, **kw):
+        commands.append(argv)
+        return FakeProcess()
+
+    monkeypatch.setattr(apt, "spawn", capture)
+    dec = _decoder(tmp_path, spawn=apt._popen)
+    dec.start()
+
+    tle_path = tmp_path / "apt" / "tle.txt"
+    assert not tle_path.exists()
+    argv, = commands
+    assert "--tle_override" in argv
+    assert argv[argv.index("--tle_override") + 1] == str(tle_path)
+
+
 def test_start_uses_no_source_id_without_a_radio_survey(tmp_path):
     captured = {}
 
