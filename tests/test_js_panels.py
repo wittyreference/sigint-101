@@ -87,8 +87,8 @@ def test_the_panel_javascript_has_tests_and_they_run():
 
 # The check above, run on throwaway test files instead of the repo's own. Each file is written to
 # tmp_path, never to tests/, and the check is pointed at it through JS_TESTS. A bad file is tried
-# alone and after a file whose test passes, because in a run of all the files together a good
-# file would cover for a bad one.
+# alone, after a file whose test passes and before one, because in a run of all the files
+# together a good file would cover for a bad one.
 PASSING_JS = 'const test = require("node:test");\ntest("passes", () => {});\n'
 BAD_JS = {
     "empty": "",
@@ -133,13 +133,14 @@ def _write_js(directory, name, source):
 
 
 @pytest.mark.parametrize("kind", sorted(BAD_JS))
-@pytest.mark.parametrize("beside_a_passing_file", [False, True], ids=["alone", "with_good"])
+@pytest.mark.parametrize("order", ["alone", "good_first", "bad_first"])
 def test_a_js_test_file_that_runs_no_passing_test_of_its_own_fails_the_check(
-        monkeypatch, tmp_path, kind, beside_a_passing_file):
+        monkeypatch, tmp_path, kind, order):
+    # Both orders beside a good file, so a check that judges only the first or only the last
+    # file cannot pass.
     bad = _write_js(tmp_path, f"{kind}.test.js", BAD_JS[kind])
-    files = [bad]
-    if beside_a_passing_file:
-        files = [_write_js(tmp_path, "good.test.js", PASSING_JS), bad]
+    good = _write_js(tmp_path, "good.test.js", PASSING_JS)
+    files = {"alone": [bad], "good_first": [good, bad], "bad_first": [bad, good]}[order]
     message = _js_check_on(monkeypatch, files)
     assert message is not None, f"{kind}.test.js was accepted as a pass"
     assert bad.name in message, f"the failure does not name {bad.name}: {message}"
