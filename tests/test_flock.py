@@ -40,6 +40,7 @@ from sigint101.flock import (
 )
 from tests.child_fakes import Child
 from tests.test_app import _client
+from tests.test_app_radio_routes import _panel_shows
 from tests.test_templates import refusal_lines_shown
 
 # A real off-air capture: tcpdump -i wlan1 -s 512 -w off wlan1 in monitor mode, 2026-10-29.
@@ -943,6 +944,46 @@ def test_the_panel_reads_stopped_when_marauder_never_answers(tmp_path, bridge):
     assert body["reason"].startswith(f"no answer from Marauder on {bridge.path}")
 
 
+# C30: after a link died, a missing bridge port read STOPPED "· retrying now" for as long as it
+# stayed missing, though nothing was retrying: the port check sits before the back-off, so no new
+# link ever came to end the death's record. Only the death reads STOPPED; no port, or two, read as
+# what they are, and the port coming back starts the link again.
+def test_after_a_marauder_death_a_missing_bridge_reads_no_radio_not_stopped(tmp_path, bridge):
+    ports = [bridge.path]
+    dec = MarauderFlockDetector(glob=lambda pattern: list(ports), answer_timeout=0.05)
+    now = [5000.0]
+    dec.watch.clock = lambda: now[0]
+    with _client(tmp_path, flock_factory=lambda: dec) as client:
+        assert client.get("/api/flock").json()["state"] == "starting"
+        dec.drain()                         # Marauder never answers on the pty: the link dies
+        died = client.get("/api/flock").json()
+        ports.clear()                       # the Flipper is unplugged
+        gone = [client.get("/api/flock").json()]
+        now[0] += 10 * childproc.MAX_RETRY_S
+        gone += [client.get("/api/flock").json() for _ in range(3)]
+        ports[:] = TWO_BRIDGES["by-id3"]
+        two = client.get("/api/flock").json()
+        ports[:] = [bridge.path]            # the bridge is back
+        back = client.get("/api/flock").json()
+        dec.stop()
+    assert died["state"] == "stopped" and died["retry_in"] > 0, died
+    assert died["reason"].startswith(f"no answer from Marauder on {bridge.path}")
+    for body in gone:
+        assert body["reason"].startswith("no monitor radio: "), body
+        assert "state" not in body and "retry_in" not in body, body
+    assert two["reason"].startswith("more than one Flipper USB-UART bridge"), two
+    assert "state" not in two and "retry_in" not in two, two
+    assert back["available"] is True and back["state"] == "starting", back
+    assert dec.watch.stopped is False
+
+    shown = _panel_shows("flock", [died, *gone, two])
+    assert shown[0]["badge"] == "STOPPED"
+    assert shown[0]["reason"] == died["reason"] + " · retrying in 2 s"
+    for down, body in zip(shown[1:], [*gone, two]):
+        assert down["badge"] == "NO RADIO", down
+        assert down["reason"] == body["reason"], down
+
+
 # Lesson 18's panel is 124 px tall: under its head it holds two 18 px lines of message, and the
 # no-bridge refusal's third line was cut off (20.67 px of it, measured at 800x480). A line holds 66
 # characters: 738 px of text (the 764 px panel less its borders and padding) at 11.16 px a
@@ -1003,8 +1044,9 @@ def test_the_no_port_refusal_names_what_it_looked_for(tmp_path, pinned):
 
 # Every refusal the Marauder path can show must be whole in lesson 18's panel: as many lines as the
 # panel shows for a refusal (refusal_lines_shown, read from app.css), at the panel's 66 characters.
-# A refusal comes in two forms: before any link died, and after one did, when the console badges it
-# STOPPED with the countdown (childproc's ChildWatch stays stopped until the next spawn). Port
+# A refusal is served before any link died and after one did. After one did it is still a refusal,
+# not STOPPED with a countdown: only the death itself reads STOPPED, so the panel shows it as it
+# shows a refusal before any death (C30, and the route test of it in test_app_radio_routes). Port
 # names reach the detector through its glob, never as a real pin, and every open is doubled or
 # lands on the test's pty, so no test opens a /dev/serial name. A by-id name is 44 + 2n characters
 # for an n-character Flipper name, and the firmware caps n at 8.
@@ -1140,10 +1182,10 @@ def test_every_marauder_refusal_shows_whole_in_the_lesson_panel(
     monkeypatch.setattr(childproc, "FIRST_RETRY_S", 0.05)
     body, words = _served_refusal(tmp_path, monkeypatch, bridge, row, port, cause, form)
     assert body["available"] is False, body
-    if form == "never-died":
-        assert "state" not in body, body       # refused, never stopped
-    else:
+    if form == "the-death":
         assert body.get("state") == "stopped", body
+    else:
+        assert "state" not in body, body       # refused, never stopped, before a death or after
     text = _panel_text(body)
     lines = textwrap.wrap(text, PANEL_MESSAGE_CHARS)
     assert len(lines) <= refusal_lines_shown(), lines

@@ -1,9 +1,14 @@
 # ABOUTME: Route tests for the radio panels: a dead tool reads stopped, every route shows its argv.
 # ABOUTME: Also the single claim lock, deduplicated refusal logging, and the ppm route's claim.
 
+import json
+import re
 import shlex
+import shutil
+import subprocess
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -180,6 +185,202 @@ def test_a_dead_tool_reads_stopped_not_live(tmp_path, path, factory, build, key,
     kinds = _kinds(tmp_path)
     assert kinds.count(f"{kind}_start") == 1
     assert kinds.count(f"{kind}_blocked") == 1    # one line for the death, not one per poll
+
+
+# --- C30: after a death, only the death reads stopped; any other refusal reads as what it is ---
+# WHY: the console keeps a tool's death on record until its next spawn, and it badged every refusal
+# in that time STOPPED with the retry countdown. The radio check sits before the spawn, so a radio
+# unplugged after a death read STOPPED "· retrying now" for as long as it stayed away, though
+# nothing was retrying; so did a refusal from a check after the back-off, such as a tool that
+# cannot run. Only the death's own reason is STOPPED now. The record and its back-off still stand:
+# a radio that comes back inside the back-off waits it out, STOPPED with its countdown, as before.
+
+STATIC = Path(__file__).resolve().parent.parent / "sigint101" / "static"
+
+# The refusals a decoder gives when its radio is gone: an RTL-SDR's, and Flock's monitor interface.
+NO_RADIO = ("no RTL-SDR on the USB bus", "no monitor interface")
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 5000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _panel_shows(kind, bodies):
+    """Each refused body as the route's panel shows it: decoder-panel.js's downState, in node.
+
+    The fallback badge is the one the panel's own script passes (sigint101/static/<kind>.js), so
+    what is checked is the badge and line a learner would read on that panel.
+    """
+    call = re.search(r'DecoderPanel\.showDown\(panel, badge, empty, body, "([^"]+)", "([^"]+)"\)',
+                     (STATIC / f"{kind}.js").read_text(encoding="utf-8"))
+    assert call, f"{kind}.js no longer shows a refusal through DecoderPanel.showDown"
+    node = shutil.which("node")
+    assert node, "node is not on PATH, so the panel's own rendering cannot be checked"
+    script = ("const p = require(process.argv[1]);"
+              "const [badge, reason, bodies] = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+              "const down = bodies.map(b => p.downState(b, badge, reason));"
+              "process.stdout.write(JSON.stringify(down));")
+    result = subprocess.run([node, "-e", script, str(STATIC / "decoder-panel.js")],
+                            input=json.dumps([call[1], call[2], bodies]),
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _dying_then_running(spawned, cannot_run=None):
+    """A spawn whose first tool dies at once on a busy dongle and whose later ones keep running.
+
+    While `cannot_run[0]` is true, the spawn fails as a missing or broken binary does.
+    """
+    def spawn(*_):
+        if cannot_run and cannot_run[0]:
+            raise OSError(8, "Exec format error")
+        spawned.append(Child(["tool"], code=1, said=USB_BUSY) if not spawned else Child(["tool"]))
+        return spawned[-1]
+    return spawn
+
+
+def _assert_stopped(body, *, counting):
+    assert body["available"] is False, body
+    assert body["state"] == "stopped", body
+    assert "exit status 1" in body["reason"], body
+    assert (body["retry_in"] > 0) is counting, body
+
+
+def _assert_refused_not_stopped(body, words):
+    assert body["available"] is False, body
+    assert any(word in body["reason"] for word in words), body
+    assert "exit status" not in body["reason"], body
+    assert "state" not in body and "retry_in" not in body, body
+
+
+@pytest.mark.parametrize("path,factory,build,key,kind", ROUTES, ids=ROUTE_IDS)
+def test_after_a_death_a_missing_radio_reads_missing_not_stopped(
+        tmp_path, path, factory, build, key, kind):
+    spawned = []
+    dec = build(_dying_then_running(spawned), tmp_path)
+    clock = _Clock()
+    dec.watch.clock = clock
+    present = [True]
+    dec._radio_present = lambda: present[0]
+    with _client(tmp_path, probe=_present, **{factory: lambda: dec}) as client:
+        assert client.get(path).json()["available"] is True    # launched; it dies at once
+        dec.drain()                                             # its end is read before a poll
+        died = client.get(path).json()
+        present[0] = False                                      # the radio is unplugged
+        gone = [client.get(path).json()]                        # inside the back-off
+        clock.now += 10 * childproc.MAX_RETRY_S                 # and long after it
+        gone += [client.get(path).json() for _ in range(3)]
+        present[0] = True                                       # plugged back in
+        back = client.get(path).json()
+        dec.stop()
+    _assert_stopped(died, counting=True)
+    for body in gone:
+        _assert_refused_not_stopped(body, NO_RADIO)
+    assert back["available"] is True and back["state"] == "starting", back
+    assert len(spawned) == 2                                    # it started normally, once
+    assert dec.watch.stopped is False
+
+    shown = _panel_shows(kind, [died, *gone])
+    assert shown[0]["badge"] == "STOPPED"
+    assert shown[0]["reason"] == died["reason"] + " · retrying in 2 s"
+    for down, body in zip(shown[1:], gone):
+        assert down["badge"] == "NO RADIO", down
+        assert down["reason"] == body["reason"], down            # no countdown, no "retrying"
+
+
+@pytest.mark.parametrize("path,factory,build,key,kind", ROUTES, ids=ROUTE_IDS)
+def test_a_radio_back_inside_the_back_off_still_waits_it_out_stopped(
+        tmp_path, path, factory, build, key, kind):
+    # The missing radio's refusal must not end the death's record: the back-off still stands.
+    spawned = []
+    dec = build(_dying_then_running(spawned), tmp_path)
+    clock = _Clock()
+    dec.watch.clock = clock
+    present = [True]
+    dec._radio_present = lambda: present[0]
+    with _client(tmp_path, probe=_present, **{factory: lambda: dec}) as client:
+        client.get(path)                                        # launched; it dies at once
+        dec.drain()
+        died = client.get(path).json()
+        present[0] = False
+        client.get(path)
+        present[0] = True
+        clock.now += 1.0                                        # half the first back-off
+        waiting = client.get(path).json()
+        assert len(spawned) == 1                                # not relaunched early
+        clock.now += 1.0
+        back = client.get(path).json()
+        dec.stop()
+    _assert_stopped(died, counting=True)
+    _assert_stopped(waiting, counting=True)
+    assert waiting["reason"] == died["reason"]
+    assert waiting["retry_in"] == 1.0
+    assert _panel_shows(kind, [waiting])[0] == {
+        "badge": "STOPPED", "cls": "decoder__status decoder__status--stopped",
+        "reason": died["reason"] + " · retrying in 1 s"}
+    assert back["available"] is True and len(spawned) == 2
+
+
+@pytest.mark.parametrize("path,factory,build,key,kind", ROUTES, ids=ROUTE_IDS)
+def test_after_a_death_a_tool_that_cannot_run_reads_so_not_stopped(
+        tmp_path, path, factory, build, key, kind):
+    # The spawn is the last check, after the back-off: once the back-off has run out, a tool that
+    # cannot run refuses every poll, and no spawn comes to end the death's record.
+    spawned, cannot_run = [], [False]
+    dec = build(_dying_then_running(spawned, cannot_run), tmp_path)
+    clock = _Clock()
+    dec.watch.clock = clock
+    with _client(tmp_path, probe=_present, **{factory: lambda: dec}) as client:
+        client.get(path)                                        # launched; it dies at once
+        dec.drain()
+        died = client.get(path).json()
+        cannot_run[0] = True
+        clock.now += 10 * childproc.MAX_RETRY_S
+        refused = [client.get(path).json() for _ in range(3)]
+        cannot_run[0] = False
+        back = client.get(path).json()
+        dec.stop()
+    _assert_stopped(died, counting=True)
+    for body in refused:
+        _assert_refused_not_stopped(body, ["cannot run"])
+        assert "Exec format error" in body["reason"]
+    for down in _panel_shows(kind, refused):
+        assert down["badge"] == "NO RADIO" and "retrying" not in down["reason"], down
+    assert back["available"] is True and back["state"] == "starting", back
+    assert len(spawned) == 2
+
+
+# APT has no reader to see its capture end between polls: its death is found by the next poll and
+# so is always told inside its back-off. Every other route can be told it late.
+TOLD_LATE = [route for route in ROUTES if route[0] != "/api/apt"]
+
+
+@pytest.mark.parametrize("path,factory,build,key,kind", TOLD_LATE,
+                         ids=[route[0] for route in TOLD_LATE])
+def test_a_death_first_reported_after_its_back_off_reads_stopped_retrying_now(
+        tmp_path, path, factory, build, key, kind):
+    # Nobody polled while the back-off ran, so the death is told late: it is still the death, and
+    # the very next poll does try again, so "retrying now" is true.
+    spawned = []
+    dec = build(_dying_then_running(spawned), tmp_path)
+    clock = _Clock()
+    dec.watch.clock = clock
+    with _client(tmp_path, probe=_present, **{factory: lambda: dec}) as client:
+        client.get(path)                                        # launched; it dies at once
+        dec.drain()
+        clock.now += 10 * childproc.MAX_RETRY_S
+        late = client.get(path).json()
+        back = client.get(path).json()
+        dec.stop()
+    _assert_stopped(late, counting=False)
+    assert late["retry_in"] == 0
+    assert _panel_shows(kind, [late])[0]["reason"] == late["reason"] + " · retrying now"
+    assert back["available"] is True and len(spawned) == 2
 
 
 def test_a_missing_tool_is_logged_once_not_every_poll(tmp_path):
