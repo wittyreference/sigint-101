@@ -68,6 +68,7 @@ def main():
         and ov["barBottom"] <= 480
     )
     print("VERDICT:", "PASS" if ok else "FAIL")
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
