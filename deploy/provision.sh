@@ -142,6 +142,45 @@ step_preflight() {
   fi
 }
 
+# The panel JavaScript tests use mock.timers.enable({ apis: ... }), which landed in Node 21.2 and
+# was backported to 20.11. Debian Bookworm's apt nodejs is 18.x, so provision.sh checks Node up
+# front and stops clearly rather than adding an unpinned third-party apt repository.
+NODE_FLOOR_TEXT="Node.js 20.11+ (21.2+ on the 21 line)"
+
+node_version_ok() {
+  local major="$1" minor="$2"
+  if [ "$major" -gt 21 ]; then
+    return 0
+  elif [ "$major" -eq 21 ]; then
+    [ "$minor" -ge 2 ]
+  elif [ "$major" -eq 20 ]; then
+    [ "$minor" -ge 11 ]
+  else
+    return 1
+  fi
+}
+
+step_node() {
+  step "Node.js (make selftest needs $NODE_FLOOR_TEXT for the panel tests)"
+  local node_bin ver major minor
+  node_bin="$(command -v node || true)"
+  if [ -z "$node_bin" ]; then
+    die "node is not on PATH; make selftest needs $NODE_FLOOR_TEXT. Debian Bookworm's apt nodejs is 18.x (too old) — install $NODE_FLOOR_TEXT (for example from nodejs.org) and re-run."
+  fi
+  ver="$("$node_bin" --version 2>&1)" ||
+    die "could not read node version from $node_bin ($ver); make selftest needs $NODE_FLOOR_TEXT."
+  ver="${ver//$'\r'/}"
+  if [[ ! "$ver" =~ ^v?([0-9]+)\.([0-9]+)\.[0-9]+([-+].*)?$ ]]; then
+    die "unreadable node version '$ver' from $node_bin; make selftest needs $NODE_FLOOR_TEXT."
+  fi
+  major=$((10#${BASH_REMATCH[1]}))
+  minor=$((10#${BASH_REMATCH[2]}))
+  if ! node_version_ok "$major" "$minor"; then
+    die "node $ver at $node_bin is too old; make selftest needs $NODE_FLOOR_TEXT. Debian Bookworm's apt nodejs is 18.x — install $NODE_FLOOR_TEXT (for example from nodejs.org) and re-run."
+  fi
+  ok "node $ver at $node_bin (meets $NODE_FLOOR_TEXT)"
+}
+
 step_desktop_autologin() {
   step "Boot to the desktop with autologin (the course opens full-screen on top of it)"
   local target conf="/etc/lightdm/lightdm.conf"
@@ -619,6 +658,7 @@ main() {
   done
 
   step_preflight
+  step_node
   step_desktop_autologin
   step_user_groups
   step_apt
