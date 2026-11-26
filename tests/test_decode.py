@@ -503,6 +503,44 @@ def test_an_old_readers_death_record_landing_after_the_next_start_is_not_the_new
     assert len(procs) == 3
 
 
+@pytest.mark.parametrize("stand_down", ["retune", "stop"])
+@pytest.mark.parametrize("during", ["stopping", "terminate"])
+def test_what_an_old_reader_reads_during_its_stop_is_not_kept(late, during, stand_down):
+    # The run must end as the stop begins, not somewhere inside it. Here the old reader reads one
+    # more decode and then its pipe fails while the stop is under way: as the child watch is told
+    # the stop is ours, or as rtl_433 is asked to terminate. The stop goes on only once that reader
+    # has ended. Nothing it read may be listed or logged, its failure may not stand, and the next
+    # start may not be refused with it.
+    dec, procs, heard = late
+    dec.start()
+    procs[0].feed(ASK_LINE)
+    heard.wait_for(1)
+    old = procs[0]
+    owner = dec.watch if during == "stopping" else old
+    plain = getattr(owner, during)
+
+    def mid_stop(*args, **kw):
+        result = plain(*args, **kw)
+        setattr(owner, during, plain)             # once, for this stop only
+        old.feed(FSK_LINE)
+        old.break_pipe(OSError("old pipe failed during the stop"))
+        old.reader.join(5)
+        return result
+
+    setattr(owner, during, mid_stop)
+    if stand_down == "retune":
+        dec.retune(315_000_000)
+    else:
+        dec.stop()
+    assert not old.reader.is_alive()
+    assert heard.log == [("Acurite-Tower", 433_920_000, _line(old))]
+    assert "LaCrosse-TX141THBv2" not in [r.model for r in dec.recent()]
+    assert dec.error is None
+    dec.start()                                   # not refused with the old run's reason
+    assert len(procs) == 2
+    assert dec.running
+
+
 @pytest.mark.parametrize("end, reason", [
     (lambda proc: proc.break_pipe(OSError("new pipe failed")), "new pipe failed"),
     (lambda proc: (proc.die(1), proc.close_pipe()), "status 1"),
