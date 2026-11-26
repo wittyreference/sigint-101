@@ -502,3 +502,47 @@ def test_a_spawn_clears_the_stopped_state():
     watch.spawned(_Ended(["rtl_433"], None))
     assert watch.stopped is False
     assert watch.reason is None
+
+
+# --- RunGuard: numbers runs under the buffer lock ---------------------------------------------
+
+
+def test_run_guard_advances_the_run_and_rejects_earlier_ones():
+    guard = childproc.RunGuard()
+    first = guard.current
+    with guard:
+        assert guard.is_current(first) is True
+    second = guard.end()
+    assert second != first
+    assert guard.current == second
+    with guard:
+        assert guard.is_current(first) is False
+        assert guard.is_current(second) is True
+
+
+def test_run_guard_end_waits_for_a_holder_of_the_buffer_lock():
+    guard = childproc.RunGuard()
+    first = guard.current
+    entered, released, ended = threading.Event(), threading.Event(), threading.Event()
+
+    def holder():
+        with guard:
+            entered.set()
+            released.wait(5)
+
+    def stopper():
+        guard.end()
+        ended.set()
+
+    t_hold = threading.Thread(target=holder)
+    t_hold.start()
+    assert entered.wait(5)
+    t_stop = threading.Thread(target=stopper)
+    t_stop.start()
+    assert not ended.wait(0.05)          # end() cannot move the run on while the lock is held
+    released.set()
+    t_hold.join(5)
+    t_stop.join(5)
+    assert ended.is_set()
+    with guard:
+        assert guard.is_current(first) is False

@@ -440,3 +440,39 @@ class ChildWatch:
     def blocked(self) -> str | None:
         """The death reason while the back-off runs, else None."""
         return self.reason if self.retry_in() is not None else None
+
+
+class RunGuard:
+    """Pairs a decoder's run number with the lock that guards its buffer and error state.
+
+    Every stop ends the current run under that lock before stopping the child, so a reader that
+    outlives its stop cannot list a late item, report it, or record a pipe failure or death into
+    the next run. Sharing one lock between the run number and the buffer ensures a stop waits for
+    any update already past its check, and a check arriving after the stop sees the run has ended.
+    """
+
+    def __init__(self, lock=None):
+        self.lock = threading.Lock() if lock is None else lock
+        self._run = 0
+
+    @property
+    def current(self) -> int:
+        """The active run number, handed to the reader a start() launches (under _life)."""
+        return self._run
+
+    def end(self) -> int:
+        """End the current run under the lock so no reader from it can act again."""
+        with self.lock:
+            self._run += 1
+            return self._run
+
+    def is_current(self, run: int) -> bool:
+        """True while `run` is still the current run. Call with this guard's lock held."""
+        return run == self._run
+
+    def __enter__(self):
+        self.lock.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self.lock.__exit__(*exc)
