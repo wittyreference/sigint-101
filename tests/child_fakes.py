@@ -115,3 +115,82 @@ class LateProc:
 
     def wait(self, timeout=None):
         return self.returncode
+
+
+class _ByteStream:
+    """Blocking binary stream backed by a queue of bytes chunks, None (EOF), or an exception."""
+
+    def __init__(self, owner):
+        self._owner = owner
+        self._chunks = queue.Queue()
+        self._buf = bytearray()
+
+    def put(self, item):
+        self._chunks.put(item)
+
+    def read(self, n: int = -1) -> bytes:
+        self._owner.reader = threading.current_thread()
+        if not self._buf:
+            item = self._chunks.get()
+            if item is None:
+                return b""
+            if isinstance(item, BaseException):
+                raise item
+            self._buf.extend(item)
+        if n is None or n < 0:
+            out = bytes(self._buf)
+            self._buf.clear()
+            return out
+        out = bytes(self._buf[:n])
+        del self._buf[:n]
+        return out
+
+
+class LateByteProc:
+    """A byte-stream sibling of LateProc for pcap readers (Flock) that call stdout.read(n).
+
+    Feed raw bytes chunks (such as pcap records after an optional preamble header) with feed();
+    terminate() and die() end the process without closing the pipe, and close_pipe() or
+    break_pipe() ends the reader.
+    """
+
+    def __init__(self, cmd, *, preamble: bytes = b""):
+        self.args = list(cmd)
+        self.returncode = None
+        self.terminated = False
+        self.reader = None
+        self.stderr = io.StringIO("")
+        self._stream = _ByteStream(self)
+        self.stdout = self._stream
+        if preamble:
+            self._stream.put(preamble)
+
+    def read(self, n: int = -1) -> bytes:
+        return self._stream.read(n)
+
+    def feed(self, *chunks: bytes):
+        for chunk in chunks:
+            self._stream.put(chunk)
+
+    def close_pipe(self):
+        self._stream.put(None)
+
+    def break_pipe(self, error):
+        self._stream.put(error)
+
+    def die(self, code):
+        self.returncode = code
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        if self.returncode is None:
+            self.returncode = -15
+
+    def kill(self):
+        self.terminate()
+
+    def wait(self, timeout=None):
+        return self.returncode
