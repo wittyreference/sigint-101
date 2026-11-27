@@ -510,6 +510,51 @@ def test_sstv_unreaped_writer_keeps_its_picture_private(capture_files, monkeypat
     assert heard == []
 
 
+def test_sstv_restart_cleans_an_aborted_capture_after_reap_retry(
+        tmp_path, capture_files, monkeypatch):
+    dec, launches, heard = capture_files
+    upstream = _StubbornStage(["rtl_fm"])
+    spawn = dec._spawn
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.02)
+    monkeypatch.setattr(childproc, "EXIT_GRACE_S", 0)
+    monkeypatch.setattr(
+        dec, "_spawn", lambda *args: childproc.Pipeline(upstream, spawn(*args), finite=True))
+    dec.start()
+    child, staged = launches[0]
+    ticket = dec._run
+    staged.write_bytes(PNG_BYTES)
+    unrelated = staged.with_name("another-capture.png")
+    unrelated.touch()
+    discarded = dec._discard_dir / staged.name
+    unlink = Path.unlink
+
+    def interrupted_unlink(path, *args, **kwargs):
+        if path == discarded:
+            raise OSError("discard cleanup interrupted")
+        return unlink(path, *args, **kwargs)
+
+    try:
+        dec.stop()
+        assert ticket.reap_failed and not ticket.reaped
+        assert staged.exists() and not discarded.exists()
+        with monkeypatch.context() as interruption:
+            interruption.setattr(Path, "unlink", interrupted_unlink)
+            upstream.die(7)
+            assert ticket.complete.wait(3)
+            assert ticket.reaped and ticket.reap_failed
+            assert not staged.exists() and discarded.exists()
+        restarted = _decoder(tmp_path, spawn=spawn)
+        restarted.start()
+        assert not discarded.exists()
+        assert unrelated.exists()
+        assert restarted.images() == [] and heard == []
+        restarted.stop()
+    finally:
+        upstream.die(7)
+        child.close_pipe()
+        assert ticket.complete.wait(3)
+
+
 def test_sstv_only_clean_reaped_exit_zero_publishes_and_never_overwrites(
         tmp_path, capture_files):
     dec, launches, _ = capture_files
@@ -756,10 +801,9 @@ def test_sstv_settle_diagnostic_error_sweeps_only_its_confirmed_reaped_capture(
             assert ticket.complete.wait(3)
             assert ticket.reaped and ticket.reap_failed
             assert heard == [] and links == [] and dec.images() == []
-            assert staged in dec._staged_cleanup and staged.exists()
+            assert not staged.exists()
             monkeypatch.setattr(dec, "_spawn", spawn)
             dec.start()
-            assert not staged.exists()
             # Recovery must not suppress the next capture, or lose its own diagnostic fault.
             successor, next_staged = launches[1]
             break_stderr(successor)
@@ -824,10 +868,9 @@ def test_sstv_run_numbered_names_isolate_delayed_writers_and_orphan_sidecars(
     ticket = dec._run
     upstream.die(7)
     assert ticket.complete.wait(5)
-    assert first_path.exists()
+    assert not first_path.exists()
     monkeypatch.setattr(dec, "_spawn", spawn)
     dec.start()
-    assert not first_path.exists()
     second, second_path = launches[1]
     second_run = getattr(getattr(dec, "_runs", None), "current", None)
 

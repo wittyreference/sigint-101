@@ -300,10 +300,10 @@ class SstvDecoder(SupervisedReceiver):
     def _report(self, run):
         """Use the retired capture's status and files once the physical outcome is known."""
         capture, radio = run.args
-        if not run.reap_failed and run.exit_code is None:
+        if run.reap_failed or run.exit_code is None:
             self._discard_aborted(capture.staged_path)
             return
-        if run.reap_failed or run.exit_code != 0:
+        if run.exit_code != 0:
             with self._staging_lock:
                 self._staged_cleanup.add(capture.staged_path)
             return
