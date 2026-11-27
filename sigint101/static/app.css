@@ -2985,8 +2985,8 @@ body {
   grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   align-items: stretch;
   column-gap: 12px;
-  row-gap: 5px;
-  padding: 5px var(--gutter) 6px;
+  row-gap: 4px;
+  padding: 4px var(--gutter) 6px;
 }
 .stage-panel--sort > .sort-head {
   grid-row: 1;
@@ -3006,7 +3006,7 @@ body {
   grid-row: 2;
   grid-column: 1 / -1;
   margin: 0;
-  font-size: 14px;
+  font-size: 18px;
   line-height: 1.2;
   color: var(--fg-dim);
 }

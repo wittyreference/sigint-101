@@ -98,44 +98,59 @@ def test_m5_stages_agree_with_twelve_card_sort():
 
 def test_m5_pack_cites_primary_sources_for_sort_authorities():
     raw = yaml.safe_load(PACK_M5.read_text(encoding="utf-8"))
-    urls = [str(s.get("url", "")) for s in (raw.get("sources") or []) if isinstance(s, dict)]
-    # F9: official primary government URLs (uscode.house.gov, ecfr.gov, ca9.uscourts.gov), not LII.
+    sources = [s for s in (raw.get("sources") or []) if isinstance(s, dict)]
+    titles = [str(s.get("title", "")) for s in sources]
+    urls = [str(s.get("url", "")) for s in sources]
+    # F9: pin the citation text in sources, with official government URLs (never LII or dead
+    # uscode.house.gov prelim paths), rather than hard-coding brittle URL paths.
     assert not any("law.cornell.edu" in u for u in urls), urls
-    for expected in (
-        "title18-section2510",
-        "title18-section2511",
-        "title47-section301",
-        "title47-section605",
-        "ecfr.gov/current/title-47/section-15.121",
-        "ecfr.gov/current/title-47/section-15.247",
-        "ecfr.gov/current/title-47/section-15.249",
-        "ecfr.gov/current/title-47/section-97.5",
-        "ecfr.gov/current/title-47/section-95.305",
-        "ecfr.gov/current/title-47/section-95.1705",
-        "11-17483_opinion122713.pdf",
+    assert not any("uscode.house.gov" in u for u in urls), urls
+    assert all(u.startswith("https://") for u in urls), urls
+    for cite_text in (
+        "18 U.S.C. 2510",
+        "18 U.S.C. 2511",
+        "47 U.S.C. 301",
+        "47 U.S.C. 605",
+        "47 CFR 15.121",
+        "47 CFR 15.247",
+        "47 CFR 15.249",
+        "47 CFR 97.5",
+        "47 CFR 95.305",
+        "47 CFR 95.1705",
+        "746 F.3d 920",
     ):
-        assert any(expected in u for u in urls), (
-            f"missing primary source URL for {expected}: {urls}"
+        assert any(cite_text in t for t in titles), (
+            f"missing primary source entry citing {cite_text}: {titles}"
         )
 
 
 def test_law_sections_joffe_and_part15_are_exact_to_primary_sources():
-    # F1: Joffe section keeps only the amended 2510(16) radio-communication holding, motion to
-    # dismiss posture, Ninth Circuit reach, and silence on beacons — never the withdrawn holding.
+    # F1: Joffe section keeps only the amended 2510(16) radio-communication holding, affirms the
+    # denial of Google's motion to dismiss (deciding no liability — never "finding no liability"),
+    # puts 2014 cert denial before settlement, limits reach to the Ninth Circuit, and notes silence
+    # on beacons.
     joffe = next(s for s in LAW_SECTIONS if s.id == "joffe-wifi")
     low = joffe.summary.lower()
     assert "nor 'readily accessible" not in low
     assert not re.search(r"\bheld\b[^.?!]*readily accessible", low)
+    assert "finding no liability" not in low
+    assert "affirmed the denial" in low and "motion to dismiss" in low
+    assert "decided no liability" in low
+    assert "2014" in low and "settled" in low and low.index("2014") < low.index("settled")
     assert "radio communication" in low and "2510(16)" in joffe.summary
-    assert "motion to dismiss" in low
     assert "ninth circuit" in low
     assert "beacon" in low and ("never decided" in low or "nothing about" in low)
-    assert "11-17483_opinion122713.pdf" in joffe.url
+    assert "746 F.3d 920" in joffe.cite
 
-    # F9: Part 15 section cites 15.247(b)(3) for the 1 W limit and uses primary government URLs.
+    # F9: Part 15 section cites 15.247(b)(3) for the 1 W limit and uses official gov domains.
     part15 = next(s for s in LAW_SECTIONS if s.id == "part15-ism")
     assert "(b)(3)" in part15.cite and "15.247(b)(3)" in part15.summary
     assert not any("law.cornell.edu" in s.url for s in LAW_SECTIONS)
+    assert not any("uscode.house.gov" in s.url for s in LAW_SECTIONS)
+    assert all(
+        any(host in s.url for host in ("govinfo.gov", "ecfr.gov", "uscourts.gov"))
+        for s in LAW_SECTIONS
+    )
 
 
 # --- Additive sort_answers storage in progress.py ----------------------------------------------

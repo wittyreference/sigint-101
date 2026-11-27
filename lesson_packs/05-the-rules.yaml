@@ -34,7 +34,7 @@ stages:
     FCC Part 15, for compliant equipment inside its power, antenna and no-interference conditions.
     So the line is simple: listen within those limits, transmit only where you are authorised.
   try: >-
-    Sort twelve real situations — each cites its rule, and nothing locks the course.
+    Sort twelve real situations — each cites its rule; no lockouts.
   predict: >-
     You listened to the local ham repeater all evening. Now you key up and transmit on it yourself,
     with no licence. Is that legal? Lock it in — the rest stays hidden until you do.
@@ -74,79 +74,79 @@ sort:
   - key: aircraft-am
     text: "Tune your RTL-SDR to unencrypted VHF air-band traffic (ACARS or tower voice) and listen."
     answer: legal
-    why: "Receiving unencrypted aviation transmissions is carved out as lawful listening."
+    why: "Unencrypted aviation transmissions are carved out as lawful listening."
     cite: "18 USC 2511(2)(g)(ii)(IV)"
   - key: adsb-ais
     text: "Decode ADS-B aircraft positions at 1090 MHz and marine AIS ship beacons on VHF."
     answer: legal
-    why: "Ship and aircraft safety broadcasts are open to receive under federal law."
+    why: "Ship and aircraft broadcasts are open to receive under federal law."
     cite: "18 USC 2511(2)(g)(ii)(IV)"
   - key: wifi-beacons
     text: "Run a read-only Wi-Fi survey that counts channels, SSIDs, and BSSIDs without connecting."
     answer: legal
-    why: "Beacons advertise network presence with no message contents; Joffe ruled on payload, not beacons."
+    why: "Beacons carry no message contents; Joffe ruled on payload, not beacons."
     cite: "18 USC 2510(8), 2511(2)(g)(i)"
   - key: own-wideband-rx
     text: "Own a wideband SDR receiver covering 24 MHz to 1.7 GHz for passive listening."
     answer: legal
-    why: "The scanner rule governs equipment certification and sale, not owning a passive SDR."
+    why: "The scanner rule governs certification and sale, not owning an SDR."
     cite: "47 CFR 15.121"
   - key: ham-tx-unlicensed
     text: "Key up and transmit on a local 2-meter amateur repeater with no amateur licence."
     answer: illegal
-    why: "Transmitting on amateur frequencies requires an FCC amateur licence grant."
+    why: "Transmitting on ham bands requires an FCC amateur licence grant."
     cite: "47 USC 301; 47 CFR 97.5(a)"
   - key: pocsag-words
     text: "Decode and read the text of a commercial carrier's unencrypted POCSAG pager messages."
     answer: illegal
-    why: "Carrier text pages are not public radio; framing is shown here and words are withheld."
+    why: "Carrier pages aren't public radio; framing shows, words are withheld."
     cite: "18 USC 2510(16)(D), 2511(1)(a)"
   - key: open-wifi-payload
     text: "Capture emails, logins, or web traffic from a neighbour's unencrypted Wi-Fi network."
     answer: illegal
-    why: "Unencrypted isn't public: the Ninth Circuit held Wi-Fi payload is not a 'radio communication'."
-    cite: "18 USC 2510(16), 2511(1)(a); Joffe v. Google, 746 F.3d 920 (9th Cir.)"
+    why: "Ninth Circuit: Wi-Fi payload is not a 'radio communication'."
+    cite: "18 USC 2510(16), 2511; Joffe, 746 F.3d 920 (9th Cir.)"
   - key: break-encryption
     text: "Record an encrypted digital voice or cellular call and crack it to listen in."
     answer: illegal
-    why: "Scrambled or encrypted transmissions are never readily accessible; breaking in is a crime."
+    why: "Encrypted traffic is never readily accessible; cracking it is a crime."
     cite: "18 USC 2510(16)(A), 2511(1)(a)"
   - key: meshtastic-tx
     text: "Transmit a Meshtastic text on 915 MHz without holding an individual FCC licence."
     answer: depends
-    why: "Compliant gear needs 500 kHz Long Turbo for 1 W (15.247(b)(3)); 250 kHz LongFast caps at ~0.75 mW."
+    why: "500 kHz Long Turbo allows 1 W; 250 kHz LongFast caps at ~0.75 mW."
     cite: "47 CFR 15.247(a)(2), (b)(3); 15.249"
   - key: police-scanner-car
     text: "Listen to unencrypted local police dispatch on a receiver mounted in your car."
     answer: depends
-    why: "Federal law allows clear public-safety listening, but several states restrict mobile scanners."
+    why: "Federal law allows clear police listening, but some states bar car scanners."
     cite: "18 USC 2511(2)(g)(ii)(II)"
   - key: share-private-rx
     text: "Post online or act on a radio message you picked up while tuning around the band."
     answer: depends
-    why: "Public broadcasts and ham traffic are fine, but divulging private interceptions is barred."
+    why: "Public and ham traffic are fine; divulging private catches is barred."
     cite: "47 USC 605(a)"
   - key: gmrs-handheld-tx
     text: "Transmit on a 462 MHz walkie-talkie channel shared by FRS and GMRS radios."
     answer: depends
-    why: "Compliant FRS handhelds are licence-free, while GMRS operation requires an individual licence."
+    why: "FRS handhelds are licence-free; GMRS requires an individual licence."
     cite: "47 CFR 95.305, 95.1705"
 
 sources:
   - title: "18 U.S.C. 2510 — Wiretap Act definitions ('contents', 'electronic communication', 'readily accessible')"
-    url: "https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title18-section2510&num=0&edition=prelim"
+    url: "https://www.govinfo.gov/app/details/USCODE-2023-title18/USCODE-2023-title18-partI-chap119-sec2510"
     read: "2026-11-27"
   - title: "18 U.S.C. 2511 — Wiretap Act interception prohibition and public/radio exceptions"
-    url: "https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title18-section2511&num=0&edition=prelim"
+    url: "https://www.govinfo.gov/app/details/USCODE-2023-title18/USCODE-2023-title18-partI-chap119-sec2511"
     read: "2026-11-27"
   - title: "Joffe v. Google, Inc., 746 F.3d 920 (9th Cir. Dec. 27, 2013) (amended slip opinion, No. 11-17483)"
     url: "https://cdn.ca9.uscourts.gov/datastore/general/2013/12/27/11-17483_opinion122713.pdf"
     read: "2026-11-27"
   - title: "47 U.S.C. 301 — License for radio communication or transmission of energy"
-    url: "https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title47-section301&num=0&edition=prelim"
+    url: "https://www.govinfo.gov/app/details/USCODE-2023-title47/USCODE-2023-title47-chap5-subchapIII-partI-sec301"
     read: "2026-11-27"
   - title: "47 U.S.C. 605 — Unauthorized publication or use of communications"
-    url: "https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title47-section605&num=0&edition=prelim"
+    url: "https://www.govinfo.gov/app/details/USCODE-2023-title47/USCODE-2023-title47-chap5-subchapVI-sec605"
     read: "2026-11-27"
   - title: "47 CFR 15.121 — Scanning receivers and frequency converters"
     url: "https://www.ecfr.gov/current/title-47/section-15.121"

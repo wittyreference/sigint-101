@@ -35,7 +35,7 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "from unencrypted government, police, fire, or public-safety systems. Some states "
             "restrict mobile scanners in vehicles."
         ),
-        url="https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title18-section2511&num=0&edition=prelim",
+        url="https://www.govinfo.gov/app/details/USCODE-2023-title18/USCODE-2023-title18-partI-chap119-sec2511",
     ),
     LawSection(
         id="wiretap-limits",
@@ -48,20 +48,22 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "decrypting them is a federal offence on its own — which is why this console shows "
             "POCSAG framing and withholds the words."
         ),
-        url="https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title18-section2510&num=0&edition=prelim",
+        url="https://www.govinfo.gov/app/details/USCODE-2023-title18/USCODE-2023-title18-partI-chap119-sec2510",
     ),
     LawSection(
         id="joffe-wifi",
         title="Wi-Fi payload (Joffe v. Google)",
         cite="Joffe v. Google, Inc., 746 F.3d 920 (9th Cir. 2013)",
         summary=(
-            "Unencrypted is not the same as public. In its amended opinion, the Ninth Circuit "
-            "held that Wi-Fi payload data (emails, passwords, images, documents) is not a "
-            "'radio communication' — a predominantly auditory broadcast — under 18 USC 2510(16), "
-            "so the unencrypted-radio definition does not bring it into the 18 USC 2511(2)(g)(i) "
-            "exemption. That appeal reviewed a motion to dismiss (finding no liability; the suit "
-            "later settled and certiorari was denied), binds only the Ninth Circuit, and never "
-            "decided whether beacon metadata (SSID, MAC, signal, channel) is covered."
+            "Being unencrypted does not, by itself, make Wi-Fi payload public. In its amended "
+            "opinion, the Ninth Circuit held that Wi-Fi payload data (emails, passwords, images, "
+            "documents) is not a 'radio communication' — a predominantly auditory broadcast — "
+            "under 18 USC 2510(16), so the unencrypted-radio definition does not bring it into "
+            "the 18 USC 2511(2)(g)(i) exemption. That appeal affirmed the denial of Google's "
+            "motion to dismiss, so the claim went forward; it decided no liability (the Supreme "
+            "Court denied review in 2014 and the suit later settled), binds only the Ninth "
+            "Circuit, and never decided whether beacon metadata (SSID, MAC, signal, channel) is "
+            "covered."
         ),
         url="https://cdn.ca9.uscourts.gov/datastore/general/2013/12/27/11-17483_opinion122713.pdf",
     ),
@@ -74,7 +76,7 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "contents of private radio communications you are not authorised to receive, while "
             "carving out broadcasts for the general public, amateur traffic, and distress calls."
         ),
-        url="https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title47-section605&num=0&edition=prelim",
+        url="https://www.govinfo.gov/app/details/USCODE-2023-title47/USCODE-2023-title47-chap5-subchapVI-sec605",
     ),
     LawSection(
         id="tx-licence",
@@ -85,7 +87,7 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "specific rule authorizes licence-free operation. On the amateur bands, the station "
             "must be under the control of a licensed amateur operator before keying up."
         ),
-        url="https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title47-section301&num=0&edition=prelim",
+        url="https://www.govinfo.gov/app/details/USCODE-2023-title47/USCODE-2023-title47-chap5-subchapIII-partI-sec301",
     ),
     LawSection(
         id="part15-ism",

@@ -34,11 +34,13 @@ function measureCardSort(expectedTheme) {
 
   const choices = [...panel.querySelectorAll('[data-sort-choice]')];
   const footBtns = [...panel.querySelectorAll('.stage-foot button, .stage-foot a')];
+  const intro = panel.querySelector('[data-sort-intro]');
   const card = panel.querySelector('.sort-card');
   const fb = panel.querySelector('[data-sort-feedback]');
   const prevBtn = panel.querySelector('[data-sort-prev]');
   const nextBtn = panel.querySelector('[data-sort-next]');
   if (choices.length !== 3 || !card || !fb || !prevBtn || !nextBtn) return null;
+  const introFontPx = intro ? Math.round(parseFloat(getComputedStyle(intro).fontSize) || 0) : 0;
 
   // Stub fetch before clicking so the render check never POSTs /api/sort to a live console.
   const origFetch = window.fetch;
@@ -55,25 +57,27 @@ function measureCardSort(expectedTheme) {
   let choiceHeights = choices.map(b => Math.round(b.getBoundingClientRect().height));
 
   try {
-    // Walk back to card 1, then visit every card and tap a choice to measure feedback on all 12.
+    // Walk back to card 1, then visit every card and tap all 3 choices to measure every state.
     while (!prevBtn.disabled) prevBtn.click();
 
     for (let i = 0; i < 20; i += 1) {
-      choices[i % 3].click();
       cardsChecked += 1;
-      maxDocW = Math.max(maxDocW, document.documentElement.scrollWidth);
-      maxDocH = Math.max(maxDocH, document.documentElement.scrollHeight);
-      const heights = choices.map(b => Math.round(b.getBoundingClientRect().height));
-      choiceHeights = choiceHeights.map((h, idx) => Math.min(h, heights[idx]));
-      if (!choices.every(unclipped)) choicesFit = false;
-      if (!footBtns.every(b => unclipped(b) && b.getBoundingClientRect().height >= 72)) {
-        footerFit = false;
+      for (const btn of choices) {
+        btn.click();
+        maxDocW = Math.max(maxDocW, document.documentElement.scrollWidth);
+        maxDocH = Math.max(maxDocH, document.documentElement.scrollHeight);
+        const heights = choices.map(b => Math.round(b.getBoundingClientRect().height));
+        choiceHeights = choiceHeights.map((h, idx) => Math.min(h, heights[idx]));
+        if (!choices.every(unclipped)) choicesFit = false;
+        if (!footBtns.every(b => unclipped(b) && b.getBoundingClientRect().height >= 72)) {
+          footerFit = false;
+        }
+        const fbRect = fb.getBoundingClientRect();
+        if (fb.hidden || !inViewport(fbRect)) feedbackFits = false;
+        const delta = card.scrollHeight - card.clientHeight;
+        worstDelta = Math.max(worstDelta, delta);
+        if (delta > 0) cardScrolls = true;
       }
-      const fbRect = fb.getBoundingClientRect();
-      if (fb.hidden || !inViewport(fbRect)) feedbackFits = false;
-      const delta = card.scrollHeight - card.clientHeight;
-      worstDelta = Math.max(worstDelta, delta);
-      if (delta > 1) cardScrolls = true;
       if (nextBtn.disabled) break;
       nextBtn.click();
     }
@@ -86,6 +90,7 @@ function measureCardSort(expectedTheme) {
     theme: app.dataset.theme,
     doc: [maxDocW, maxDocH],
     back: inViewport(backRect) && backRect.height >= 72,
+    introFontPx,
     choicesFit,
     choiceHeights,
     footerFit,
@@ -168,12 +173,14 @@ def main(console):
                 sort.get("theme") == theme
                 and sort.get("doc") == [800, 480]
                 and sort.get("back") is True
+                and sort.get("introFontPx", 0) >= 18
                 and sort.get("choicesFit") is True
                 and len(sort.get("choiceHeights", [])) == 3
                 and all(72 <= h <= 80 for h in sort["choiceHeights"])
                 and sort.get("footerFit") is True
                 and sort.get("feedbackFits") is True
                 and sort.get("cardScrolls") is False
+                and sort.get("worstDelta") == 0
             )
             failed |= verdict(sort_ok, f"card-sort {theme}", sort)
 

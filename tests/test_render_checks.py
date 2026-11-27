@@ -591,6 +591,8 @@ CARD_SORT_FITS = {
     "footerFit": True,
     "feedbackFits": True,
     "cardScrolls": False,
+    "worstDelta": 0,
+    "introFontPx": 18,
 }
 LAW_FITS = {
     "doc": [800, 480],
@@ -637,6 +639,8 @@ def test_card_sort_render_checks_card_screen_and_law_in_all_three_themes(devtool
     {"footerFit": False},
     {"feedbackFits": False},
     {"cardScrolls": True},
+    {"worstDelta": 1},
+    {"introFontPx": 14},
     {"theme": "dark"},
 ])
 def test_card_sort_render_fails_when_card_screen_overflows_or_shrinks_buttons(devtools, defect):
@@ -713,6 +717,7 @@ const panel = {{
     if (sel === "[data-sort-feedback]") return fb;
     if (sel === "[data-sort-prev]") return prevBtn;
     if (sel === "[data-sort-next]") return nextBtn;
+    if (sel === "[data-sort-intro]") return makeEl(22);
     return null;
   }},
 }};
@@ -720,7 +725,9 @@ globalThis.window = {{ fetch: origFetch }};
 globalThis.fetch = origFetch;
 globalThis.innerWidth = 800;
 globalThis.innerHeight = 480;
-globalThis.getComputedStyle = () => ({{ overflowX: "visible", overflowY: "visible" }});
+globalThis.getComputedStyle = () => ({{
+  overflowX: "visible", overflowY: "visible", fontSize: "18px",
+}});
 globalThis.document = {{
   documentElement: {{ scrollWidth: 800, scrollHeight: 480 }},
   querySelector(sel) {{
