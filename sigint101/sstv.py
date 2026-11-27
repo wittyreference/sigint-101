@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -14,7 +15,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import childproc
+from . import childproc, receiver_lifecycle
 from .childproc import (
     ChildWatch,
     Pipeline,
@@ -58,6 +59,9 @@ DEFAULT_OUTPUT_DIR = "data/sstv"
 
 # sstv prints exactly this, then the mode's name, when it locks onto a transmission.
 _MODE_PREFIX = "Detected SSTV mode "
+
+# The only names a capture stages: _allocate_capture's stem, then the picture or its sidecar.
+_STAGED_NAME = re.compile(r"[0-9]{8}T[0-9]{6}-[0-9]{3}-r[0-9]+(?:-[0-9]+)?\.(?:png|json)")
 
 
 class SstvUnavailable(RuntimeError):
@@ -167,6 +171,7 @@ class SstvDecoder(SupervisedReceiver):
         self._discard_dir = self._staging_dir / ".discard"
         self._staged_cleanup: set[Path] = set()
         self._staging_lock = threading.Lock()
+        self._staging_swept = False
         self.data_dir = Path(data_dir) if data_dir is not None else self.output_dir.parent
         self._list_devices = list_devices
         self._spawn = spawn
@@ -204,6 +209,11 @@ class SstvDecoder(SupervisedReceiver):
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self._staging_dir.mkdir(parents=True, exist_ok=True)
+            with self._life:
+                # Held across the sweep, so no launch of this console can start under it.
+                if not self._staging_swept and self._run is None:
+                    self._staging_swept = True
+                    self._sweep_previous_staging()
             with self._staging_lock:
                 cleanup = self._staged_cleanup.copy()
             # Entries only get here by moving the exact owned file after a confirmed reap.
@@ -256,6 +266,36 @@ class SstvDecoder(SupervisedReceiver):
                 if self._runs.is_current(run):
                     self.error = str(exc)
 
+    def _sweep_previous_staging(self) -> None:
+        """Remove the staged captures an earlier console left behind, before this one stages any.
+
+        Every stage is spawned with PR_SET_PDEATHSIG set to SIGKILL, so an earlier console's
+        writers died with it. Only regular files directly in a real staging directory, named as
+        _allocate_capture names them, are removed. Symlinks are never followed or removed.
+        """
+        try:
+            fd = os.open(self._staging_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            return
+        try:
+            try:
+                if os.path.samestat(os.fstat(fd), os.stat(self.output_dir)):
+                    return
+            except OSError:
+                return
+            with os.scandir(fd) as entries:
+                names = [entry.name for entry in entries
+                         if _STAGED_NAME.fullmatch(entry.name)
+                         and entry.is_file(follow_symlinks=False)]
+            for name in names:
+                try:
+                    # Relative to the opened directory, and an unlink never follows a link.
+                    os.unlink(name, dir_fd=fd)
+                except OSError:
+                    pass
+        finally:
+            os.close(fd)
+
     def _remove_staged(self, path: Path) -> None:
         """Retry cleanup of this retired path at the next launch if unlink fails."""
         try:
@@ -304,10 +344,12 @@ class SstvDecoder(SupervisedReceiver):
             self._discard_aborted(capture.staged_path)
             return
         if run.exit_code != 0:
-            with self._staging_lock:
-                self._staged_cleanup.add(capture.staged_path)
+            self._discard_aborted(capture.staged_path)
             return
-        run.diagnosed.wait()
+        if not run.diagnosed.wait(receiver_lifecycle.DIAGNOSTIC_WAIT_S):
+            # The reap is confirmed and clean, so the picture may still publish with the fault.
+            if run.diagnostic_fault is None:
+                run.diagnostic_fault = "exit diagnostic did not finish"
         try:
             info = capture.staged_path.lstat()
         except FileNotFoundError:

@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -476,7 +477,7 @@ def test_sstv_aborted_or_failed_capture_discards_its_picture(capture_files, exit
         child.die(exit_code)
     child.close_pipe()
     dec.stop()
-    assert staged.exists() is (exit_code is not None)
+    assert not staged.exists()
     assert dec.images() == []
     assert heard == []
     if exit_code is not None:
@@ -784,7 +785,8 @@ def test_sstv_settle_diagnostic_error_sweeps_only_its_confirmed_reaped_capture(
         assert not staged.exists()
         assert len(dec.images()) == 1
     else:
-        assert staged.exists()
+        # A confirmed reap discards its own failed capture at once; an unconfirmed one keeps it.
+        assert staged.exists() is (outcome != "nonzero")
         assert heard == []
         assert links == []
         assert dec.images() == []
@@ -816,7 +818,7 @@ def test_sstv_settle_diagnostic_error_sweeps_only_its_confirmed_reaped_capture(
                 "status": 0, "reason": "diagnostics failed",
             }
     elif outcome == "nonzero":
-        assert staged in dec._staged_cleanup
+        assert dec._staged_cleanup == set()
         with pytest.raises(SstvUnavailable, match="exit status 9.*diagnostics failed"):
             dec.start()
         assert not staged.exists()
@@ -885,3 +887,119 @@ def test_sstv_run_numbered_names_isolate_delayed_writers_and_orphan_sidecars(
     assert Path(report[0]["path"]).name == second_path.name
     assert (dec.output_dir / second_path.name).stat().st_size == len(PNG_BYTES)
     assert first_path.exists()
+
+
+# --- bounded retirement and staged leftovers -------------------------------------
+
+
+def test_sstv_stalled_exit_diagnostic_does_not_hold_a_clean_capture(capture_files, monkeypatch):
+    dec, launches, heard = capture_files
+    monkeypatch.setattr(receiver_lifecycle, "DIAGNOSTIC_WAIT_S", 0.05)
+    stalled, unstall = threading.Event(), threading.Event()
+
+    class StalledStderr(io.StringIO):
+        def read(self, *args):
+            stalled.set()
+            unstall.wait(10)
+            return ""
+
+    dec.start()
+    child, staged = launches[0]
+    child.stderr.close()
+    child.stderr = StalledStderr()
+    staged.write_bytes(PNG_BYTES)
+    ticket = dec._run
+    try:
+        _finish(child)
+        assert stalled.wait(2)
+        assert ticket.ready.wait(2), "a stalled exit diagnostic held the finished capture"
+        assert ticket.complete.wait(2)
+        assert ticket.reaped and not ticket.reap_failed
+        # A confirmed clean reap still publishes, and says its diagnostic never finished.
+        [(item, command, _)] = heard
+        assert item["meta"]["exit_diagnostic"] == {
+            "status": 0, "reason": "exit diagnostic did not finish",
+        }
+        assert command == childproc.command_line(child)
+        assert [image["path"] for image in dec.images()] == [item["path"]]
+        assert not staged.exists()
+        dec.start()
+        assert len(launches) == 2 and dec.running
+    finally:
+        unstall.set()
+
+
+def test_sstv_failed_exit_discards_its_picture_at_retirement(capture_files):
+    dec, launches, heard = capture_files
+    dec.start()
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    ticket = dec._run
+    _finish(child, code=1)
+    assert ticket.complete.wait(3)
+    assert ticket.reaped
+    # Gone now, not parked in memory for a later launch that a console restart would skip.
+    assert not os.path.lexists(staged)
+    assert not os.path.lexists(dec._discard_dir / staged.name)
+    assert dec._staged_cleanup == set()
+    assert heard == [] and dec.images() == []
+
+
+def test_sstv_first_launch_sweeps_only_a_previous_consoles_staged_captures(
+        tmp_path, capture_files):
+    dec, launches, _ = capture_files
+    staging = dec._staging_dir
+    staging.mkdir(parents=True)
+    leftovers = [staging / name for name in (
+        "20250101T000000-000-r3.png", "20250101T000000-000-r3.json",
+        "20250101T000000-000-r12-1.png")]
+    for path in leftovers:
+        path.write_bytes(PNG_BYTES)
+    unrelated = [staging / name for name in (
+        "notes.txt", "another-capture.png", "20250101T000000-000-r3.png.part",
+        "x20250101T000000-000-r5.png", "20250101T000000-000-r5.PNG")]
+    for path in unrelated:
+        path.write_bytes(b"keep")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = elsewhere / "20250101T000000-000-r4.png"
+    target.write_bytes(PNG_BYTES)
+    link = staging / target.name
+    link.symlink_to(target)
+    same_named_dir = staging / "20250101T000000-000-r6.png"
+    same_named_dir.mkdir()
+    published = Path(_drop_image(dec.output_dir, "20250101T000000-000-r7.png", mode="Robot 36"))
+
+    dec.start()
+    assert [path.name for path in leftovers if os.path.lexists(path)] == []
+    assert all(path.read_bytes() == b"keep" for path in unrelated)
+    assert link.is_symlink() and target.read_bytes() == PNG_BYTES
+    assert same_named_dir.is_dir()
+    assert published.read_bytes() == PNG_BYTES
+    assert published.with_suffix(".json").exists()
+
+    # Only the first launch sweeps: later staged files may be this console's own writers.
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    _finish(child)
+    dec.stop()
+    later = staging / "20250101T000000-000-r8.png"
+    later.write_bytes(PNG_BYTES)
+    dec.start()
+    assert len(launches) == 2
+    assert later.exists()
+
+
+@pytest.mark.parametrize("layout", ["staging-links-to-gallery", "gallery-links-to-staging"])
+def test_sstv_staging_sweep_never_reaches_the_published_pictures(tmp_path, capture_files, layout):
+    dec, launches, _ = capture_files
+    if layout == "staging-links-to-gallery":
+        real, linked = dec.output_dir, dec._staging_dir
+    else:
+        real, linked = dec._staging_dir, dec.output_dir
+    picture = Path(_drop_image(real, "20250101T000000-000-r7.png", mode="Robot 36"))
+    linked.symlink_to(real, target_is_directory=True)
+    dec.start()
+    assert len(launches) == 1
+    assert picture.read_bytes() == PNG_BYTES
+    assert picture.with_suffix(".json").exists()
