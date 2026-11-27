@@ -990,10 +990,13 @@ def test_sstv_first_launch_sweeps_only_a_previous_consoles_staged_captures(
     assert later.exists()
 
 
-@pytest.mark.parametrize("layout", ["staging-links-to-gallery", "gallery-links-to-staging"])
-def test_sstv_staging_sweep_never_reaches_the_published_pictures(tmp_path, capture_files, layout):
+@pytest.mark.parametrize("layout", [
+    "staging-links-elsewhere", "staging-links-to-gallery", "gallery-links-to-staging"])
+def test_sstv_staging_sweep_stays_inside_a_real_staging_dir(tmp_path, capture_files, layout):
     dec, launches, _ = capture_files
-    if layout == "staging-links-to-gallery":
+    if layout == "staging-links-elsewhere":
+        real, linked = tmp_path / "elsewhere", dec._staging_dir
+    elif layout == "staging-links-to-gallery":
         real, linked = dec.output_dir, dec._staging_dir
     else:
         real, linked = dec._staging_dir, dec.output_dir
