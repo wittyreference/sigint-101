@@ -25,7 +25,7 @@ from .hardware import (
     RTL_FM,
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # Where the RDS lesson listens. RDS rides a 57 kHz subcarrier on an ordinary FM broadcast station,
@@ -197,11 +197,9 @@ class RDSDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise RDSUnavailable(str(exc)) from exc
 
@@ -256,7 +254,8 @@ class RDSDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise RDSUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
         # End any retiring reader from an earlier natural death before starting its replacement.
         self._runs.end(self.watch)
         try:
@@ -266,11 +265,12 @@ class RDSDecoder:
             raise RDSUnavailable(f"cannot run the RDS pipeline: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc, self._runs.current),
+        self._thread = threading.Thread(target=self._read,
+                                        args=(self._proc, self._runs.current, radio),
                                         name="sigint101-rds", daemon=True)
         self._thread.start()
 
-    def _read(self, proc, run: int) -> None:
+    def _read(self, proc, run: int, radio: dict) -> None:
         """Consume redsea's JSON on a background thread, assembling the station until it ends."""
         named = False   # whether the station on this PI has had its PS name reported yet
         try:
@@ -297,7 +297,7 @@ class RDSDecoder:
                     cmd = command_line(proc)
                     report = self.on_reception
                 if identity is not None and report is not None:
-                    emit_reception(report, identity, command=cmd, freq_hz=freq_hz)
+                    emit_reception(report, identity, command=cmd, freq_hz=freq_hz, radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):

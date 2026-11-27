@@ -23,7 +23,7 @@ from .childproc import (
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # dsd-fme's binary (the DSD-FME fork, github.com/lwvmobile/dsd-fme). Named here rather than in
@@ -265,11 +265,9 @@ class DmrDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise DmrUnavailable(str(exc)) from exc
 
@@ -324,7 +322,8 @@ class DmrDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise DmrUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
         # End any retiring reader from an earlier natural death before starting its replacement.
         self._runs.end(self.watch)
         try:
@@ -337,11 +336,11 @@ class DmrDecoder:
         self._tail = tail
         self.error = None
         self._thread = threading.Thread(target=self._read,
-                                        args=(self._proc, self._runs.current, tail),
+                                        args=(self._proc, self._runs.current, tail, radio),
                                         name="sigint101-dmr", daemon=True)
         self._thread.start()
 
-    def _read(self, proc, run: int, tail: _Tail) -> None:
+    def _read(self, proc, run: int, tail: _Tail, radio: dict) -> None:
         """Consume dsd-fme's decoded lines on a background thread, logging calls until it ends."""
         try:
             for raw in proc.stdout:
@@ -360,7 +359,7 @@ class DmrDecoder:
                     cmd = command_line(proc)
                     report = self.on_reception
                 if report is not None:
-                    emit_reception(report, item, command=cmd, freq_hz=freq_hz)
+                    emit_reception(report, item, command=cmd, freq_hz=freq_hz, radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):

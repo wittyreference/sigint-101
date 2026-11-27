@@ -46,7 +46,13 @@ from .exam import (
 from .flipper import FlipperError, FlipperSelectionError
 from .flipperconsole import FlipperConsole
 from .flock import FlockUnavailable, configured_flock_detector
-from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
+from .hardware import (
+    RTLSDR_SERIAL_ENV,
+    DeviceSelectionError,
+    list_rtlsdr_devices,
+    probe_rtlsdr,
+    select_rtlsdr_index,
+)
 from .kiosk import request_exit
 from .lessons import CHECK_STAGE, COMMIT_STAGE, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
@@ -94,10 +100,6 @@ DATA_DIR = REPO_DIR / "data"
 # The line glyph a home tile falls back to. The waterfall glyph is the one every lesson earns —
 # the spectrogram is the instrument the whole course is built on.
 DEFAULT_TILE_GLYPH = "waterfall"
-
-# Env var that pins which radio to sweep when the bus holds more than one. A serial, not an index:
-# the index changes with plug order, so "00000001" handed to rtl_power's -d is read as index 1.
-RTLSDR_SERIAL_ENV = "SIGINT101_RTLSDR_SERIAL"
 
 # Where the ADS-B radar is standing. Set to the receiver's own latitude/longitude, the scope turns
 # each aircraft's position into a range and bearing; left unset, the scope lists contacts without
@@ -318,9 +320,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
                                 context_processors=[status_bar, flock_tool])
 
-    # The radios the bus held the last time a tool looked, as each SDR tool enumerates them before
-    # it opens one. A reception names its radio's serial from here, so logging one never has to
-    # run the enumerator again while a tool holds the dongle.
+    # The latest bus survey supplies serials to reception hooks whose receiver sends no radio.
+    # Each guarded receiver carries its own selection from launch.
     radio_census = []
 
     def enumerate_radios():
@@ -1787,7 +1788,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         Called from the receiver's reader thread. It never raises: a reception that cannot be
         written is reported through /api/receptions rather than ending the live decode.
         """
-        def hook(item: dict, *, command: str | None = None, freq_hz=None) -> None:
+        def hook(item: dict, *, command: str | None = None, freq_hz=None,
+                 radio: dict | None = None) -> None:
             freq = freq_hz if freq_hz is not None else getattr(receiver, "freq_hz", None)
             if freq is None and inst.fixed_hz:
                 freq = inst.fixed_hz[0] if len(inst.fixed_hz) == 1 else list(inst.fixed_hz)
@@ -1803,7 +1805,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 # No tool is ever handed a ppm correction, so every reception is uncorrected;
                 # the last measurement this run rides along for whoever reads the record.
                 ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
-                radio=_radio(inst, receiver))
+                radio=radio if radio is not None else _radio(inst, receiver))
             with reception_lock:
                 try:
                     event = log_event(app.state.events_path, "reception", record)
