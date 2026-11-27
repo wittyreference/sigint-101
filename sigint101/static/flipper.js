@@ -1,5 +1,5 @@
 // ABOUTME: Shows the attached Flipper's identity on the console by polling /api/flipper (M29).
-// ABOUTME: On 503 it shows the reason (no Flipper on USB) and never invents a device — absence is honest.
+// ABOUTME: Preserves refusal reasons and shows the HTTP status when a reply has no reading.
 
 (function () {
   "use strict";
@@ -22,9 +22,31 @@
     return "";
   }
 
+  // The device's account of itself, as the route sends it: an object, never a bare value.
+  function isDevice(device) {
+    return !!device && typeof device === "object" && !Array.isArray(device);
+  }
+
+  // The answer a poll is shown from. The route's own answers are a reading (available, with the
+  // device's account) or a refusal with its reason; anything else is no reading, said with its
+  // HTTP status: a server fault's page (not JSON), a JSON error with no reason, a page from
+  // something in between, a 200 with no device in it. Left alone, such an answer kept the panel
+  // on "reading the Flipper over USB…" for as long as it was open, read as "no Flipper on USB",
+  // or drew a card for a device nobody reported. status null: no answer came at all.
+  function pollAnswer(status, body) {
+    var ok = status >= 200 && status < 300;
+    if (body && typeof body === "object") {
+      if (body.available === false && typeof body.reason === "string" && body.reason) return body;
+      if (ok && body.available === true && isDevice(body.device)) return body;
+    }
+    return { available: false, command: null, device: null,
+             reason: status ? "the console could not read the Flipper (HTTP " + status + ")"
+                            : "Lost contact with the console." };
+  }
+
   // Under node's test runner the file is loaded for its pure helpers and there is no document.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { deviceLine: deviceLine, radioLine: radioLine };
+    module.exports = { deviceLine: deviceLine, radioLine: radioLine, pollAnswer: pollAnswer };
     return;
   }
 
@@ -47,7 +69,7 @@
   }
 
   // No read: the card hides and the empty line carries the reason (no Flipper on USB, two on the
-  // bus, an app open on it). The API supplies the cause to the shared badge.
+  // bus, an app open on it, or a port error). The API supplies the cause to the shared badge.
   function showEmpty(panel, body) {
     var card = panel.querySelector("[data-flipper-card]");
     var empty = panel.querySelector("[data-flipper-empty]");
@@ -70,22 +92,16 @@
 
   function tick() {
     fetch("/api/flipper", { cache: "no-store" })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        var waiting = false;
-        if (!res.ok || res.body.available === false) {
-          panels.forEach(function (p) { showEmpty(p, res.body); });
-          waiting = true;
-        } else {
-          panels.forEach(function (p) { render(p, res.body); });
-        }
+      .then(function (r) {
+        return r.json().then(function (b) { return pollAnswer(r.status, b); },
+                             function () { return pollAnswer(r.status, null); });
+      }, function () { return pollAnswer(null, null); })
+      .then(function (body) {
+        var waiting = body.available === false;
+        panels.forEach(function (p) { if (waiting) showEmpty(p, body); else render(p, body); });
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () {
-        if (stopped) return;
-        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
-        setTimeout(tick, RETRY_MS);
-      });
+      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
   }
 
   tick();
