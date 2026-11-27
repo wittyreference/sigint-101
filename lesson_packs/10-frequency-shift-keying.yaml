@@ -24,24 +24,17 @@ stages:
     this one never switches off. Its trick sits too fine to tell by eye on this screen, so tonight
     you meet a new instrument: a decoder that reads it for you.
   demo: >-
-    Watch — hands off for now. No waterfall tonight: rtl_433 listens on 433.92 again,
-    demodulates each transmission and prints the device's make, its reading and the modulation.
-    A cheap remote or doorbell reads ASK: one frequency switched on and off, last lesson's OOK.
-    Some sensors read FSK, frequency-shift, and print two frequencies. You're reading a signal you
-    cannot see.
+    Watch — hands off. rtl_433 prints each device's make, reading and modulation: ASK, one
+    frequency, or FSK, two. You're reading a signal you cannot see.
   try: >-
-    Your turn, comrade — eyes on the list, and be patient; a sensor chirps every minute or two.
-    Sort the reads by modulation: ASK, one frequency, or FSK, two? For an FSK read, note how far
-    apart its tones sit. All ASK is normal here: most US 433 MHz sensors are on-off keyed; FSK ones
-    mostly live at 915.
+    Watch the list, comrade — sensors chirp every minute or two. Sort reads by ASK or FSK, and
+    note an FSK read's tone gap. All ASK is normal at 433 MHz.
   predict: >-
     An FSK sensor sends a bit, but unlike last lesson's OOK its carrier never switches off. So how
     does it carry that bit? Lock it in.
   observe: >-
-    Find an FSK read in the list, eye on its two frequencies. Same number or two, and how far
-    apart? Then ask why we trusted the decoder: if those tones sit tens of kHz apart, could a screen
-    whose every bin — the slice of spectrum one pixel column sums — is 125 kHz wide ever show them
-    as two?
+    Check an FSK read's two frequencies and how far apart they sit. If tones sit tens of kHz
+    apart, could a waterfall whose bins are 125 kHz wide ever show them as two?
   explain: >-
     A second frequency, carrier lit: which tone is sounding, mark or space, carries the bits.
     Nothing switches off, so FSK beats OOK in noise: interference can fake a blink, but hardly a

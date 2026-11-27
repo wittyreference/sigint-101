@@ -27,23 +27,19 @@ stages:
     second, carrying a plane's identity, its altitude, its exact position over the ground. Tonight
     you build a radar.
   demo: >-
-    Watch — hands off. No waterfall: it would show a faint smudge; the meaning is in the data. The
-    scope is dump1090's radar: you at the centre, rings for distance, angle for compass bearing.
-    Identity, altitude and position, speed: separate messages, joined into one track, a callsign on
-    its ring. Quiet sky, empty scope: it never invents a plane.
+    Watch — hands off. dump1090's radar puts you at centre: rings for distance, angle for bearing.
+    Separate identity, altitude and position messages join into one track. Empty? Quiet sky — it
+    never invents a plane.
   try: >-
-    Your scope now, comrade. Give it a minute: ADS-B is a broadcast, not a request; planes appear
-    only when they transmit. Read a contact: callsign, ring for distance, angle for bearing. If the
-    sky is quiet or the antenna weak at 1090 MHz, the scope says so plainly. Notice the shift: you
-    are reading a message, not identifying a modulation.
+    Give it a minute, comrade: planes appear only when they broadcast. Read a contact — callsign,
+    ring for distance, angle for bearing. Empty? Quiet sky or an antenna weak at 1090 MHz, shown
+    plainly.
   predict: >-
     An airliner overhead is transmitting on 1090 MHz. To put it on your scope — callsign, altitude,
     position — what must you have? Lock it in.
   observe: >-
-    Look at what the scope gives you: not "a signal at 1090 MHz", all a waterfall could ever say,
-    but a name, a height, a place. How much did you unlock, and how much simply arrived the moment
-    you decoded it? And if the scope is empty: a failing decoder, or the honest answer that nothing
-    up there is talking?
+    The scope gives a name, height and place, not just energy at 1090. How much did you unlock,
+    and how much arrived once decoded? Empty scope: failing decoder, or an honest quiet sky?
   explain: >-
     Nothing was broken into. ADS-B, Automatic Dependent Surveillance–Broadcast, has every equipped
     aircraft announce its identity and position in the clear on 1090 MHz, because air traffic is

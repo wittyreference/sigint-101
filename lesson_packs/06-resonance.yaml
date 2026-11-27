@@ -25,23 +25,18 @@ stages:
     fork — loud at one length, quieter everywhere else — and you are going to feel it happen under
     your own thumbs.
   demo: >-
-    Watch — hands off for now. The stock whip caught FM loud; at 1090 MHz, where aircraft report
-    positions, it hears worse. An antenna is a tuning fork, ringing only where wavelength
-    matches length. Wavelength in metres is 300 over MHz: three at 100, about 0.28 at 1090. A
-    quarter-length leg, just under 7 cm, is what 1090 wants.
+    Watch — hands off. The FM whip hears worse at 1090 MHz. Wavelength is 300 over MHz: 3 m at
+    100, 0.28 m at 1090 — 1090 wants a quarter-wave leg just under 7 cm.
   try: >-
-    Your hands, comrade. Swap in the kit's telescopic dipole, legs long: still almost nothing.
-    Slide each leg to just under 7 cm, a thumb's length, watching 1090's floor. Aircraft replies
-    are microsecond bursts: a busy sky lifts a faint hump, never a stripe. Still flat? A quiet sky
-    reads like poor hearing; Lesson 13's radar is the sharper test.
+    Swap in the kit's dipole, comrade: legs long, then just under 7 cm, watching 1090's floor for
+    a faint hump. Still flat? A quiet sky looks like poor hearing.
   predict: >-
     You set the legs for 1090 MHz with 300 over the frequency. Now picture 915 MHz, where small
     wireless gadgets chatter — lower than 1090. To ring there, do the legs get LONGER, SHORTER, or
     stay the SAME? Lock it in.
   observe: >-
-    Before you touch the legs, reason off the number and say what you expect: 300 divided by 915
-    against 300 divided by 1090 — is the wavelength at 915 bigger or smaller? And so, to match it,
-    should the legs grow or shrink from the thumb-length that just worked for aircraft?
+    Before touching the legs: 300 over 915 against 300 over 1090 — is 915's wavelength bigger or
+    smaller, and should the legs grow or shrink from 1090's thumb-length?
   explain: >-
     Pull the legs out, comrade. Frequency and wavelength sit on a seesaw with 300 fixed on top: a
     lower frequency means a longer wave, and 300 over 915 is about 0.33 metres against 0.28 at

@@ -29,22 +29,16 @@ stages:
     you would never look twice at. Decoded, it is a postcard with a return address. Tonight you read
     the mail.
   demo: >-
-    Watch — hands off. No waterfall; a burst is just a flick there. rtl_fm listens on 144.390;
-    multimon-ng turns the AFSK tones (Bell 202: 1200 and 2200 Hz, 1200 bits a second) into AX.25
-    frames. Each roster row: a licensed callsign-SSID (-9 means mobile), the digipeaters that relayed
-    it, then a position, status or message. Amateur radio: public by law.
+    Watch — hands off. rtl_fm and multimon-ng turn 144.390 AFSK into AX.25 frames. Each row:
+    callsign-SSID (-9 mobile), digipeaters, and position, status or message.
   try: >-
-    Your roster now, comrade. APRS is bursty — a station beacons every minute or few — so give it
-    time. Read a row: who sent it and what it carried; a position becomes latitude and longitude, a
-    message shows who it was for. You're not naming a modulation any more: you're reading a framed
-    message, return address and all.
+    Give it a few minutes, comrade — stations beacon in bursts. Read a row: who sent it, its
+    latitude and longitude, or who a message was for.
   predict: >-
     A 2m APRS burst is a half-second blip on the waterfall. Decoded, what is inside it? Lock it in.
   observe: >-
-    Look at a row. The waterfall said "a brief signal at 144.39"; the decoder says "this licensed
-    station, relayed by these digipeaters, is standing here and said this." How much of that
-    structure was in the air all along, waiting for something that knew the frame? And an empty
-    roster: a failing decoder, or no one beaconing in range?
+    Look at a row: station, digipeaters, place and words — all in the air waiting for a decoder
+    that knew the frame. Empty roster: failing decoder, or no one in range?
   explain: >-
     A structured packet. APRS speaks AX.25, amateur radio's packet link protocol; every frame has
     one skeleton: source callsign and SSID, destination, digipeater path and an information field

@@ -22,20 +22,16 @@ stages:
     in your wallet, the TV across the room. Over this unit you will drive each of those yourself. But
     first, meet the device — and see what changes the moment you set it next to the nomad.
   demo: >-
-    Watch, hands off. The Flipper is plugged in by USB and speaks a plain-text command line. The
-    nomad asks it to describe itself and shows the answer: model, firmware, region, and whether
-    its Bluetooth radio is alive. Reading it never disturbs a sweep or a decode. No Flipper
-    attached? The panel says so and invents nothing.
+    Watch — hands off. Over USB, the nomad reads the Flipper's model, firmware, region, and
+    whether its Bluetooth radio is alive. Empty? Unplugged — it invents nothing.
   try: >-
-    Your turn, comrade. The panel names the device and its radio state in words, so it reads the
-    same in sun or red-night. Now the question this unit is built around: you know what the Flipper
-    does alone in the field. What does plugging it into the nomad buy you that it can't do alone?
+    Read the device and radio state in words, comrade. You know what the Flipper does alone in the
+    field — what does plugging it into the nomad buy you?
   predict: >-
     Plugged into the nomad like this, what does the Flipper gain? Lock it in.
   observe: >-
-    Hold your guess against the device. The Flipper's screen is a few lines of pixels; its storage
-    is a microSD you can't read at a glance. The nomad has an 800-by-480 panel, a disk, and every
-    lesson in this course. The cable carries the Flipper's command line and saved files both ways.
+    Compare them: the Flipper has a tiny screen and microSD; the nomad has an 800-by-480 panel,
+    disk and lessons, carrying its command line and files over USB.
   explain: >-
     A bench, not radios: the Flipper has the same antennas plugged in as in your pocket, so no
     range or speed is gained. On its own it is the field tool: you carry it, capture with it, and

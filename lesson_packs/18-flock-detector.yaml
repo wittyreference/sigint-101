@@ -27,23 +27,17 @@ stages:
     touch the camera. You will not transmit a thing. You will only listen to what it is already
     saying to the air.
   demo: >-
-    Watch — hands off. A WiFi radio, not the SDR, sits in monitor mode, overhearing the 802.11
-    probes every device shouts in the clear. Each row is one: its OUI, the
-    MAC half naming the maker; its Information Element order, the capabilities it lists; sometimes
-    a network it hunts. All matched against a Flock camera's shape.
+    Watch — hands off. A WiFi radio in monitor mode hears 802.11 probes: OUI (maker prefix),
+    Information Element order and hunted network, matched to a Flock camera.
   try: >-
-    Your watch, comrade. Let it listen; frames come in bursts as devices wake, probe and fall
-    quiet. On a flagged row: what maker does the OUI name, and did the whole fingerprint match
-    or only the prefix? You read metadata, who speaks and how, never payload or pictures. You
-    never answer, associate or transmit; the camera never knows you exist.
+    Let it listen, comrade: probes come in bursts. On a flagged row, check the OUI maker and
+    whether the whole fingerprint or only the prefix matched.
   predict: >-
     A device trips your detector: a known Flock MAC prefix, but the IE fingerprint doesn't match.
     How sure are you it's a camera? Lock it in.
   observe: >-
-    Weigh what actually fired against what did not. The maker prefix is shared across a whole product
-    line, and more than one kind of gadget can wear a radio from the same batch; the fingerprint is
-    the finer thing. Ask yourself which half of the match carries the weight, and what a half-match
-    honestly earns.
+    Many devices share one maker prefix; the fingerprint is finer. Which half of the match carries
+    the weight, and what does a half-match honestly earn?
   explain: >-
     A weak hint, comrade, not a camera. Recognition comes in tiers: a bare OUI says only that a
     maker Flock also buys from built the radio — a family name, nothing to stand behind. The

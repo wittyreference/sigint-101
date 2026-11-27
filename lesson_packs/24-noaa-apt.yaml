@@ -31,22 +31,16 @@ stages:
     megahertz. A wire antenna and your dongle could catch it until 2025, and when the lines stacked
     up you held a picture of your own sky, taken from space. That is the prize.
   demo: >-
-    Watch — hands off. The panel sits on the 137 megahertz polar weather-satellite band. APT is a
-    facsimile, not packets: a 2400-hertz tone on an FM carrier whose loudness is brightness, two
-    lines a second. The decoder stacks lines into two pictures, visible and infrared, sync stripes
-    down each edge. The panel is empty, honestly; the end says why.
+    Watch — hands off. APT on 137 MHz is a 2400 Hz FM tone: loudness is brightness, two lines a
+    second, visible and infrared. Empty? Honestly so — the end says why.
   try: >-
-    Think it through, comrade. Every decoder so far was digital — aircraft position, ham packet,
-    pager page, airliner message — each frame passing its checksum whole or vanishing. APT has no
-    packets, no checksum: a tone whose loudness is a pixel. So when a low, faint satellite's tone
-    comes in buried in hiss, what does that picture do?
+    Digital frames pass a checksum or vanish, comrade; APT has neither — just a tone whose
+    loudness is a pixel. Buried in hiss, what does that picture do?
   predict: >-
     A weak, noisy pass, the tone buried in hiss. What does that leave you? Lock it in.
   observe: >-
-    Hold your guess against how a facsimile differs from a packet, comrade. A packet past its error
-    correction fails its checksum and is thrown away whole. A picture has no checksum; every
-    moment of tone is a brightness, landing wherever the line has reached. Ask what hiss does to a
-    brightness, and whether a half-spoiled line is a lost line.
+    A packet past error correction is thrown away whole; APT has no checksum, each tone moment a
+    brightness. What does hiss do to it — is a half-spoiled line lost?
   explain: >-
     A grainy but real image, comrade. APT is analog, so it fails gracefully: noise rides along as
     false brightness, and a weak pass comes down faded and speckled, banded with static where the

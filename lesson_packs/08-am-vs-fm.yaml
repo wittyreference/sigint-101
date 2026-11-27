@@ -27,15 +27,11 @@ stages:
     Tonight, comrade, you learn to read a signal's modulation — the trick it uses to carry a message — straight
     off its shape on the waterfall, so you can call AM from FM on sight, with no speaker at all.
   demo: >-
-    Watch — hands off for now. On a fine display an airband AM voice channel is one hard, bright
-    line dead still at center, the carrier, with brightness flickering around it as words come and
-    go, under ten kHz: the message in height. Broadcast FM, from Lesson 1, is a fat 200 kHz block
-    that writhes: the message in pitch.
+    Watch — hands off. Airband AM is one still line under 10 kHz, flickering in brightness
+    (height). Broadcast FM is a 200 kHz block that writhes (pitch).
   try: >-
-    Your turn, comrade — eyes only; this console has no speaker yet, and the shapes are the
-    lesson. On the aircraft band, at this resolution, a channel is one thin column of pixels, lit
-    only while someone talks. Watch for one to blink on, then hold it against Lesson 1's wide FM
-    blocks: thin is AM, wide is FM.
+    Eyes only, comrade — no speaker yet. On airband, a channel is a thin column lit while someone
+    talks. Watch one blink on against FM: thin is AM, wide is FM.
   predict: >-
     Watch an airband channel through a conversation, comrade: its thin column lights, goes dark
     for a few seconds, then lights again. When it goes dark, what happened? Lock it in.

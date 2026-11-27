@@ -18,20 +18,17 @@ stages:
     is seeing a real signal as a shape on the screen, and every lesson after this one is just
     learning to read more shapes.
   demo: >-
-    Watch — hands off for now. The screen sweeps the whole FM band, 88 to 108 MHz. That bright
-    vertical stripe, about 200 kHz wide, is a radio station arriving right now. You are seeing
-    radio. This picture is a waterfall: left-to-right is frequency; top-to-bottom is time, the
-    newest sliver at the top; brightness is power. That's the whole alphabet.
+    Watch — hands off. That bright stripe, about 200 kHz wide, is an FM station. Across is
+    frequency; down is time, newest at top; brightness is power.
   try: >-
-    Now it's your turn, comrade. Tap a different bright stripe and the dial jumps to it, or step
-    there with − and +. Read its frequency off the dial. That's it — you just tuned a radio.
+    Tap a different bright stripe, comrade, and the dial jumps to it, or step there with − and +.
+    Read its frequency off the dial. That's it — you just tuned a radio.
   predict: >-
     Next you'll tune to the next bright stripe to the right and hold the two side by side. On this
     screen, will the dimmer of the two look WIDER, the SAME width, or NARROWER? Lock it in.
   observe: >-
-    Now tune to the next bright stripe to the right and hold the two stations side by side. Tell
-    me what you actually see, not what you expected: which stripe is BRIGHTER — the stronger
-    signal — and which is WIDER, or do the two look the same?
+    Tune to the next bright stripe to the right and compare them. Which stripe is BRIGHTER — the
+    stronger signal — and which is WIDER, or do they look the same?
   explain: >-
     Narrower. Broadcast FM hands every station the same slice of the dial, about 200 kHz, but
     this screen paints only the power that clears the noise floor. A strong station lifts its
