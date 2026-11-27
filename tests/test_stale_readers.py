@@ -17,13 +17,14 @@ from typing import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from sigint101 import acars, adsb, ais, aprs, childproc, dmr, flock, pocsag, rds
+from sigint101 import acars, adsb, ais, aprs, childproc, dmr, flock, pocsag, rds, sstv
 from sigint101.app import create_app
 from sigint101.childproc import ChildWatch, Pipeline
 from sigint101.childproc import spawn as spawn_child
 from sigint101.events import read_events
 from sigint101.hardware import RadioProbe
 from tests.child_fakes import LateByteProc, LateProc
+from tests.test_sstv import PNG_BYTES
 
 FIXTURE_PACKS = Path(__file__).resolve().parent / "fixtures" / "lesson_packs"
 
@@ -2089,3 +2090,397 @@ def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket
                     s.close()
                 except OSError:
                     pass
+
+
+# --- SSTV retires a finite capture while its reader may outlive it ------------------
+
+
+@pytest.fixture
+def late_sstv(tmp_path):
+    children, paths, reports, readers, gates = [], [], [], [], []
+    clock = _Clock()
+
+    def spawn(freq, device, path):
+        child = LateProc(["sstv", "--freq", str(freq), "-o", str(path)])
+        children.append(child)
+        paths.append(path)
+        return child
+
+    dec = sstv.SstvDecoder(spawn=spawn, output_dir=tmp_path / "sstv", data_dir=tmp_path,
+                           clock=clock, **_common())
+    dec.watch.clock = clock
+    dec.STOP_WAIT_S = 0.03
+
+    def heard(item, *, command=None, freq_hz=None):
+        reports.append((item, command, freq_hz))
+
+    def reader_at_join(action=None):
+        thread = dec._thread
+        join = thread.join
+        readers.append(join)
+
+        def bounded_join(timeout=None):
+            if action is not None:
+                action()
+            join(0.03 if action is None else 2)
+
+        thread.join = bounded_join
+        return join
+
+    def gate():
+        event = threading.Event()
+        gates.append(event)
+        return event
+
+    dec.on_reception = heard
+    yield dec, children, paths, reports, clock, reader_at_join, gate
+    for event in gates:
+        event.set()
+    for child in children:
+        child.close_pipe()
+    dec.stop()
+    for join in readers:
+        join(2)
+
+
+def _sstv_end(child, *, code=0, mode=None):
+    child.die(code)
+    if mode is not None:
+        child.feed(f"Detected SSTV mode {mode}")
+    child.close_pipe()
+
+
+def test_sstv_finite_pipeline_reaps_live_upstream_before_join_while_draining_mode(
+        late_sstv, monkeypatch):
+    dec, children, paths, heard, _, reader_at_join, _ = late_sstv
+    rtl_fm, sox = LateProc(["rtl_fm"]), LateProc(["sox"])
+    spawn = dec._spawn
+    monkeypatch.setattr(dec, "_spawn", lambda *args: Pipeline(
+        rtl_fm, sox, spawn(*args), finite=True))
+    dec.start()
+    child = children[0]
+    child.die(0)
+    paths[0].write_bytes(PNG_BYTES)
+    stages_at_join = []
+
+    def after_reap():
+        stages_at_join.append((rtl_fm.poll(), sox.poll()))
+        child.feed("Detected SSTV mode Robot 36")
+        child.close_pipe()
+
+    reader_at_join(after_reap)
+    expected = childproc.command_line(dec._proc)
+    dec.stop()
+    assert stages_at_join and None not in stages_at_join[0]
+    [(image, command, freq)] = heard
+    assert (command, freq, image["mode"]) == (expected, sstv.DEFAULT_SSTV_HZ, "Robot 36")
+
+
+@pytest.mark.parametrize("control", ["stop", "release"])
+@pytest.mark.parametrize("boundary", ["parsed", "unread", "exited"])
+def test_sstv_mode_commit_and_stop_release_boundary(late_sstv, control, boundary):
+    dec, children, paths, heard, _, reader_at_join, _ = late_sstv
+    dec.start()
+    child = children[0]
+    staged = paths[0]
+    staged.write_bytes(PNG_BYTES)
+    capture = getattr(dec, "_capture", None)
+    if boundary == "parsed":
+        # A sentinel fetched after the first mode proves the reader processed that mode.
+        parsed = threading.Event()
+
+        class Sentinel(str):
+            def strip(self):
+                parsed.set()
+                return super().strip()
+
+        child.feed("Detected SSTV mode Robot 36", Sentinel("working"))
+        assert parsed.wait(2)
+
+    if boundary == "exited":
+        child.die(0)
+        reader_at_join(lambda: _sstv_end(child, mode="Robot 36"))
+    else:
+        join = reader_at_join()
+    getattr(dec, control)()
+    if boundary == "exited":
+        [(image, command, freq)] = heard
+        assert (command, freq, image["mode"]) == (
+            _line(child), sstv.DEFAULT_SSTV_HZ, "Robot 36")
+    else:
+        child.feed("Detected SSTV mode PD 120")
+        child.close_pipe()
+        join(2)
+        assert heard == []
+        assert dec.images() == []
+        assert not staged.with_suffix(".json").exists()
+        assert capture.mode == ("Robot 36" if boundary == "parsed" else None)
+
+
+@pytest.mark.parametrize("app_hook", [False, True], ids=["unit", "console"])
+@pytest.mark.parametrize("slow", [False, True], ids=["drained", "timed-out"])
+def test_sstv_clean_cycle_keeps_each_captures_command_freq_and_png(
+        late_sstv, tmp_path, app_hook, slow):
+    dec, children, paths, heard, clock, reader_at_join, _ = late_sstv
+
+    def cycle(start, finish, media=None):
+        start()
+        child = children[0]
+        paths[0].write_bytes(PNG_BYTES)
+        child.die(0)
+        action = None if slow else lambda: _sstv_end(child, mode="Robot 36")
+        old_join = reader_at_join(action)
+        clock.now += 1
+        dec.freq_hz = 145_800_000
+        start()
+        assert len(children) == 2
+        assert paths[0].name != paths[1].name
+        assert child.terminated
+        if slow:
+            _sstv_end(child, mode="Robot 36")
+            old_join(2)
+        paths[1].write_bytes(PNG_BYTES)
+        _sstv_end(children[1], mode="PD 120")
+        dec.stop()
+        records = finish()
+        assert len(records) == 2
+        for i, expected_freq in enumerate((sstv.DEFAULT_SSTV_HZ, 145_800_000)):
+            image, command, freq = records[i]
+            assert command == _line(children[i])
+            assert freq == expected_freq
+            assert image["path"] == f"sstv/{paths[i].name}"
+            assert image in dec.images()
+            mode = (None if slow else "Robot 36") if i == 0 else "PD 120"
+            assert image["mode"] == mode
+            if mode is None:
+                assert image["meta"] == {}
+            else:
+                assert image["meta"]["freq_hz"] == expected_freq
+            if media is not None:
+                assert media(image["path"]) == 200
+
+    if not app_hook:
+        cycle(dec.start, lambda: heard)
+        return
+
+    app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path, sstv_factory=lambda: dec,
+                     probe=lambda: RadioProbe(False, "test", "no real RTL-SDR"))
+    with TestClient(app) as client:
+        def start():
+            assert client.get("/api/sstv").status_code == 200
+
+        def finish():
+            return [(p["item"], p["command"], p["freq_hz"])
+                    for event in read_events(tmp_path / "events.jsonl")
+                    if event["kind"] == "reception" for p in [event["payload"]]]
+
+        cycle(start, finish, lambda path: client.get(f"/media/{path}").status_code)
+
+
+def _sstv_retire(dec, child, clock, boundary):
+    if boundary in ("release", "stop"):
+        getattr(dec, boundary)()
+        dec.resume()
+        dec.start()
+    elif boundary == "clean-finish":
+        child.die(0)
+        dec.start()
+    else:
+        child.die(1)
+        with pytest.raises(sstv.SstvUnavailable, match="status 1"):
+            dec.start()
+        if boundary != "back-off":
+            clock.now += 60
+            dec.start()
+
+
+@pytest.mark.parametrize("boundary", ["release", "stop", "death", "clean-finish", "back-off"])
+@pytest.mark.parametrize("late", ["clean-eof", "pipe-error"])
+def test_sstv_stale_reader_cannot_publish_or_refuse_a_future_start(late_sstv, boundary, late):
+    dec, children, paths, heard, clock, reader_at_join, _ = late_sstv
+    dec.start()
+    child = children[0]
+    paths[0].write_bytes(PNG_BYTES)
+    join = reader_at_join()
+    _sstv_retire(dec, child, clock, boundary)
+    baseline = list(heard)
+    gallery = dec.images()
+    if late == "clean-eof":
+        child.feed("Detected SSTV mode Robot 36")
+        child.close_pipe()
+    else:
+        child.break_pipe(OSError("old pipe failed"))
+    join(2)
+    assert not paths[0].with_suffix(".json").exists()
+    assert heard == baseline
+    assert dec.images() == gallery
+    if len(paths) == 2:
+        assert not paths[1].with_suffix(".json").exists()
+        children[1].close_pipe()
+        dec.stop()
+    clock.now += 60
+    assert dec.error is None
+    dec.start()
+    assert dec.running
+
+
+@pytest.mark.parametrize("boundary", ["stop", "clean-finish"])
+def test_sstv_in_flight_metadata_commit_crossing_retirement_is_dropped(
+        late_sstv, monkeypatch, boundary):
+    dec, children, paths, heard, clock, reader_at_join, gate = late_sstv
+    inside, resume = gate(), gate()
+    reader = None
+
+    def clock_at_commit():
+        if threading.current_thread() is reader:
+            inside.set()
+            assert resume.wait(5)
+        return clock()
+
+    monkeypatch.setattr(dec, "_clock", clock_at_commit)
+    dec.start()
+    reader = dec._thread
+    join = reader_at_join()
+    capture = getattr(dec, "_capture", None)
+    child = children[0]
+    paths[0].write_bytes(PNG_BYTES)
+    child.feed("Detected SSTV mode Martin 1")
+    child.close_pipe()
+    assert inside.wait(2)
+    _sstv_retire(dec, child, clock, boundary)
+    baseline = list(heard)
+    resume.set()
+    join(2)
+    assert not paths[0].with_suffix(".json").exists()
+    assert heard == baseline
+    assert (capture.mode, capture.decoded_at) == (None, None)
+    assert dec.error is None
+
+
+def test_sstv_stale_reader_never_reads_next_captures_path(late_sstv, monkeypatch):
+    dec, children, paths, heard, clock, reader_at_join, gate = late_sstv
+    entered, resume = gate(), gate()
+    read = dec._read
+
+    def read_after_gate(proc, *args):
+        if proc is children[0]:
+            entered.set()
+            assert resume.wait(5)
+        read(proc, *args)
+
+    monkeypatch.setattr(dec, "_read", read_after_gate)
+    dec.start()
+    old = children[0]
+    assert entered.wait(2)
+    join = reader_at_join()
+    dec.stop()
+    clock.now += 1
+    dec.start()
+    paths[1].write_bytes(PNG_BYTES)
+    resume.set()
+    old.feed("Detected SSTV mode Martin 1")
+    old.close_pipe()
+    join(2)
+    assert not paths[1].with_suffix(".json").exists()
+    assert heard == []
+
+
+def test_sstv_late_death_reason_cannot_corrupt_error_or_refuse_next_start(late_sstv, monkeypatch):
+    dec, children, _, _, clock, reader_at_join, gate = late_sstv
+    diagnosed, resume = gate(), gate()
+    ended = dec.watch.ended
+
+    def pause_reason(proc, **kwargs):
+        reason = ended(proc, **kwargs)
+        if threading.current_thread() is proc.reader and reason:
+            diagnosed.set()
+            assert resume.wait(5)
+        return reason
+
+    monkeypatch.setattr(dec.watch, "ended", pause_reason)
+    dec.start()
+    child = children[0]
+    join = reader_at_join()
+    _sstv_end(child, code=1)
+    assert diagnosed.wait(2)
+    with pytest.raises(sstv.SstvUnavailable, match="status 1"):
+        dec.start()
+    clock.now += 60
+    dec.start()
+    resume.set()
+    join(2)
+    assert dec.error is None
+    assert not dec.watch.stopped
+    children[1].close_pipe()
+    dec.stop()
+    dec.start()
+    assert dec.running
+
+
+def test_sstv_exit_diagnostics_do_not_hold_the_run_guard(late_sstv, monkeypatch):
+    dec, children, _, _, _, reader_at_join, gate = late_sstv
+    inside, resume = gate(), gate()
+    dec.start()
+    child = children[0]
+    join = reader_at_join()
+    wait = child.wait
+
+    def gated_wait(timeout=None):
+        if threading.current_thread() is child.reader:
+            inside.set()
+            assert resume.wait(5)
+            return 1
+        return wait(timeout)
+
+    monkeypatch.setattr(child, "wait", gated_wait)
+    child.close_pipe()
+    assert inside.wait(2)
+    # This is lock-discipline coverage for the guard introduced by this change.
+    guard = getattr(dec, "_runs", None)
+    if guard is not None:
+        assert guard.lock.acquire(blocking=False)
+        guard.lock.release()
+    dec.stop()
+    dec.start()
+    resume.set()
+    join(2)
+    assert dec.running
+    assert not dec.watch.stopped
+    assert dec.error is None
+
+
+def test_sstv_concurrent_start_and_settle_never_tear_down_live_capture(late_sstv, monkeypatch):
+    dec, children, _, _, _, _, gate = late_sstv
+    spawning, resume, requesting = gate(), gate(), gate()
+    spawn = dec._spawn
+
+    def gated_spawn(*args):
+        spawning.set()
+        assert resume.wait(5)
+        return spawn(*args)
+
+    def request_start():
+        requesting.set()
+        dec.start()
+
+    monkeypatch.setattr(dec, "_spawn", gated_spawn)
+    a = threading.Thread(target=dec.start)
+    b = threading.Thread(target=request_start)
+    a.start()
+    try:
+        assert spawning.wait(2)
+        b.start()
+        assert requesting.wait(2)
+    finally:
+        resume.set()
+        a.join(2)
+        if b.ident is not None:
+            b.join(2)
+    assert not a.is_alive() and not b.is_alive()
+    with dec._life:
+        settle = getattr(dec, "_settle_locked", None)
+        if settle is not None:
+            settle()
+    assert len(children) == 1
+    assert not children[0].terminated
+    assert dec.running
