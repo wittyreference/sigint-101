@@ -1675,3 +1675,19 @@ def test_refusals_centre_the_message_and_keep_a_command_whole():
     assert _css_decl(condition + " > .decoder__empty", "margin-block") == "auto"
     assert _css_decl(condition + " > .decoder__empty", "overflow-y") == "auto"
     assert _css_decl(".refusal-command", "white-space") == "nowrap"
+
+
+def test_lesson_instrument_captions_leave_activity_to_the_status_badge():
+    caption_pattern = re.compile(r'<div class="tune__caption"[^>]*>(.*?)</div>', re.S)
+    activity = re.compile(r"\b(?:decoding|listening|sweeping)\b", re.I)
+    claims = []
+    for lid, lesson in load_lessons(REAL_PACKS).items():
+        if not lesson.needs_hardware:
+            continue
+        html = _console(lesson=lesson, prediction_committed=True, current_stage="explain")
+        captions = caption_pattern.findall(html)
+        assert captions, f"lesson {lid} has an instrument but no dial caption"
+        for caption in sorted(set(captions)):
+            if activity.search(re.sub(r"<[^>]*>", "", caption)):
+                claims.append(f"lesson {lid}: {caption}")
+    assert not claims, "\n".join(claims)
