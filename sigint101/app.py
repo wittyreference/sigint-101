@@ -1839,6 +1839,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         Called from the receiver's reader thread. It never raises: a reception that cannot be
         written is reported through /api/receptions rather than ending the live decode.
         """
+        sink = app.state.reception_sink
+
         def hook(item: dict, *, command: str | None = None, freq_hz=None,
                  radio: dict | None = None) -> None:
             freq = freq_hz if freq_hz is not None else getattr(receiver, "freq_hz", None)
@@ -1858,7 +1860,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
                 radio=radio if radio is not None else _radio(inst, receiver))
             with reception_lock:
-                if not app.state.reception_sink.open():
+                if not sink.allows_log():
                     return
                 try:
                     event = log_event(app.state.events_path, "reception", record)

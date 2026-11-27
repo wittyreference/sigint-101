@@ -10,6 +10,7 @@ import stat
 import subprocess
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -163,6 +164,7 @@ class SstvDecoder(SupervisedReceiver):
         self.serial = serial or None
         self.output_dir = Path(output_dir)
         self._staging_dir = self.output_dir.parent / f".{self.output_dir.name}.staging"
+        self._discard_dir = self._staging_dir / ".discard"
         self._staged_cleanup: set[Path] = set()
         self._staging_lock = threading.Lock()
         self.data_dir = Path(data_dir) if data_dir is not None else self.output_dir.parent
@@ -203,7 +205,9 @@ class SstvDecoder(SupervisedReceiver):
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self._staging_dir.mkdir(parents=True, exist_ok=True)
             with self._staging_lock:
-                cleanup = tuple(self._staged_cleanup)
+                cleanup = self._staged_cleanup.copy()
+            # Entries only get here by moving the exact owned file after a confirmed reap.
+            cleanup.update(self._discard_dir.glob("*.png"))
             for path in cleanup:
                 self._remove_staged(path)
             capture = self._allocate_capture(self._clock(), number, freq_hz)
@@ -230,7 +234,8 @@ class SstvDecoder(SupervisedReceiver):
             stem = base if suffix == 0 else f"{base}-{suffix}"
             published = self.output_dir / f"{stem}.png"
             staged = self._staging_dir / published.name
-            paths = (staged, staged.with_suffix(".json"), published, published.with_suffix(".json"))
+            paths = (staged, staged.with_suffix(".json"), published, published.with_suffix(".json"),
+                     self._discard_dir / staged.name)
             if not any(os.path.lexists(path) for path in paths):
                 return _Capture(staged, published, freq_hz)
             suffix += 1
@@ -262,17 +267,47 @@ class SstvDecoder(SupervisedReceiver):
             with self._staging_lock:
                 self._staged_cleanup.discard(path)
 
+    def _discard_aborted(self, path: Path) -> None:
+        """Move an owned, reaped capture to the discard queue before unlinking it."""
+        discarded = self._discard_dir / path.name
+        try:
+            self._discard_dir.mkdir(exist_ok=True)
+            path.replace(discarded)
+        except FileNotFoundError:
+            return
+        except OSError:
+            self._remove_staged(path)
+        else:
+            self._remove_staged(discarded)
+
+    def _needs_diagnostics(self, run):
+        return run.exit_code == 0 or super()._needs_diagnostics(run)
+
+    def _describe_diagnostics(self, run, ended):
+        read_tail = childproc.read_stderr_tail
+        if run.exit_code == 0:
+            # Successful captures check every stream after the writers are gone. Reuse those
+            # reads for the exit reason if an upstream stage also reported a failure.
+            run.physical.wait()
+            if not run.reaped:
+                return None
+            tails = {id(stage): read_tail(stage) for stage in childproc._stages(run.proc)}
+            return childproc.describe_exits(ended, finite=True, tool=run.watch.tool,
+                                            read_tail=lambda stage: tails[id(stage)])
+        return childproc.describe_exits(ended, finite=True, tool=run.watch.tool,
+                                        read_tail=read_tail)
+
     def _report(self, run):
         """Use the retired capture's status and files once the physical outcome is known."""
         capture, radio = run.args
+        if not run.reap_failed and run.exit_code is None:
+            self._discard_aborted(capture.staged_path)
+            return
         if run.reap_failed or run.exit_code != 0:
             with self._staging_lock:
                 self._staged_cleanup.add(capture.staged_path)
             return
-        sink = getattr(self, "reception_sink", None)
-        diagnostic = self._capture_diagnostic(run)
-        if sink is not None and not sink.open():
-            return
+        run.diagnosed.wait()
         try:
             info = capture.staged_path.lstat()
         except FileNotFoundError:
@@ -286,29 +321,26 @@ class SstvDecoder(SupervisedReceiver):
         if not info.st_size:
             self._remove_staged(capture.staged_path)
             return
-        if not self._publish_capture(capture):
-            return
-        item = self._describe(capture.published_path).as_dict()
-        if diagnostic is not None:
-            item["meta"]["exit_diagnostic"] = diagnostic
-        admission = self._admit()
-        run.ready.set()
-        self._emit(admission, item, command=command_line(run.proc), freq_hz=capture.freq_hz,
-                   radio=radio)
-
-    @staticmethod
-    def _capture_diagnostic(run):
-        try:
-            for stage in childproc._stages(run.proc):
-                childproc.stderr_tail(stage)
-        except Exception as exc:
-            return {"status": run.exit_code, "reason": str(exc)}
+        hook = self.on_reception
+        sink = getattr(self, "reception_sink", None)
+        publication = sink.publication() if sink is not None else nullcontext(True)
+        with publication as admitted:
+            if not admitted:
+                self._discard_aborted(capture.staged_path)
+                return
+            if not self._publish_capture(capture):
+                return
+            item = self._describe(capture.published_path).as_dict()
+            if run.diagnostic_fault is not None:
+                item["meta"]["exit_diagnostic"] = {"status": run.exit_code,
+                                                   "reason": run.diagnostic_fault}
+            run.ready.set()
+            if hook is not None:
+                childproc.emit_reception(hook, item, command=command_line(run.proc),
+                                         freq_hz=capture.freq_hz, radio=radio)
 
     def _publish_capture(self, capture: _Capture) -> bool:
         """The exclusive PNG link commits publication. Install its metadata afterwards."""
-        sink = getattr(self, "reception_sink", None)
-        if sink is not None and not sink.open():
-            return False
         png = capture.published_path
         sidecar = png.with_suffix(".json")
         staged_sidecar = None
@@ -322,8 +354,6 @@ class SstvDecoder(SupervisedReceiver):
                     staged_sidecar = candidate
                     json.dump({"mode": capture.mode, "freq_hz": capture.freq_hz,
                                "decoded_at": capture.decoded_at}, handle, sort_keys=True)
-            if sink is not None and not sink.open():
-                return False
             os.link(capture.staged_path, png)
             committed = True
             if staged_sidecar is not None:

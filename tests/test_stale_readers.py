@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import shlex
 import socket
 import struct
@@ -2471,22 +2472,21 @@ def test_sstv_late_death_reason_cannot_corrupt_error_or_refuse_next_start(late_s
     assert dec.running
 
 
-def test_sstv_exit_diagnostics_do_not_hold_the_run_guard(late_sstv, monkeypatch):
+def test_sstv_exit_diagnostics_do_not_hold_the_run_guard(late_sstv):
     dec, children, _, _, clock, reader_at_join, gate = late_sstv
     inside, resume = gate(), gate()
     dec.start()
     ticket = dec._run
     child = children[0]
     join = reader_at_join()
-    tail = childproc.stderr_tail
-
-    def gated_tail(proc):
-        if proc is child:
+    class GatedStderr(io.StringIO):
+        def read(self, *args):
             inside.set()
             assert resume.wait(5)
-        return tail(proc)
+            return super().read(*args)
 
-    monkeypatch.setattr(childproc, "stderr_tail", gated_tail)
+    child.stderr.close()
+    child.stderr = GatedStderr()
     _sstv_end(child, code=1)
     assert inside.wait(2)
     guard = dec._runs

@@ -52,6 +52,7 @@ class ReceptionSink:
         self._lock = threading.Lock()
         self._open = True
         self._pending = 0
+        self._publication = threading.local()
 
     def admit(self):
         with self._lock:
@@ -71,6 +72,24 @@ class ReceptionSink:
     def open(self):
         with self._lock:
             return self._open
+
+    def allows_log(self):
+        """A publication already admitted on this thread can finish after sealing."""
+        return getattr(self._publication, "active", False) or self.open()
+
+    @contextmanager
+    def publication(self):
+        """Admit a gallery publication and its reception together before either can start."""
+        if not self.admit():
+            yield False
+            return
+        active = getattr(self._publication, "active", False)
+        self._publication.active = True
+        try:
+            yield True
+        finally:
+            self._publication.active = active
+            self.finished()
 
     def seal(self):
         with self._lock:

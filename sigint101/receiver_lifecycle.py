@@ -58,6 +58,7 @@ class Run:
     reaped: bool = False
     reap_failed: bool = False
     failure: str | None = None
+    diagnostic_fault: str | None = None
     unreported_death: bool = False
     exit_code: int | None = None
     preserve_drain: bool = False
@@ -407,14 +408,20 @@ class SupervisedReceiver:
     def _diagnostic_tail(self, run):
         return None
 
+    def _needs_diagnostics(self, run):
+        return run.unreported_death
+
+    def _describe_diagnostics(self, run, ended):
+        return childproc.describe_exits(ended, finite=run.watch.finite,
+                                        tail=self._diagnostic_tail(run), tool=run.watch.tool)
+
     def _diagnose(self, run, ended, status):
         try:
             try:
-                detail = childproc.describe_exits(
-                    ended, finite=run.watch.finite,
-                    tail=self._diagnostic_tail(run), tool=run.watch.tool)
+                detail = self._describe_diagnostics(run, ended)
             except Exception as exc:
-                detail = f"{status} (exit diagnostic unavailable: {exc})"
+                run.diagnostic_fault = str(exc)
+                detail = f"{status} (exit diagnostic unavailable: {exc})" if status else None
             if detail:
                 run.watch.enrich(run.proc, detail)
                 with self._runs:
@@ -460,7 +467,7 @@ class SupervisedReceiver:
         ended = []
         try:
             ended, _ = self._observe_exit(run)
-            if run.unreported_death:
+            if self._needs_diagnostics(run):
                 daemon(self._diagnose, run, ended, run.watch.reason,
                        name=f"sigint101-{run.watch.tool}-diagnostics")
             else:

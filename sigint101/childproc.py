@@ -334,17 +334,20 @@ def _how(code: int) -> str:
 
 def stderr_tail(proc) -> list:
     """The last few lines a tool wrote to its captured stderr, or [] if none were captured."""
-    stream = getattr(proc, "stderr", None)
-    if stream is None:
-        return []
     try:
-        if not stream.seekable():
-            return []
-        end = stream.seek(0, os.SEEK_END)
-        stream.seek(max(0, end - TAIL_READ_BYTES))
-        text = stream.read()
+        return read_stderr_tail(proc)
     except (OSError, ValueError):  # closed, or never a file
         return []
+
+
+def read_stderr_tail(proc) -> list:
+    """Read captured stderr, propagating a fault in the stream."""
+    stream = getattr(proc, "stderr", None)
+    if stream is None or not stream.seekable():
+        return []
+    end = stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, end - TAIL_READ_BYTES))
+    text = stream.read()
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines[-TAIL_LINES:]
 
@@ -374,7 +377,7 @@ def exit_reason(proc, *, finite=False, tail=None, tool="the decoder") -> str | N
     return describe_exits(ended, finite=finite, tail=tail, tool=tool)
 
 
-def describe_exits(ended, *, finite=False, tail=None, tool="the decoder"):
+def describe_exits(ended, *, finite=False, tail=None, tool="the decoder", read_tail=None):
     """Describe a snapshot without waiting on a child."""
     if not ended:
         return None
@@ -396,7 +399,7 @@ def describe_exits(ended, *, finite=False, tail=None, tool="the decoder"):
         if code < 0:
             lines = []
         else:
-            lines = list(tail) if tail is not None else stderr_tail(stage)
+            lines = list(tail) if tail is not None else (read_tail or stderr_tail)(stage)
         parts.append(_describe(_name(stage, tool), code, lines[-TAIL_LINES:]))
     return "; ".join(parts)
 
