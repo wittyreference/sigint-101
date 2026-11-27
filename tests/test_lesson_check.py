@@ -270,19 +270,28 @@ def test_before_the_answer_the_check_offers_chips_and_commit_but_no_complete(tmp
     assert 'data-nav="next"' in explain
 
 
-def test_a_wrong_answer_shows_not_yet_both_whys_and_complete(tmp_path):
+def test_a_wrong_answer_shows_missed_marks_the_right_chip_both_whys_and_complete(tmp_path):
     with _client(tmp_path, _pack()) as client:
         _predict(client)
         _answer(client, "power")
         html = client.get("/lesson/3").text
     check = _panel(html, "check")
-    assert "Not yet" in check
+    assert "Missed" in check
+    assert "Not yet" not in check
     assert "WHY_POWER" in check and "WHY_HD" in check
     assert "WHY_TWO" not in check
     assert "verdict--miss" in check
     assert "data-complete" in check
     assert "Commit answer" not in check
     assert 'data-stage="check" hidden' not in html      # it reopens on the check
+    # On a miss, the right chip carries its own mark and outline; the chosen wrong chip does not.
+    chips = re.findall(r'<label class="predict-chip[^"]*">.*?</label>', check, re.S)
+    assert len(chips) == 3
+    answer_chips = [c for c in chips if "predict-chip--answer" in c]
+    assert len(answer_chips) == 1
+    assert "HD sidebands" in answer_chips[0]
+    assert "predict-chip__mark" in answer_chips[0] and "Answer" in answer_chips[0]
+    assert "Twice the power" not in answer_chips[0]
 
 
 def test_a_right_answer_shows_right_and_its_why_once(tmp_path):
@@ -291,7 +300,9 @@ def test_a_right_answer_shows_right_and_its_why_once(tmp_path):
         _answer(client, "hd")
         html = client.get("/lesson/3").text
     check = _panel(html, "check")
-    assert "Right" in check and "Not yet" not in check
+    assert "Right" in check and "Missed" not in check and "Not yet" not in check
+    assert "predict-chip--answer" not in check
+    assert "predict-chip__mark" not in check
     assert check.count("WHY_HD") == 1
     assert "verdict--hit" in check
     assert "data-complete" in check
@@ -337,7 +348,7 @@ def _token(rule, prop):
 
 
 def _tag_colours(theme, outcome):
-    """The (ink, fill) the check's Right/Not yet tag paints in a theme, through the CSS cascade.
+    """The (ink, fill) the check's Right/Missed tag paints in a theme, through the CSS cascade.
 
     Resolved through the theme's own tokens, so a colour outside its palette has no hex to find.
     """
@@ -357,3 +368,13 @@ def test_the_check_result_tag_reads_at_4_5_to_1(theme, outcome):
     ink, fill = _tag_colours(theme, outcome)
     ratio = _contrast(ink, fill)
     assert ratio >= 4.5, f"{theme} {outcome} tag {ink} on {fill} is {ratio:.2f}:1"
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_the_right_chip_answer_mark_reads_at_4_5_to_1(theme):
+    rule = _css_rule(".predict-chip__mark")
+    ink, fill = _token(rule, "color"), _token(rule, "background")
+    assert ink and fill, f".predict-chip__mark missing token color/background: {rule!r}"
+    tokens = _theme_tokens(theme)
+    ratio = _contrast(tokens[ink], tokens[fill])
+    assert ratio >= 4.5, f"{theme} right-chip mark {tokens[ink]} on {tokens[fill]} is {ratio:.2f}:1"
