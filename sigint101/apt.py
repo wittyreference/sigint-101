@@ -108,7 +108,8 @@ class AptDecoder:
         # Called with each image's dict (as images() lists it) that the running pass wrote, once
         # the console reaps that pass; the PNGs already on disk when it began are never reported.
         # satdump writes files rather than lines, so the pass's end is where its images are read.
-        # The console's hook logs each as a reception and never raises, so it is called directly.
+        # Through emit_reception, the console's hook gets each image with the command read from
+        # its satdump process after the pass ends and the frequency saved at launch.
         self.on_reception = None
         self._pass_start: tuple[int, set[Path]] | None = None
         # Who ended the child, and when the console may launch it again after it died on its own.
