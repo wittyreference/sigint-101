@@ -4,6 +4,9 @@
 {% import "_panels.html" as panels %}
 
 {% block title %}Operator mode{% endblock %}
+{% block status_actions %}
+<a class="rack__log-link" href="/logbook" aria-label="Open reception logbook">LOG</a>
+{% endblock %}
 
 {# The dial of an instrument that listens where its protocol puts it: the frequency and a caption,
    read as text the way the lesson's fixed dial does. A decoder that names its own frequency
@@ -124,9 +127,9 @@
          aria-label="The command this instrument is running"><code data-command-text></code></div>
     {# The newest reception this instrument logged, with its time and frequency; on a sweep view
        (which decodes nothing) the newest from any instrument. operate.js reads /api/receptions. #}
-    <div class="rack__log" data-rack-log data-instrument="{{ '' if inst.api == 'spectrum' else inst.key }}">
+    <a class="rack__log" href="/logbook" data-rack-log data-instrument="{{ '' if inst.api == 'spectrum' else inst.key }}">
       <span class="rack__log-tag">LOG</span><span class="rack__log-line" data-rack-log-line>no receptions logged yet</span>
-    </div>
+    </a>
   </section>
 </div>
 {% if inst.key in ('apt', 'sstv') %}

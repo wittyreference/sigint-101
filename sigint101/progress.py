@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -61,6 +62,21 @@ CREATE TABLE IF NOT EXISTS places (
 );
 """
 
+# A badge keeps its first evidence even after the source line rotates away. The event digests
+# track which lines of the retained log have already contributed to each count.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS stamps (
+    instrument TEXT PRIMARY KEY,
+    first_ts   REAL NOT NULL,
+    count      INTEGER NOT NULL,
+    provenance TEXT NOT NULL,
+    digest     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stamp_events (
+    digest BLOB PRIMARY KEY
+) WITHOUT ROWID;
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
@@ -109,9 +125,11 @@ class Progress:
         # check_same_thread=False + a lock: the FastAPI threadpool touches this from
         # a different thread than the one that opened it. The lock serializes access.
         self._lock = threading.Lock()
+        self._closed = False
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            self._conn.execute("PRAGMA synchronous=FULL")
             self._conn.executescript(SCHEMA)
             _add_correct_column(self._conn)
             self._conn.commit()
@@ -305,7 +323,45 @@ class Progress:
             ).fetchone()
         return dict(row) if row else None
 
-    def close(self) -> None:
-        """Close the database. Called from the app's shutdown so the file is left clean."""
+    def record_stamps(self, stamps, *, backfill=False) -> bool:
+        """Count each event once, keeping the first evidence and any retired badge rows."""
         with self._lock:
-            self._conn.close()
+            if self._closed:
+                return False
+            with self._conn:
+                expired = ({row[0] for row in self._conn.execute("SELECT digest FROM stamp_events")}
+                           if backfill else set())
+                for stamp in stamps:
+                    digest = bytes.fromhex(stamp.get("watermark", stamp["digest"]))
+                    expired.discard(digest)
+                    inserted = self._conn.execute(
+                        "INSERT INTO stamp_events(digest) VALUES(?) ON CONFLICT DO NOTHING",
+                        (digest,),
+                    )
+                    if inserted.rowcount:
+                        self._conn.execute(
+                            "INSERT INTO stamps(instrument, first_ts, count, provenance, digest) "
+                            "VALUES(?, ?, 1, ?, ?) ON CONFLICT(instrument) DO UPDATE SET "
+                            "count=stamps.count + 1",
+                            (stamp["instrument"], stamp["first_ts"],
+                             json.dumps(stamp["provenance"]), stamp["digest"]),
+                        )
+                if expired:
+                    self._conn.executemany("DELETE FROM stamp_events WHERE digest=?",
+                                           ((digest,) for digest in expired))
+            return True
+
+    def stamps(self) -> list[dict]:
+        """The stamps earned so far, with the evidence of each first reception."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT instrument, first_ts, count, provenance, digest FROM stamps"
+            ).fetchall()
+        return [{**dict(row), "provenance": json.loads(row["provenance"])} for row in rows]
+
+    def close(self) -> None:
+        """Close the database and fence any late reception writes under the same lock."""
+        with self._lock:
+            if not self._closed:
+                self._closed = True
+                self._conn.close()

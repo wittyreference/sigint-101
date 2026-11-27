@@ -1,6 +1,9 @@
 <!-- ABOUTME: The instrument panels, one macro per panel, shared by the lesson stages and the rack.
      ABOUTME: A macro draws only the live panel; the lesson stage or the rack adds its own strips. -->
 
+{% macro reception_badge() %}<span class="logbook-mark logbook-mark--stamp">STAMP</span>{% endmacro %}
+{% macro replay_mark() %}<span class="logbook-mark logbook-mark--replay">REPLAY</span>{% endmacro %}
+
 {# Every process-backed panel's head carries a command strip between its title and badge: the exact
    command the console is running, read off the live process by the route (`command` in its JSON)
    and filled by decoder-panel.js. It starts empty and hidden and truncates to one line. A tap

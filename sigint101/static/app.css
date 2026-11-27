@@ -2843,6 +2843,7 @@ body {
   border-top: 1px dashed var(--border);
   font-family: var(--font-mono);
   font-size: 15px;
+  text-decoration: none;
   white-space: nowrap;
 }
 .rack__log-tag {
@@ -2856,4 +2857,79 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--fg-dim);
+}
+
+/* The LOG key sits in the bar, leaving the whole bench height for the receiver. */
+.rack__log-link {
+  flex: 0 0 var(--touch);
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 18px;
+  text-decoration: none;
+}
+
+/* The legend and Back stay fixed. The evidence and full commands scroll inside the list. */
+.logbook {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px var(--gutter);
+  font-size: 18px;
+}
+.logbook__legend {
+  flex: none;
+}
+.logbook__legend p {
+  margin: 0 0 4px;
+}
+.logbook-mark {
+  display: inline-block;
+  padding: 2px 9px;
+  font-size: 16px;
+  border: 2px solid var(--accent);
+}
+.logbook-mark--stamp {
+  border-radius: 1em;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.logbook-mark--replay {
+  border-radius: 0;
+  color: var(--fg);
+}
+.logbook__frame,
+.logbook__entries {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.logbook__entries {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 18px;
+  overflow-wrap: anywhere;
+}
+.logbook__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.logbook__entry {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.logbook__heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+.logbook__entry p {
+  margin: 5px 0 0;
 }

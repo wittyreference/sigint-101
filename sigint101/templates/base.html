@@ -32,6 +32,7 @@
       {% endif %}
 
       <div class="statusbar__title">{% block title %}{{ title|default('SIGINT 101') }}{% endblock %}</div>
+      {% block status_actions %}{% endblock %}
 
       <div class="statusbar__status">
         {# ppm corrected / RAW — the word carries the state, the dot only echoes it #}
