@@ -28,7 +28,7 @@ stages:
     number your panel shows, not ours. "No pilot" means mono or too weak: pick a stronger station.
   predict: >-
     Say your dial sits about 10 kHz high at 100 MHz. Up at 1090 MHz — where aircraft report their
-    positions — will its error in kHz be BIGGER, about the SAME, or SMALLER? Lock it in — the rest
+    positions — will its error in kHz be SMALLER, about the SAME, or BIGGER? Lock it in — the rest
     stays hidden until you do.
   observe: >-
     Reason from the predict's supposition, then say what you expect: at 1090 MHz — about eleven

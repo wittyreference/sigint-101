@@ -25,8 +25,8 @@ stages:
     hissy. One meets the bare whisper first; the other sees a signal already lifted. Which position
     does more to decide what you can hear?
   predict: >-
-    Two amplifiers go behind the antenna: one quiet, one ordinary. To hear the faintest signal, which
-    goes first — quiet or ordinary? Lock it in.
+    Two amplifiers go behind the antenna: one quiet, one ordinary. To hear the faintest signal, what
+    order do they go in? Lock it in.
   observe: >-
     Hold your guess against the chain. The first amplifier is the only one that meets the signal
     while it is still a bare whisper, and whatever hiss it adds no later stage can undo. So whose hiss
