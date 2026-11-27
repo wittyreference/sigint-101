@@ -541,20 +541,28 @@ def settle_ended(proc, thread, runs: RunGuard, watch: ChildWatch, *,
     pipe open can never stall the drain (pipes remain readable after their writers exit). Socket
     feeds (ADS-B, AIS) expose `stop_child` and `close_transport` so their child process is reaped
     before the join while the socket stays open until the bounded drain ends. Once the join
-    finishes or times out, the run ends and any open transport closes so nothing the reader later
-    delivers during retry back-off can list, log or refuse the next start.
+    finishes or times out — or if diagnostics, child stop or join raises — the run ends, the child
+    is stopped and any open transport closes so nothing the detached reader later delivers can
+    list, log or refuse the next start.
     Returns False only when even SIGKILL left a child stage unreaped.
     """
-    note_end(proc, runs.current)
-    watch.stopping()
     stop_child = getattr(proc, "stop_child", None)
     close_transport = getattr(proc, "close_transport", None)
+    stop_fn = stop_child if stop_child is not None else (lambda: stop_process(proc))
+    stopped = False
     try:
-        reaped = stop_child() if stop_child is not None else stop_process(proc)
+        note_end(proc, runs.current)
+        watch.stopping()
+        stopped = True
+        reaped = stop_fn()
         if thread is not None:
             thread.join(timeout=wait_s)
     finally:
         runs.end(watch)
-        if close_transport is not None:
-            close_transport()
+        try:
+            if not stopped:
+                stop_fn()
+        finally:
+            if close_transport is not None:
+                close_transport()
     return reaped

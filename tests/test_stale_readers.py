@@ -1934,3 +1934,158 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
     dec.start()
     assert len(procs) == 2
     assert dec.running
+
+
+def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_drops_queued_item():
+    # If exit diagnostics raise inside settle_ended(), the run must still end and the process must
+    # still be stopped so a detached reader resuming with a queued item cannot publish it.
+    procs = []
+
+    class _TrackedLateProc(LateProc):
+        def __init__(self, args):
+            super().__init__(args)
+            self.terminated = False
+
+        def terminate(self):
+            self.terminated = True
+            super().terminate()
+
+    def spawn(freq_hz, device):
+        proc = _TrackedLateProc(["multimon-ng", "-f", str(freq_hz), "-d", str(device)])
+        procs.append(proc)
+        return proc
+
+    dec = aprs.AprsDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 0.15
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    heard = _Heard(dec, lambda d: d["source"], default_freq=aprs.DEFAULT_APRS_HZ)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        procs[0].feed(APRS_1)
+        assert paused.wait(5)
+
+        # Queue a second complete packet and mark the child exited, then fail exit diagnostics.
+        procs[0].feed(APRS_2)
+        procs[0].die(1)
+
+        real_ended = dec.watch.ended
+
+        def boom(*_args, **_kw):
+            raise OSError("stderr read failed")
+
+        dec.watch.ended = boom
+        real_thread = dec._thread
+
+        with pytest.raises(OSError, match="stderr read failed"):
+            dec.start()
+        dec.watch.ended = real_ended
+        assert procs[0].terminated is True
+
+        # Resuming the detached reader must publish nothing to the roster or reception hook.
+        go_on.set()
+        procs[0].close_pipe()
+        real_thread.join(5)
+        assert not real_thread.is_alive()
+        assert dec.watch.stopped is False
+        assert dec.error is None
+        assert [s["source"] for s in dec.stations()] == ["KD2ABC-9"]
+        assert heard.log == [("KD2ABC-9", aprs.DEFAULT_APRS_HZ, _line(procs[0]))]
+    finally:
+        go_on.set()
+        for proc in procs:
+            proc.close_pipe()
+        dec.stop()
+
+
+def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket():
+    # If exit diagnostics raise inside settle_ended() for a socket feed, the run must still end,
+    # the child process must be stopped, and the socket must close so the detached reader cannot
+    # publish a queued SBS line after the failed settle.
+    pairs = []
+    procs = []
+
+    class _TrackedAliveProc(_AliveProc):
+        def __init__(self, args):
+            super().__init__(args)
+            self.terminated = False
+
+        def terminate(self):
+            self.terminated = True
+            super().terminate()
+
+    def spawn(device):
+        client_sock, server_sock = socket.socketpair()
+        client_sock.settimeout(adsb.FEED_POLL_S)
+        pairs.append((client_sock, server_sock))
+        proc = _TrackedAliveProc(
+            ["dump1090-fa", "--device-index", str(device), "--run", str(len(procs) + 1)])
+        procs.append(proc)
+        return adsb._Feed(proc, client_sock)
+
+    dec = adsb.AdsbDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 0.15
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    heard = _Heard(dec, lambda d: d["hex_ident"], default_freq=adsb.DEFAULT_ADSB_HZ)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        pairs[0][1].sendall((ADSB_1 + "\n").encode())
+        assert paused.wait(5)
+
+        pairs[0][1].sendall((ADSB_2 + "\n").encode())
+        procs[0].returncode = 1
+
+        real_ended = dec.watch.ended
+
+        def boom(*_args, **_kw):
+            raise OSError("stderr read failed")
+
+        dec.watch.ended = boom
+        real_thread = dec._thread
+
+        with pytest.raises(OSError, match="stderr read failed"):
+            dec.start()
+        dec.watch.ended = real_ended
+        assert procs[0].terminated is True
+        assert pairs[0][0].fileno() == -1
+
+        # Resuming the detached reader must not publish the queued SBS line.
+        go_on.set()
+        real_thread.join(5)
+        assert not real_thread.is_alive()
+        assert dec.watch.stopped is False
+        assert dec.error is None
+        assert {a["hex_ident"] for a in dec.aircraft()} == {"A1B2C3"}
+        assert heard.log == [("A1B2C3", adsb.DEFAULT_ADSB_HZ, _line(procs[0]))]
+    finally:
+        go_on.set()
+        dec.stop()
+        for a, b in pairs:
+            for s in (a, b):
+                try:
+                    s.close()
+                except OSError:
+                    pass
