@@ -438,6 +438,17 @@ def test_a_fault_that_is_no_port_error_escapes_as_itself(where):
     assert not isinstance(escaped.value, FlipperError)
 
 
+@pytest.mark.parametrize("error_type", [_Bug, KeyboardInterrupt])
+def test_a_startup_banner_fault_closes_the_port_and_reraises(error_type):
+    fault = error_type("banner read failed")
+    channel = FailingChannel("read", 1, fault)
+    with pytest.raises(error_type) as escaped:
+        with FlipperCli(port=LONG_PORT, opener=lambda port: channel):
+            pytest.fail("the session opened despite the banner fault")
+    assert escaped.value is fault
+    assert channel.closed is True
+
+
 def test_an_error_with_words_but_no_number_does_not_show_errno_none():
     exc, words = OPEN_FAILURES["strerror-no-errno"]
     with pytest.raises(FlipperError) as refused:
@@ -592,4 +603,4 @@ def test_a_server_fault_is_shown_as_no_reading_and_polled_again(tmp_path):
         assert down["emptyHidden"] is False and down["cardHidden"] is True, down
         assert down["nextPollMs"] == [RETRY_MS], down
     assert "500" in shown["empty"], shown
-    assert "lost contact with the console" in reading["empty"].lower(), reading
+    assert reading["empty"] == "Lost contact with the console.", reading

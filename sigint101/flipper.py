@@ -182,7 +182,11 @@ class FlipperCli:
         self._name = None
 
     def __enter__(self):
-        self._open()
+        try:
+            self._open()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def __exit__(self, *exc):

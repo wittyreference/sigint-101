@@ -41,7 +41,7 @@
     }
     return { available: false, command: null, device: null,
              reason: status ? "the console could not read the Flipper (HTTP " + status + ")"
-                            : "lost contact with the console" };
+                            : "Lost contact with the console." };
   }
 
   // Under node's test runner the file is loaded for its pure helpers and there is no document.

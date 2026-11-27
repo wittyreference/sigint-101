@@ -74,7 +74,10 @@ test("a good status with no device in it is no reading, never a device card", as
 });
 
 test("no answer at all shows that the console was not reached", async () => {
-  assertNoReading(await showPoll(null, ""), "lost contact with the console");
+  const shown = await showPoll(null, "");
+  const expected = "Lost contact with the console.";
+  assert.strictEqual(shown.empty, expected);
+  assertNoReading(shown, expected);
 });
 
 test("the route's refusals keep their exact reason or shared next-step message", async () => {
