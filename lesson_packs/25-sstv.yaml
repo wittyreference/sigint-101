@@ -40,8 +40,8 @@ stages:
     used it since 2026 (145.800 before; ariss.org lists each event's frequency and mode). What
     comes out of all that warbling?
   predict: >-
-    A minute of warbling tones — no words, no station name. Feed it to the decoder: a real photo, or
-    just noise? Lock it in.
+    A minute of warbling tones — no words, no station name. Feed it to the decoder: what comes out?
+    Lock it in.
   observe: >-
     Hold your guess against what the decoder is really doing. It is not translating a language or
     cracking a code; it is reading pitch as brightness and time as position, exactly as the sender
