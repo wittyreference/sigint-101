@@ -129,20 +129,35 @@ _SPAWNER = _Spawner()
 
 
 class GroupPopen(subprocess.Popen):
-    """A Popen whose terminate() and kill() reach the tool's whole session, not just its leader.
+    """A Popen whose terminate() and kill() reach the tool's process group.
 
     A tool that forks (a shell wrapper, a helper process) would otherwise leave a child holding the
     dongle after its parent was stopped.
     """
 
+    _group_gone = False
+
     def send_signal(self, sig):
         self.poll()
-        if self.returncode is not None:
-            return
+        self._signal_group(sig)
+
+    def _group_exists(self) -> bool:
+        """Check for members even after the process-group leader has been reaped."""
+        try:
+            return self._signal_group(0)
+        except PermissionError:
+            return True
+
+    def _signal_group(self, sig) -> bool:
+        if self._group_gone:
+            return False
         try:
             os.killpg(self.pid, sig)
-        except ProcessLookupError:  # the session is already gone, which is what was wanted
-            pass
+        except ProcessLookupError:
+            # Once this group is gone, a later stop must not signal a recycled group id.
+            self._group_gone = True
+            return False
+        return True
 
 
 #: Pass as `stderr=` to keep the tool's last words in a scratch file for the exit reason.
@@ -227,24 +242,32 @@ def _quietly(signal_call):
 
 
 def stop_process(proc) -> bool:
-    """Ask a tool to stop, insist if it ignores the ask, and confirm the OS has reaped it.
+    """Stop a tool and wait for its leaders to be reaped and their groups to disappear.
 
-    Returns False only when even SIGKILL left it unreaped (a process in uninterruptible sleep):
-    the caller reports that, because the next tool will find the dongle busy and deserves to know
-    why.
+    If a leader or group remains after the SIGKILL wait, return False so the caller can report
+    that the dongle may still be held.
     """
     _quietly(proc.terminate)
-    try:
-        proc.wait(timeout=STOP_WAIT_S)
+    if _wait_stopped(proc, STOP_WAIT_S):
         return True
-    except subprocess.TimeoutExpired:
-        pass
     _quietly(proc.kill)
+    return _wait_stopped(proc, STOP_WAIT_S)
+
+
+def _wait_stopped(proc, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
     try:
-        proc.wait(timeout=STOP_WAIT_S)
-        return True
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         return False
+    groups = [stage for stage in _stages(proc) if isinstance(stage, GroupPopen)]
+    while any(group._group_exists() for group in groups):
+        # Orphaned helpers are reaped by the system. Use only the time left after the leader wait.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(remaining, 0.01))
+    return True
 
 
 def _stages(proc) -> tuple:
