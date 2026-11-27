@@ -143,7 +143,7 @@ def test_sealed_stages_are_everything_past_predict_for_each_type():
     assert parse_lesson(_intro()).sealed_stages == ("observe", "explain")
 
 
-# --- lifted loader validation (behaviour carried over from elmer) -------------
+# --- lifted loader validation (carried over from an earlier loader) -----------
 
 
 def test_missing_required_field_raises():

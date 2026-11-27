@@ -156,7 +156,7 @@ the inventory of record) **plus** the M37 console lesson that walks the high poi
 
 - **Diagnose:** won't boot / panel dark (the HDMI EDID pin, `cmdline.txt`), kiosk app down, an
   SDR/radio missing, Flipper not mounting, `meshtasticd`, the battery/UPS daemon, tailnet
-  reachability, the `lab-guard` firewall.
+  reachability, the lab firewall.
 - **Restore:** SD backup & restore, config restore from the owner's private host notes + the
   meshtastic node identity (already exported to a backup on the second Recon),
   re-flash, re-pair.

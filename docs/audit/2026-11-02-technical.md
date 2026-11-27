@@ -4,10 +4,10 @@
 
 **After the audit, `origin/main` moved to 3538592.** It gained a server service (#7), a fix for the kiosk respawn storm (#9) and `deploy/provision.sh` (#10, #11). Branch `instrument-honesty` (4151223, not merged) fixes T-02. I didn't re-audit any of these. I mark findings they may touch.
 
-**The measurement window was polluted.** From 21:05 to 21:20 PST (the reference Recon's clock) the coordinator's kiosk-Chromium respawn storm drove load to 20.8. **I re-took every CPU, RSS, latency and diskstats number below after load fell below 1.2 (21:23 onward).** That covers the idle/spectrum/provenance runs, all 17 route scenarios and the events-scaling timings. The decoder and other-route scenarios ran at load 1.3–3.9, because other sessions' Chromium renders were still running. Per-process numbers barely move with that load, but latency figures carry the caveat.
+**The measurement window was polluted.** From 05:05 to 05:20 UTC on 2026-11-03 (the reference Recon's clock) the coordinator's kiosk-Chromium respawn storm drove load to 20.8. **I re-took every CPU, RSS, latency and diskstats number below after load fell below 1.2 (05:23 UTC onward).** That covers the idle/spectrum/provenance runs, all 17 route scenarios and the events-scaling timings. The decoder and other-route scenarios ran at load 1.3–3.9, because other sessions' Chromium renders were still running. Per-process numbers barely move with that load, but latency figures carry the caveat.
 
 Measurements I did **not** re-take (none of them depend on timing):
-- The H1 pixel render, at about 21:18.
+- The H1 pixel render, at about 05:18 UTC.
 - The first APRS and rtl_433 dead-child drills. Their facts are API bodies and PIDs. The two ~9.5 s request latencies from those drills are discarded as polluted. A clean re-test of the same restart took 132 ms, and clean consumer switches took 0.38–0.92 s.
 
 **Cleanup is done.** I removed `/tmp/audit-tech` and the scripts dir, killed every one of my processes by PID, and confirmed with `rtl_test -t` that the dongle opens. The kiosk uvicorn (PID 3762) was left alone, and so was `/tmp/uxverify`.

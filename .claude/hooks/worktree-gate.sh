@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ABOUTME: PreToolUse gate — writes to source directories must happen in a linked worktree.
-# ABOUTME: Scoped to elmer/, scripts/ and githooks/ so docs and review sessions never meet it.
+# ABOUTME: Scoped to sigint101/ by default so docs and review sessions never meet it.
 
 # The worktree invariant in .claude/rules/worktree-invariants.md has been documentation with
 # nothing behind it, which is the shape the TX gate was in until it grew a caller. This is
@@ -22,10 +22,10 @@ FILE_PATH="$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/de
 [ -n "$FILE_PATH" ] || exit 0
 
 # Directories this gate guards, relative to the repo root. Overridable in ff.config.json
-# under worktree.guardedPaths; the defaults are the three directories that hold executable
-# source. Tests live outside it on purpose — a test-only change is the smallest safe edit
+# under worktree.guardedPaths; the default matches this repository's executable source
+# directory. Tests live outside it on purpose — a test-only change is the smallest safe edit
 # there is, and blocking it would push TDD onto the main tree anyway.
-GUARDED_DEFAULT=$'elmer/\nscripts/\ngithooks/'
+GUARDED_DEFAULT=$'sigint101/'
 ROOT_FOR_CONF="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 CONF="$ROOT_FOR_CONF/ff.config.json"
 
