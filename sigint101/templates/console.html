@@ -24,6 +24,12 @@
    predict actions or footer), so stepping back costs no screen height. #}
 {% macro prev_step(is_first) %}{% if not is_first %}<button class="btn btn--prev" type="button" data-nav="prev" aria-label="Previous step">&lsaquo; Prev</button>{% endif %}{% endmacro %}
 
+{% macro complete_lesson() %}
+  <span class="predict__hint" role="status" data-complete-status></span>
+  <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}"
+          data-next-href="{{ complete_href|default('/') }}">Complete lesson</button>
+{% endmacro %}
+
 {% block title %}{{ lesson.title }}{% endblock %}
 
 {% block content %}
@@ -312,8 +318,7 @@
               <div class="predict__actions">
                 {{ prev_step(loop.first) }}
                 {% if fb %}
-                  <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}"
-                          data-next-href="{{ complete_href|default('/') }}">Complete lesson</button>
+                  {{ complete_lesson() }}
                 {% else %}
                   <span class="predict__hint">Tap a choice, comrade, then commit.</span>
                   <button class="btn btn--primary btn-commit" type="submit">Commit answer</button>
@@ -591,11 +596,10 @@
              theirs in their own action row; every other stage (the text stages, and the no-hardware
              instrument stages that render as text) keeps the footer. #}
           {% if stage not in ('predict', 'check') and not (stage in INSTRUMENT and lesson.needs_hardware) %}
-            <footer class="stage-foot">
+            <footer class="stage-foot{% if loop.last %} predict__actions{% endif %}">
               {{ prev_step(loop.first) }}
               {% if loop.last %}
-              <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}"
-                      data-next-href="{{ complete_href|default('/') }}">Complete lesson</button>
+              {{ complete_lesson() }}
               {% else %}
               <button class="btn btn--primary" type="button" data-nav="next">Next step</button>
               {% endif %}

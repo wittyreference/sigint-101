@@ -1997,6 +1997,11 @@ button.rail-pip:disabled {
   z-index: 1;
 }
 
+/* Unit grids end the page. Trim their bottom inset to fit Unit 4's two rows. */
+.content > .tiles:last-child {
+  padding-bottom: 11px;
+}
+
 /* Honest empty state for a unit whose lessons are not built yet (no lock, D16). */
 .empty-note {
   margin: 0;
@@ -2127,7 +2132,7 @@ button.rail-pip:disabled {
 .tile--active .tile__bar > span {
   background: var(--sel-ink);
 }
-.tile--active .tile__head::before {
+.tile--active .tile__code::before {
   content: "\25B6";
   font-size: 13px;
   margin-right: 2px;
