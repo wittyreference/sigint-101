@@ -26,24 +26,23 @@ stages:
     weaker than the noise, yet decoded whole where plain data is gone.
   try: >-
     Send a few from a second Meshtastic node at least 50 cm from the Nomad (antenna always on,
-    same region, LongFast); read each SNR. Alone, an empty list is the honest answer.
+    region, Long Turbo); read SNR. Alone, an empty list is the honest answer.
   predict: >-
-    A LoRa packet on this radio's LongFast preset arrives twelve dB below the noise floor — weaker
-    than the very noise around it. Does it decode cleanly, arrive garbled, or fail outright?
+    A LoRa packet on this radio's Long Turbo preset arrives twelve dB below the noise floor —
+    weaker than the noise around it. Does it decode cleanly, arrive garbled, or fail outright?
     Lock it in.
   observe: >-
     Check a reception's SNR: above zero or below? If the signal is weaker than the noise, how can
     the radio read it — what does the chirp do a steady carrier can't?
   explain: >-
     Clean, from below zero. LoRa — Long Range — is chirp spread spectrum: each symbol a chirp
-    sweeping linearly across the band, multiplied at the receiver by a reference down-chirp.
-    De-chirping collapses the symbol into one tone; the unmatched noise stays spread thin. That
-    gathering is processing gain: packets decode at minus ten, even about minus seventeen dB SNR on
-    LongFast, where a waterfall shows an empty band. So LoRa reaches kilometres on a small
-    battery, trading raw speed for reach. You read these because the sender shares your
-    channel's key; another channel's packet lands as "encrypted", its SNR just as real: received,
-    not readable. Carry this out the door: hearing a signal and reading it are two different
-    things.
+    sweeping across the band, multiplied by a reference down-chirp. De-chirping collapses the
+    symbol into one tone; unmatched noise stays spread thin. That processing gain lets packets
+    decode at minus ten, even about minus seventeen dB SNR on Long Turbo (SF11, 500 kHz; see
+    Lesson 05 for why the kit uses it with power kept to its 8 dBm FCC grant), where a waterfall
+    shows nothing. You read these because the sender shares your channel's key; another channel
+    lands as "encrypted", its SNR just as real: received, not readable. Carry this out the door:
+    hearing a signal and reading it are two different things.
 
 # Keyboard-free predict chips: {key, label}. None of these keys are YAML 1.1 booleans
 # (yes/no/on/off/true/false), so they load as plain strings without needing quotes.
@@ -55,5 +54,13 @@ choices:
 # The scored gate: the chip that matches the explain, and the one line the explain header prints.
 answer: [decodes]
 verdict: >-
-  It decodes cleanly on LongFast, to about −17 dB: de-chirping gathers the symbol into one spike
-  above the noise. Short and Medium presets fail sooner.
+  It decodes cleanly on Long Turbo (SF11), to about −17 dB: de-chirping lifts the symbol above the
+  noise. Short and Medium presets fail sooner.
+
+sources:
+  - title: "Semtech SX1261/SX1262 Datasheet (Table 6-1, Typical LoRa Demodulator SNR: SF11 = -17.5 dB)"
+    url: "https://semtech.my.salesforce.com/sfc/p/E0000000JelG/a/2R000000Un7F/yT.fKdAr9ZAo3cJLc4F2cBdUsMftpT2vsOICP7NmvMo"
+    read: "2026-11-27"
+  - title: "Meshtastic Radio Settings (Long Turbo: SF11, 500 kHz, CR 4/8)"
+    url: "https://meshtastic.org/docs/overview/radio-settings/"
+    read: "2026-11-27"
