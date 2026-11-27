@@ -439,7 +439,11 @@ def _popen(cmd):
     scratch = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     # spawn() gives rtl_power its own session and ties it to the console's life, so a console
     # killed outright does not leave it holding the dongle.
-    proc = spawn(cmd, stdout=subprocess.PIPE, stderr=scratch, text=True)
+    try:
+        proc = spawn(cmd, stdout=subprocess.PIPE, stderr=scratch, text=True)
+    except BaseException:
+        scratch.close()
+        raise
     # Popen leaves .stderr as None when handed a file, so the handle is reattached
     # here: it gives the reader one place to look, real process or injected fake.
     proc.stderr = scratch
@@ -688,12 +692,15 @@ class Sweeper:
             # set before the process is killed, and in production the read above blocks on the
             # pipe until that kill closes it. Nor does a reader whose start a later one replaced:
             # the sweep is another process now.
-            code = self._exit_status(proc) if ended else proc.poll()
-            if self._current(run):
-                if ended and code == 0:
-                    self._flush(run, pending)
-                elif ended or code:
-                    self._record_abnormal_death(code, proc)
+            try:
+                code = self._exit_status(proc) if ended else proc.poll()
+                if self._current(run):
+                    if ended and code == 0:
+                        self._flush(run, pending)
+                    elif ended or code:
+                        self._record_abnormal_death(code, proc)
+            finally:
+                self._close_streams(proc)
 
     def _exit_status(self, proc):
         """rtl_power's exit status once its pipe has ended, or None if it has not exited in time.
@@ -744,18 +751,16 @@ class Sweeper:
         lived = now - self._started_at if self._started_at is not None else 0.0
         self._deaths = 1 if lived >= STABLE_AFTER_S else self._deaths + 1
         self._retry_at = now + min(FIRST_RETRY_S * 2 ** (self._deaths - 1), MAX_RETRY_S)
-        # Nothing more of it will be read: its tail is in the reason. Closing here frees the
-        # handle now rather than at the next start(), and the temporary file with it (a process
-        # not yet exited keeps writing to its own handle, not this one).
-        self._close_stderr(proc)
 
     @staticmethod
-    def _close_stderr(proc) -> None:
-        """Release the scratch file a finished process was writing its stderr into."""
-        stream = getattr(proc, "stderr", None)
-        if stream is not None:
+    def _close_streams(proc) -> None:
+        """Release the reader's pipe and scratch file after recording any diagnostics."""
+        for stream in (proc.stdout, getattr(proc, "stderr", None)):
+            close = getattr(stream, "close", None)
+            if close is None:
+                continue
             try:
-                stream.close()
+                close()
             except OSError:  # already gone; the handle is what mattered, not the close
                 pass
 
