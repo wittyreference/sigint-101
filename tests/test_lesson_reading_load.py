@@ -22,7 +22,7 @@ LAW_EXPLAIN_MAX_WORDS = {5: 165, 15: 185}
 # An instrument stage's narration reads in a thin band under the live panel while the learner is
 # told to watch it: split attention. About 60 words keeps the instruction and drops the lecture.
 NARRATION_MAX_WORDS = 60
-INSTRUMENT_STAGES = ("demo", "try", "observe")
+INSTRUMENT_STAGES = ("demo", "try", "operate", "observe")
 
 
 def _words(text: str) -> int:
@@ -41,6 +41,6 @@ def test_every_explain_fits_a_short_reveal(lesson_id):
 def test_every_instrument_narration_reads_while_watching(lesson_id):
     lesson = LESSONS[lesson_id]
     long = {stage: _words(lesson.stages[stage]) for stage in INSTRUMENT_STAGES
-            if _words(lesson.stages[stage]) > NARRATION_MAX_WORDS}
+            if stage in lesson.stages and _words(lesson.stages[stage]) > NARRATION_MAX_WORDS}
     assert not long, (
         f"lesson {lesson_id} narration over {NARRATION_MAX_WORDS} words: {long}")

@@ -1357,6 +1357,7 @@ REFUSAL_HIDE_SELECTOR = (
 )
 OPTED_IN_PANEL_MACROS = frozenset({
     "flock", "decode", "rds", "aprs", "pocsag", "acars", "ais", "dmr", "apt", "sstv", "flipper",
+    "survey",
 })
 OPTED_OUT_PANEL_MACROS = frozenset({"adsb", "lora", "rayhunter"})
 # The lines of message the fixed panel shows when no rule lets it grow (measured at 800x480).
@@ -1600,7 +1601,7 @@ def test_a_refusal_past_the_cap_scrolls_and_is_never_clipped():
 REAL_PACKS = TEMPLATES_DIR.parent.parent / "lesson_packs"
 _OTHER_INSTRUMENTS = ("uses_decoder", "uses_lora", "uses_rds", "uses_adsb", "uses_aprs",
                       "uses_pocsag", "uses_acars", "uses_ais", "uses_dmr", "uses_apt", "uses_sstv",
-                      "uses_flock", "uses_rayhunter", "uses_flipper")
+                      "uses_flock", "uses_rayhunter", "uses_flipper", "uses_survey")
 _RESTART_KEY = re.compile(r"<button[^>]*data-wf-restart[^>]*>([^<]*)</button>")
 
 

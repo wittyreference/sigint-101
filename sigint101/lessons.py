@@ -72,9 +72,10 @@ SSTV_PANEL = "sstv"
 FLOCK_PANEL = "flock"
 RAYHUNTER_PANEL = "rayhunter"
 FLIPPER_PANEL = "flipper"
+SURVEY_PANEL = "survey"
 INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL,
                      POCSAG_PANEL, ACARS_PANEL, AIS_PANEL, DMR_PANEL, APT_PANEL, SSTV_PANEL,
-                     FLOCK_PANEL, RAYHUNTER_PANEL, FLIPPER_PANEL)
+                     FLOCK_PANEL, RAYHUNTER_PANEL, FLIPPER_PANEL, SURVEY_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -82,9 +83,9 @@ KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 DEFAULT_TUNE_STEP_HZ = 100_000
 
 # What a lesson tile says the learner must bring, keyed by the pack's `hardware:` names. The
-# RTL-SDR is built into the Recon, so it earns no badge. LoRa's radio is built in too, but its
-# lessons need a second node to talk to, so that is the badge.
-BUILT_IN_HARDWARE = ("rtl-sdr",)
+# RTL-SDR and host Wi-Fi radio are built into the Recon, so they earn no badge. LoRa's radio is
+# built in too, but its lessons need a second node to talk to, so that is the badge.
+BUILT_IN_HARDWARE = ("rtl-sdr", "wifi")
 HARDWARE_BADGES = {
     # The site's Flock source is wlan1's USB adapter or the Flipper's Wi-Fi devboard: both are a
     # Wi-Fi radio in monitor mode, and the tile reads the same for either.
@@ -318,6 +319,15 @@ class Lesson:
         never touches the SDR.
         """
         return FLIPPER_PANEL in self.panels
+
+    @property
+    def uses_survey(self) -> bool:
+        """True when the instrument is the read-only Wi-Fi survey (survey panel), not a waterfall.
+
+        It runs a read-only nmcli scan on the host's Wi-Fi radio and groups visible beacons into a
+        per-channel metadata census from /api/survey, never touching the SDR.
+        """
+        return SURVEY_PANEL in self.panels
 
     @property
     def stage_order(self) -> tuple:

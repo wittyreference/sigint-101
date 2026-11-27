@@ -1,0 +1,145 @@
+// ABOUTME: Lists read-only Wi-Fi channel census rows on the console by polling /api/survey (M39).
+// ABOUTME: Renders strictly from envelope metadata fields — never payload — and refuses honestly on 503.
+
+(function () {
+  "use strict";
+
+  var ENVELOPE_FIELDS = Object.freeze(["ssid", "bssid", "channel", "signal", "security"]);
+  var CENSUS_FIELDS = Object.freeze(["channel", "count", "hidden", "open", "strongest", "ssids"]);
+
+  // Pick strictly the allowlisted census fields; any unexpected or payload key is dropped here.
+  function envelopeRow(raw) {
+    raw = raw && typeof raw === "object" ? raw : {};
+    return {
+      channel: typeof raw.channel === "number" ? raw.channel : null,
+      count: typeof raw.count === "number" ? raw.count : 0,
+      hidden: typeof raw.hidden === "number" ? raw.hidden : 0,
+      open: typeof raw.open === "number" ? raw.open : 0,
+      strongest: typeof raw.strongest === "number" ? raw.strongest : null,
+      ssids: Array.isArray(raw.ssids) ? raw.ssids.map(String) : [],
+    };
+  }
+
+  function channelLabel(row) {
+    var clean = envelopeRow(row);
+    return clean.channel != null ? "CH " + clean.channel : "CH —";
+  }
+
+  function countLabel(row) {
+    var clean = envelopeRow(row);
+    return clean.count + (clean.count === 1 ? " AP" : " APs");
+  }
+
+  function signalLabel(row) {
+    var clean = envelopeRow(row);
+    return clean.strongest != null ? clean.strongest + "%" : "—";
+  }
+
+  function summary(row) {
+    var clean = envelopeRow(row);
+    var parts = [];
+    if (clean.ssids.length) {
+      var shown = clean.ssids.slice(0, 2).join(", ");
+      if (clean.ssids.length > 2) shown += ", +" + (clean.ssids.length - 2);
+      parts.push(shown);
+    }
+    if (clean.hidden > 0) parts.push(clean.hidden + " hidden");
+    if (clean.open > 0) parts.push(clean.open + " open");
+    return parts.length ? parts.join(" · ") : "(no SSID)";
+  }
+
+  function pollAnswer(status, body) {
+    var ok = status >= 200 && status < 300;
+    if (body && typeof body === "object") {
+      if (body.available === false && typeof body.reason === "string" && body.reason) return body;
+      if (ok && body.available === true && Array.isArray(body.channels)) return body;
+    }
+    return {
+      available: false,
+      command: null,
+      channels: [],
+      reason: status ? "the console could not run the Wi-Fi survey (HTTP " + status + ")"
+                     : "Lost contact with the console.",
+    };
+  }
+
+  // Under node's test runner the file is loaded for its pure helpers and there is no document.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      ENVELOPE_FIELDS: ENVELOPE_FIELDS,
+      CENSUS_FIELDS: CENSUS_FIELDS,
+      envelopeRow: envelopeRow,
+      channelLabel: channelLabel,
+      countLabel: countLabel,
+      signalLabel: signalLabel,
+      summary: summary,
+      pollAnswer: pollAnswer,
+    };
+    return;
+  }
+
+  var panels = Array.prototype.slice.call(document.querySelectorAll("[data-survey-panel]"));
+  if (!panels.length) return;
+
+  var POLL_MS = 10000;     // nmcli caches scans ~30 s; a gentle poll refreshes without thrashing
+  var RETRY_MS = 5000;     // when no Wi-Fi radio is ready, poll gently until one appears
+  var stopped = false;
+
+  function esc(value) {
+    var div = document.createElement("div");
+    div.textContent = value == null ? "" : String(value);
+    return div.innerHTML;
+  }
+
+  function render(panel, body) {
+    var list = panel.querySelector("[data-survey-list]");
+    var empty = panel.querySelector("[data-survey-empty]");
+    var badge = panel.querySelector("[data-survey-badge]");
+    var rows = (body.channels || []).map(envelopeRow);
+    list.innerHTML = "";
+    rows.forEach(function (row) {
+      var li = document.createElement("li");
+      li.className = "decoder__item";
+      li.innerHTML =
+        '<span class="decoder__model">' + esc(channelLabel(row)) + "</span>" +
+        '<span class="decoder__mod">' + esc(countLabel(row)) + "</span>" +
+        '<span class="decoder__read">' + esc(summary(row)) + "</span>" +
+        '<span class="decoder__tone">' + esc(signalLabel(row)) + "</span>";
+      list.appendChild(li);
+    });
+    DecoderPanel.showLive(badge, body);
+    DecoderPanel.showCommand(panel, body.command);
+    if (empty) {
+      empty.hidden = rows.length > 0;
+      if (!rows.length) {
+        empty.textContent = DecoderPanel.quietText(body, "no Wi-Fi networks heard in this scan");
+      }
+    }
+  }
+
+  function showEmpty(panel, body) {
+    var list = panel.querySelector("[data-survey-list]");
+    var empty = panel.querySelector("[data-survey-empty]");
+    var badge = panel.querySelector("[data-survey-badge]");
+    if (list) list.innerHTML = "";
+    DecoderPanel.showDown(panel, badge, empty, body);
+  }
+
+  function tick() {
+    fetch("/api/survey", { cache: "no-store" })
+      .then(function (r) {
+        return r.json().then(function (b) { return pollAnswer(r.status, b); },
+                             function () { return pollAnswer(r.status, null); });
+      }, function () { return pollAnswer(null, null); })
+      .then(function (body) {
+        var waiting = body.available === false;
+        panels.forEach(function (p) { if (waiting) showEmpty(p, body); else render(p, body); });
+        if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
+      })
+      .catch(function () {
+        if (!stopped) setTimeout(tick, RETRY_MS);
+      });
+  }
+
+  tick();
+})();
