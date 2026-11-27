@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import threading
 import time
@@ -46,7 +47,13 @@ from .exam import (
 from .flipper import FlipperError, FlipperSelectionError
 from .flipperconsole import FlipperConsole
 from .flock import FlockUnavailable, configured_flock_detector
-from .hardware import DeviceSelectionError, list_rtlsdr_devices, probe_rtlsdr, select_rtlsdr_index
+from .hardware import (
+    RTLSDR_SERIAL_ENV,
+    DeviceSelectionError,
+    list_rtlsdr_devices,
+    probe_rtlsdr,
+    select_rtlsdr_index,
+)
 from .kiosk import request_exit
 from .lessons import CHECK_STAGE, COMMIT_STAGE, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
@@ -94,10 +101,6 @@ DATA_DIR = REPO_DIR / "data"
 # The line glyph a home tile falls back to. The waterfall glyph is the one every lesson earns —
 # the spectrogram is the instrument the whole course is built on.
 DEFAULT_TILE_GLYPH = "waterfall"
-
-# Env var that pins which radio to sweep when the bus holds more than one. A serial, not an index:
-# the index changes with plug order, so "00000001" handed to rtl_power's -d is read as index 1.
-RTLSDR_SERIAL_ENV = "SIGINT101_RTLSDR_SERIAL"
 
 # Where the ADS-B radar is standing. Set to the receiver's own latitude/longitude, the scope turns
 # each aircraft's position into a range and bearing; left unset, the scope lists contacts without
@@ -318,9 +321,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
                                 context_processors=[status_bar, flock_tool])
 
-    # The radios the bus held the last time a tool looked, as each SDR tool enumerates them before
-    # it opens one. A reception names its radio's serial from here, so logging one never has to
-    # run the enumerator again while a tool holds the dongle.
+    # SSTV leaves radio identity to the hook, which uses the latest bus survey for serial lookup.
+    # The other RTL-SDR receivers send the radio they selected at launch.
     radio_census = []
 
     def enumerate_radios():
@@ -1227,6 +1229,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # refusal is logged when it changes, and again after the next successful start.
     last_refusal = {}
 
+    def _receiver_cause(kind, exc, reason):
+        """Classify the refusal that actually fired, without polling hardware again."""
+        if reason.startswith("no RTL-SDR on the USB bus"):
+            return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
+                    "next_step": "Plug in the RTL-SDR."}
+        if reason == "no Flipper attached":
+            return {"cause": "no_radio", "next_step": "Connect the Flipper over USB."}
+        if reason.startswith("no monitor radio:"):
+            return {"cause": "no_radio"}  # This refusal already says how to seat the devboard.
+
+        missing = re.match(r"(?:cannot survey the bus: )?([\w.+-]+) is not installed\b", reason)
+        tool = missing[1] if missing else None
+        if (kind == "spectrum" and reason.startswith("cannot run rtl_power:")
+                and isinstance(exc.__cause__, FileNotFoundError)
+                and exc.__cause__.filename == "rtl_power"):
+            tool = "rtl_power"
+        if tool:
+            command = "Run deploy/provision.sh"
+            if tool in {"dsd-fme", "satdump", "sstv"}:
+                command += " --with-optional"
+            return {"cause": "missing_tool", "message": f"{tool} is not installed.",
+                    "next_step": command}
+        return {"cause": "unavailable"}
+
     def _refused(kind: str, exc, empty: dict, watch=None):
         """A 503 that says why. A tool that died on its own reads as stopped, with its retry.
 
@@ -1241,10 +1267,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, f"{kind}_blocked", {"reason": reason})
         body = {"available": False, "reason": reason, "command": None, **empty}
         death = watch.reason if watch is not None else None
-        if death is not None and reason == death:
-            retry = watch.retry_in()
-            body["state"] = "stopped"
+        sweep_died = kind == "spectrum" and reason.startswith(
+            ("the sweep stopped (", "the sweep was killed mid-pass (",
+             "rtl_power closed its output but did not exit"))
+        if (death is not None and reason == death) or sweep_died:
+            retry = (app.state.sweeper if sweep_died else watch).retry_in()
+            body["cause"] = body["state"] = "stopped"
             body["retry_in"] = round(retry, 1) if retry is not None else 0
+        else:
+            body.update(_receiver_cause(kind, exc, reason))
         return JSONResponse(status_code=503, content=body)
 
     def _started(kind: str, payload: dict) -> None:
@@ -1281,7 +1312,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # target is measured), else the span's middle.
         target = getattr(sweeper, "target", None)
         # Judged before the rows are read, so a row published in between is judged on the next poll.
-        _, stale, _ = sweeper.newest()
+        newest_row, stale, _ = sweeper.newest()
+        if newest_row is None and stale is None:
+            stale = "waiting"
         return {
             "available": True,
             "freq_low": sweeper.low,
@@ -1295,7 +1328,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             # follows (Sweeper.newest): null while it is; "stalled" once rtl_power has gone too
             # long without a pass; "resuming" for the first two passes after, which carry levels
             # from before the stall; "restarting" from a Restart sweep press until a run after it
-            # has swept a pass. The rows are served either way: they are real.
+            # has swept a pass. With neither a row nor a state, the current run is "waiting" for
+            # its first pass. The rows are served either way: they are real.
             "stale": stale,
             "rows": [row.as_dict() for row in sweeper.rows(limit)],
         }
@@ -1784,21 +1818,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         Called from the receiver's reader thread. It never raises: a reception that cannot be
         written is reported through /api/receptions rather than ending the live decode.
         """
-        def hook(item: dict) -> None:
-            freq = getattr(receiver, "freq_hz", None)
+        def hook(item: dict, *, command: str | None = None, freq_hz=None,
+                 radio: dict | None = None) -> None:
+            freq = freq_hz if freq_hz is not None else getattr(receiver, "freq_hz", None)
             if freq is None and inst.fixed_hz:
                 freq = inst.fixed_hz[0] if len(inst.fixed_hz) == 1 else list(inst.fixed_hz)
-            live_command = getattr(receiver, "live_command", None)
+            if command is None:
+                live_command = getattr(receiver, "live_command", None)
+                command = live_command() if live_command else None
             record = reception_record(
                 inst, item, freq_hz=freq,
-                command=live_command() if live_command else None,
+                command=command,
                 # A receiver that names its own tool (the Flock detector's source) is logged
                 # under it, so the record names the tool that ran its command.
                 tool=getattr(receiver, "tool", None),
                 # No tool is ever handed a ppm correction, so every reception is uncorrected;
                 # the last measurement this run rides along for whoever reads the record.
                 ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
-                radio=_radio(inst, receiver))
+                radio=radio if radio is not None else _radio(inst, receiver))
             with reception_lock:
                 try:
                     event = log_event(app.state.events_path, "reception", record)
@@ -1813,9 +1850,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def _recent_receptions() -> list:
         """The newest receptions, oldest first, read in from the log the first time asked.
 
-        The log is a file and can hold a pager reception that carries a page's words. Each one
-        is read in through without_page_words, so whatever is stored, none of it reaches a
-        response or the rack's LOG line; the file itself is never rewritten.
+        The log can hold a pager reception with the page's text and the line built from it.
+        On readback, without_page_words withholds the item's text and replaces the stored summary
+        with a line built from the framing for the response and the rack's LOG. Other item fields
+        and receptions from other instruments pass through as stored, and the file is left alone.
         """
         with reception_lock:
             if app.state.receptions is None:

@@ -11,12 +11,21 @@ import threading
 import time
 from dataclasses import dataclass
 
-from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    RunGuard,
+    command_line,
+    emit_reception,
+    running_command,
+    settle_ended,
+    spawn,
+    stop_process,
+)
 from .hardware import (
     DUMP1090,
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # Where the ADS-B lesson listens. Mode S transponders answer on 1090 MHz worldwide; dump1090 is
@@ -209,16 +218,25 @@ class _Feed:
 
     def _lines(self):
         buffer = ""
+        draining = False
         with self._sock:
             while not self._closed.is_set():
+                if not draining and self._proc.poll() is not None:
+                    # Once dump1090 has exited, switch to non-blocking so complete lines already
+                    # queued in the socket drain at once without waiting out FEED_POLL_S.
+                    try:
+                        self._sock.settimeout(0.0)
+                    except OSError:
+                        return
+                    draining = True
                 try:
                     chunk = self._sock.recv(4096)
                 except TimeoutError:
-                    # No aircraft for a moment is an empty sky, not an ended feed: keep listening
-                    # while dump1090 lives. Taking the timeout as the end once left a running
-                    # dump1090 behind a reader that had quietly stopped.
-                    if self._proc.poll() is not None:
+                    if draining:
                         return
+                    # No aircraft for a moment is an empty sky, not an ended feed: keep listening
+                    # while dump1090 lives. If it just exited, loop once more in non-blocking mode
+                    # to drain anything queued at the boundary, then return.
                     continue
                 except OSError:
                     return
@@ -243,6 +261,14 @@ class _Feed:
             self._sock.close()
         except OSError:
             pass
+
+    def stop_child(self) -> bool:
+        """Stop and reap dump1090 while leaving the SBS socket open to drain queued lines."""
+        return stop_process(self._proc)
+
+    def close_transport(self) -> None:
+        """Close the SBS socket once any natural-exit drain has finished or timed out."""
+        self._close_socket()
 
     def terminate(self):
         self._close_socket()
@@ -315,7 +341,7 @@ class AdsbDecoder:
         # the tracker lock. The console's hook logs it as a reception and never raises, so the
         # call is made directly: it cannot end the decode.
         self.on_reception = None
-        self._lock = threading.Lock()
+        self._runs = RunGuard()
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
@@ -337,11 +363,9 @@ class AdsbDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise AdsbUnavailable(str(exc)) from exc
 
@@ -350,7 +374,7 @@ class AdsbDecoder:
         with self._life:
             self._released = True
             self.stop()
-            with self._lock:
+            with self._runs:
                 self._tracker = AircraftTracker()
 
     def resume(self) -> None:
@@ -382,7 +406,10 @@ class AdsbDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise AdsbUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
+        # End any retiring reader from an earlier natural death before starting its replacement.
+        self._runs.end(self.watch)
         try:
             self._proc = self._spawn(self.device)
         except AdsbUnavailable:
@@ -393,41 +420,60 @@ class AdsbDecoder:
             raise AdsbUnavailable(f"cannot run dump1090: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+        self._thread = threading.Thread(target=self._read,
+                                        args=(self._proc, self._runs.current, radio),
                                         name="sigint101-adsb", daemon=True)
         self._thread.start()
 
-    def _read(self, proc) -> None:
+    def _read(self, proc, run: int, radio: dict) -> None:
         """Consume dump1090's SBS lines on a background thread, assembling the sky until it ends."""
         contacts = set()   # the ICAO addresses this feed has already reported as new contacts
         try:
             for raw in proc.stdout:
                 msg = parse_sbs_message(raw)
-                if msg is not None:
-                    with self._lock:
-                        plane = self._tracker.absorb(msg, now=time.time())
-                        contact = self._row(plane) if msg.hex_ident not in contacts else None
-                    if contact is not None:
-                        contacts.add(msg.hex_ident)
-                        hook = self.on_reception
-                        if hook is not None:
-                            hook(contact)
+                if msg is None:
+                    continue
+                with self._runs:
+                    if not self._runs.is_current(run):
+                        continue
+                    plane = self._tracker.absorb(msg, now=time.time())
+                    contact = self._row(plane) if msg.hex_ident not in contacts else None
+                    cmd = command_line(proc)
+                    hook = self.on_reception
+                if contact is not None:
+                    contacts.add(msg.hex_ident)
+                    if hook is not None:
+                        emit_reception(hook, contact, command=cmd, freq_hz=DEFAULT_ADSB_HZ,
+                                       radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
-            self.error = str(exc)
+            with self._runs:
+                if self._runs.is_current(run):
+                    self.error = str(exc)
         finally:
-            self._note_end(proc)
+            self._note_end(proc, run)
 
-    def _note_end(self, proc) -> None:
+    def _note_end(self, proc, run: int) -> None:
         """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc)
-        if reason and self.error is None:
-            self.error = reason
+        reason = self.watch.ended(proc, runs=self._runs, run=run)
+        if reason:
+            with self._runs:
+                if self._runs.is_current(run) and self.error is None:
+                    self.error = reason
 
     def _settle(self) -> None:
-        """Account for a child that ended since the last poll, then clear away what it left."""
-        if self._proc is not None:
-            self._note_end(self._proc)
-            self._stop_locked()
+        """Account for a child that ended since the last poll, letting its reader drain before
+        ending the run and clearing away what it left.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        thread, self._thread = self._thread, None
+        if not settle_ended(proc, thread, self._runs, self.watch,
+                            note_end=self._note_end, wait_s=self.STOP_WAIT_S):
+            self.error = "dump1090 survived kill; the dongle may still be held"
+
+    #: How long stop() waits, in seconds, for the reader to end once dump1090 is stopped.
+    STOP_WAIT_S = 3.0
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -435,13 +481,14 @@ class AdsbDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
-        # Marked first, so the reader seeing the output end never reports our stop as a death.
-        self.watch.stopping()
+        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
+        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
+        self._runs.end(self.watch)
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "dump1090 survived kill; the dongle may still be held"
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
 
     def drain(self, timeout: float = 5.0) -> None:
@@ -452,7 +499,7 @@ class AdsbDecoder:
     def aircraft(self) -> list[dict]:
         """The live sky as plain dicts for the API, closest-ranged aircraft first when located."""
         now = time.time()
-        with self._lock:
+        with self._runs:
             planes = self._tracker.aircraft(now=now, max_age_s=self.max_age_s)
         out = [self._row(p) for p in planes]
         # Closest first when ranges are known; the located aircraft lead the unlocated.

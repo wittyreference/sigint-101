@@ -336,8 +336,12 @@ def test_the_sweep_launches_rtl_power_through_spawn(monkeypatch):
     seen = _record_spawns(monkeypatch, spectrum)
     cmd = ["rtl_power", "-f", "88000000:108000000:125000", "-i", "1", "-d", "0"]
     proc = spectrum._popen(cmd)
-    assert seen[0].args == cmd
-    assert proc.stderr is not None          # its stderr still lands where the sweeper reads it
+    try:
+        assert seen[0].args == cmd
+        assert proc.stderr is not None      # its stderr still lands where the sweeper reads it
+    finally:
+        if proc.stderr is not None:
+            proc.stderr.close()
 
 
 def test_adsb_launch_failure_stops_dump1090_and_says_so(monkeypatch):

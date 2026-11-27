@@ -47,7 +47,7 @@
     var badge = panel.querySelector("[data-rayhunter-badge]");
     var status = body.status || "off";
     var warnings = body.warnings || [];
-    if (line) { line.textContent = lineText(status); line.className = lineClass(status); }
+    if (line) { line.hidden = false; line.textContent = lineText(status); line.className = lineClass(status); }
     if (list) {
       list.innerHTML = "";
       warnings.forEach(function (w) {
@@ -61,22 +61,21 @@
         list.appendChild(li);
       });
     }
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
     if (empty) {
       empty.hidden = warnings.length > 0;
       if (!warnings.length) empty.textContent = "no findings — a quiet line never proves no catcher";
     }
   }
 
-  function showEmpty(panel, reason) {
+  function showEmpty(panel, body) {
     var line = panel.querySelector("[data-rayhunter-line]");
     var list = panel.querySelector("[data-rayhunter-list]");
     var empty = panel.querySelector("[data-rayhunter-empty]");
     var badge = panel.querySelector("[data-rayhunter-badge]");
-    if (line) { line.textContent = "orbic unreachable"; line.className = "rayhunter__line"; }
+    if (line) line.hidden = true;
     if (list) list.innerHTML = "";
-    if (badge) { badge.textContent = "NO ORBIC"; badge.className = "decoder__status decoder__status--empty"; }
-    if (empty) { empty.hidden = false; empty.textContent = reason || "no Orbic to read Rayhunter"; }
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -85,15 +84,18 @@
       .then(function (res) {
         var waiting = false;
         if (!res.ok || res.body.available === false) {
-          var reason = (res.body && res.body.reason) || "no Orbic to read Rayhunter";
-          panels.forEach(function (p) { showEmpty(p, reason); });
+          panels.forEach(function (p) { showEmpty(p, res.body); });
           waiting = true;
         } else {
           panels.forEach(function (p) { render(p, res.body); });
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

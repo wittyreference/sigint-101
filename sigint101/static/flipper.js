@@ -1,5 +1,5 @@
 // ABOUTME: Shows the attached Flipper's identity on the console by polling /api/flipper (M29).
-// ABOUTME: On 503 it shows the reason, on any other failure its status; it never invents a device.
+// ABOUTME: Preserves refusal reasons and shows the HTTP status when a reply has no reading.
 
 (function () {
   "use strict";
@@ -69,15 +69,14 @@
   }
 
   // No read: the card hides and the empty line carries the reason (no Flipper on USB, two on the
-  // bus, an app open on it, a port that failed, an answer that was no reading). The badge says only
-  // that nothing was read, which is true of all of them.
+  // bus, an app open on it, or a port error). The API supplies the cause to the shared badge.
   function showEmpty(panel, body) {
     var card = panel.querySelector("[data-flipper-card]");
     var empty = panel.querySelector("[data-flipper-empty]");
     var badge = panel.querySelector("[data-flipper-badge]");
     fillCard(panel, null);
     if (card) card.hidden = true;
-    DecoderPanel.showDown(panel, badge, empty, body, "NO READ", "no Flipper on USB");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function render(panel, body) {

@@ -289,6 +289,25 @@ def test_sweeper_reports_a_missing_rtl_power_binary():
         sweeper.start()
 
 
+def test_sweep_closes_the_stderr_file_if_rtl_power_cannot_start(monkeypatch):
+    opened = []
+
+    def missing(_cmd, *, stderr, **_kwargs):
+        opened.append(stderr)
+        raise FileNotFoundError("rtl_power")
+
+    monkeypatch.setattr(spectrum_module, "spawn", missing)
+    sweeper = Sweeper(radio_present=lambda: True)
+    try:
+        with pytest.raises(SpectrumUnavailable, match="cannot run rtl_power"):
+            sweeper.start()
+        [stderr] = opened
+        assert stderr.closed
+    finally:
+        for stream in opened:
+            stream.close()
+
+
 class DeadProc(FakeProc):
     """An rtl_power that has exited — the shape of a dongle pulled out mid-sweep.
 
@@ -306,6 +325,31 @@ class DeadProc(FakeProc):
 
     def wait(self, timeout=None):
         return self.returncode
+
+
+@pytest.mark.parametrize("code", [0, 1], ids=["clean-exit", "failure"])
+def test_sweep_closes_both_streams_when_the_reader_finishes(monkeypatch, code):
+    proc = DeadProc([], returncode=code)
+    proc.stdout = io.StringIO(LINE_A + "\n")
+
+    def launch(_cmd, *, stderr, **_kwargs):
+        stderr.write("rtl_power diagnostic\n")
+        stderr.flush()
+        return proc
+
+    monkeypatch.setattr(spectrum_module, "spawn", launch)
+    sweeper = Sweeper(radio_present=lambda: True)
+    try:
+        sweeper.start()
+        sweeper.drain()
+        if code:
+            assert "rtl_power diagnostic" in sweeper.error
+        assert proc.stderr.closed
+        assert proc.stdout.closed
+    finally:
+        sweeper.stop()
+        proc.stdout.close()
+        proc.stderr.close()
 
 
 class BlockingProc(FakeProc):

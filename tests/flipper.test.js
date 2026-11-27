@@ -26,18 +26,17 @@ test("the radio state is words, not a colour, and empty when unknown", () => {
 });
 
 // C33: the panel's poll, run against one answer in a stand-in page (tests/flipper_poll.js). A
-// server fault answers 500 with a plain-text page that is not JSON; the panel stayed on its
-// "reading…" line for as long as the page was open, and a JSON error with no reason read as
-// "no Flipper on USB". Whatever the answer, the panel ends the first poll saying what it got.
+// server fault can answer 500 with plain text. The panel shows the HTTP status for an
+// unusable reply, and the shared badge and explanation for a refusal from the route.
 const { showPoll, macroText } = require("./flipper_poll.js");
-const READING = macroText("data-flipper-empty").text;
+const CHECKING = macroText("data-flipper-empty").text;
 const RETRY_MS = 4000;
 const POLL_MS = 2000;
 
 function assertNoReading(shown, words) {
-  assert.equal(shown.badge, "NO READ", JSON.stringify(shown));
+  assert.equal(shown.badge, "UNAVAILABLE", JSON.stringify(shown));
   assert.match(shown.badgeClass, /decoder__status--empty/);
-  assert.notEqual(shown.empty, READING);
+  assert.notEqual(shown.empty, CHECKING);
   assert.ok(!shown.empty.includes("no Flipper on USB"), shown.empty);   // an error is no absence
   assert.ok(shown.empty.includes(words), shown.empty);
   assert.equal(shown.emptyHidden, false);
@@ -45,8 +44,8 @@ function assertNoReading(shown, words) {
   assert.deepEqual(shown.nextPollMs, [RETRY_MS]);                       // and it asks again
 }
 
-test("the stand-in page starts as the template does, reading", () => {
-  assert.match(READING, /^reading the Flipper over USB/);
+test("the stand-in page starts as the template does, checking", () => {
+  assert.equal(CHECKING, "Checking receiver…");
 });
 
 test("a server fault's plain-text 500 shows no reading with its status, not reading forever", async () => {
@@ -78,15 +77,23 @@ test("no answer at all shows that the console was not reached", async () => {
   assertNoReading(await showPoll(null, ""), "lost contact with the console");
 });
 
-test("the route's refusal shows its reason whole", async () => {
+test("the route's refusals keep their exact reason or shared next-step message", async () => {
   const reason = "cannot open the Flipper: [Errno 13] Permission denied "
     + "(usb-Flipper_Devices_Inc._Flipper_Abcdefgh_flip_Abcdefgh-if00)";
   const shown = await showPoll(503, JSON.stringify(
-    { available: false, reason: reason, command: null, device: null }));
-  assert.equal(shown.badge, "NO READ");
+    { available: false, cause: "unavailable", reason: reason, command: null, device: null }));
+  assert.equal(shown.badge, "UNAVAILABLE");
   assert.equal(shown.empty, reason);
   assert.equal(shown.cardHidden, true);
   assert.deepEqual(shown.nextPollMs, [RETRY_MS]);
+
+  const absent = await showPoll(503, JSON.stringify({ available: false, cause: "no_radio",
+    reason: "no Flipper attached", message: "No Flipper on USB.",
+    next_step: "Connect the Flipper over USB." }));
+  assert.equal(absent.badge, "NO RADIO");
+  assert.equal(absent.empty, "No Flipper on USB. · Connect the Flipper over USB.");
+  assert.equal(absent.cardHidden, true);
+  assert.deepEqual(absent.nextPollMs, [RETRY_MS]);
 });
 
 test("a device read shows the card and polls gently", async () => {

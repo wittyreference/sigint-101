@@ -1,4 +1,4 @@
-// ABOUTME: Lesson-stage navigation: Next, Previous and rail-pip jumps between the rendered panels,
+// ABOUTME: Lesson-stage navigation: Next and Previous between the rendered panels,
 // ABOUTME: each step remembered server-side (POST /api/stage) so a reload resumes; Complete leads on.
 
 (function () {
@@ -13,8 +13,6 @@
 
   // Pure: how one rail pip reads, from its index in the stage order, the open stage's index, the
   // furthest index reached, and whether it is sealed (a stage past predict, before the commit).
-  //   "locked" sealed: never tappable     "active" the open stage
-  //   "done"   reached before: tappable   "ahead"  not reached yet: disabled
   function pipState(i, current, furthest, sealed) {
     if (sealed) return "locked";
     if (i === current) return "active";
@@ -27,12 +25,35 @@
     return;
   }
 
+  // The exam submit buttons live in the pinned footer, outside their form.
+  document.querySelectorAll("form[data-choice-commit]").forEach(function (form) {
+    var commit = Array.prototype.find.call(form.elements, function (control) {
+      return control.classList.contains("btn-commit");
+    });
+    if (!commit) return;
+    var status = commit.parentElement.querySelector("[data-choice-status]");
+
+    function syncChoice() {
+      var ready = !!form.querySelector('input[type="radio"]:checked:not(:disabled)');
+      commit.disabled = !ready;
+      status.textContent = ready ? "Choice set. Commit to unlock." : "Choose one, comrade";
+      return ready;
+    }
+
+    form.addEventListener("change", syncChoice);
+    form.addEventListener("submit", function (event) {
+      if (event.submitter && event.submitter.formNoValidate) return; // Practice exam Skip.
+      if (!syncChoice()) event.preventDefault();
+    });
+    window.addEventListener("pageshow", syncChoice);
+    syncChoice();
+  });
+
   var stageEl = document.querySelector(".stage");
   if (!stageEl) return;
   var lessonId = stageEl.getAttribute("data-lesson-id");
   // Only the panels the server rendered: sealed stages are absent until the commit.
   var panels = Array.prototype.slice.call(document.querySelectorAll(".stage-panel"));
-  // One pip per stage in the lesson's order; a sealed one is a <span>, never a button.
   var pips = Array.prototype.slice.call(document.querySelectorAll(".rail-pip"));
   var order = pips.map(function (p) { return p.getAttribute("data-stage"); });
   var furthest = parseInt(stageEl.getAttribute("data-reached"), 10) || 0;
@@ -43,10 +64,10 @@
 
   function paintRail(current) {
     pips.forEach(function (pip, i) {
-      var state = pipState(i, current, furthest, pip.tagName !== "BUTTON");
+      var state = pipState(i, current, furthest, pip.classList.contains("rail-pip--locked"));
       pip.classList.toggle("rail-pip--active", state === "active");
       pip.classList.toggle("rail-pip--done", state === "done");
-      if (pip.tagName === "BUTTON") pip.disabled = (state === "ahead");
+      pip.classList.toggle("rail-pip--ahead", state === "ahead");
       if (state === "active") pip.setAttribute("aria-current", "step");
       else pip.removeAttribute("aria-current");
     });
@@ -74,16 +95,27 @@
     remember(stage);
   }
 
-  // Finish the lesson: record completion, then lead on — the next lesson in the unit, or the unit
-  // page at its end (the server put that on the Complete button). On any refusal still lead on, so
-  // the learner is never trapped on the last screen (worst case the lesson stays un-ticked).
-  function complete() {
-    var btn = document.querySelector("[data-complete]");
-    var next = (btn && btn.getAttribute("data-next-href")) || "/";
-    if (!lessonId) { window.location = next; return; }
+  // Advance only after the server has recorded completion. Back stays available on a refusal.
+  function complete(btn) {
+    if (btn.disabled) return;
+    var status = btn.parentElement.querySelector("[data-complete-status]");
+    var next = btn.getAttribute("data-next-href") || "/";
+
+    function failed() {
+      if (status) status.textContent = "Progress couldn't be saved";
+      btn.textContent = "Retry save";
+      btn.disabled = false;
+    }
+
+    if (!lessonId) { failed(); return; }
+    btn.disabled = true;
+    if (status) status.textContent = "";
     fetch("/api/complete?lesson_id=" + encodeURIComponent(lessonId), { method: "POST" })
-      .then(function () { window.location = next; })
-      .catch(function () { window.location = next; });
+      .then(function (response) {
+        if (!response.ok) { failed(); return; }
+        btn.disabled = false;
+        window.location = next;
+      }, failed);
   }
 
   document.querySelectorAll("[data-nav='next']").forEach(function (btn) {
@@ -91,7 +123,7 @@
       var cur = openIndex();
       var to = stepTo(cur, 1, panels.length);
       if (to > -1) show(to);
-      else if (cur === panels.length - 1) complete();   // last stage: Next finishes the lesson
+      else if (cur === panels.length - 1) complete(btn);   // last stage: Next finishes the lesson
     });
   });
   document.querySelectorAll("[data-nav='prev']").forEach(function (btn) {
@@ -99,13 +131,7 @@
       show(stepTo(openIndex(), -1, panels.length));
     });
   });
-  document.querySelectorAll("[data-nav='goto']").forEach(function (pip) {
-    pip.addEventListener("click", function () {
-      var stage = pip.getAttribute("data-stage");
-      show(panels.findIndex(function (p) { return p.getAttribute("data-stage") === stage; }));
-    });
-  });
   document.querySelectorAll("[data-complete]").forEach(function (btn) {
-    btn.addEventListener("click", complete);
+    btn.addEventListener("click", function () { complete(btn); });
   });
 })();

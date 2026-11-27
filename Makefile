@@ -1,4 +1,4 @@
-.PHONY: test lint coverage selftest run bootstrap
+.PHONY: test lint coverage selftest run bootstrap render-check
 bootstrap:
 	./bootstrap.sh
 test:
@@ -11,3 +11,5 @@ selftest:
 	.venv/bin/pytest --cov=sigint101 --cov-fail-under=80 -q
 run:
 	.venv/bin/uvicorn sigint101.app:app --host 127.0.0.1 --port 8008
+render-check:
+	@.venv/bin/python tools/render/render_check.py

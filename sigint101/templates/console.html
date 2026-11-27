@@ -24,34 +24,36 @@
    predict actions or footer), so stepping back costs no screen height. #}
 {% macro prev_step(is_first) %}{% if not is_first %}<button class="btn btn--prev" type="button" data-nav="prev" aria-label="Previous step">&lsaquo; Prev</button>{% endif %}{% endmacro %}
 
+{% macro scroll_text(text) %}
+  <div class="scroll-frame">
+    <div class="stage-panel__body">
+      <p class="scroll-copy">{{ text }}</p>
+    </div>
+  </div>
+{% endmacro %}
+
+{% macro complete_lesson() %}
+  <span class="predict__hint" role="status" data-complete-status></span>
+  <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}"
+          data-next-href="{{ complete_href|default('/') }}">Complete lesson</button>
+{% endmacro %}
+
 {% block title %}{{ lesson.title }}{% endblock %}
 
 {% block content %}
-  {# ---- Stage rail: progress through the loop; sealed stages read as locked ----
-     Every stage up to the furthest one reached is a button that jumps back to it; a stage not yet
-     reached is a disabled button until the walk gets there. A sealed stage before the commit is
-     not a button at all — commit-before-reveal leaves nothing to tap. #}
+  {# Stage order and progress. Prev and Next do the moving. #}
   {% set reached_at = reached|default(0) %}
-  {# Seven stages (an intro lesson with a check) leave the gate label room only to wrap. #}
-  <nav class="rail{% if lesson.stage_order|length > 6 %} rail--long{% endif %}" aria-label="Lesson progress">
-    {% for stage in lesson.stage_order %}
-      {% set sealed = stage in lesson.sealed_stages %}
-      {% if sealed and not prediction_committed %}
-      <span class="rail-pip rail-pip--locked" data-stage="{{ stage }}">
-        <span class="rail-pip__dot"></span>{{ stage }}
-      </span>
-      {% else %}
-      {% set pip_class = 'rail-pip--active' if stage == cur
-          else ('rail-pip--done' if loop.index0 <= reached_at else '') %}
-      <button class="rail-pip {{ pip_class }}" type="button" data-stage="{{ stage }}"
-              data-nav="goto"{% if loop.index0 > reached_at %} disabled{% endif %}>
-        <span class="rail-pip__dot"></span>{{ stage }}
-      </button>
-      {% endif %}
-    {% endfor %}
-    <span class="rail-sep"></span>
+  <div class="rail">
+    <ol class="rail__steps" aria-label="Lesson progress">
+      {% for stage in lesson.stage_order %}
+        {% set sealed = stage in lesson.sealed_stages and not prediction_committed %}
+        {% set state = 'locked' if sealed else ('active' if stage == cur
+            else ('done' if loop.index0 <= reached_at else 'ahead')) %}
+        <li class="rail-pip rail-pip--{{ state }}" data-stage="{{ stage }}"{% if state == 'active' %} aria-current="step"{% endif %}>{{ stage }}</li>
+      {% endfor %}
+    </ol>
     {% if not prediction_committed %}<span class="rail__gate">Locked until you predict</span>{% endif %}
-  </nav>
+  </div>
 
   {# ---- One stage at a time. Sealed stages are not rendered at all until a
          prediction is committed: commit-before-reveal is enforced server-side,
@@ -251,7 +253,7 @@
             </div>
             {% endif %}
             {% endif %}
-            <form class="predict{% if prediction_committed %} predict--committed{% endif %}"
+            <form class="predict{% if prediction_committed %} predict--committed{% endif %}" novalidate data-choice-commit
                   method="post" action="{{ commit_url|default('#') }}">
               <fieldset class="predict-chips">
                 <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
@@ -272,8 +274,8 @@
                   <span class="predict__committed-note">Prediction committed, comrade &mdash; the rest is unlocked</span>
                   <button class="btn btn--primary" type="button" data-nav="next">Next step</button>
                 {% else %}
-                  <span class="predict__hint">Tap a choice, comrade. Nothing unlocks until you commit.</span>
-                  <button class="btn btn--primary btn-commit" type="submit">Commit prediction</button>
+                  <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+                  <button class="btn btn--primary btn-commit" type="submit" disabled>Commit prediction</button>
                 {% endif %}
               </div>
             </form>
@@ -286,7 +288,7 @@
                  lesson. Interactive, so it fits the fixed 800x480 with no scroll. ---- #}
             {% set fb = check_feedback|default(none) %}
             <h1 class="stage-panel__title">&#9773; {{ lesson.check.prompt }}</h1>
-            <form class="predict{% if fb %} predict--committed{% endif %}"
+            <form class="predict{% if fb %} predict--committed{% endif %}" novalidate data-choice-commit
                   method="post" action="{{ check_url|default('#') }}">
               <fieldset class="predict-chips">
                 <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
@@ -312,11 +314,10 @@
               <div class="predict__actions">
                 {{ prev_step(loop.first) }}
                 {% if fb %}
-                  <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}"
-                          data-next-href="{{ complete_href|default('/') }}">Complete lesson</button>
+                  {{ complete_lesson() }}
                 {% else %}
-                  <span class="predict__hint">Tap a choice, comrade, then commit.</span>
-                  <button class="btn btn--primary btn-commit" type="submit">Commit answer</button>
+                  <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+                  <button class="btn btn--primary btn-commit" type="submit" disabled>Commit answer</button>
                 {% endif %}
               </div>
             </form>
@@ -330,12 +331,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
-                  <div class="tune__caption">ISM band &middot; rtl_433 listening</div>
+                  <div class="tune__caption">ISM band &middot; rtl_433</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_lora %}
             {# LoRa instrument (M11): the meshtastic packet panel (panels.lora) over a fixed dial. #}
@@ -344,12 +345,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">915<span>MHz</span></div>
-                  <div class="tune__caption">US LoRa band &middot; meshtastic listening</div>
+                  <div class="tune__caption">US LoRa band &middot; meshtastic</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_rds %}
             {# RDS instrument (M12): the redsea station card (panels.rds) over a fixed dial. #}
@@ -358,12 +359,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq" data-rds-freq>{{ "%.1f"|format(mhz) }}<span>MHz</span></div>
-                  <div class="tune__caption">FM station &middot; redsea decoding RDS</div>
+                  <div class="tune__caption">FM station &middot; redsea</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_adsb %}
             {# ADS-B radar (M13): the dump1090 scope (panels.adsb) over a fixed dial. #}
@@ -372,12 +373,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">1090<span>MHz</span></div>
-                  <div class="tune__caption">Mode S &middot; dump1090 decoding ADS-B</div>
+                  <div class="tune__caption">Mode S &middot; dump1090</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_aprs %}
             {# APRS roster (M14): the multimon-ng station roster (panels.aprs) over a fixed dial. #}
@@ -386,12 +387,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">144.390<span>MHz</span></div>
-                  <div class="tune__caption">2m packet &middot; multimon-ng decoding APRS</div>
+                  <div class="tune__caption">2m packet &middot; multimon-ng</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_pocsag %}
             {# POCSAG page log (M15): the framing-only page log (panels.pocsag) over a fixed dial. #}
@@ -405,7 +406,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_acars %}
             {# ACARS log (M16): the acarsdec message log (panels.acars) over a fixed dial. #}
@@ -414,12 +415,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">131.550<span>MHz</span></div>
-                  <div class="tune__caption">VHF ACARS &middot; acarsdec decoding messages</div>
+                  <div class="tune__caption">VHF ACARS &middot; acarsdec</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_ais %}
             {# AIS roster (M26): the rtl_ais vessel roster (panels.ais) over a fixed dial. #}
@@ -433,7 +434,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_dmr %}
             {# DMR/P25 call log (M27): the dsd-fme call log (panels.dmr) over a fixed dial. #}
@@ -442,12 +443,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">450.000<span>MHz</span></div>
-                  <div class="tune__caption">Digital voice &middot; dsd-fme decoding calls</div>
+                  <div class="tune__caption">Digital voice &middot; dsd-fme</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_apt %}
             {# NOAA APT image (M24): the satdump picture frame (panels.apt) over a fixed dial. #}
@@ -456,12 +457,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">137.100<span>MHz</span></div>
-                  <div class="tune__caption">NOAA APT &middot; satdump decoding a pass</div>
+                  <div class="tune__caption">NOAA APT &middot; satdump</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_sstv %}
             {# SSTV image (M25): the sstv picture frame (panels.sstv) over a fixed dial. #}
@@ -470,12 +471,12 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
-                  <div class="tune__caption">ISS SSTV &middot; rtl_fm|sox|sstv decoding a picture</div>
+                  <div class="tune__caption">ISS SSTV &middot; rtl_fm|sox|sstv</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_flock %}
             {# Flock detector (M18): the monitor radio's detections list (panels.flock), titled with
@@ -490,7 +491,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_rayhunter %}
             {# Rayhunter monitor (M19): the Orbic findings panel (panels.rayhunter) over a fixed dial. #}
@@ -504,7 +505,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_flipper %}
             {# Flipper (M29): the attached device's own account of itself (panels.flipper), read
@@ -519,41 +520,45 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% else %}
             {# Instrument: the waterfall (panels.waterfall), with the pack's declared side panels
                (gain, provenance, ppm) beside it and the sweep's command strip under the row. #}
             <div class="instrument">
               <div class="instrument__row">
-                {{ panels.waterfall(tune_band) }}
+                {{ panels.waterfall(tune_band, interactive=stage != "demo") }}
                 {% if 'gain' in lesson.panels %}
-                {{ panels.gain_meter() }}
+                {{ panels.gain_meter(interactive=stage != "demo") }}
                 {% endif %}
                 {% if 'provenance' in lesson.panels %}
-                {{ panels.provenance() }}
+                {{ panels.provenance(primary=false) }}
                 {% endif %}
                 {% if 'ppm' in lesson.panels %}
-                {{ panels.ppm() }}
+                {{ panels.ppm(primary=false) }}
                 {% endif %}
               </div>
               {{ panels.sweep_command_strip() }}
-              {# +/- and a tap on the waterfall retune the live sweep through /api/tune (waterfall.js).
-                 The dial starts on the lesson's target, marked pending, and reads as tuned only once
-                 the radio confirms the span. #}
-              <div class="tune" data-tune-strip data-step-hz="{{ step_hz|default(100000) }}">
+              {# Demo shows the sweep without manual tuning. The dial starts on the lesson's target
+                 and reads as tuned once the radio confirms the span. #}
+              <div class="tune{% if stage == 'demo' %} tune--fixed{% endif %}" data-tune-strip
+                   data-step-hz="{{ step_hz|default(100000) }}">
+                {% if stage != 'demo' %}
                 <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
+                {% endif %}
                 <div class="tune__dial">
                   <div class="tune__freq tune__freq--pending" data-freq>{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
-                  <div class="tune__caption" data-tune-caption>Tap to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz</div>
+                  <div class="tune__caption" data-tune-caption>{% if stage == 'demo' %}Watch the waterfall{% else %}Tap to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz{% endif %}</div>
                 </div>
+                {% if stage != 'demo' %}
                 <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+                {% endif %}
                 {# Next-step rides on the tune strip here (not a separate footer) so the fixed 800x480
                    instrument stage keeps a scrollable band for the narration below. #}
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% endif %}
 
@@ -572,18 +577,22 @@
                learner feedback). Explain only renders after a commit, so the answer never reaches
                the page early; a pack with no answer shows no header. #}
             {% set scored = lesson.score(committed_choice) if prediction_committed else none %}
-            <div class="stage-panel__body">
-              {% if scored %}
-              <div class="verdict">
-                <div class="verdict__line">Your call: <b>{{ scored.said }}</b> &middot; {{ lesson.reveal_label }}: <b>{{ scored.answer|join(' or ') }}</b></div>
-                <div class="verdict__why">{{ scored.verdict }}</div>
+            <div class="scroll-frame">
+              <div class="stage-panel__body">
+                <div class="scroll-copy">
+                  {% if scored %}
+                  <div class="verdict">
+                    <div class="verdict__line">Your call: <b>{{ scored.said }}</b> &middot; {{ lesson.reveal_label }}: <b>{{ scored.answer|join(' or ') }}</b></div>
+                    <div class="verdict__why">{{ scored.verdict }}</div>
+                  </div>
+                  {% endif %}
+                  <p>{{ lesson.stages[stage] }}</p>
+                  <p class="stage-panel__concept">{{ lesson.concept }}</p>
+                </div>
               </div>
-              {% endif %}
-              <p>{{ lesson.stages[stage] }}</p>
-              <p class="stage-panel__concept">{{ lesson.concept }}</p>
             </div>
             {% else %}
-            <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            {{ scroll_text(lesson.stages[stage]) }}
             {% endif %}
           {% endif %}
 
@@ -591,11 +600,10 @@
              theirs in their own action row; every other stage (the text stages, and the no-hardware
              instrument stages that render as text) keeps the footer. #}
           {% if stage not in ('predict', 'check') and not (stage in INSTRUMENT and lesson.needs_hardware) %}
-            <footer class="stage-foot">
+            <footer class="stage-foot{% if loop.last %} predict__actions{% endif %}">
               {{ prev_step(loop.first) }}
               {% if loop.last %}
-              <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}"
-                      data-next-href="{{ complete_href|default('/') }}">Complete lesson</button>
+              {{ complete_lesson() }}
               {% else %}
               <button class="btn btn--primary" type="button" data-nav="next">Next step</button>
               {% endif %}
@@ -666,7 +674,7 @@
      tap-to-tune retune the live sweep) in /static/waterfall.js, which alone paints the canvas — a
      placeholder spectrogram would be invented signal, which the RF honesty invariant forbids.
      Keyboard scrolling is shared across screens — see /static/scroll-keys.js (loaded in base). -->
-<!-- Stage navigation: Next, Previous and rail-pip jumps; each step is remembered server-side so a
+<!-- Stage navigation: Next and Previous; each step is remembered server-side so a
      reload resumes in place, and Complete leads on to the next lesson or back to the unit. -->
 <script src="/static/lesson-nav.js"></script>
 {% endblock %}

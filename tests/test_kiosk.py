@@ -200,7 +200,7 @@ def test_home_swaps_back_for_exit_sigint_101(tmp_path):
     form = re.search(r'<form[^>]*class="statusbar__exit"[^>]*>(.*?)</form>', html, re.S)
     assert form, "home carries the Exit form in the status bar"
     assert 'method="post"' in form.group(0) and 'action="/api/kiosk/exit"' in form.group(0)
-    assert re.search(r'<button[^>]*type="submit"', form.group(1))
+    assert re.search(r'<button[^>]*type="button"', form.group(1))
     assert re.search(r"Exit SIGINT 101", form.group(1))
     # Home's Back used to link to home itself; it is gone there.
     assert 'class="btn-back"' not in html

@@ -455,7 +455,8 @@ def test_explain_header_sets_your_call_beside_what_the_radio_does():
     assert "VERDICT_marker" in block
     # The header rides at the top of the explain's scrolling body, so a long eyebrow can never
     # squeeze the reading itself to nothing on the fixed 800x480 panel.
-    assert re.search(r'<div class="stage-panel__body">\s*<div class="verdict', html)
+    assert re.search(r'<div class="stage-panel__body">\s*<div class="scroll-copy">\s*'
+                     r'<div class="verdict', html)
     assert "EXPLAIN_SCORED_marker" in html
 
 
@@ -621,15 +622,21 @@ def test_a_gain_lesson_shows_the_gain_meter_beside_the_waterfall():
     assert "data-gain-gap" in html and "data-gain-floor" in html
 
 
-def test_the_gain_panel_carries_a_real_gain_stepper_and_its_value():
-    # M2's try stage is "step the gain from the bottom up": the panel has - and + that drive
-    # /api/gain, and the gain the radio is on is shown beside them (unknown until it reports).
+def test_demo_keeps_the_live_readings_and_reserves_radio_controls_for_try():
     html = _console(lesson=_gain_intro_lesson(), current_stage="demo")
-    demo = re.search(r'<section class="stage-panel[^"]*" data-stage="demo"(.*?)</section>',
-                     html, re.S).group(1)
-    meter = re.search(r'<aside class="gain-meter"(.*?)</aside>', demo, re.S).group(1)
-    assert 'data-gain-step="-1"' in meter and 'data-gain-step="1"' in meter
-    assert re.search(r"data-gain-value[^>]*>&mdash;<", meter)
+    demo = _section(html, "demo")
+    assert "data-tune-step" not in demo
+    assert "data-gain-step" not in demo
+    assert not re.search(r"<canvas[^>]* data-tune(?=\s|>)", demo)
+    assert "Tap to tune" not in demo
+    assert 'class="waterfall"' in demo and "data-gain-value" in demo
+
+    # M2's Try asks the learner to step the gain and watch how the gap changes.
+    try_stage = _section(html, "try")
+    assert re.search(r"<canvas[^>]* data-tune(?=\s|>)", try_stage)
+    assert 'data-tune-step="-1"' in try_stage and 'data-tune-step="1"' in try_stage
+    assert 'data-gain-step="-1"' in try_stage and 'data-gain-step="1"' in try_stage
+    assert re.search(r"data-gain-value[^>]*>&mdash;<", try_stage)
 
 
 def test_the_gain_stepper_buttons_are_full_touch_targets():
@@ -926,7 +933,7 @@ def test_a_flipper_lesson_shows_the_device_panel_not_a_waterfall():
     assert "canvas class=\"waterfall\"" not in html
     # The honest states every panel has: a badge that is not LIVE until the device answers, the
     # device card hidden, and the empty line at the readable size, never a device line up front.
-    assert re.search(r"data-flipper-badge[^>]*>SAMPLE &middot; NOT LIVE<", demo)
+    assert re.search(r"data-flipper-badge[^>]*>CHECKING<", demo)
     assert re.search(r"<div[^>]*data-flipper-card[^>]*\shidden", demo)
     assert re.search(r'class="decoder__empty" data-flipper-empty', demo)
     # Back a step rides the fixed dial beside Next, as on every other panel's stages.
@@ -1033,7 +1040,8 @@ def _live_instrument(html):
     """The live (operate) instrument's markup: its waterfall wrap and tune strip."""
     return re.search(r'<section class="stage-panel[^"]*" data-stage="operate".*?'
                      r'<div class="instrument(?: instrument--gain)?">(.*?)'
-                     r'<p class="stage-panel__body">', html, re.S).group(1)
+                     r'<div class="scroll-frame">\s*<div class="stage-panel__body">', html,
+                     re.S).group(1)
 
 
 def test_a_tuned_lesson_names_its_bin_size_and_step_for_the_live_tune():
@@ -1129,9 +1137,7 @@ def test_home_puts_the_exam_and_operator_bars_side_by_side_in_one_row():
     assert 'href="/exam"' in inside and 'href="/operate"' in inside
 
 
-def test_every_screen_has_no_horizontal_overflow_affordance():
-    # Guard against a stray inline width that would break the 800x480 no-scroll rule;
-    # this is a smoke check that the templates render without raising.
+def test_base_console_and_home_templates_render_with_canvas_or_statusbar():
     for html in (_render("base.html", **_status()), _console(),
                  _render("home.html", **_status(), tiles=UNITS)):
         assert "<canvas" in html or "statusbar" in html
@@ -1531,3 +1537,202 @@ def test_the_restart_key_stays_hidden_until_waterfall_js_shows_it():
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.parametrize("stage", ["explain", "check"])
+def test_completion_has_a_body_size_status_beside_save_and_keeps_back(stage):
+    lesson = _intro_lesson() if stage == "explain" else load_lessons(REAL_PACKS)[1]
+    html = _console(
+        lesson=lesson, current_stage=stage, prediction_committed=True,
+        check_feedback={"correct": True, "chosen": {"label": "A", "why": "It fits."}},
+    )
+    panel = _section(html, stage)
+    action_class = "stage-foot" if stage == "explain" else "predict__actions"
+    row = re.search(r'class="' + action_class + r'\b[^"]*">(.*?)(?:</footer>|</div>)',
+                    panel, re.S).group(1)
+    status = re.search(r"<span\b([^>]*)>\s*</span>", row)
+    assert status and 'role="status"' in status[1] and "data-complete-status" in status[1]
+    assert 'class="predict__hint"' in status[1]
+    assert _css_decl(".predict__hint", "font-size") == "18px"
+    assert re.search(r"<button[^>]*\bdata-complete\s[^>]*>Complete lesson</button>", row)
+    assert 'class="btn-back"' in html
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_exam_eyebrow_gets_its_emblem_only_from_css(template):
+    q = exam.load_pool().get("T1A01")
+    html = _render(template, **_exam_ctx(
+        question=q, reviewed=False, position=1, total=35, score=0, answered=0, pass_mark=26,
+    ))
+    eyebrow = re.search(r'class="stage-panel__eyebrow">([^<]+)</div>', html)[1]
+    assert eyebrow.startswith("EXAM" if template == "exam.html" else "PRACTICE EXAM")
+    assert "\u262d" not in eyebrow and "&#9773;" not in eyebrow
+    assert _css_decl(".stage-panel__eyebrow::before", "content") == r'"\262D "'
+
+
+def test_active_tile_cursor_stays_with_the_left_aligned_code():
+    assert _css_decl(".tile--active .tile__head::before", "content") is None
+    marker = ".tile--active .tile__code::before"
+    assert _css_decl(marker, "content") == r'"\25B6"'
+    assert _css_decl(marker, "animation").startswith("blink ")
+
+
+def test_unit_grid_has_no_three_pixel_padding_overflow_without_shrinking_tiles():
+    # Unit 4 originally measured 417px in a 414px region with 14px insets and a 66px bar.
+    # Take the taller bar out of those insets so the tiles themselves keep their size.
+    initial_inset = _px(_css_decl(".tiles", "padding"))
+    top = _px(_css_decl(".content > .tiles:last-child", "padding-top"))
+    bottom = _px(_css_decl(".content > .tiles:last-child", "padding-bottom"))
+    view = 480 - _px(_css_decl(".app", "--bar-h"))
+    assert 417 - 2 * initial_inset + top + bottom <= view
+    assert _css_decl(".tiles", "overflow-y") == "auto"
+    assert _css_decl(".tiles", "grid-auto-rows") == "max-content"
+    assert _decls(_css_rule(".tile"))["min-height"] == "124px"
+
+
+@pytest.mark.parametrize("form", ["predict", "check", "exam.html", "exam_sim.html"])
+def test_choice_commit_has_a_themed_gate_without_native_popup(form):
+    if form in ("predict", "check"):
+        lesson = load_lessons(REAL_PACKS)[1]
+        whole = _console(lesson=lesson, current_stage=form, prediction_committed=form == "check")
+        html = _section(whole, form)
+    else:
+        q = exam.load_pool().get("T1A01")
+        whole = html = _render(form, **_exam_ctx(question=q, reviewed=False, can_skip=True))
+    assert '/static/lesson-nav.js' in whole
+    assert re.search(r"<form[^>]*\bnovalidate\b[^>]*>", html)
+    assert re.search(r"<form[^>]*\bdata-choice-commit\b[^>]*>", html)
+    assert re.search(r'<input type="radio"[^>]*\brequired\b[^>]*>', html)
+    assert re.search(r'<button[^>]*\bbtn-commit\b[^>]*\bdisabled\b[^>]*>', html)
+    assert re.search(r'<span[^>]*role="status"[^>]*>Choose one, comrade</span>', html)
+
+
+def test_receiver_macros_start_checking_and_adsb_count_is_hidden():
+    html = _console(lesson=_intro_lesson(), current_stage="demo")
+    assert "Checking receiver…" in html
+    assert "SAMPLE &middot; NOT LIVE" not in html
+    rack = _render("operate.html", **_status(), inst=instrument("adsb"),
+                   instruments=INSTRUMENTS)
+    assert "Checking receiver…" in rack
+    assert re.search(r'<div class="radar__count" hidden>', rack)
+
+
+def test_shared_refusal_badge_reads_on_every_theme_including_the_waterfall():
+    selector = ".badge--na, .decoder__status--empty, .decoder__status--stopped"
+    rule = _decls(_css_rule(selector))
+    ink = re.fullmatch(r"var\((--[a-z-]+)\)", rule["color"])[1]
+    paper = re.fullmatch(r"var\((--[a-z-]+)\)", rule["background"])[1]
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        assert _contrast(tokens[ink], tokens[paper]) >= 4.5, theme
+
+
+def test_status_bar_controls_get_the_full_touch_height_inside_the_bar():
+    bar = _css_rule(".statusbar")
+    assert _decls(bar)["align-items"] == "stretch"
+    assert _px(_css_decl(".app", "--bar-h")) - _px(_decls(bar)["border-bottom"]) >= 72
+    for control in (".btn-back", ".btn-theme", ".btn-exit"):
+        assert not re.search(rf"{control}::(?:after|before)\s*\{{", APP_CSS.read_text())
+    header = _render("base.html", **_status(exit_to_desktop=True))
+    assert re.search(r'<button class="btn-back btn-exit" type="button"', header)
+    assert re.search(r'data-exit-armed hidden>Tap again<br>to exit<', header)
+
+
+@pytest.mark.parametrize("stage", ["predict", "check"])
+def test_lesson_gates_recover_the_header_height_without_shrinking_touch_targets(stage):
+    header_and_rail = sum(_px(_css_decl(".app", token)) for token in ("--bar-h", "--rail-h"))
+    stage_rule = _decls(_css_rule(f'.stage-panel[data-stage="{stage}"]'))
+    assert header_and_rail > 66 + 40
+    assert header_and_rail + _px(stage_rule["padding-top"]) + _px(stage_rule["padding-bottom"]) <= (
+        66 + 40 + 2 * 6
+    )
+    assert _px(_css_decl(".app", "--touch")) >= 72
+
+
+def test_scroll_cue_frames_wrap_home_lesson_text_and_operator_picker():
+    home = _render("home.html", **_status(), tiles=UNITS)
+    home = re.sub(r"<!--.*?-->", "", home, flags=re.S)
+    assert re.search(r'class="scroll-frame home-grid">\s*<[^>]*class="tiles"', home)
+    lesson = _console(lesson=_intro_lesson(), current_stage="demo")
+    for stage in ("frame", "demo"):
+        assert re.search(r'class="scroll-frame">\s*<div class="stage-panel__body">\s*'
+                         r'<p class="scroll-copy">', _section(lesson, stage))
+    rack = _render("operate.html", **_status(), inst=instrument("adsb"), instruments=INSTRUMENTS)
+    assert re.search(r'class="scroll-frame rack__chooser">\s*<nav class="rack__picker"', rack)
+    assert _px(_css_decl(".home-grid .tile", "min-height")) < _px(
+        _decls(_css_rule(".tile"))["min-height"])
+
+
+def test_adsb_labels_live_outside_the_scaled_svg_with_a_css_pixel_floor():
+    html = _render("operate.html", **_status(), inst=instrument("adsb"), instruments=INSTRUMENTS)
+    plot = re.search(r'<div class="radar__plot">\s*(<svg.*?</svg>)(.*?)</div>', html, re.S)
+    assert plot
+    assert "<text " not in plot[1]
+    assert all(f">{point}<" in plot[2] for point in "NESW")
+    assert "data-adsb-labels" in html
+    for label in (".radar__compass", ".radar__plane-label", ".radar__ring-label"):
+        assert _px(_css_decl(label, "font-size")) >= 13
+
+
+def test_refusals_centre_the_message_and_keep_a_command_whole():
+    condition = (".decoder:has(> .decoder__head > "
+                 ":is(.decoder__status--empty, .decoder__status--stopped))")
+    assert _css_decl(condition + " > :not(.decoder__head, .decoder__empty)", "display") == "none"
+    assert _css_decl(condition + " > .decoder__empty", "margin-block") == "auto"
+    assert _css_decl(condition + " > .decoder__empty", "overflow-y") == "auto"
+    assert _css_decl(".refusal-command", "white-space") == "nowrap"
+
+
+def test_lesson_instrument_captions_leave_activity_to_the_status_badge():
+    caption_pattern = re.compile(r'<div class="tune__caption"[^>]*>(.*?)</div>', re.S)
+    activity = re.compile(r"\b(?:decoding|listening|sweeping)\b", re.I)
+    claims = []
+    for lid, lesson in load_lessons(REAL_PACKS).items():
+        if not lesson.needs_hardware:
+            continue
+        html = _console(lesson=lesson, prediction_committed=True, current_stage="explain")
+        captions = caption_pattern.findall(html)
+        assert captions, f"lesson {lid} has an instrument but no dial caption"
+        for caption in sorted(set(captions)):
+            if activity.search(re.sub(r"<[^>]*>", "", caption)):
+                claims.append(f"lesson {lid}: {caption}")
+    assert not claims, "\n".join(claims)
+
+
+@pytest.mark.parametrize("key", ["waterfall", "aprs"])
+def test_operator_adjust_keys_name_the_quantity_on_the_key(key):
+    html = _render("operate.html", **_status(), inst=instrument(key), instruments=INSTRUMENTS,
+                   freq_hz=144_390_000)
+    pairs = {"tune": "Freq", "gain": "Gain"} if key == "waterfall" else {"tune": "Freq"}
+    for control, label in pairs.items():
+        for direction in (-1, 1):
+            hook = f'data-{control}-step="{direction}"'
+            button = re.search(rf'<button[^>]*{hook}[^>]*>(.*?)</button>', html, re.S)
+            assert button and f">{label}<" in button[1]
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+@pytest.mark.parametrize("reviewed", [False, True])
+def test_exam_body_has_the_more_below_cue_in_study_and_practice(template, reviewed):
+    html = _render(template, **_exam_ctx(
+        question=exam.load_pool().get("T0A01"), reviewed=reviewed,
+        position=1, total=35, score=0, answered=0, pass_mark=26))
+    assert re.search(r'<div class="scroll-frame">\s*<div class="exam__body">', html)
+    assert 'src="/static/scroll-keys.js"' in html
+
+
+@pytest.mark.parametrize(("lesson_id", "instrument_key", "control"), [
+    (3, "health", "data-prov-capture"),
+    (4, "clock", "data-ppm-measure"),
+])
+def test_lesson_next_is_primary_beside_a_secondary_instrument_action(
+    lesson_id, instrument_key, control,
+):
+    lesson = load_lessons(REAL_PACKS)[lesson_id]
+    demo = _section(_console(lesson=lesson, current_stage="demo"), "demo")
+    keys = re.findall(r'<button[^>]*class="[^"]*btn--primary[^"]*"[^>]*>', demo)
+    assert len(keys) == 1 and 'data-nav="next"' in keys[0]
+    assert re.search(rf'<button class="[^"]*btn--secondary[^"]*"[^>]*{control}', demo)
+    rack = _render("operate.html", **_status(), inst=instrument(instrument_key),
+                   instruments=INSTRUMENTS, freq_hz=98_100_000)
+    assert re.search(rf'<button class="[^"]*btn--primary[^"]*"[^>]*{control}', rack)

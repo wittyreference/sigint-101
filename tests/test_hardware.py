@@ -163,6 +163,25 @@ def test_no_radio_at_all_is_refused():
         select_rtlsdr_index(None, devices=())
 
 
+def test_no_radio_refusal_keeps_honest_promise_without_naming_a_waterfall():
+    # select_rtlsdr_index serves every SDR instrument (decoders, PPM, sweeper), so its empty-bus
+    # refusal must not claim a waterfall on a decoder panel.
+    for serial in (None, "00000001"):
+        with pytest.raises(DeviceSelectionError) as caught:
+            select_rtlsdr_index(serial, devices=())
+        message = str(caught.value)
+        assert "no RTL-SDR on the USB bus" in message
+        assert "SIGINT 101 will not fake" in message
+        assert "waterfall" not in message.lower()
+
+
+def test_no_radio_refusal_fits_the_64_character_panel_budget():
+    # The decoder panels' measured fit budget is 64 characters; keep the refusal within it.
+    with pytest.raises(DeviceSelectionError) as caught:
+        select_rtlsdr_index(None, devices=())
+    assert len(str(caught.value)) <= 64
+
+
 def test_a_bus_that_cannot_be_surveyed_is_not_reported_as_an_empty_bus():
     # "The survey failed" and "there are no radios" are different facts, and conflating
     # them is how a working radio gets reported as absent — the same lie the sweep-death

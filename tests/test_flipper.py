@@ -556,7 +556,7 @@ def test_the_route_refuses_a_failing_port_and_the_panel_shows_why(tmp_path, case
     assert body["available"] is False and body["device"] is None and body["command"] is None
     _assert_refusal(body["reason"], words)
     shown = _panel_shows(resp.status_code, resp.text)
-    assert shown["badge"] == "NO READ", shown
+    assert shown["badge"] == "UNAVAILABLE", shown
     assert shown["empty"] == body["reason"], shown         # the reason, whole, as the route gave it
     assert shown["emptyHidden"] is False and shown["cardHidden"] is True, shown
     assert shown["nextPollMs"] == [RETRY_MS], shown
@@ -586,9 +586,10 @@ def test_a_server_fault_is_shown_as_no_reading_and_polled_again(tmp_path):
     shown = _panel_shows(resp.status_code, resp.text)
     reading = _panel_shows(None, "")                       # not even an answer: the same rule
     for down in (shown, reading):
-        assert down["badge"] == "NO READ", down
-        assert "reading the Flipper" not in down["empty"], down
+        assert down["badge"] == "UNAVAILABLE", down
+        assert "Checking receiver" not in down["empty"], down
         assert "no Flipper on USB" not in down["empty"], down   # an error is not an absence
         assert down["emptyHidden"] is False and down["cardHidden"] is True, down
         assert down["nextPollMs"] == [RETRY_MS], down
     assert "500" in shown["empty"], shown
+    assert "lost contact with the console" in reading["empty"].lower(), reading

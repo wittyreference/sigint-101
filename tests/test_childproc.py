@@ -1,14 +1,16 @@
 # ABOUTME: Tests the shared radio-child helpers: own session, dies with the console, kill path.
 # ABOUTME: Real short-lived processes prove the OS behaviour; fakes at the boundary pin the reasons.
 
+import gc
+import io
 import os
 import signal
 import subprocess
 import sys
-import tempfile
 import textwrap
 import threading
 import time
+import warnings
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,7 @@ from sigint101.childproc import (
     spawn,
     stop_process,
 )
+from tests.child_fakes import Child
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -182,9 +185,7 @@ class _Ended:
         self.args = args
         self._code = code
         self.stdout = None                  # a Popen without stdout=PIPE carries None here
-        self.stderr = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-        self.stderr.write(said)
-        self.stderr.flush()
+        self.stderr = io.StringIO(said)
 
     def poll(self):
         return self._code
@@ -502,3 +503,323 @@ def test_a_spawn_clears_the_stopped_state():
     watch.spawned(_Ended(["rtl_433"], None))
     assert watch.stopped is False
     assert watch.reason is None
+
+
+# --- RunGuard: numbers runs under the buffer lock ---------------------------------------------
+
+
+def test_run_guard_advances_the_run_and_rejects_earlier_ones():
+    guard = childproc.RunGuard()
+    first = guard.current
+    with guard:
+        assert guard.is_current(first) is True
+    second = guard.end()
+    assert second != first
+    assert guard.current == second
+    with guard:
+        assert guard.is_current(first) is False
+        assert guard.is_current(second) is True
+
+
+def test_run_guard_end_waits_for_a_holder_of_the_buffer_lock():
+    guard = childproc.RunGuard()
+    first = guard.current
+    entered, released, ended = threading.Event(), threading.Event(), threading.Event()
+
+    def holder():
+        with guard:
+            entered.set()
+            released.wait(5)
+
+    def stopper():
+        guard.end()
+        ended.set()
+
+    t_hold = threading.Thread(target=holder)
+    t_hold.start()
+    assert entered.wait(5)
+    t_stop = threading.Thread(target=stopper)
+    t_stop.start()
+    assert not ended.wait(0.05)          # end() cannot move the run on while the lock is held
+    released.set()
+    t_hold.join(5)
+    t_stop.join(5)
+    assert ended.is_set()
+    with guard:
+        assert guard.is_current(first) is False
+
+
+def test_run_guard_end_marks_watch_stopping_and_blocks_stale_retry():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    proc = _Ended(["rtl_433"], 1, "usb_claim_interface error -6\n")
+    watch.spawned(proc)
+    guard.end(watch)
+    assert watch.ended(proc, runs=guard, run=first) is None
+    assert watch.stopped is False
+    assert watch.blocked() is None
+
+
+def test_watch_ended_requires_current_generation_to_commit_retry():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    proc = _Ended(["rtl_433"], 1, "usb_claim_interface error -6\n")
+    watch.spawned(proc)
+    guard.end()
+    # Even if stopping() has not cleared _current, a stale generation cannot commit a retry.
+    assert watch.ended(proc, runs=guard, run=first) is None
+    assert watch.stopped is False
+    assert watch.blocked() is None
+
+
+def test_watch_ended_computes_exit_diagnostics_outside_run_guard_lock():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    waiting, release = threading.Event(), threading.Event()
+    lock_free_during_wait = []
+
+    class _SlowExit(_Ended):
+        def __init__(self):
+            super().__init__(["rtl_433"], None, "usb_claim_interface error -6\n")
+
+        def wait(self, timeout=None):
+            free = guard.lock.acquire(blocking=False)
+            if free:
+                guard.lock.release()
+            lock_free_during_wait.append(free)
+            waiting.set()
+            release.wait(5)
+            self._code = 1
+            return 1
+
+    proc = _SlowExit()
+    watch.spawned(proc)
+    outcome = []
+    reader = threading.Thread(
+        target=lambda: outcome.append(watch.ended(proc, runs=guard, run=first)))
+    reader.start()
+    assert waiting.wait(5)
+    assert lock_free_during_wait == [True]
+    # Stop invalidates the run and watch while the reader is waiting on exit diagnostics.
+    guard.end(watch)
+    release.set()
+    reader.join(5)
+    assert not reader.is_alive()
+    assert outcome == [None]
+    assert watch.stopped is False
+    assert watch.blocked() is None
+
+
+def test_settle_ended_stops_pipe_process_before_joining_and_ends_run_after():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    events = []
+
+    class _TrackedProc(_Ended):
+        def terminate(self):
+            events.append(("terminate", guard.is_current(first)))
+
+    class _FakeThread:
+        def join(self, timeout=None):
+            events.append(("join", timeout, guard.is_current(first)))
+
+    proc = _TrackedProc(["rtl_433"], 1)
+    watch.spawned(proc)
+
+    def note_end(p, run):
+        events.append(("note_end", p is proc, run == first, guard.is_current(first)))
+        watch.ended(p, runs=guard, run=run)
+
+    reaped = childproc.settle_ended(
+        proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=1.25)
+    assert reaped is True
+    assert events == [
+        ("note_end", True, True, True),
+        ("terminate", True),
+        ("join", 1.25, True),
+    ]
+    with guard:
+        assert guard.is_current(first) is False
+    assert watch.stopped is True
+
+
+def test_settle_ended_stops_socket_child_before_join_and_closes_transport_after():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    events = []
+
+    class _SocketFeed(_Ended):
+        def stop_child(self):
+            events.append(("stop_child", guard.is_current(first)))
+            return True
+
+        def close_transport(self):
+            events.append(("close_transport", guard.is_current(first)))
+
+        def terminate(self):  # pragma: no cover - settle_ended must use stop_child, not terminate
+            events.append(("terminate", guard.is_current(first)))
+
+    class _FakeThread:
+        def join(self, timeout=None):
+            events.append(("join", timeout, guard.is_current(first)))
+
+    proc = _SocketFeed(["dump1090-fa"], 1)
+    watch.spawned(proc)
+
+    def note_end(p, run):
+        events.append(("note_end", p is proc, run == first, guard.is_current(first)))
+        watch.ended(p, runs=guard, run=run)
+
+    reaped = childproc.settle_ended(
+        proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=0.75)
+    assert reaped is True
+    assert events == [
+        ("note_end", True, True, True),
+        ("stop_child", True),
+        ("join", 0.75, True),
+        ("close_transport", False),
+    ]
+    with guard:
+        assert guard.is_current(first) is False
+    assert watch.stopped is True
+
+
+def test_settle_ended_ends_run_even_when_join_times_out_and_reports_unkillable(monkeypatch):
+    monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.01)
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    proc = _Unkillable()
+    watch.spawned(proc)
+
+    class _StuckThread:
+        def join(self, timeout=None):
+            pass
+
+    reaped = childproc.settle_ended(
+        proc, _StuckThread(), guard, watch, note_end=lambda _p, _r: None, wait_s=0.01)
+    assert reaped is False
+    assert proc.sent == ["TERM", "KILL"]
+    with guard:
+        assert guard.is_current(first) is False
+
+
+@pytest.mark.parametrize("fail_at", ["note_end", "stop", "join"])
+def test_settle_ended_cleans_up_pipe_process_when_step_raises(fail_at):
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    events = []
+
+    class _TrackedProc(_Ended):
+        def terminate(self):
+            events.append(("terminate", guard.is_current(first)))
+
+        def wait(self, timeout=None):
+            if fail_at == "stop":
+                raise OSError("wait failed")
+            return super().wait(timeout=timeout)
+
+    class _FakeThread:
+        def join(self, timeout=None):
+            events.append(("join", guard.is_current(first)))
+            if fail_at == "join":
+                raise RuntimeError("join failed")
+
+    proc = _TrackedProc(["rtl_433"], 1)
+    watch.spawned(proc)
+
+    def note_end(p, run):
+        events.append(("note_end", guard.is_current(first)))
+        if fail_at == "note_end":
+            raise OSError("stderr read failed")
+        watch.ended(p, runs=guard, run=run)
+
+    expected = RuntimeError if fail_at == "join" else OSError
+    with pytest.raises(expected):
+        childproc.settle_ended(
+            proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=0.5)
+
+    with guard:
+        assert guard.is_current(first) is False
+    assert [name for name, _ in events].count("terminate") == 1
+    if fail_at == "note_end":
+        assert events == [("note_end", True), ("terminate", False)]
+    elif fail_at == "stop":
+        assert events == [("note_end", True), ("terminate", True)]
+    else:
+        assert events == [("note_end", True), ("terminate", True), ("join", True)]
+
+
+@pytest.mark.parametrize("fail_at", ["note_end", "stop_child", "join"])
+def test_settle_ended_cleans_up_socket_feed_when_step_raises(fail_at):
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    events = []
+
+    class _SocketFeed(_Ended):
+        def stop_child(self):
+            events.append(("stop_child", guard.is_current(first)))
+            if fail_at == "stop_child":
+                raise OSError("stop_child failed")
+            return True
+
+        def close_transport(self):
+            events.append(("close_transport", guard.is_current(first)))
+
+    class _FakeThread:
+        def join(self, timeout=None):
+            events.append(("join", guard.is_current(first)))
+            if fail_at == "join":
+                raise RuntimeError("join failed")
+
+    proc = _SocketFeed(["dump1090-fa"], 1)
+    watch.spawned(proc)
+
+    def note_end(p, run):
+        events.append(("note_end", guard.is_current(first)))
+        if fail_at == "note_end":
+            raise OSError("stderr read failed")
+        watch.ended(p, runs=guard, run=run)
+
+    expected = RuntimeError if fail_at == "join" else OSError
+    with pytest.raises(expected):
+        childproc.settle_ended(
+            proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=0.5)
+
+    with guard:
+        assert guard.is_current(first) is False
+    assert [name for name, _ in events].count("stop_child") == 1
+    assert events[-1] == ("close_transport", False)
+    if fail_at == "note_end":
+        assert events == [
+            ("note_end", True), ("stop_child", False), ("close_transport", False),
+        ]
+    elif fail_at == "stop_child":
+        assert events == [
+            ("note_end", True), ("stop_child", True), ("close_transport", False),
+        ]
+    else:
+        assert events == [
+            ("note_end", True), ("stop_child", True), ("join", True),
+            ("close_transport", False),
+        ]
+
+
+def test_fake_children_do_not_leak_unclosed_stderr_files():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        child = Child(["rtl_433"], code=1, said=RTL_FM_BUSY)
+        ended = _Ended(["rtl_433"], 1, RTL_FM_BUSY)
+        assert "usb_claim_interface error -6" in exit_reason(child)
+        assert "usb_claim_interface error -6" in exit_reason(ended)
+        del child, ended
+        gc.collect()
+    resource_warnings = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert resource_warnings == []

@@ -13,10 +13,14 @@ Diagnose shell vs `.env` conflicts that cause mysterious auth failures. Run this
 
 ## Usage
 
-Run the diagnostic script:
+> **Note:** `./scripts/env-doctor.sh` is **not shipped in this repository** (and `ff.config.json`
+> defines no `envDoctor` block). Check shell-vs-`.env` conflicts manually with `env` against any
+> local `.env` file.
+
+When the diagnostic script is present in a project that ships it:
 
 ```bash
-./scripts/env-doctor.sh
+./scripts/env-doctor.sh  # not shipped in this repository
 ```
 
 ## Configuration

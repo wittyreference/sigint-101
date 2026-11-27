@@ -27,6 +27,13 @@ def test_setup_names_every_tool_development_needs():
     assert not missing, f"README's Setup names no {missing}"
 
 
+def test_setup_names_the_python_floor():
+    # The code annotates with PEP 604 unions (int | None), and FastAPI evaluates the route
+    # annotations at startup, so anything older than Python 3.10 fails before the console runs.
+    assert re.search(r"\bpython 3\.10\b", _setup(), re.IGNORECASE), \
+        "README's Setup does not name Python 3.10 as the minimum"
+
+
 def test_setup_gives_both_paths_and_links_the_quick_start():
     text = _setup()
     for command in ("bootstrap.sh", "make selftest", "make run", "deploy/provision.sh"):

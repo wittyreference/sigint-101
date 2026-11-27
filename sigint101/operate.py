@@ -137,7 +137,7 @@ def validate_decoder_hz(inst: Instrument, value) -> int:
 def command_gain(command: str | None) -> str | None:
     """The tuner gain a live command line sets, exactly as written, or None if it sets none.
 
-    rtl_fm, rtl_power and acarsdec take `-g`, satdump `--general_gain`, and dsd-fme carries it
+    rtl_fm, rtl_power and acarsdec take `-g`, satdump `--gain`, and dsd-fme carries it
     as the fourth field of its rtl: selector (0 is the tuner's AGC). A tool given no gain runs on
     its own default, which the record leaves as None beside the command that shows it.
     """
@@ -149,7 +149,7 @@ def command_gain(command: str | None) -> str | None:
         except ValueError:
             continue
         for i, arg in enumerate(argv):
-            if arg in ("-g", "--general_gain") and i + 1 < len(argv):
+            if arg in ("-g", "--gain") and i + 1 < len(argv):
                 return argv[i + 1]
             if arg.startswith("rtl:"):
                 parts = arg.split(":")
@@ -255,13 +255,13 @@ def reception_record(inst: Instrument, item: dict, *, freq_hz, command, ppm, rad
 
 
 def without_page_words(event: dict) -> dict:
-    """A logged reception as the console reads it in: a pager item never brings a page's words.
+    """A logged reception as the console reads it back for the rack and the API.
 
-    The event log is a file, and a pager reception in it can carry a page's text, in its item
-    and in the line built from that item. Whatever the file holds, the text is dropped, the item
-    says it was withheld, and the line is rebuilt from the framing, so no stored word reaches a
-    response. The event is copied, never changed, and the file is left as it is. Every other
-    instrument's reception is returned as it was logged.
+    The event log is a file, and a pager reception in it can carry the page's text and a summary
+    that includes it. On readback, the console withholds `item.text` and sets `text_withheld`
+    when there was text. The stored summary is replaced with a line built from the item's
+    framing, and the other item fields pass through as stored. The pager event is copied in
+    memory and the file is left as it is. Receptions from other instruments pass through as logged.
     """
     payload = event.get("payload")
     if not isinstance(payload, dict) or payload.get("instrument") != "pager":

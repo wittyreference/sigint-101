@@ -2,10 +2,14 @@
 # ABOUTME: newest-first. satdump is a fake at the boundary; no radio / no satdump is honest.
 
 import os
+import shlex
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from sigint101 import apt
+from sigint101.app import create_app
 from sigint101.apt import (
     APT_PIPELINE,
     DEFAULT_APT_HZ,
@@ -14,17 +18,20 @@ from sigint101.apt import (
     AptUnavailable,
     satellite_for,
 )
-from sigint101.hardware import RtlSdrDevice
+from sigint101.events import read_events
+from sigint101.hardware import RadioProbe, RtlSdrDevice
 
 
 class FakeProcess:
     """Stands in for the satdump process at the boundary (it writes PNGs and exits on timeout)."""
 
-    def __init__(self):
+    def __init__(self, args=()):
+        self.args = args
+        self.returncode = None
         self.terminated = False
 
     def poll(self):
-        return None
+        return self.returncode
 
     def terminate(self):
         self.terminated = True
@@ -60,31 +67,58 @@ def test_popen_builds_the_satdump_apt_live_command(tmp_path, monkeypatch):
         captured["kw"] = kw
 
     monkeypatch.setattr(apt, "spawn", rec)
-    apt._popen(DEFAULT_APT_HZ, device=2, output_dir=tmp_path)
+    apt._popen(DEFAULT_APT_HZ, "00000042", tmp_path)
     argv = captured["argv"]
     assert argv[0] == SATDUMP
     assert argv[1] == "live"
     assert argv[2] == APT_PIPELINE
     assert argv[3] == str(tmp_path)
     assert argv[argv.index("--source") + 1] == "rtlsdr"
-    assert argv[argv.index("--source_id") + 1] == "2"
+    assert argv[argv.index("--source_id") + 1] == "00000042"
     assert argv[argv.index("--frequency") + 1] == str(DEFAULT_APT_HZ)
+    assert argv[argv.index("--gain") + 1] == "49"
+    assert "--general_gain" not in argv
     assert "--timeout" in argv
     # satdump narrates heavily; its chatter is silenced so the console output stays pristine.
     assert captured["kw"]["stdout"] == apt.subprocess.DEVNULL
     assert captured["kw"]["stderr"] == apt.subprocess.DEVNULL
 
 
-def test_start_passes_the_default_device_to_the_spawn(tmp_path):
+def test_popen_omits_source_id_without_a_serial(tmp_path, monkeypatch):
+    monkeypatch.setattr(apt, "spawn", lambda argv, **kw: argv)
+    argv = apt._popen(DEFAULT_APT_HZ, None, tmp_path)
+    assert "--source_id" not in argv
+
+
+def test_start_passes_local_tle_override_even_when_file_is_missing(tmp_path, monkeypatch):
+    commands = []
+
+    def capture(argv, **kw):
+        commands.append(argv)
+        return FakeProcess()
+
+    monkeypatch.setattr(apt, "spawn", capture)
+    dec = _decoder(tmp_path, spawn=apt._popen)
+    dec.start()
+
+    tle_path = tmp_path / "apt" / "tle.txt"
+    assert not tle_path.exists()
+    argv, = commands
+    assert "--tle_override" in argv
+    assert argv[argv.index("--tle_override") + 1] == str(tle_path)
+
+
+def test_start_uses_no_source_id_without_a_radio_survey(tmp_path):
     captured = {}
 
-    def spawn(freq, device, output_dir):
-        captured.update(freq=freq, device=device, output_dir=output_dir)
+    def spawn(freq, source_id, output_dir):
+        captured.update(freq=freq, source_id=source_id, output_dir=output_dir)
         return FakeProcess()
 
     dec = _decoder(tmp_path, device=5, freq_hz=DEFAULT_APT_HZ, spawn=spawn)
     dec.start()
-    assert captured["device"] == 5
+    assert captured["source_id"] is None
+    assert dec.device == 5
     assert captured["freq"] == DEFAULT_APT_HZ
     assert captured["output_dir"] == tmp_path / "apt"
 
@@ -92,14 +126,29 @@ def test_start_passes_the_default_device_to_the_spawn(tmp_path):
 def test_start_selects_the_pinned_radio_by_serial(tmp_path):
     captured = {}
 
-    def spawn(freq, device, output_dir):
-        captured["device"] = device
+    def spawn(freq, source_id, output_dir):
+        captured["source_id"] = source_id
         return FakeProcess()
 
-    devices = (RtlSdrDevice(3, "AAAA"), RtlSdrDevice(7, "ZZZZ"))
-    dec = _decoder(tmp_path, serial="ZZZZ", list_devices=lambda: devices, spawn=spawn)
+    devices = (RtlSdrDevice(3, "AAAA"), RtlSdrDevice(7, "00000042"))
+    dec = _decoder(tmp_path, serial="00000042", list_devices=lambda: devices, spawn=spawn)
     dec.start()
-    assert captured["device"] == 7  # the index that carries the pinned serial, not plug order
+    assert captured["source_id"] == "00000042"
+    assert dec.device == 7  # the index still identifies the radio in reception metadata
+
+
+@pytest.mark.parametrize("serial, expected", [("00000042", "00000042"), ("", None)])
+def test_start_uses_the_only_radios_serial_when_readable(tmp_path, serial, expected):
+    captured = {}
+
+    def spawn(freq, source_id, output_dir):
+        captured["source_id"] = source_id
+        return FakeProcess()
+
+    dec = _decoder(tmp_path, list_devices=lambda: (RtlSdrDevice(2, serial),), spawn=spawn)
+    dec.start()
+    assert captured["source_id"] == expected
+    assert dec.device == 2
 
 
 def test_start_refuses_when_the_radio_is_ambiguous(tmp_path):
@@ -192,6 +241,64 @@ def test_release_stops_the_process(tmp_path):
     dec.release()
     assert proc.terminated
     assert not dec.running
+
+
+@pytest.mark.parametrize("end", ["console-stop", "timeout"])
+def test_ended_pass_reports_each_images_command_and_frequency(tmp_path, end):
+    pass_freq = 137_620_000
+    args = [SATDUMP, "live", APT_PIPELINE, "pass images", "--frequency", str(pass_freq),
+            "--gain", "35"]
+    first = FakeProcess(args)
+    replacement = FakeProcess([SATDUMP, "live", APT_PIPELINE, "next pass"])
+    passes = iter((first, replacement))
+    dec = _decoder(tmp_path, freq_hz=pass_freq, spawn=lambda f, d, o: next(passes))
+    reported = []
+
+    def report(image, *, command=None, freq_hz=None):
+        reported.append((image["path"], image["satellite"], command, freq_hz))
+
+    dec.on_reception = report
+    dec.start()
+    _drop_png(dec.output_dir, "avhrr.png", mtime=1_000_000)
+    _drop_png(dec.output_dir, "raw.png", mtime=2_000_000)
+    # The settings for the next pass can differ from the ones for the process being reaped.
+    dec.freq_hz = DEFAULT_APT_HZ
+    if end == "timeout":
+        first.returncode = 0
+        dec.start()
+        assert dec.live_command() == shlex.join(replacement.args)
+    dec.stop()
+
+    assert reported == [
+        ("apt/avhrr.png", "NOAA-15", shlex.join(args), pass_freq),
+        ("apt/raw.png", "NOAA-15", shlex.join(args), pass_freq),
+    ]
+
+
+def test_console_logs_the_command_for_an_apt_image_after_the_pass_stops(tmp_path):
+    args = [SATDUMP, "live", APT_PIPELINE, "apt", "--frequency", str(DEFAULT_APT_HZ),
+            "--gain", "49"]
+    dec = _decoder(tmp_path, spawn=lambda f, d, o: FakeProcess(args))
+    console = create_app(
+        pack_dir=Path(__file__).parent / "fixtures" / "lesson_packs",
+        data_dir=tmp_path,
+        probe=lambda: RadioProbe(False, "test", "no RTL-SDR on USB bus"),
+        apt_factory=lambda: dec,
+    )
+    with TestClient(console) as client:
+        assert client.get("/api/apt").status_code == 200
+        _drop_png(dec.output_dir, "avhrr.png")
+        # A sweep request releases APT before the missing radio makes the sweep return 503.
+        assert client.get("/api/spectrum").status_code == 503
+        assert not dec.running
+
+    [event] = [event for event in read_events(tmp_path / "events.jsonl")
+               if event["kind"] == "reception"]
+    payload = event["payload"]
+    assert payload["instrument"] == "apt"
+    assert payload["item"]["path"] == "apt/avhrr.png"
+    assert payload["command"] == shlex.join(args)
+    assert payload["freq_hz"] == DEFAULT_APT_HZ
 
 
 def test_satellite_for_maps_known_apt_frequencies():

@@ -8,46 +8,48 @@
 {# The question and its choices scroll in one body; the footer holding Skip / Commit / Next is
    pinned under it, so a long pool question can never push the action off the 800x480 screen. #}
 <section class="exam exam-sim">
-  <div class="exam__body">
-    <div class="stage-panel__eyebrow">&#9773; PRACTICE EXAM &middot; Question {{ position }} of {{ total }}</div>
+  <div class="scroll-frame">
+    <div class="exam__body">
+      <div class="stage-panel__eyebrow">PRACTICE EXAM &middot; Question {{ position }} of {{ total }}</div>
 
-    <div class="exam-sim__score">
-      Score so far: {{ score }} right of {{ answered }} answered &middot; pass at {{ pass_mark }}/{{ total }}
-      {%- if skipped %} &middot; {{ skipped }} skipped{% endif %}
-    </div>
+      <div class="exam-sim__score">
+        Score so far: {{ score }} right of {{ answered }} answered &middot; pass at {{ pass_mark }}/{{ total }}
+        {%- if skipped %} &middot; {{ skipped }} skipped{% endif %}
+      </div>
 
-    <div class="exam__ask">
-      <h1 class="exam__question">{{ question.question }}</h1>
-      {% include "_exam_figure.html" %}
-    </div>
+      <div class="exam__ask">
+        <h1 class="exam__question">{{ question.question }}</h1>
+        {% include "_exam_figure.html" %}
+      </div>
 
-    {% if not reviewed %}
-      {# ---- Answer: tap a choice, then commit. No typing (keyboard-free gate). ---- #}
-      <form class="exam-form" id="exam-answer" method="post" action="/api/exam/sim/answer?question_id={{ question.id }}">
-        <fieldset class="predict-chips exam-chips">
-          <legend class="sr-only">Tap your answer, then commit &mdash; no typing</legend>
+      {% if not reviewed %}
+        {# ---- Answer: tap a choice, then commit. No typing (keyboard-free gate). ---- #}
+        <form class="exam-form" novalidate data-choice-commit id="exam-answer" method="post" action="/api/exam/sim/answer?question_id={{ question.id }}">
+          <fieldset class="predict-chips exam-chips">
+            <legend class="sr-only">Tap your answer, then commit &mdash; no typing</legend>
+            {% for letter, text in question.options.items()|sort %}
+              <label class="predict-chip exam-chip">
+                <input type="radio" name="choice" value="{{ letter }}" {% if loop.first %}required{% endif %}>
+                <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
+                <span class="predict-chip__label">{{ text }}</span>
+              </label>
+            {% endfor %}
+          </fieldset>
+        </form>
+      {% else %}
+        {# ---- Review: the right option is marked; a wrong pick is flagged too. ---- #}
+        <div class="exam-chips exam-chips--reviewed">
           {% for letter, text in question.options.items()|sort %}
-            <label class="predict-chip exam-chip">
-              <input type="radio" name="choice" value="{{ letter }}" {% if loop.first %}required{% endif %}>
+            <div class="predict-chip exam-chip
+                        {%- if letter == question.answer %} exam-chip--correct{% endif %}
+                        {%- if letter == chosen and letter != question.answer %} exam-chip--chosen{% endif %}">
               <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
               <span class="predict-chip__label">{{ text }}</span>
-            </label>
+            </div>
           {% endfor %}
-        </fieldset>
-      </form>
-    {% else %}
-      {# ---- Review: the right option is marked; a wrong pick is flagged too. ---- #}
-      <div class="exam-chips exam-chips--reviewed">
-        {% for letter, text in question.options.items()|sort %}
-          <div class="predict-chip exam-chip
-                      {%- if letter == question.answer %} exam-chip--correct{% endif %}
-                      {%- if letter == chosen and letter != question.answer %} exam-chip--chosen{% endif %}">
-            <span class="predict-chip__key" aria-hidden="true">{{ letter }}</span>
-            <span class="predict-chip__label">{{ text }}</span>
-          </div>
-        {% endfor %}
-      </div>
-    {% endif %}
+        </div>
+      {% endif %}
+    </div>
   </div>
 
   {% if not reviewed %}
@@ -58,8 +60,8 @@
         <button class="btn exam__skip" type="submit" form="exam-answer" formnovalidate
                 formaction="/api/exam/sim/skip?question_id={{ question.id }}">Skip</button>
       {% endif %}
-      <span class="predict__hint">Tap your answer, comrade &mdash; then commit.</span>
-      <button class="btn btn--primary btn-commit" type="submit" form="exam-answer">Commit answer</button>
+      <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+      <button class="btn btn--primary btn-commit" type="submit" disabled form="exam-answer">Commit answer</button>
     </div>
   {% else %}
     <div class="exam__foot exam-reveal">
@@ -72,3 +74,5 @@
   {% endif %}
 </section>
 {% endblock %}
+
+{% block scripts %}<script src="/static/lesson-nav.js"></script>{% endblock %}

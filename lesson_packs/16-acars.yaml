@@ -38,8 +38,7 @@ stages:
     codes, some readable text. Sit with how far this unit has come: from naming a signal's shape to
     reading what an aircraft told its airline.
   predict: >-
-    An ACARS burst is a quarter-second buzz on the waterfall. Decoded, what is inside — readable
-    airline text, or encrypted ops data? Lock it in.
+    An ACARS burst is a quarter-second buzz on the waterfall. Decoded, what is inside? Lock it in.
   observe: >-
     Look at a message against this unit. Lesson 13's scope said "this aircraft is here"; this log
     says "this aircraft said this." The same waterfall that once only showed a signal existed now

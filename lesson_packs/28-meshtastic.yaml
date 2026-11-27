@@ -34,8 +34,7 @@ stages:
     from another channel. Empty until a second node sends on LongFast. Adding one? Antenna always
     on, same region. How would a far node's text reach here?
   predict: >-
-    A node too far to hear you directly, one node between. Does your text reach it, or die at your
-    edge? Lock it in.
+    A node too far to hear you directly, one node between. What happens to your text? Lock it in.
   observe: >-
     Hold your guess against the word "mesh." A mesh is not two radios shouting across a gap; it is
     many, each willing to repeat what it hears. If the node between you repeats your packet, where

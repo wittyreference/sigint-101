@@ -10,14 +10,23 @@ import threading
 import time
 from dataclasses import dataclass
 
-from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    RunGuard,
+    command_line,
+    emit_reception,
+    running_command,
+    settle_ended,
+    spawn,
+    stop_process,
+)
 from .childproc import Pipeline as _Pipeline
 from .hardware import (
     MULTIMON,
     RTL_FM,
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # Where the APRS lesson listens. 144.390 MHz is the North American 2m APRS channel; a pack can
@@ -231,7 +240,7 @@ class AprsDecoder:
         # thread only and outside the roster lock. The console's hook logs it as a reception and
         # never raises, so the call is made directly: it cannot end the decode.
         self.on_reception = None
-        self._lock = threading.Lock()
+        self._runs = RunGuard()
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
@@ -253,11 +262,9 @@ class AprsDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise AprsUnavailable(str(exc)) from exc
 
@@ -266,7 +273,7 @@ class AprsDecoder:
         with self._life:
             self._released = True
             self.stop()
-            with self._lock:
+            with self._runs:
                 self._roster = StationRoster()
 
     def resume(self) -> None:
@@ -284,7 +291,7 @@ class AprsDecoder:
                 return
             self._stop_locked()
             self.freq_hz = int(freq_hz)
-            with self._lock:
+            with self._runs:
                 self._roster = StationRoster()
 
     def start(self) -> None:
@@ -312,7 +319,10 @@ class AprsDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise AprsUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
+        # End any retiring reader from an earlier natural death before starting its replacement.
+        self._runs.end(self.watch)
         try:
             self._proc = self._spawn(self.freq_hz, self.device)
         except (OSError, ValueError) as exc:
@@ -320,37 +330,56 @@ class AprsDecoder:
             raise AprsUnavailable(f"cannot run the APRS pipeline: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+        self._thread = threading.Thread(target=self._read,
+                                        args=(self._proc, self._runs.current, radio),
                                         name="sigint101-aprs", daemon=True)
         self._thread.start()
 
-    def _read(self, proc) -> None:
+    def _read(self, proc, run: int, radio: dict) -> None:
         """Consume multimon-ng's output on a background thread, building the roster till it ends."""
         try:
             for raw in proc.stdout:
                 packet = parse_aprs_frame(parse_aprs_line(raw))
-                if packet is not None:
-                    with self._lock:
-                        station = _station_dict(self._roster.absorb(packet, now=time.time()))
+                if packet is None:
+                    continue
+                with self._runs:
+                    if not self._runs.is_current(run):
+                        continue
+                    station = _station_dict(self._roster.absorb(packet, now=time.time()))
+                    freq_hz = self.freq_hz
+                    cmd = command_line(proc)
                     report = self.on_reception
-                    if report is not None:
-                        report(station)
+                if report is not None:
+                    emit_reception(report, station, command=cmd, freq_hz=freq_hz, radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
-            self.error = str(exc)
+            with self._runs:
+                if self._runs.is_current(run):
+                    self.error = str(exc)
         finally:
-            self._note_end(proc)
+            self._note_end(proc, run)
 
-    def _note_end(self, proc) -> None:
+    def _note_end(self, proc, run: int) -> None:
         """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc)
-        if reason and self.error is None:
-            self.error = reason
+        reason = self.watch.ended(proc, runs=self._runs, run=run)
+        if reason:
+            with self._runs:
+                if self._runs.is_current(run) and self.error is None:
+                    self.error = reason
 
     def _settle(self) -> None:
-        """Account for a child that ended since the last poll, then clear away what it left."""
-        if self._proc is not None:
-            self._note_end(self._proc)
-            self._stop_locked()
+        """Account for a child that ended since the last poll, letting its reader drain before
+        ending the run and clearing away what it left.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        thread, self._thread = self._thread, None
+        if not settle_ended(proc, thread, self._runs, self.watch,
+                            note_end=self._note_end, wait_s=self.STOP_WAIT_S):
+            self.error = "the APRS pipeline survived kill; the dongle may still be held"
+
+    #: How long stop() waits, in seconds, for the reader to end once the pipeline is stopped.
+    STOP_WAIT_S = 3.0
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -358,13 +387,14 @@ class AprsDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
-        # Marked first, so the reader seeing the output end never reports our stop as a death.
-        self.watch.stopping()
+        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
+        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
+        self._runs.end(self.watch)
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "the APRS pipeline survived kill; the dongle may still be held"
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
 
     def drain(self, timeout: float = 5.0) -> None:
@@ -375,6 +405,6 @@ class AprsDecoder:
     def stations(self) -> list:
         """The roster so far, as plain dicts for the API, freshest station first."""
         now = time.time()
-        with self._lock:
+        with self._runs:
             rows = self._roster.stations(now=now)
         return [_station_dict(s) for s in rows]

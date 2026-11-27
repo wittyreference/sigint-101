@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ctypes
+import inspect
 import os
 import queue
 import shlex
@@ -128,19 +129,68 @@ _SPAWNER = _Spawner()
 
 
 class GroupPopen(subprocess.Popen):
-    """A Popen whose terminate() and kill() reach the tool's whole session, not just its leader.
+    """Signal the tool's group while its leader still holds the group ID.
 
-    A tool that forks (a shell wrapper, a helper process) would otherwise leave a child holding the
-    dongle after its parent was stopped.
+    A leader that exits is kept unreaped until SIGKILL has reached any helpers in its group.
+    The child then keeps its own exit status, and its PID is safe to release.
     """
 
+    def _exit_pending(self) -> os.waitid_result | None:
+        """Peek at the leader under Popen's waitpid lock, leaving its pid reserved."""
+        try:
+            return os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            # Match Popen's status when the child was already reaped elsewhere.
+            self.returncode = 0
+            return None
+
+    def poll(self):
+        # Use the same lock as Popen's internal poll (including stdlib cleanup) and
+        # send_signal. No managed reap can release the pid midway through a signal.
+        if self.returncode is None and self._waitpid_lock.acquire(False):
+            try:
+                if self.returncode is None and (exited := self._exit_pending()) is not None:
+                    _quietly(lambda: self._signal_group(signal.SIGKILL))
+                    try:
+                        _, status = os.waitpid(self.pid, 0)  # waitid confirmed the exit
+                    except ChildProcessError:
+                        # Another waiter reaped the leader after waitid observed its exit.
+                        self.returncode = (exited.si_status if exited.si_code == os.CLD_EXITED
+                                           else -exited.si_status)
+                    else:
+                        self._handle_exitstatus(status)
+            finally:
+                self._waitpid_lock.release()
+        return self.returncode
+
+    def _wait(self, timeout):
+        # Popen.wait calls this hook. Sleep outside the lock so a parallel stop can
+        # still send its signal while the leader is running.
+        deadline = None if timeout is None else time.monotonic() + timeout
+        delay = 0.0005
+        while (code := self.poll()) is None:
+            delay = min(2 * delay, 0.05)
+            if deadline is None:
+                time.sleep(delay)
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                time.sleep(min(delay, remaining))
+        return code
+
     def send_signal(self, sig):
-        self.poll()
-        if self.returncode is not None:
-            return
+        with self._waitpid_lock:
+            if self.returncode is None:
+                self._exit_pending()  # ECHILD means there is no longer an owned leader.
+                if self.returncode is None:
+                    self._signal_group(sig)
+
+    def _signal_group(self, sig):
+        """Signal with the waitpid lock held and the leader still owned."""
         try:
             os.killpg(self.pid, sig)
-        except ProcessLookupError:  # the session is already gone, which is what was wanted
+        except ProcessLookupError:
             pass
 
 
@@ -226,24 +276,24 @@ def _quietly(signal_call):
 
 
 def stop_process(proc) -> bool:
-    """Ask a tool to stop, insist if it ignores the ask, and confirm the OS has reaped it.
+    """Ask the tool to stop, insist if necessary, and wait for its leaders to be reaped.
 
-    Returns False only when even SIGKILL left it unreaped (a process in uninterruptible sleep):
-    the caller reports that, because the next tool will find the dongle busy and deserves to know
-    why.
+    GroupPopen sweeps the leader's group before reaping it. Only a leader that
+    survives the SIGKILL wait leaves the stop unconfirmed.
     """
     _quietly(proc.terminate)
-    try:
-        proc.wait(timeout=STOP_WAIT_S)
+    if _wait_stopped(proc, STOP_WAIT_S):
         return True
-    except subprocess.TimeoutExpired:
-        pass
     _quietly(proc.kill)
+    return _wait_stopped(proc, STOP_WAIT_S)
+
+
+def _wait_stopped(proc, timeout: float) -> bool:
     try:
-        proc.wait(timeout=STOP_WAIT_S)
-        return True
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         return False
+    return True
 
 
 def _stages(proc) -> tuple:
@@ -370,6 +420,38 @@ def running_command(proc) -> str | None:
     return command_line(proc)
 
 
+def _provenance_keywords(hook) -> set[str]:
+    """Provenance arguments this hook accepts by keyword."""
+    try:
+        params = inspect.signature(hook).parameters
+    except (TypeError, ValueError):
+        return set()
+    names = {"command", "freq_hz", "radio"}
+    kw_kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    accepted = {name for name in names if name in params and params[name].kind in kw_kinds}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        # Existing wrappers can forward **kwargs to hooks that only take command and freq_hz.
+        accepted.update(("command", "freq_hz"))
+    return accepted
+
+
+def emit_reception(hook, item: dict, *, command: str | None = None, freq_hz=None,
+                   radio: dict | None = None) -> None:
+    """Call `hook` with `item` and the run provenance its signature supports.
+
+    The console can log the command, frequency and radio even if the reader stalls after
+    admitting an item and a replacement run starts. Hooks that accept command and frequency
+    still receive them together. A named radio keyword opts in to the radio snapshot.
+    """
+    accepted = _provenance_keywords(hook)
+    kwargs = {}
+    if {"command", "freq_hz"} <= accepted:
+        kwargs.update(command=command, freq_hz=freq_hz)
+    if radio is not None and "radio" in accepted:
+        kwargs["radio"] = radio.copy()
+    hook(item, **kwargs)
+
+
 class ChildWatch:
     """One decoder's record of its child: whether we stopped it, why it died, when to retry.
 
@@ -400,12 +482,32 @@ class ChildWatch:
         with self._lock:
             self._current = None
 
-    def ended(self, proc, *, tail=None) -> str | None:
-        """Record the child's death if it was not ours. Returns the reason the first time only."""
+    def ended(self, proc, *, tail=None, runs: RunGuard | None = None,
+              run: int | None = None) -> str | None:
+        """Record the child's death if it was not ours. Returns the reason the first time only.
+
+        Exit diagnostics (which can wait for the process's exit status) are computed outside both
+        the watch lock and any RunGuard lock. When `runs` is supplied, committing a death and its
+        retry deadline requires both that `run` is still current under `runs.lock` and that `proc`
+        is still the current child.
+        """
+        if proc is None:
+            return None
         with self._lock:
-            if proc is None or proc is not self._current:
+            if proc is not self._current:
                 return None
-            reason = exit_reason(proc, finite=self.finite, tail=tail, tool=self.tool)
+        reason = exit_reason(proc, finite=self.finite, tail=tail, tool=self.tool)
+        if runs is not None:
+            with runs:
+                if not runs.is_current(run):
+                    return None
+                return self._commit_end(proc, reason)
+        return self._commit_end(proc, reason)
+
+    def _commit_end(self, proc, reason: str | None) -> str | None:
+        with self._lock:
+            if proc is not self._current:
+                return None
             if reason is None:
                 if proc.poll() is not None:
                     self._current = None  # a finite capture's clean end: nothing to report
@@ -440,3 +542,80 @@ class ChildWatch:
     def blocked(self) -> str | None:
         """The death reason while the back-off runs, else None."""
         return self.reason if self.retry_in() is not None else None
+
+
+class RunGuard:
+    """Pairs a decoder's run number with the lock that guards its buffer and error state.
+
+    Every stop ends the current run under that lock before stopping the child, so a reader that
+    outlives its stop cannot list a late item, report it, or record a pipe failure or death into
+    the next run. Sharing one lock between the run number and the buffer ensures a stop waits for
+    any update already past its check, and a check arriving after the stop sees the run has ended.
+    """
+
+    def __init__(self, lock=None):
+        self.lock = threading.Lock() if lock is None else lock
+        self._run = 0
+
+    @property
+    def current(self) -> int:
+        """The active run number, handed to the reader a start() launches (under _life)."""
+        return self._run
+
+    def end(self, watch: ChildWatch | None = None) -> int:
+        """End the current run under the lock, and mark `watch` stopping in the same step."""
+        with self.lock:
+            self._run += 1
+            if watch is not None:
+                watch.stopping()
+            return self._run
+
+    def is_current(self, run: int) -> bool:
+        """True while `run` is still the current run. Call with this guard's lock held."""
+        return run == self._run
+
+    def __enter__(self):
+        self.lock.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self.lock.__exit__(*exc)
+
+
+def settle_ended(proc, thread, runs: RunGuard, watch: ChildWatch, *,
+                 note_end, wait_s: float) -> bool:
+    """Account for a child that ended on its own, reap every stage, drain its reader, then end
+    the run.
+
+    Unlike an explicit stop (which invalidates the run and shuts down the transport at once), a
+    natural exit records the death first and gives the retiring reader up to `wait_s` to drain
+    complete items still buffered in its pipe or socket under the dead run's provenance. Every
+    child stage is brought down before joining the reader so a live downstream process holding a
+    pipe open can never stall the drain (pipes remain readable after their writers exit). Socket
+    feeds (ADS-B, AIS) expose `stop_child` and `close_transport` so their child process is reaped
+    before the join while the socket stays open until the bounded drain ends. Once the join
+    finishes or times out — or if diagnostics, child stop or join raises — the run ends, the child
+    is stopped and any open transport closes so nothing the detached reader later delivers can
+    list, log or refuse the next start.
+    Returns False only when even SIGKILL left a child stage unreaped.
+    """
+    stop_child = getattr(proc, "stop_child", None)
+    close_transport = getattr(proc, "close_transport", None)
+    stop_fn = stop_child if stop_child is not None else (lambda: stop_process(proc))
+    stopped = False
+    try:
+        note_end(proc, runs.current)
+        watch.stopping()
+        stopped = True
+        reaped = stop_fn()
+        if thread is not None:
+            thread.join(timeout=wait_s)
+    finally:
+        runs.end(watch)
+        try:
+            if not stopped:
+                stop_fn()
+        finally:
+            if close_transport is not None:
+                close_transport()
+    return reaped

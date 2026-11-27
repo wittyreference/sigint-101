@@ -12,6 +12,9 @@ from dataclasses import dataclass
 # RealTek RTL2832U — the chip inside common RTL-SDR / DVB-T dongles (incl. the Nomad's).
 RTLSDR_USB_IDS = ("0bda:2838", "0bda:2832")
 
+# Pin a radio by serial because its index can change with plug order.
+RTLSDR_SERIAL_ENV = "SIGINT101_RTLSDR_SERIAL"
+
 # The sweeper's binary. Enumeration asks the very program that will do the sweeping how it
 # numbers the bus, so the index SIGINT 101 picks is the index rtl_power will honour.
 RTL_POWER = "rtl_power"
@@ -157,7 +160,12 @@ def describe_devices(devices) -> str:
 
 
 def select_rtlsdr_index(serial, *, devices) -> int:
-    """Turn the radio the console wants into the index rtl_power needs, or refuse.
+    """Turn the radio the console wants into the index rtl_power needs, or refuse."""
+    return _select_rtlsdr_device(serial, devices).index
+
+
+def _select_rtlsdr_device(serial, devices) -> RtlSdrDevice:
+    """Resolve which enumerated radio a tool should open.
 
     A serial cannot be handed to `-d` directly. librtlsdr parses that argument as an
     integer index first and only falls back to matching serials, so the Nomad's own
@@ -171,17 +179,28 @@ def select_rtlsdr_index(serial, *, devices) -> int:
     """
     if not devices:
         raise DeviceSelectionError(
-            "no RTL-SDR on the USB bus — SIGINT 101 will not fake a waterfall")
+            "no RTL-SDR on the USB bus — SIGINT 101 will not fake a signal")
     if serial:
         for device in devices:
             if device.serial == serial:
-                return device.index
+                return device
         raise DeviceSelectionError(
             f"no radio on this bus has serial {serial}. Found: {describe_devices(devices)}")
     if len(devices) == 1:
-        return devices[0].index
+        return devices[0]
     raise DeviceSelectionError(
         "more than one RTL-SDR is on the bus and none is pinned, so SIGINT 101 cannot tell "
         f"which one this lesson means. Found: {describe_devices(devices)}. "
         "Set SIGINT101_RTLSDR_SERIAL to the serial of the radio you want — the serial, not "
         "the index, because the index changes with plug order.")
+
+
+def rtlsdr_radio_for_run(index, serial, list_devices) -> dict:
+    """Snapshot the index and serial together using the enumeration that chose the radio."""
+    if list_devices is not None:
+        device = _select_rtlsdr_device(serial, list_devices())
+        index, serial = device.index, device.serial
+    else:
+        # A receiver built without an enumerator keeps its fixed index and any configured serial.
+        serial = serial or os.environ.get(RTLSDR_SERIAL_ENV)
+    return {"kind": "rtl-sdr", "index": index, "serial": serial or None}

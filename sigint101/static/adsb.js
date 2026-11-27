@@ -63,34 +63,37 @@
     while (group && group.firstChild) group.removeChild(group.firstChild);
   }
 
-  function drawDot(group, pos, label) {
+  function drawDot(group, labels, pos, label) {
     var dot = document.createElementNS(SVGNS, "circle");
     dot.setAttribute("class", "radar__plane");
     dot.setAttribute("cx", pos.x.toFixed(1));
     dot.setAttribute("cy", pos.y.toFixed(1));
     dot.setAttribute("r", "2.6");
     group.appendChild(dot);
-    if (label) {
-      var text = document.createElementNS(SVGNS, "text");
-      text.setAttribute("class", "radar__plane-label");
-      text.setAttribute("x", (pos.x + 4).toFixed(1));
-      text.setAttribute("y", (pos.y - 3).toFixed(1));
+    if (label && labels) {
+      // Use the same plot coordinates but let CSS size the text in screen pixels.
+      var text = document.createElement("span");
+      text.className = "radar__plane-label" + (pos.x > CENTER ? " radar__plane-label--left" : "");
+      text.style.left = (pos.x * 100 / VIEW) + "%";
+      text.style.top = (pos.y * 100 / VIEW) + "%";
       text.textContent = label;
-      group.appendChild(text);
+      labels.appendChild(text);
     }
   }
 
   function render(panel, body) {
     var aircraft = body.aircraft || [];
     var group = panel.querySelector("[data-adsb-dots]");
+    var labels = panel.querySelector("[data-adsb-labels]");
     var empty = panel.querySelector("[data-adsb-empty]");
     var badge = panel.querySelector("[data-adsb-badge]");
     var count = panel.querySelector("[data-adsb-count]");
     var ring = panel.querySelector("[data-adsb-ring]");
     DecoderPanel.showLive(badge, body);
     DecoderPanel.showCommand(panel, body.command);
-    if (count) count.textContent = String(aircraft.length);
+    if (count) { count.textContent = String(aircraft.length); count.parentElement.hidden = false; }
     clear(group);
+    clear(labels);
 
     var located = aircraft.filter(function (a) { return a.range_nm != null && a.bearing_deg != null; });
     var max = scopeRange(aircraft);
@@ -101,10 +104,12 @@
     }
 
     if (!hasAircraft(body)) {
-      if (empty) { empty.hidden = false; empty.textContent = "listening… no aircraft overhead yet"; }
+      if (empty) { empty.hidden = false; empty.textContent = DecoderPanel.quietText(body, "no aircraft overhead yet"); }
       return;
     }
-    located.forEach(function (a) { drawDot(group, plot(a.range_nm, a.bearing_deg, max), planeLabel(a)); });
+    located.forEach(function (a) {
+      drawDot(group, labels, plot(a.range_nm, a.bearing_deg, max), planeLabel(a));
+    });
     if (empty) {
       if (!body.receiver_located) {
         // Contacts are being heard but the scope has no location to place them against; say so
@@ -122,12 +127,14 @@
 
   function showEmpty(panel, body) {
     var group = panel.querySelector("[data-adsb-dots]");
+    var labels = panel.querySelector("[data-adsb-labels]");
     var empty = panel.querySelector("[data-adsb-empty]");
     var badge = panel.querySelector("[data-adsb-badge]");
     var count = panel.querySelector("[data-adsb-count]");
     clear(group);
-    if (count) count.textContent = "0";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode ADS-B");
+    clear(labels);
+    if (count) count.parentElement.hidden = true;
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -143,7 +150,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

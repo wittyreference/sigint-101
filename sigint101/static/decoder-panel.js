@@ -4,19 +4,41 @@
 (function (root) {
   "use strict";
 
-  // How a panel reads when its poll answers "not available". A tool that died on its own is
-  // STOPPED, with the tool's own last words and when the console will try it again; any other
-  // refusal (no radio, a missing tool, the radio lent to another lesson) keeps the panel's wording.
-  function downState(body, fallbackBadge, fallbackReason) {
+  // Only the API knows what caused a refusal. A missing or unknown cause is unavailable.
+  function downState(body) {
     body = body || {};
-    var reason = body.reason || fallbackReason;
-    if (body.state === "stopped") {
+    var reason = body.reason || "Receiver unavailable.";
+    if (body.cause === "stopped" || body.state === "stopped") {
       var retry = typeof body.retry_in === "number" && body.retry_in > 0
         ? "retrying in " + Math.ceil(body.retry_in) + " s" : "retrying now";
       return { badge: "STOPPED", cls: "decoder__status decoder__status--stopped",
                reason: reason + " · " + retry };
     }
-    return { badge: fallbackBadge, cls: "decoder__status decoder__status--empty", reason: reason };
+    var badge = body.cause === "no_radio" ? "NO RADIO" :
+      (body.cause === "missing_tool" ? "TOOL MISSING" : "UNAVAILABLE");
+    return { badge: badge, cls: "decoder__status decoder__status--empty",
+             reason: reason, message: body.message, nextStep: body.next_step };
+  }
+
+  function refusalText(down) {
+    var text = down.message || down.reason;
+    return down.nextStep ? text + " · " + down.nextStep : text;
+  }
+
+  function renderRefusal(el, down) {
+    if (!down.nextStep || !down.nextStep.startsWith("Run ")) {
+      el.textContent = refusalText(down);
+      return;
+    }
+    el.textContent = (down.message || down.reason) + " · Run ";
+    var command = el.ownerDocument.createElement("code");
+    command.className = "refusal-command";
+    command.textContent = down.nextStep.slice(4);
+    el.appendChild(command);
+  }
+
+  function quietText(body, detail) {
+    return body.state === "starting" ? "Checking receiver…" : "Listening · " + detail;
   }
 
   // The badge for an answering tool. A fresh one reads STARTING until it has held on a moment —
@@ -36,7 +58,8 @@
 
   // Under node's test runner the file is loaded for its pure helpers and there is no document.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { downState: downState, liveBadge: liveBadge, commandText: commandText };
+    module.exports = { downState: downState, liveBadge: liveBadge, commandText: commandText,
+                       refusalText: refusalText, renderRefusal: renderRefusal, quietText: quietText };
     return;
   }
 
@@ -71,10 +94,10 @@
   }
 
   // Badge and empty line for a refused poll, through downState.
-  function showDown(panel, badge, empty, body, fallbackBadge, fallbackReason) {
-    var down = downState(body, fallbackBadge, fallbackReason);
+  function showDown(panel, badge, empty, body) {
+    var down = downState(body);
     if (badge) { badge.textContent = down.badge; badge.className = down.cls; }
-    if (empty) { empty.hidden = false; empty.textContent = down.reason; }
+    if (empty) { empty.hidden = false; renderRefusal(empty, down); }
     showCommand(panel, null);
   }
 
@@ -93,5 +116,6 @@
   Array.prototype.forEach.call(document.querySelectorAll("button[data-command]"), wire);
 
   root.DecoderPanel = { showCommand: showCommand, showDown: showDown, showLive: showLive,
-                        downState: downState };
+                        downState: downState, refusalText: refusalText, renderRefusal: renderRefusal,
+                        quietText: quietText };
 })(this);

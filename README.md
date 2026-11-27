@@ -12,9 +12,10 @@ Status: in active development (see STATUS.md).
 ## Setup
 
 ### Development, on any Linux machine
-You need Python 3 with its `venv` module (on Debian, the `python3-venv` package), git, make, jq,
-and Node.js 20.11+ (21.2+ on the 21 line; 22 and later work). `make selftest` needs Node for the
-panels' JavaScript tests and jq for the credential-check tests; the course itself uses neither.
+You need Python 3.10 or later with its `venv` module (on Debian, the `python3-venv` package), git,
+make, jq, and Node.js 20.11+ (21.2+ on the 21 line; 22 and later work). `make selftest` needs Node
+for the panels' JavaScript tests and jq for the credential-check tests; the course itself uses
+neither.
 `./bootstrap.sh` downloads the Python packages, so it needs a network connection.
 
 ```
@@ -22,6 +23,9 @@ panels' JavaScript tests and jq for the credential-check tests; the course itsel
 make selftest    # the whole test suite, with the 80% coverage gate
 make run         # the console at http://127.0.0.1:8008
 ```
+
+With `make run` active and Chromium installed, run `make render-check` in another terminal for the 800×480 layout checks.
+Use `make render-check RENDER_URL=http://127.0.0.1:8009` for a console on a different port.
 
 ### A fresh Recon
 On the Recon's stock Debian Bookworm, with a network connection, as the user the desktop logs in

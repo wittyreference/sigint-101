@@ -1076,23 +1076,24 @@ def test_recording_a_stage_on_an_unknown_lesson_is_404(tmp_path):
 
 
 def _pip(html, stage):
-    """The rail pip for one stage: its tag (button = tappable) and attributes."""
-    return re.search(r'<(button|span) class="rail-pip[^"]*"[^>]*data-stage="' + stage + r'"[^>]*>',
+    """The markup for one stage in the progress rail."""
+    return re.search(rf'<\w+ class="rail-pip[^"]*"[^>]*data-stage="{stage}"[^>]*>',
                      html).group(0)
 
 
-def test_the_rail_opens_every_visited_stage_and_no_further(tmp_path):
+def test_the_rail_reports_each_stage_state_without_jump_targets(tmp_path):
     with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
         _stage(client, 1, "try")
         _stage(client, 1, "demo")                 # stepped back: try was still reached
         html = client.get("/lesson/1").text
-    assert "rail-pip--active" in _pip(html, "demo")
-    for visited in ("frame", "try"):
-        pip = _pip(html, visited)
-        assert pip.startswith("<button") and "disabled" not in pip
-    assert "disabled" in _pip(html, "predict")    # not reached yet
-    assert _pip(html, "observe").startswith("<span")   # sealed: not even a button
-    assert "rail-pip--locked" in _pip(html, "observe")
+    assert 'data-nav="goto"' not in html
+    expected = {"frame": "done", "demo": "active", "try": "done",
+                "predict": "ahead", "observe": "locked", "explain": "locked"}
+    for stage, state in expected.items():
+        pip = _pip(html, stage)
+        assert pip.startswith("<li ") and "disabled" not in pip
+        assert f"rail-pip--{state}" in pip
+        assert ('aria-current="step"' in pip) == (stage == "demo")
 
 
 # --- spectrum (no-mock: absence is an answer, never a fake row) ---------------
@@ -3276,6 +3277,62 @@ def test_the_spectrum_route_marks_a_stall_by_the_rule_the_reading_follows(tmp_pa
     assert polls == [(True, 2, None, True), (True, 2, None, True), (True, 2, "stalled", False),
                      (True, 3, "resuming", False), (True, 4, "resuming", False),
                      (True, 5, None, True)]
+
+
+@pytest.mark.parametrize("path,payload,restart_first", [
+    pytest.param("/api/gain", {"gain": 29.7}, False, id="gain"),
+    pytest.param("/api/tune", {"low": DEFAULT_LOW, "high": DEFAULT_HIGH, "bin_size": DEFAULT_BIN},
+                 False, id="same-span-retune"),
+    pytest.param(None, None, False, id="crash"),
+    pytest.param("/api/ppm/measure", None, False, id="ppm"),
+    pytest.param("/api/gain", {"gain": 29.7}, True, id="restart-then-gain"),
+])
+def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload, restart_first):
+    procs, bus, now = [], ["AAAA"], [1000.0]
+
+    def measure(**kw):
+        return {"hz": kw["hz"], "ppm": 10.0, "reason": ""}
+
+    with _client(tmp_path, probe=_present, ppm_measure=measure,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
+        sweeper = client.app.state.sweeper
+
+        def poll():
+            response = client.get("/api/spectrum")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["available"] is True
+            return body
+
+        starting = poll()
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        before = poll()
+        assert before["stale"] is None
+        if restart_first:
+            now[0] += sweeper.stale_after() + 1
+            assert client.post("/api/spectrum/restart").status_code == 200
+            assert poll()["stale"] == "restarting"
+        if path is None:
+            procs[-1].die(1)
+            sweeper.drain()
+            now[0] += 60  # past back-off; report the death once before starting again
+            assert client.get("/api/spectrum").status_code == 503
+        else:
+            assert client.post(path, json=payload).status_code == 200
+
+        waiting = poll()
+        now[0] += sweeper.stale_after() + sweeper.START_ALLOWANCE_S + 0.01
+        still_waiting = poll()
+        kept = [] if path in ("/api/tune", "/api/ppm/measure") else before["rows"]
+        procs[-1].feed(_fm_pass(2) + _fm_pass(0))
+        wait_for_rows(sweeper, len(kept) + 1)
+        live = poll()
+
+    assert (waiting["stale"], still_waiting["stale"], live["stale"]) == ("waiting", "waiting", None)
+    assert (starting["stale"], starting["rows"]) == ("waiting", [])
+    assert waiting["rows"] == still_waiting["rows"] == kept
+    assert live["rows"][:-1] == kept
 
 
 # --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------

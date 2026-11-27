@@ -26,6 +26,47 @@ PANELS = sorted(REPO.glob("sigint101/static/*.js"))
 # are read as numbers, so the verdict does not rest on how a report happens to be worded.
 TAP_TOTAL = re.compile(r"^# (pass|fail) (\d+)$", re.MULTILINE)
 
+# The panel tests use mock.timers.enable({ apis: ... }), which landed in Node 21.2 and was
+# backported to 20.11. Checking the version up front avoids confusing failures on older nodes.
+NODE_FLOOR_TEXT = "Node.js 20.11+ (21.2+ on the 21 line)"
+NODE_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
+
+
+def _parse_node_version(raw: str) -> tuple[int, int, int] | None:
+    match = NODE_VERSION_RE.match(raw.strip())
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def _node_version_supported(version: tuple[int, int, int]) -> bool:
+    major, minor, _ = version
+    if major > 21:
+        return True
+    if major == 21:
+        return minor >= 2
+    if major == 20:
+        return minor >= 11
+    return False
+
+
+def _check_node_version(node: str) -> None:
+    result = subprocess.run([node, "--version"], cwd=REPO, capture_output=True, text=True,
+                            timeout=15)
+    raw = (result.stdout or result.stderr).strip()
+    assert result.returncode == 0, (
+        f"could not read node version (`{node} --version` exited {result.returncode}: "
+        f"{raw or 'no output'}). The panel tests need {NODE_FLOOR_TEXT}."
+    )
+    version = _parse_node_version(raw)
+    assert version is not None, (
+        f"unreadable node version {raw!r} from `{node} --version`. "
+        f"The panel tests need {NODE_FLOOR_TEXT}."
+    )
+    assert _node_version_supported(version), (
+        f"node {raw} is too old for the panel tests; need {NODE_FLOOR_TEXT}."
+    )
+
 
 def test_every_shipped_panel_has_its_own_test():
     """Each sigint101/static/*.js must have a matching tests/<name>.test.js.
@@ -41,7 +82,7 @@ def test_every_shipped_panel_has_its_own_test():
 
 
 def test_the_panel_javascript_has_tests_and_they_run():
-    """Run every tests/*.test.js under node, and fail loudly if node is not here.
+    """Run every tests/*.test.js under node, and fail loudly if node is missing or too old.
 
     Deliberately not a skip. A skipped suite reports success while testing nothing, which is the
     documented-step-that-cannot-run problem this repo has removed elsewhere. The panels are real
@@ -53,8 +94,9 @@ def test_the_panel_javascript_has_tests_and_they_run():
     """
     node = shutil.which("node")
     assert node, ("node is not on PATH, so the panel tests cannot run. They are part of the "
-                  "suite because sigint101/static/*.js is shipped code — install node, or say "
-                  "plainly that the panels are going untested.")
+                  "suite because sigint101/static/*.js is shipped code — install "
+                  f"{NODE_FLOOR_TEXT}, or say plainly that the panels are going untested.")
+    _check_node_version(node)
     assert JS_TESTS, "no tests/*.test.js found — the panels would be shipping untested"
 
     problems = []
@@ -178,6 +220,7 @@ def test_a_node_report_that_is_not_a_clean_pass_fails_the_check(
     bin_dir.mkdir()
     fake = bin_dir / "node"
     fake.write_text('#!/bin/sh\n'
+                    'if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then echo v22.0.0; exit 0; fi\n'
                     'for a in "$@"; do last="$a"; done\n'
                     'printf "TAP version 13\\n# running %s\\nok 1 - passes\\n1..1\\n" "$last"\n'
                     f'printf "{totals}"\n'
@@ -188,3 +231,71 @@ def test_a_node_report_that_is_not_a_clean_pass_fails_the_check(
     message = _js_check_on(monkeypatch, [good])
     assert message is not None, "a node report that is not a clean pass was accepted"
     assert good.name in message, f"the failure does not name {good.name}: {message}"
+
+
+def _install_fake_node(monkeypatch, tmp_path, body):
+    """Put a stand-in node script at the front of PATH and return its directory."""
+    bin_dir = tmp_path / "node_bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake = bin_dir / "node"
+    fake.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return bin_dir
+
+
+def test_missing_node_fails_with_a_clear_message_naming_the_floor(monkeypatch, tmp_path):
+    empty_bin = tmp_path / "empty_bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    good = _write_js(tmp_path, "good.test.js", PASSING_JS)
+    message = _js_check_on(monkeypatch, [good])
+    assert message is not None, "missing node was accepted"
+    assert "node" in message.lower() and "20.11" in message, message
+
+
+@pytest.mark.parametrize("version", ["v18.19.0", "v20.10.0", "v20.10.9", "v21.0.0", "v21.1.9"])
+def test_an_old_node_fails_before_running_tests_and_names_the_floor(
+        monkeypatch, tmp_path, version):
+    calls = tmp_path / "node.calls"
+    _install_fake_node(
+        monkeypatch,
+        tmp_path,
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        f'if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then echo "{version}"; exit 0; fi\n'
+        'printf "TAP version 13\\nok 1 - passes\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n"\n'
+        'exit 0',
+    )
+    good = _write_js(tmp_path, "good.test.js", PASSING_JS)
+    message = _js_check_on(monkeypatch, [good])
+    assert message is not None, f"old node {version} was accepted"
+    assert version in message, f"failure does not name {version}: {message}"
+    assert "20.11" in message, f"failure does not name the 20.11 floor: {message}"
+    logged = calls.read_text(encoding="utf-8") if calls.exists() else ""
+    assert "--test" not in logged, f"panel tests ran despite old node {version}: {logged}"
+
+
+@pytest.mark.parametrize("version", ["v20.11.0", "v20.18.1", "v21.2.0", "v22.0.0", "v24.0.0-rc.1"])
+def test_a_supported_node_version_passes_the_version_check(monkeypatch, tmp_path, version):
+    _install_fake_node(
+        monkeypatch,
+        tmp_path,
+        f'if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then echo "{version}"; exit 0; fi\n'
+        'printf "TAP version 13\\nok 1 - passes\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n"\n'
+        'exit 0',
+    )
+    good = _write_js(tmp_path, "good.test.js", PASSING_JS)
+    assert _js_check_on(monkeypatch, [good]) is None
+
+
+@pytest.mark.parametrize("body", [
+    'echo "not-a-version"; exit 0',
+    'echo "version broken" >&2; exit 1',
+], ids=["unreadable", "nonzero"])
+def test_an_unreadable_or_failing_node_version_fails_naming_the_floor(
+        monkeypatch, tmp_path, body):
+    _install_fake_node(monkeypatch, tmp_path, body)
+    good = _write_js(tmp_path, "good.test.js", PASSING_JS)
+    message = _js_check_on(monkeypatch, [good])
+    assert message is not None, "broken node --version was accepted"
+    assert "20.11" in message, f"failure does not name the 20.11 floor: {message}"

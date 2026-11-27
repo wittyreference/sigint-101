@@ -9,11 +9,18 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    command_line,
+    emit_reception,
+    running_command,
+    spawn,
+    stop_process,
+)
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # satdump's binary. It opens the RTL-SDR directly, runs the NOAA APT pipeline on a live pass, and
@@ -33,7 +40,7 @@ DEFAULT_APT_HZ = 137_100_000
 # find and track the carrier; ~1 MS/s is comfortable for an RTL-SDR and is what APT captures use.
 APT_SAMPLE_RATE_HZ = 1_024_000
 
-# RTL-SDR tuner gain handed to satdump (its --general_gain). Near the top of the RTL range, matching
+# RTL-SDR tuner gain handed to satdump (its --gain). Near the top of the RTL range, matching
 # the other high-band lessons — a weak 137 MHz pass needs the front end wide open.
 APT_GAIN = 49
 
@@ -59,14 +66,17 @@ def satellite_for(freq_hz: int) -> str:
     return NOAA_APT_FREQUENCIES.get(int(freq_hz), "NOAA")
 
 
-def _popen(freq_hz: int, device: int, output_dir: Path):
+def _popen(freq_hz: int, source_id: str | None, output_dir: Path):
     """Launch satdump on the NOAA APT pipeline, writing decoded image products into output_dir."""
-    return spawn(
-        [SATDUMP, "live", APT_PIPELINE, str(output_dir),
-         "--source", "rtlsdr", "--source_id", str(device),
-         "--samplerate", str(APT_SAMPLE_RATE_HZ), "--frequency", str(freq_hz),
-         "--general_gain", str(APT_GAIN), "--timeout", str(APT_PASS_TIMEOUT_S)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    argv = [SATDUMP, "live", APT_PIPELINE, str(output_dir), "--source", "rtlsdr"]
+    if source_id:
+        argv += ["--source_id", source_id]
+    argv += ["--samplerate", str(APT_SAMPLE_RATE_HZ), "--frequency", str(freq_hz),
+             "--gain", str(APT_GAIN), "--timeout", str(APT_PASS_TIMEOUT_S)]
+    # Always pass the local path (data/apt/tle.txt by default) to skip SatDump's catalog fetch.
+    # The file may be absent until pass prediction populates it. APT still decodes without it.
+    argv += ["--tle_override", str(output_dir / "tle.txt")]
+    return spawn(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class AptDecoder:
@@ -99,8 +109,10 @@ class AptDecoder:
         # the console reaps that pass; the PNGs already on disk when it began are never reported.
         # satdump writes files rather than lines, so the pass's end is where its images are read.
         # The console's hook logs each as a reception and never raises, so it is called directly.
+        # Through emit_reception, the console's hook gets each image with the command read from
+        # its satdump process after the pass ends and the frequency and radio saved at launch.
         self.on_reception = None
-        self._before_pass = None
+        self._pass_start: tuple[int, set[Path], dict] | None = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         # A pass ends by design when satdump's timeout runs out, so a clean exit is not a death.
         self.watch = ChildWatch(SATDUMP, finite=True)
@@ -118,11 +130,9 @@ class AptDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise AptUnavailable(str(exc)) from exc
 
@@ -165,15 +175,19 @@ class AptDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise AptUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
+        # SatDump takes the enumerated serial or an explicit serial when no survey is wired in.
+        source_id = radio["serial"] if self._list_devices is not None else self.serial
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._before_pass = set(self._pngs())
+        freq_hz = self.freq_hz
+        before = set(self._pngs())
         try:
-            self._proc = self._spawn(self.freq_hz, self.device, self.output_dir)
+            self._proc = self._spawn(freq_hz, source_id, self.output_dir)
         except (OSError, ValueError) as exc:
             self._proc = None
-            self._before_pass = None
             raise AptUnavailable(f"cannot run satdump: {exc}") from exc
+        self._pass_start = (freq_hz, before, radio)
         self.watch.spawned(self._proc)
         self.error = None
 
@@ -200,18 +214,21 @@ class AptDecoder:
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "satdump survived kill; the dongle may still be held"
-        self._report_pass()
+        self._report_pass(proc)
 
-    def _report_pass(self) -> None:
+    def _report_pass(self, proc) -> None:
         """Report the images the pass just ended wrote: each once, and none from before it."""
-        before, self._before_pass = self._before_pass, None
+        pass_start, self._pass_start = self._pass_start, None
         report = self.on_reception
-        if before is None or report is None:
+        if pass_start is None or report is None:
             return
+        freq_hz, before, radio = pass_start
+        command = command_line(proc)
         written = [png for png in self._pngs() if png not in before]
         written.sort(key=lambda png: png.stat().st_mtime)
         for png in written:
-            report(self._row(png))
+            emit_reception(report, self._row(png, freq_hz), command=command, freq_hz=freq_hz,
+                           radio=radio)
 
     def drain(self, timeout: float = APT_PASS_TIMEOUT_S) -> None:
         """Wait for the current pass to finish. Unlike a live feed, a satdump capture is finite."""
@@ -228,7 +245,7 @@ class AptDecoder:
         pngs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         if limit:
             pngs = pngs[:limit]
-        return [self._row(png) for png in pngs]
+        return [self._row(png, self.freq_hz) for png in pngs]
 
     def _pngs(self) -> list[Path]:
         """Every PNG under output_dir, including satdump's per-satellite subdirectories."""
@@ -236,13 +253,13 @@ class AptDecoder:
             return []
         return [p for p in self.output_dir.rglob("*.png") if p.is_file()]
 
-    def _row(self, png: Path) -> dict:
+    def _row(self, png: Path, freq_hz: int) -> dict:
         """One decoded image as the API hands it out."""
         stat = png.stat()
         received_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
         return {
             "path": png.relative_to(self.data_dir).as_posix(),
             "received_at": received_at,
-            "satellite": satellite_for(self.freq_hz),
+            "satellite": satellite_for(freq_hz),
             "meta": {"filename": png.name, "size_bytes": stat.st_size},
         }
