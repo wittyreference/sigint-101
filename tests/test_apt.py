@@ -35,6 +35,8 @@ class FakeProcess:
 
     def terminate(self):
         self.terminated = True
+        if self.returncode is None:
+            self.returncode = -15
 
     def wait(self, timeout=None):
         return 0

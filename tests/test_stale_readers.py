@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import shlex
 import socket
 import struct
@@ -534,6 +535,21 @@ def test_old_readers_pipe_failing_after_retune_is_not_the_new_runs_failure(late_
     assert dec.running
 
 
+def _park_supervisor_diagnostic(dec, procs, found, go_on):
+    enrich = dec.watch.enrich
+    returned = threading.Event()
+
+    def wait_before_enrich(proc, reason):
+        if proc is procs[0]:
+            found.set()
+            assert go_on.wait(5)
+        enrich(proc, reason)
+        returned.set()
+
+    dec.watch.enrich = wait_before_enrich
+    return returned
+
+
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
 def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(late_factory, spec):
     dec, procs, heard, clock = late_factory(spec)
@@ -547,7 +563,11 @@ def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(l
             go_on.wait(5)                          # held between finding the death and recording it
         return reason
 
-    dec.watch.ended = ended
+    diagnostic_done = None
+    if hasattr(dec, "_run"):
+        diagnostic_done = _park_supervisor_diagnostic(dec, procs, found, go_on)
+    else:
+        dec.watch.ended = ended
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
@@ -560,9 +580,13 @@ def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(l
     dec.start()
     assert len(procs) == 2
     go_on.set()
+    if diagnostic_done is not None:
+        assert diagnostic_done.wait(5)
     procs[0].reader.join(5)
     assert not procs[0].reader.is_alive()
     assert dec.error is None
+    if diagnostic_done is not None:
+        assert dec.watch.reason is None
     dec.stop()
     dec.start()                                    # not refused with the old run's reason
     assert len(procs) == 3
@@ -622,6 +646,12 @@ def test_death_on_its_way_in_at_restart_is_not_the_new_runs(late_factory, spec):
     procs[0].feed(spec.line1)
     heard.wait_for(1)
     lock.hold(procs[0].reader)
+    if hasattr(dec, "_run"):
+        # Hold the exit observation as well as the old reader's notification. This is the
+        # stop-first interleaving, so the supervisor must see cancellation before the exit.
+        ticket = dec._run
+        poll = procs[0].poll
+        procs[0].poll = lambda: poll() if ticket.cancel.is_set() else None
     procs[0].die(1)
     procs[0].close_pipe()
     _restart_while_held(dec, lock, clock, spec)
@@ -755,6 +785,8 @@ def test_run_after_retune_still_records_its_own_failure(late_factory, spec, end,
     end(procs[1])
     procs[1].reader.join(5)
     assert not procs[1].reader.is_alive()
+    if hasattr(dec, "_run") and procs[1].poll() is not None:
+        assert dec._run.ready.wait(5)
     assert dec.error is not None and reason in dec.error
     dec.stop()
     with pytest.raises(spec.unavailable, match=reason):
@@ -1025,6 +1057,15 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
     # status while stop/retune/release runs. Computing exit diagnostics must not hold the buffer
     # lock, and once the stop invalidates the run and watch, the old reader cannot commit a retry.
     dec, procs, heard, _ = late_factory(spec)
+    if hasattr(dec, "_run"):
+        read = dec._read
+
+        def finish_old_read(proc, *args):
+            read(proc, *args)
+            if proc is procs[0]:
+                slow_wait()
+
+        dec._read = finish_old_read
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
@@ -1046,7 +1087,8 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
             return 1
         return plain_wait(timeout=timeout)
 
-    old.wait = slow_wait
+    if not hasattr(dec, "_run"):
+        old.wait = slow_wait
     old.close_pipe()
     assert waiting.wait(5)
     assert lock_free_during_wait == [True]
@@ -1379,10 +1421,8 @@ def _reap_stage(proc) -> None:
 @pytest.mark.parametrize("action", ["stop", "retune"])
 def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_retune(
         monkeypatch, action):
-    # When an upstream pipeline stage dies while a downstream stage stays alive holding stdout
-    # open, _settle() must bring every stage down before joining the reader so a concurrent stop
-    # or retune never waits out STOP_WAIT_S on the lifecycle lock.
-    monkeypatch.setattr(childproc, "EXIT_GRACE_S", 0.05)
+    # While the downstream still holds stdout open during EOF grace, stop and retune must
+    # cancel retirement without joining the blocked reader under the lifecycle lock.
     stages = []
     upstream_in = []
 
@@ -1401,10 +1441,20 @@ def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_r
 
     dec = aprs.AprsDecoder(spawn=spawn, **_common())
     dec.STOP_WAIT_S = 0.6
+    dec.EOF_WAIT_S = 5
     clock = _Clock()
     dec.watch = ChildWatch(dec.watch.tool, clock=clock)
     heard = _Heard(dec, lambda d: d["source"], default_freq=aprs.DEFAULT_APRS_HZ)
     dec.on_reception = heard
+    observed_eof = threading.Event()
+    record_death = dec._record_death
+
+    def mark_eof(*args):
+        result = record_death(*args)
+        observed_eof.set()
+        return result
+
+    monkeypatch.setattr(dec, "_record_death", mark_eof)
     try:
         dec.start()
         heard.wait_for(1)
@@ -1413,15 +1463,6 @@ def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_r
         stages[0].wait(timeout=5)
         assert stages[0].poll() == 1
         assert stages[1].poll() is None
-
-        settling = threading.Event()
-        real_stopping = dec.watch.stopping
-
-        def mark_stopping():
-            real_stopping()
-            settling.set()
-
-        dec.watch.stopping = mark_stopping
 
         start_error = []
 
@@ -1433,7 +1474,9 @@ def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_r
 
         starter = threading.Thread(target=run_start)
         starter.start()
-        assert settling.wait(5)
+        assert observed_eof.wait(5)
+        assert stages[1].poll() is None
+        assert not dec._run.physical.is_set()
 
         t0 = time.monotonic()
         if action == "stop":
@@ -1449,6 +1492,8 @@ def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_r
         assert elapsed < dec.STOP_WAIT_S / 2
     finally:
         dec.stop()
+        if dec._run is not None:
+            assert dec._run.complete.wait(5)
         for stage in stages:
             _reap_stage(stage)
 
@@ -1477,6 +1522,7 @@ def test_pipeline_natural_exit_reaps_live_downstream_and_drains_buffered_pipe(mo
         return Pipeline(up, down)
 
     dec = aprs.AprsDecoder(spawn=spawn, **_common())
+    dec.EOF_WAIT_S = 0.05
     dec.STOP_WAIT_S = 1.0
     clock = _Clock()
     dec.watch = ChildWatch(dec.watch.tool, clock=clock)
@@ -1525,6 +1571,8 @@ def test_pipeline_natural_exit_reaps_live_downstream_and_drains_buffered_pipe(mo
     finally:
         go_on.set()
         dec.stop()
+        if dec._run is not None:
+            assert dec._run.complete.wait(5)
         for stage in stages:
             _reap_stage(stage)
 
@@ -1570,8 +1618,6 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
         # Queue the second SBS line in the socket buffer and end the child naturally; keep the
         # peer socket open and idle so a blocking recv() would wait out FEED_POLL_S.
         pairs[0][1].sendall((ADSB_2 + "\n").encode())
-        procs[0].returncode = 1
-
         real_thread = dec._thread
         joined = threading.Event()
         alive_after_join = []
@@ -1584,6 +1630,8 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
                 alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _ReleaseOnJoin()
+        procs[0].returncode = 1
+
 
         with pytest.raises(adsb.AdsbUnavailable, match="status 1"):
             dec.start()
@@ -1655,10 +1703,6 @@ def test_adsb_live_read_timeout_as_last_sbs_line_arrives_still_drains():
         pairs[0][1].sendall((ADSB_1 + "\n").encode())
         assert paused.wait(5)
 
-        boundary[0].armed.set()
-        go_on.set()
-        assert timed_out.wait(5)
-
         real_thread = dec._thread
         alive_after_join = []
 
@@ -1668,6 +1712,10 @@ def test_adsb_live_read_timeout_as_last_sbs_line_arrives_still_drains():
                 alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _CheckJoin()
+        boundary[0].armed.set()
+        go_on.set()
+        assert timed_out.wait(5)
+
         with pytest.raises(adsb.AdsbUnavailable, match="status 1"):
             dec.start()
         assert alive_after_join == [False]
@@ -1727,8 +1775,6 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
             assert paused.wait(5)
             # Queue the second datagram in the UDP socket buffer and end the child naturally.
             sender.sendto((AIS_2 + "\n").encode(), socks[0].getsockname())
-        procs[0].returncode = 1
-
         real_thread = dec._thread
         joined = threading.Event()
         alive_after_join = []
@@ -1741,6 +1787,8 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
                 alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _ReleaseOnJoin()
+        procs[0].returncode = 1
+
 
         with pytest.raises(ais.AisUnavailable, match="status 1"):
             dec.start()
@@ -1813,10 +1861,6 @@ def test_ais_live_read_timeout_as_last_datagram_arrives_still_drains():
             sender.sendto((AIS_1 + "\n").encode(), socks[0].getsockname())
         assert paused.wait(5)
 
-        boundary[0].armed.set()
-        go_on.set()
-        assert timed_out.wait(5)
-
         real_thread = dec._thread
         alive_after_join = []
 
@@ -1826,6 +1870,10 @@ def test_ais_live_read_timeout_as_last_datagram_arrives_still_drains():
                 alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _CheckJoin()
+        boundary[0].armed.set()
+        go_on.set()
+        assert timed_out.wait(5)
+
         with pytest.raises(ais.AisUnavailable, match="status 1"):
             dec.start()
         assert alive_after_join == [False]
@@ -1912,7 +1960,11 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
             go_on.wait(5)
         return reason
 
-    dec.watch.ended = ended
+    diagnostic_done = None
+    if hasattr(dec, "_run"):
+        diagnostic_done = _park_supervisor_diagnostic(dec, procs, found, go_on)
+    else:
+        dec.watch.ended = ended
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
@@ -1927,6 +1979,8 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
 
     # Release the old reader while still stopped in back-off (before any replacement starts).
     go_on.set()
+    if diagnostic_done is not None:
+        assert diagnostic_done.wait(5)
     procs[0].reader.join(5)
     assert not procs[0].reader.is_alive()
     assert dec.error is None
@@ -1937,9 +1991,10 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
     assert dec.running
 
 
-def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_drops_queued_item():
-    # If exit diagnostics raise inside settle_ended(), the run must still end and the process must
-    # still be stopped so a detached reader resuming with a queued item cannot publish it.
+def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_drops_queued_item(
+        monkeypatch):
+    # A failed diagnostic leaves a usable exit reason. Reap and fence the old reader so a queued
+    # item cannot publish after the drain deadline or change the replacement run's watch.
     procs = []
 
     class _TrackedLateProc(LateProc):
@@ -1979,19 +2034,15 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
 
         # Queue a second complete packet and mark the child exited, then fail exit diagnostics.
         procs[0].feed(APRS_2)
-        procs[0].die(1)
-
-        real_ended = dec.watch.ended
-
-        def boom(*_args, **_kw):
+        def boom(_stage):
             raise OSError("stderr read failed")
 
-        dec.watch.ended = boom
+        monkeypatch.setattr(childproc, "stderr_tail", boom)
+        procs[0].die(1)
         real_thread = dec._thread
 
-        with pytest.raises(OSError, match="stderr read failed"):
+        with pytest.raises(aprs.AprsUnavailable, match="exit status 1.*stderr read failed"):
             dec.start()
-        dec.watch.ended = real_ended
         assert procs[0].terminated is True
 
         # Resuming the detached reader must publish nothing to the roster or reception hook.
@@ -1999,6 +2050,9 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
         procs[0].close_pipe()
         real_thread.join(5)
         assert not real_thread.is_alive()
+        assert "exit status 1" in dec.watch.reason and "stderr read failed" in dec.watch.reason
+        clock.now += 60
+        dec.start()
         assert dec.watch.stopped is False
         assert dec.error is None
         assert [s["source"] for s in dec.stations()] == ["KD2ABC-9"]
@@ -2010,10 +2064,9 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
         dec.stop()
 
 
-def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket():
-    # If exit diagnostics raise inside settle_ended() for a socket feed, the run must still end,
-    # the child process must be stopped, and the socket must close so the detached reader cannot
-    # publish a queued SBS line after the failed settle.
+def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket(monkeypatch):
+    # A diagnostic error still leaves an exit reason, a stopped child and a closed socket.
+    # A reader that outlived the drain cannot publish its queued SBS line.
     pairs = []
     procs = []
 
@@ -2057,19 +2110,15 @@ def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket
         assert paused.wait(5)
 
         pairs[0][1].sendall((ADSB_2 + "\n").encode())
-        procs[0].returncode = 1
-
-        real_ended = dec.watch.ended
-
-        def boom(*_args, **_kw):
+        def boom(_stage):
             raise OSError("stderr read failed")
 
-        dec.watch.ended = boom
+        monkeypatch.setattr(childproc, "stderr_tail", boom)
         real_thread = dec._thread
+        procs[0].returncode = 1
 
-        with pytest.raises(OSError, match="stderr read failed"):
+        with pytest.raises(adsb.AdsbUnavailable, match="exit status 1.*stderr read failed"):
             dec.start()
-        dec.watch.ended = real_ended
         assert procs[0].terminated is True
         assert pairs[0][0].fileno() == -1
 
@@ -2077,6 +2126,9 @@ def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket
         go_on.set()
         real_thread.join(5)
         assert not real_thread.is_alive()
+        assert "exit status 1" in dec.watch.reason and "stderr read failed" in dec.watch.reason
+        clock.now += 60
+        dec.start()
         assert dec.watch.stopped is False
         assert dec.error is None
         assert {a["hex_ident"] for a in dec.aircraft()} == {"A1B2C3"}
@@ -2159,7 +2211,6 @@ def test_sstv_finite_pipeline_reaps_live_upstream_before_join_while_draining_mod
         rtl_fm, sox, spawn(*args), finite=True))
     dec.start()
     child = children[0]
-    child.die(0)
     paths[0].write_bytes(PNG_BYTES)
     stages_at_join = []
 
@@ -2170,6 +2221,7 @@ def test_sstv_finite_pipeline_reaps_live_upstream_before_join_while_draining_mod
 
     reader_at_join(after_reap)
     expected = childproc.command_line(dec._proc)
+    child.die(0)
     dec.stop()
     assert stages_at_join and None not in stages_at_join[0]
     [(image, command, freq)] = heard
@@ -2197,13 +2249,15 @@ def test_sstv_mode_commit_and_stop_release_boundary(late_sstv, control, boundary
         child.feed("Detected SSTV mode Robot 36", Sentinel("working"))
         assert parsed.wait(2)
 
+    ticket = dec._run
     if boundary == "exited":
-        child.die(0)
         reader_at_join(lambda: _sstv_end(child, mode="Robot 36"))
+        child.die(0)
     else:
         join = reader_at_join()
     getattr(dec, control)()
     if boundary == "exited":
+        assert ticket.complete.wait(2)
         [(image, command, freq)] = heard
         assert (command, freq, image["mode"]) == (
             _line(child), sstv.DEFAULT_SSTV_HZ, "Robot 36")
@@ -2227,9 +2281,9 @@ def test_sstv_clean_cycle_keeps_each_captures_command_freq_and_png(
         start()
         child = children[0]
         paths[0].write_bytes(PNG_BYTES)
-        child.die(0)
         action = None if slow else lambda: _sstv_end(child, mode="Robot 36")
         old_join = reader_at_join(action)
+        child.die(0)
         clock.now += 1
         dec.freq_hz = 145_800_000
         start()
@@ -2388,17 +2442,17 @@ def test_sstv_stale_reader_never_reads_next_captures_path(late_sstv, monkeypatch
 def test_sstv_late_death_reason_cannot_corrupt_error_or_refuse_next_start(late_sstv, monkeypatch):
     dec, children, _, _, clock, reader_at_join, gate = late_sstv
     diagnosed, resume = gate(), gate()
-    ended = dec.watch.ended
+    enrich = dec.watch.enrich
 
-    def pause_reason(proc, **kwargs):
-        reason = ended(proc, **kwargs)
-        if threading.current_thread() is proc.reader and reason:
+    def pause_reason(proc, reason):
+        if proc is children[0]:
             diagnosed.set()
             assert resume.wait(5)
-        return reason
+        enrich(proc, reason)
 
-    monkeypatch.setattr(dec.watch, "ended", pause_reason)
+    monkeypatch.setattr(dec.watch, "enrich", pause_reason)
     dec.start()
+    ticket = dec._run
     child = children[0]
     join = reader_at_join()
     _sstv_end(child, code=1)
@@ -2408,6 +2462,7 @@ def test_sstv_late_death_reason_cannot_corrupt_error_or_refuse_next_start(late_s
     clock.now += 60
     dec.start()
     resume.set()
+    assert ticket.diagnosed.wait(2)
     join(2)
     assert dec.error is None
     assert not dec.watch.stopped
@@ -2417,32 +2472,33 @@ def test_sstv_late_death_reason_cannot_corrupt_error_or_refuse_next_start(late_s
     assert dec.running
 
 
-def test_sstv_exit_diagnostics_do_not_hold_the_run_guard(late_sstv, monkeypatch):
-    dec, children, _, _, _, reader_at_join, gate = late_sstv
+def test_sstv_exit_diagnostics_do_not_hold_the_run_guard(late_sstv):
+    dec, children, _, _, clock, reader_at_join, gate = late_sstv
     inside, resume = gate(), gate()
     dec.start()
+    ticket = dec._run
     child = children[0]
     join = reader_at_join()
-    wait = child.wait
-
-    def gated_wait(timeout=None):
-        if threading.current_thread() is child.reader:
+    class GatedStderr(io.StringIO):
+        def read(self, *args):
             inside.set()
             assert resume.wait(5)
-            return 1
-        return wait(timeout)
+            return super().read(*args)
 
-    monkeypatch.setattr(child, "wait", gated_wait)
-    child.close_pipe()
+    child.stderr.close()
+    child.stderr = GatedStderr()
+    _sstv_end(child, code=1)
     assert inside.wait(2)
-    # This is lock-discipline coverage for the guard introduced by this change.
-    guard = getattr(dec, "_runs", None)
-    if guard is not None:
-        assert guard.lock.acquire(blocking=False)
-        guard.lock.release()
+    guard = dec._runs
+    assert guard.lock.acquire(blocking=False)
+    guard.lock.release()
+    with pytest.raises(sstv.SstvUnavailable, match="status 1"):
+        dec.start()
+    clock.now += 60
     dec.stop()
     dec.start()
     resume.set()
+    assert ticket.diagnosed.wait(2)
     join(2)
     assert dec.running
     assert not dec.watch.stopped

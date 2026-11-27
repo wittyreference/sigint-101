@@ -884,6 +884,22 @@ def test_marauder_source_whose_devboard_restarts_is_stopped_not_left_live(bridge
     assert dec.watch.reason.startswith("Marauder restarted on the devboard")
 
 
+def test_marauder_retires_after_restart_without_another_start(bridge):
+    dec = MarauderFlockDetector(tty=bridge.path)
+    dec.start()
+    try:
+        link, run = dec._proc, dec._runs.current
+        bridge.say(marauder_stream([]))
+        wait_for(lambda: link.answered)
+        bridge.say(b"ESP-IDF version is: v4.4.4\r\n")
+        wait_for(lambda: link.poll() == 1)
+        wait_for(lambda: dec._runs.current != run)
+        assert dec.watch.reason == link.end_reason
+        assert not dec.running
+    finally:
+        dec.stop()
+
+
 @pytest.mark.parametrize("ending", ["coalesced", "split", "marker-alone", "first-chunk"])
 def test_marauder_reboot_delivers_only_capture_before_the_marker(monkeypatch, ending):
     # A pipe fixes the read boundaries. Detection and exit reporting still use the real link

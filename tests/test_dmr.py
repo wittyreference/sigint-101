@@ -142,7 +142,7 @@ class FakeProcess:
         self.terminated = False
 
     def poll(self):
-        return None
+        return -15 if self.terminated else None
 
     def terminate(self):
         self.terminated = True

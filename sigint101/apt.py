@@ -5,23 +5,21 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .childproc import (
     ChildWatch,
+    RunGuard,
     command_line,
-    emit_reception,
-    running_command,
     spawn,
-    stop_process,
 )
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
     rtlsdr_radio_for_run,
 )
+from .receiver_lifecycle import SupervisedReceiver
 
 # satdump's binary. It opens the RTL-SDR directly, runs the NOAA APT pipeline on a live pass, and
 # writes the decoded image products as files — so this decoder orchestrates a process and then reads
@@ -79,7 +77,7 @@ def _popen(freq_hz: int, source_id: str | None, output_dir: Path):
     return spawn(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-class AptDecoder:
+class AptDecoder(SupervisedReceiver):
     """Owns one satdump process decoding a NOAA APT pass, and reads the images it writes to disk.
 
     A sibling of the ACARS and ADS-B decoders: an SDR-exclusive tool with release/resume so it takes
@@ -101,9 +99,8 @@ class AptDecoder:
         self._spawn = spawn
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
-        self._life = threading.RLock()
-        self._proc = None
-        self._released = False
+        self._runs = RunGuard()
+        self._init_lifecycle()
         self.error = None
         # Called with each image's dict (as images() lists it) that the running pass wrote, once
         # the console reaps that pass; the PNGs already on disk when it began are never reported.
@@ -112,23 +109,13 @@ class AptDecoder:
         # Through emit_reception, the console's hook gets each image with the command read from
         # its satdump process after the pass ends and the frequency and radio saved at launch.
         self.on_reception = None
-        self._pass_start: tuple[int, set[Path], dict] | None = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         # A pass ends by design when satdump's timeout runs out, so a clean exit is not a death.
         self.watch = ChildWatch(SATDUMP, finite=True)
 
-    @property
-    def running(self) -> bool:
-        proc = self._proc
-        return proc is not None and proc.poll() is None
-
-    def live_command(self) -> str | None:
-        """The exact command running now, read off the live process; None when nothing runs."""
-        return running_command(self._proc)
-
-    @property
-    def released(self) -> bool:
-        return self._released
+    _unavailable = AptUnavailable
+    _released_reason = "the radio was released to another program; resume APT to take it back"
+    _read = None
 
     def _choose_radio(self) -> dict:
         try:
@@ -136,99 +123,38 @@ class AptDecoder:
         except DeviceSelectionError as exc:
             raise AptUnavailable(str(exc)) from exc
 
-    def release(self) -> None:
-        """Hand the dongle to another program (the sweeper) and stay off it until resumed.
-
-        The decoded images are real receptions on disk, so releasing stops the capture but keeps
-        them — unlike the in-memory message logs, there is nothing here to throw away.
-        """
-        with self._life:
-            self._released = True
-            self.stop()
-
-    def resume(self) -> None:
-        with self._life:
-            self._released = False
-
-    def start(self) -> None:
-        """Begin a capture, unless the radio is absent, satdump is missing, or released."""
-        with self._life:
-            self._start_locked()
-
-    def _start_locked(self) -> None:
-        if self.running:
-            return
-        self._settle()
-        if self._released:
-            raise AptUnavailable(
-                "the radio was released to another program; resume APT to take it back")
+    def _prepare_launch(self, freq_hz, _number):
         if not self._which(SATDUMP):
             raise AptUnavailable(
                 f"{SATDUMP} is not installed, so SIGINT 101 cannot decode an APT pass")
         if not self._radio_present():
             raise AptUnavailable("no RTL-SDR on the USB bus — SIGINT 101 will not fake an image")
-        if self.error:
-            reason, self.error = self.error, None
-            raise AptUnavailable(reason)
-        # A child that died on its own is not relaunched on every poll: the reason stands, and the
-        # console waits out a back-off that grows while the deaths keep coming.
-        blocked = self.watch.blocked()
-        if blocked:
-            raise AptUnavailable(blocked)
         radio = self._choose_radio()
-        self.device = radio["index"]
         # SatDump takes the enumerated serial or an explicit serial when no survey is wired in.
         source_id = radio["serial"] if self._list_devices is not None else self.serial
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        freq_hz = self.freq_hz
         before = set(self._pngs())
-        try:
-            self._proc = self._spawn(freq_hz, source_id, self.output_dir)
-        except (OSError, ValueError) as exc:
-            self._proc = None
-            raise AptUnavailable(f"cannot run satdump: {exc}") from exc
-        self._pass_start = (freq_hz, before, radio)
-        self.watch.spawned(self._proc)
-        self.error = None
 
-    def _note_end(self, proc) -> None:
-        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc)
-        if reason and self.error is None:
-            self.error = reason
+        def launch():
+            try:
+                proc = self._spawn(freq_hz, source_id, self.output_dir)
+            except (OSError, ValueError) as exc:
+                raise AptUnavailable(f"cannot run satdump: {exc}") from exc
+            self.device = radio["index"]
+            return proc
 
-    def _settle(self) -> None:
-        """Account for a child that ended since the last poll, then clear away what it left."""
-        if self._proc is not None:
-            self._note_end(self._proc)
-            self._stop_locked()
+        return launch, (freq_hz, before, radio)
 
-    def stop(self) -> None:
-        """End the capture and let go of the dongle."""
-        with self._life:
-            self._stop_locked()
-
-    def _stop_locked(self) -> None:
-        # Marked first, so a pass we end is never reported as a death.
-        self.watch.stopping()
-        proc, self._proc = self._proc, None
-        if proc is not None and not stop_process(proc):
-            self.error = "satdump survived kill; the dongle may still be held"
-        self._report_pass(proc)
-
-    def _report_pass(self, proc) -> None:
-        """Report the images the pass just ended wrote: each once, and none from before it."""
-        pass_start, self._pass_start = self._pass_start, None
-        report = self.on_reception
-        if pass_start is None or report is None:
-            return
-        freq_hz, before, radio = pass_start
-        command = command_line(proc)
+    def _report(self, run):
+        """Fix all rows before the next APT pass can scan or write this directory."""
+        freq_hz, before, radio = run.args
         written = [png for png in self._pngs() if png not in before]
         written.sort(key=lambda png: png.stat().st_mtime)
-        for png in written:
-            emit_reception(report, self._row(png, freq_hz), command=command, freq_hz=freq_hz,
-                           radio=radio)
+        rows = [self._row(png, freq_hz) for png in written]
+        command = command_line(run.proc)
+        run.ready.set()
+        for row in rows:
+            self._emit(self._admit(), row, command=command, freq_hz=freq_hz, radio=radio)
 
     def drain(self, timeout: float = APT_PASS_TIMEOUT_S) -> None:
         """Wait for the current pass to finish. Unlike a live feed, a satdump capture is finite."""
