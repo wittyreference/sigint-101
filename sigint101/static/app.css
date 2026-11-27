@@ -363,12 +363,10 @@ body {
   font-family: var(--font-display);
   font-size: 20px;
   font-weight: 400;
+  line-height: 1.15;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   text-shadow: var(--glow);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .statusbar__status {
@@ -378,49 +376,15 @@ body {
   flex: none;
 }
 
-/* Chip (ppm corrected / RAW) — word + dot; the word is the signal, not the hue */
-.chip {
-  display: inline-flex;
+/* Status and charge on top, with quiet measurements below. The touch keys keep the full bar. */
+.statusbar__readouts {
+  display: grid;
+  grid-template-areas: "radio battery" "ppm snr";
   align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 12px;
-  border-radius: 0;
-  border: 2px solid var(--border-strong);
-  background: var(--surface-2);
-  color: var(--fg);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  white-space: nowrap;
+  gap: 4px 10px;
 }
 
-.chip::before {
-  content: "";
-  width: 10px;
-  height: 10px;
-  background: var(--fg-mute);
-  flex: none;
-}
-
-.chip--ok {
-  border-color: var(--ok);
-  color: var(--ok);
-}
-.chip--ok::before {
-  background: var(--ok);
-}
-
-.chip--warn {
-  border-color: var(--warn);
-  color: var(--warn);
-}
-.chip--warn::before {
-  background: var(--warn);
-}
-
-/* Readouts (SNR, battery) */
+/* Radio and measured readouts */
 .readout {
   display: inline-flex;
   align-items: center;
@@ -431,6 +395,19 @@ body {
   color: var(--fg-dim);
   white-space: nowrap;
 }
+
+.readout--radio {
+  grid-area: radio;
+  font-size: 14px;
+}
+
+.readout--ppm {
+  grid-area: ppm;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+
+.readout--snr { grid-area: snr; }
 
 .readout__label {
   font-size: 13px;
@@ -445,6 +422,7 @@ body {
 }
 
 .batt {
+  grid-area: battery;
   display: inline-flex;
   align-items: center;
   gap: 6px;
