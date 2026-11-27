@@ -527,3 +527,22 @@ class RunGuard:
 
     def __exit__(self, *exc):
         return self.lock.__exit__(*exc)
+
+
+def settle_ended(proc, thread, runs: RunGuard, watch: ChildWatch, *,
+                 note_end, wait_s: float) -> bool:
+    """Account for a child that ended on its own, drain its reader, then end the run and reap it.
+
+    Unlike an explicit stop (which invalidates the run and shuts down the transport at once), a
+    natural exit records the death first and gives the retiring reader up to `wait_s` to drain
+    complete items still queued in its pipe or socket under the dead run's provenance. Once that
+    bounded drain finishes or times out, the run ends so nothing the reader later delivers during
+    retry back-off can list, log or refuse the next start, and the process/transport is stopped.
+    Returns False only when even SIGKILL left the child unreaped.
+    """
+    note_end(proc, runs.current)
+    watch.stopping()
+    if thread is not None:
+        thread.join(timeout=wait_s)
+    runs.end(watch)
+    return stop_process(proc)

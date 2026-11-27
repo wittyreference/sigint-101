@@ -610,3 +610,57 @@ def test_watch_ended_computes_exit_diagnostics_outside_run_guard_lock():
     assert outcome == [None]
     assert watch.stopped is False
     assert watch.blocked() is None
+
+
+def test_settle_ended_joins_before_ending_run_and_stopping_process():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    events = []
+
+    class _TrackedProc(_Ended):
+        def terminate(self):
+            events.append(("terminate", guard.is_current(first)))
+
+    class _FakeThread:
+        def join(self, timeout=None):
+            events.append(("join", timeout, guard.is_current(first)))
+
+    proc = _TrackedProc(["rtl_433"], 1)
+    watch.spawned(proc)
+
+    def note_end(p, run):
+        events.append(("note_end", p is proc, run == first, guard.is_current(first)))
+        watch.ended(p, runs=guard, run=run)
+
+    reaped = childproc.settle_ended(
+        proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=1.25)
+    assert reaped is True
+    assert events == [
+        ("note_end", True, True, True),
+        ("join", 1.25, True),
+        ("terminate", False),
+    ]
+    with guard:
+        assert guard.is_current(first) is False
+    assert watch.stopped is True
+
+
+def test_settle_ended_ends_run_even_when_join_times_out_and_reports_unkillable(monkeypatch):
+    monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.01)
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    proc = _Unkillable()
+    watch.spawned(proc)
+
+    class _StuckThread:
+        def join(self, timeout=None):
+            pass
+
+    reaped = childproc.settle_ended(
+        proc, _StuckThread(), guard, watch, note_end=lambda _p, _r: None, wait_s=0.01)
+    assert reaped is False
+    assert proc.sent == ["TERM", "KILL"]
+    with guard:
+        assert guard.is_current(first) is False
