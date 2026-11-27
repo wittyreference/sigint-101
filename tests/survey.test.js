@@ -1,20 +1,29 @@
 // ABOUTME: Tests the Wi-Fi survey panel's pure helpers and strict envelope-only rendering.
-// ABOUTME: Uses node's built-in runner; verifies no field outside the envelope list ever renders.
+// ABOUTME: Uses node's built-in runner; verifies band+channel keying and no payload field ever renders.
 
 const test = require("node:test");
 const assert = require("node:assert");
 const panel = require("../sigint101/static/survey.js");
 
-test("envelope allowlist excludes any payload field by construction", () => {
-  assert.deepStrictEqual(panel.ENVELOPE_FIELDS, ["ssid", "bssid", "channel", "signal", "security"]);
-  assert.deepStrictEqual(panel.CENSUS_FIELDS, ["channel", "count", "hidden", "open", "strongest", "ssids"]);
+test("envelope allowlist includes band/freq metadata and excludes any payload field", () => {
+  assert.deepStrictEqual(
+    panel.ENVELOPE_FIELDS,
+    ["ssid", "bssid", "band", "channel", "freq_mhz", "signal", "security"],
+  );
+  assert.deepStrictEqual(
+    panel.CENSUS_FIELDS,
+    ["band", "channel", "count", "hidden", "open", "strongest", "ssids"],
+  );
   for (const forbidden of ["payload", "data", "body", "content", "packet", "frame"]) {
     assert.ok(!panel.ENVELOPE_FIELDS.includes(forbidden));
     assert.ok(!panel.CENSUS_FIELDS.includes(forbidden));
   }
 });
 
-test("channelLabel, countLabel and signalLabel format census metrics cleanly", () => {
+test("channelLabel distinguishes bands so 2.4 GHz and 6 GHz channel 1 stay separate", () => {
+  assert.equal(panel.channelLabel({ band: "2.4 GHz", channel: 1 }), "2.4G CH 1");
+  assert.equal(panel.channelLabel({ band: "5 GHz", channel: 36 }), "5G CH 36");
+  assert.equal(panel.channelLabel({ band: "6 GHz", channel: 1 }), "6G CH 1");
   assert.equal(panel.channelLabel({ channel: 6 }), "CH 6");
   assert.equal(panel.channelLabel({}), "CH —");
   assert.equal(panel.countLabel({ count: 1 }), "1 AP");
@@ -37,6 +46,7 @@ test("summary formats SSIDs, hidden count, and open count from metadata alone", 
 
 test("envelopeRow drops any field outside the envelope allowlist", () => {
   const dirty = {
+    band: "2.4 GHz",
     channel: 6,
     count: 2,
     hidden: 1,
@@ -62,11 +72,11 @@ test("envelopeRow drops any field outside the envelope allowlist", () => {
   assert.ok(!rendered.includes("DO_NOT_RENDER"));
 });
 
-test("pollAnswer preserves honest no-radio refusals and rejects malformed replies", () => {
+test("pollAnswer preserves honest radio-off refusals and rejects malformed replies", () => {
   const down = panel.pollAnswer(503, {
     available: false,
     cause: "no_radio",
-    reason: "no Wi-Fi radio on this host — SIGINT 101 will not fake a scan",
+    reason: "Wi-Fi radio is off — enable Wi-Fi to run the survey",
     channels: [],
   });
   assert.equal(down.available, false);
@@ -74,8 +84,10 @@ test("pollAnswer preserves honest no-radio refusals and rejects malformed replie
 
   const ok = panel.pollAnswer(200, {
     available: true,
-    command: "nmcli -t -f SSID,BSSID,CHAN,SIGNAL,SECURITY dev wifi list",
-    channels: [{ channel: 1, count: 1, hidden: 0, open: 0, strongest: 80, ssids: ["CafeNet"] }],
+    command: "nmcli -t -f SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan no",
+    channels: [
+      { band: "2.4 GHz", channel: 1, count: 1, hidden: 0, open: 0, strongest: 80, ssids: ["CafeNet"] },
+    ],
   });
   assert.equal(ok.available, true);
   assert.equal(ok.channels.length, 1);

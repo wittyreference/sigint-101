@@ -15,9 +15,9 @@ LESSONS = load_lessons(PACK_DIR)
 # lines of why and one line to carry out the door fit in about 120.
 EXPLAIN_MAX_WORDS = 120
 
-# M5 and M15 teach the law, and their legal sentences stay word for word as corrected after the
-# audit (§5a X1, R1): the statute is the lesson there, so the explain gets room for it, not a trim.
-LAW_EXPLAIN_MAX_WORDS = {5: 165, 15: 185}
+# M5, M15, and M39 teach the law, and their legal sentences stay exact to the statute and opinion
+# rather than trimmed into overstatement, so their explains get room for the citations and limits.
+LAW_EXPLAIN_MAX_WORDS = {5: 165, 15: 185, 39: 175}
 
 # An instrument stage's narration reads in a thin band under the live panel while the learner is
 # told to watch it: split attention. About 60 words keeps the instruction and drops the lecture.

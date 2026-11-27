@@ -1285,7 +1285,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return {"cause": "no_radio", "next_step": "Connect the Flipper over USB."}
         if reason.startswith("no monitor radio:"):
             return {"cause": "no_radio"}  # This refusal already says how to seat the devboard.
-        if reason.startswith("no Wi-Fi radio"):
+        if reason.startswith(("no Wi-Fi radio", "Wi-Fi radio is off", "no managed Wi-Fi device")):
             return {"cause": "no_radio"}
 
         missing = re.match(r"(?:cannot survey the bus: )?([\w.+-]+) is not installed\b", reason)

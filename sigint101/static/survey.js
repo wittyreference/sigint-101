@@ -4,13 +4,14 @@
 (function () {
   "use strict";
 
-  var ENVELOPE_FIELDS = Object.freeze(["ssid", "bssid", "channel", "signal", "security"]);
-  var CENSUS_FIELDS = Object.freeze(["channel", "count", "hidden", "open", "strongest", "ssids"]);
+  var ENVELOPE_FIELDS = Object.freeze(["ssid", "bssid", "band", "channel", "freq_mhz", "signal", "security"]);
+  var CENSUS_FIELDS = Object.freeze(["band", "channel", "count", "hidden", "open", "strongest", "ssids"]);
 
   // Pick strictly the allowlisted census fields; any unexpected or payload key is dropped here.
   function envelopeRow(raw) {
     raw = raw && typeof raw === "object" ? raw : {};
     return {
+      band: typeof raw.band === "string" && raw.band ? raw.band : null,
       channel: typeof raw.channel === "number" ? raw.channel : null,
       count: typeof raw.count === "number" ? raw.count : 0,
       hidden: typeof raw.hidden === "number" ? raw.hidden : 0,
@@ -22,7 +23,10 @@
 
   function channelLabel(row) {
     var clean = envelopeRow(row);
-    return clean.channel != null ? "CH " + clean.channel : "CH —";
+    var ch = clean.channel != null ? "CH " + clean.channel : "CH —";
+    if (!clean.band) return ch;
+    var shortBand = clean.band.replace(/\s*GHz$/i, "G");
+    return shortBand + " " + ch;
   }
 
   function countLabel(row) {

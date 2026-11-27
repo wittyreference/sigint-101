@@ -20,6 +20,7 @@ SCROLL = REPO / "tools" / "render" / "render_scroll.py"
 FIGURE = REPO / "tools" / "render" / "render_figure.py"
 FIT = REPO / "tools" / "render" / "render_fit.py"
 LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
+SURVEY = REPO / "tools" / "render" / "render_survey.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -420,7 +421,7 @@ def render_make(tmp_path, console_url, devtools):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, SURVEY):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -459,9 +460,10 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
 
 
-@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name],
+@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name,
+                                     SURVEY.name],
                          ids=["all-pass", "fit-fails", "scroll-fails", "figure-fails",
-                              "logbook-fails"])
+                              "logbook-fails", "survey-fails"])
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
     proc = render_make(FAILING_CHECK=failing)
     assert proc.stdout.splitlines() == [
@@ -469,6 +471,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {SCROLL.name} {console_url}/",
         f"ran {FIGURE.name} {console_url}/exam/review/T6C02",
         f"ran {LOGBOOK.name} {console_url}",
+        f"ran {SURVEY.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -555,3 +558,57 @@ def test_rack_render_fails_if_the_later_theme_overflows_or_blocks_the_strip(devt
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-2:] == ["VERDICT: FAIL - rack red-night",
                                    "VERDICT: PASS - logbook red-night"]
+
+
+SURVEY_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "badge": "LIVE",
+    "rows": 11,
+    "listScrolls": True,
+    "noRowOverflow": True,
+    "controlsFit": True,
+    "explainScrolls": True,
+    "completeVisible": True,
+}
+
+
+def _survey_pages(*, defect=None):
+    pages = {}
+    for theme in THEMES:
+        row = {**SURVEY_FITS, "theme": theme}
+        if theme == "red-night":
+            row.update(defect or {})
+        pages[f"measureSurvey({json.dumps(theme)})"] = row
+    return pages
+
+
+def test_survey_render_checks_populated_panel_in_all_three_themes(devtools):
+    port = devtools(_survey_pages())
+    proc = run(SURVEY, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - survey dark",
+        "VERDICT: PASS - survey sunlight",
+        "VERDICT: PASS - survey red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"back": False},
+    {"doc": [801, 480]},
+    {"doc": [800, 481]},
+    {"badge": "NO RADIO"},
+    {"rows": 0},
+    {"listScrolls": False},
+    {"noRowOverflow": False},
+    {"controlsFit": False},
+    {"explainScrolls": False},
+    {"completeVisible": False},
+    {"theme": "dark"},
+])
+def test_survey_render_fails_when_populated_panel_overflows_or_stays_empty(devtools, defect):
+    port = devtools(_survey_pages(defect=defect))
+    proc = run(SURVEY, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - survey red-night"

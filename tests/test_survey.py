@@ -1,5 +1,5 @@
 # ABOUTME: Tests Wi-Fi survey parsing, read-only nmcli execution, /api/survey, and lesson 39.
-# ABOUTME: Uses format-based nmcli fixtures (no live scan) and guards the metadata-only invariant.
+# ABOUTME: Uses format-based nmcli fixtures (no live scan) and guards V1-V5 requirements.
 
 from __future__ import annotations
 
@@ -20,7 +20,9 @@ from sigint101.hardware import RadioProbe
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file, parse_lesson
 from sigint101.survey import (
     CENSUS_FIELDS,
+    DEVICE_COMMAND,
     ENVELOPE_FIELDS,
+    RADIO_COMMAND,
     SURVEY_COMMAND,
     SurveyUnavailable,
     WifiNetwork,
@@ -35,20 +37,24 @@ from sigint101.units import teaching_position, unit_for_lesson
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACK_M39 = REPO_ROOT / "lesson_packs" / "39-wifi-survey.yaml"
 FIXTURE_PACKS = Path(__file__).resolve().parent / "fixtures" / "lesson_packs"
+DENSE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "survey" / "dense_nmcli.txt"
 
-# Format-based nmcli fixtures following nmcli(1) terse output (-t -f SSID,BSSID,CHAN,SIGNAL,SECURITY
-# dev wifi list, default --escape yes: colons and backslashes inside fields are backslash-escaped,
-# hidden networks carry an empty SSID). A real capture from the kiosk replaces these at the next
-# bench sitting.
+# Format-based nmcli fixtures following nmcli(1) terse output (-t -f
+# SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan no, default --escape yes: colons and
+# backslashes inside fields are backslash-escaped, hidden networks carry an empty SSID). All BSSIDs
+# use locally administered MAC addresses (02:...).
 NMCLI_FIXTURE = "\n".join([
-    r"CafeNet:AA\:BB\:CC\:DD\:EE\:01:1:84:WPA2",
-    r"Lab\:5G:AA\:BB\:CC\:DD\:EE\:02:36:71:WPA2 WPA3",
-    r"Ops\\West\:2:AA\:BB\:CC\:DD\:EE\:03:6:63:WPA2",
-    r":AA\:BB\:CC\:DD\:EE\:04:6:55:WPA2",
-    r"GuestOpen:AA\:BB\:CC\:DD\:EE\:05:6:42:",
-    r"LibraryFree:AA\:BB\:CC\:DD\:EE\:06:11:39:--",
-    r"--:AA\:BB\:CC\:DD\:EE\:07:11:28:WPA2",
+    r"CafeNet:02\:00\:00\:00\:ee\:01:1:2412 MHz:84:WPA2",
+    r"Lab\:5G:02\:00\:00\:00\:ee\:02:36:5180 MHz:71:WPA2 WPA3",
+    r"Ops\\West\:2:02\:00\:00\:00\:ee\:03:6:2437 MHz:63:WPA2",
+    r":02\:00\:00\:00\:ee\:04:6:2437 MHz:55:WPA2",
+    r"GuestOpen:02\:00\:00\:00\:ee\:05:6:2437 MHz:42:",
+    r"LibraryFree:02\:00\:00\:00\:ee\:06:11:2462 MHz:39:--",
+    r"--:02\:00\:00\:00\:ee\:07:11:2462 MHz:28:WPA2",
+    r"SixGigAP:02\:00\:00\:00\:ee\:08:1:5955 MHz:77:WPA3",
 ])
+
+NMCLI_DEVICES_READY = "wlan0:wifi:connected\nwlan1:wifi:unmanaged\neth0:ethernet:connected\n"
 
 
 class _FakeScanChild:
@@ -88,6 +94,47 @@ class _FakeScanChild:
         return self.returncode
 
 
+def _fake_nmcli_spawn(
+    *,
+    radio_out="enabled\n",
+    devices_out=NMCLI_DEVICES_READY,
+    list_out=NMCLI_FIXTURE,
+    radio_rc=0,
+    devices_rc=0,
+    list_rc=0,
+    radio_err="",
+    devices_err="",
+    list_err="",
+    timeout_on=None,
+    seen=None,
+):
+    """Fake spawn dispatching nmcli radio, device, and wifi list commands like real nmcli."""
+    def spawn(argv):
+        cmd = tuple(argv)
+        if cmd == RADIO_COMMAND:
+            child = _FakeScanChild(
+                argv, stdout=radio_out, stderr=radio_err, returncode=radio_rc,
+                timeout=(timeout_on == "radio"),
+            )
+        elif cmd == DEVICE_COMMAND:
+            child = _FakeScanChild(
+                argv, stdout=devices_out, stderr=devices_err, returncode=devices_rc,
+                timeout=(timeout_on == "device"),
+            )
+        elif cmd == SURVEY_COMMAND:
+            child = _FakeScanChild(
+                argv, stdout=list_out, stderr=list_err, returncode=list_rc,
+                timeout=(timeout_on == "list"),
+            )
+        else:
+            raise AssertionError(f"unexpected nmcli argv: {argv!r}")
+        if seen is not None:
+            seen.append(child)
+        return child
+
+    return spawn
+
+
 def _absent():
     return RadioProbe(False, "lsusb", "no RTL2832U on USB bus")
 
@@ -101,46 +148,59 @@ def _client(tmp_path, *, pack_dir=FIXTURE_PACKS, survey_factory=None):
     ))
 
 
-# --- nmcli terse parser & channel census -------------------------------------------------------
+# --- V3 & V4: nmcli command, terse parser, band + channel census -------------------------------
 
 
-def test_command_is_read_only_terse_wifi_list_with_envelope_fields_only():
+def test_command_is_read_only_terse_wifi_list_with_rescan_no_and_freq():
+    assert RADIO_COMMAND == ("nmcli", "-t", "-f", "WIFI", "radio")
+    assert DEVICE_COMMAND == ("nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device")
     assert SURVEY_COMMAND == (
-        "nmcli", "-t", "-f", "SSID,BSSID,CHAN,SIGNAL,SECURITY", "dev", "wifi", "list",
+        "nmcli", "-t", "-f", "SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY",
+        "dev", "wifi", "list", "--rescan", "no",
     )
     assert "connect" not in SURVEY_COMMAND
-    assert ENVELOPE_FIELDS == ("ssid", "bssid", "channel", "signal", "security")
+    assert ENVELOPE_FIELDS == ("ssid", "bssid", "band", "channel", "freq_mhz", "signal", "security")
+    assert CENSUS_FIELDS == ("band", "channel", "count", "hidden", "open", "strongest", "ssids")
 
 
 def test_split_nmcli_terse_unescapes_colons_and_backslashes():
-    line = r"Ops\\West\:2:AA\:BB\:CC\:DD\:EE\:03:6:63:WPA2"
+    line = r"Ops\\West\:2:02\:00\:00\:00\:ee\:03:6:2437 MHz:63:WPA2"
     assert split_nmcli_terse(line) == [
-        r"Ops\West:2", "AA:BB:CC:DD:EE:03", "6", "63", "WPA2",
+        r"Ops\West:2", "02:00:00:00:ee:03", "6", "2437 MHz", "63", "WPA2",
     ]
 
 
-def test_parse_nmcli_line_handles_escaped_ssid_colons_hidden_and_open():
-    colon_net = parse_nmcli_line(r"Lab\:5G:AA\:BB\:CC\:DD\:EE\:02:36:71:WPA2 WPA3")
+def test_parse_nmcli_line_handles_escaped_ssid_colons_band_hidden_and_open():
+    colon_net = parse_nmcli_line(r"Lab\:5G:02\:00\:00\:00\:ee\:02:36:5180 MHz:71:WPA2 WPA3")
     assert colon_net == WifiNetwork(
         ssid="Lab:5G",
-        bssid="AA:BB:CC:DD:EE:02",
+        bssid="02:00:00:00:EE:02",
+        band="5 GHz",
         channel=36,
+        freq_mhz=5180,
         signal=71,
         security="WPA2 WPA3",
     )
 
-    hidden = parse_nmcli_line(r":AA\:BB\:CC\:DD\:EE\:04:6:55:WPA2")
+    six_net = parse_nmcli_line(r"SixGigAP:02\:00\:00\:00\:ee\:08:1:5955 MHz:77:WPA3")
+    assert six_net is not None
+    assert six_net.band == "6 GHz"
+    assert six_net.channel == 1
+    assert six_net.freq_mhz == 5955
+
+    hidden = parse_nmcli_line(r":02\:00\:00\:00\:ee\:04:6:2437 MHz:55:WPA2")
     assert hidden is not None
     assert hidden.ssid is None
-    assert hidden.bssid == "AA:BB:CC:DD:EE:04"
+    assert hidden.bssid == "02:00:00:00:EE:04"
+    assert hidden.band == "2.4 GHz"
     assert hidden.channel == 6
 
-    dash_hidden = parse_nmcli_line(r"--:AA\:BB\:CC\:DD\:EE\:07:11:28:WPA2")
+    dash_hidden = parse_nmcli_line(r"--:02\:00\:00\:00\:ee\:07:11:2462 MHz:28:WPA2")
     assert dash_hidden is not None
     assert dash_hidden.ssid is None
 
-    open_empty = parse_nmcli_line(r"GuestOpen:AA\:BB\:CC\:DD\:EE\:05:6:42:")
-    open_dash = parse_nmcli_line(r"LibraryFree:AA\:BB\:CC\:DD\:EE\:06:11:39:--")
+    open_empty = parse_nmcli_line(r"GuestOpen:02\:00\:00\:00\:ee\:05:6:2437 MHz:42:")
+    open_dash = parse_nmcli_line(r"LibraryFree:02\:00\:00\:00\:ee\:06:11:2462 MHz:39:--")
     assert open_empty is not None and open_empty.security == "Open"
     assert open_dash is not None and open_dash.security == "Open"
 
@@ -149,52 +209,57 @@ def test_parse_nmcli_line_handles_escaped_ssid_colons_hidden_and_open():
     "",
     "   ",
     "too:few:fields",
-    "too:many:fields:here:1:2",
-    r"BadChan:AA\:BB\:CC\:DD\:EE\:01:notanint:50:WPA2",
-    r"ZeroChan:AA\:BB\:CC\:DD\:EE\:01:0:50:WPA2",
-    r"BadSig:AA\:BB\:CC\:DD\:EE\:01:6:loud:WPA2",
-    r"NoBssid::6:50:WPA2",
-    r"DashBssid:--:6:50:WPA2",
+    "too:many:fields:here:1:2:3",
+    r"BadChan:02\:00\:00\:00\:ee\:01:notanint:2412 MHz:50:WPA2",
+    r"ZeroChan:02\:00\:00\:00\:ee\:01:0:2412 MHz:50:WPA2",
+    r"BadFreq:02\:00\:00\:00\:ee\:01:6:notafreq:50:WPA2",
+    r"BadSig:02\:00\:00\:00\:ee\:01:6:2437 MHz:loud:WPA2",
+    r"NoBssid::6:2437 MHz:50:WPA2",
+    r"DashBssid:--:6:2437 MHz:50:WPA2",
 ])
 def test_parse_nmcli_line_ignores_blank_or_malformed_lines(bad_line):
     assert parse_nmcli_line(bad_line) is None
 
 
-def test_parse_nmcli_wifi_deduplicates_bssid_keeping_strongest_signal():
+def test_parse_nmcli_wifi_deduplicates_bssid_per_band_and_channel():
     raw = "\n".join([
-        r"CafeNet:aa\:bb\:cc\:dd\:ee\:01:1:40:WPA2",
-        r"CafeNet:AA\:BB\:CC\:DD\:EE\:01:1:82:WPA2",
+        r"CafeNet:02\:00\:00\:00\:ee\:01:1:2412 MHz:40:WPA2",
+        r"CafeNet:02\:00\:00\:00\:EE\:01:1:2412 MHz:82:WPA2",
+        r"CafeNet6:02\:00\:00\:00\:EE\:01:1:5955 MHz:75:WPA3",
     ])
     nets = parse_nmcli_wifi(raw)
-    assert len(nets) == 1
-    assert nets[0].bssid == "AA:BB:CC:DD:EE:01"
-    assert nets[0].signal == 82
+    assert len(nets) == 2
+    by_band = {n.band: n for n in nets}
+    assert by_band["2.4 GHz"].signal == 82
+    assert by_band["6 GHz"].signal == 75
 
 
-def test_channel_census_groups_networks_per_channel_with_envelope_fields_only():
+def test_channel_census_keys_by_band_and_channel_never_merging_6ghz_into_24ghz():
     nets = parse_nmcli_wifi(NMCLI_FIXTURE)
-    assert len(nets) == 7
+    assert len(nets) == 8
     census = channel_census(nets)
-    assert [row["channel"] for row in census] == [1, 6, 11, 36]
+    assert [(row["band"], row["channel"]) for row in census] == [
+        ("2.4 GHz", 1),
+        ("2.4 GHz", 6),
+        ("2.4 GHz", 11),
+        ("5 GHz", 36),
+        ("6 GHz", 1),
+    ]
+
+    ch1_24 = census[0]
+    ch1_6 = census[4]
+    assert ch1_24["ssids"] == ["CafeNet"] and ch1_24["count"] == 1
+    assert ch1_6["ssids"] == ["SixGigAP"] and ch1_6["count"] == 1
 
     ch6 = census[1]
     assert ch6 == {
+        "band": "2.4 GHz",
         "channel": 6,
         "count": 3,
         "hidden": 1,
         "open": 1,
         "strongest": 63,
         "ssids": ["GuestOpen", r"Ops\West:2"],
-    }
-
-    ch11 = census[2]
-    assert ch11 == {
-        "channel": 11,
-        "count": 2,
-        "hidden": 1,
-        "open": 1,
-        "strongest": 39,
-        "ssids": ["LibraryFree"],
     }
 
     for net in nets:
@@ -205,31 +270,75 @@ def test_channel_census_groups_networks_per_channel_with_envelope_fields_only():
             assert forbidden not in bucket
 
 
-# --- WifiSurvey execution, timeout, and honest no-radio state ----------------------------------
+def test_dense_fixture_parses_many_networks_across_all_three_bands():
+    nets = parse_nmcli_wifi(DENSE_FIXTURE.read_text(encoding="utf-8"))
+    census = channel_census(nets)
+    assert len(nets) >= 18
+    assert len(census) >= 10
+    bands = {row["band"] for row in census}
+    assert bands == {"2.4 GHz", "5 GHz", "6 GHz"}
+    # Both 2.4 GHz ch 1 and 6 GHz ch 1 appear as distinct rows; 2.4 GHz ch 1 has two 32-char SSIDs.
+    ch1_24 = next(r for r in census if r["band"] == "2.4 GHz" and r["channel"] == 1)
+    ch1_6 = next(r for r in census if r["band"] == "6 GHz" and r["channel"] == 1)
+    assert ch1_24["count"] == 6 and ch1_24["hidden"] == 1 and ch1_24["open"] == 1
+    assert any(len(s) == 32 for s in ch1_24["ssids"])
+    assert ch1_6["ssids"] == ["SixGigCafe"]
 
 
-def test_wifi_survey_runs_read_only_nmcli_with_timeout_and_returns_census():
+# --- V2 & V3: WifiSurvey execution, radio-off / unmanaged refusal, and timeout -----------------
+
+
+def test_wifi_survey_checks_radio_and_devices_then_runs_rescan_no_census():
     seen = []
-
-    def fake_spawn(argv):
-        child = _FakeScanChild(argv, stdout=NMCLI_FIXTURE)
-        seen.append(child)
-        return child
-
     scanner = WifiSurvey(
-        spawn=fake_spawn,
+        spawn=_fake_nmcli_spawn(seen=seen),
         which=lambda name: "/usr/bin/nmcli" if name == "nmcli" else None,
         radio_present=lambda: True,
         timeout=7.5,
     )
     result = scanner.scan()
-    assert len(seen) == 1
-    assert tuple(seen[0].args) == SURVEY_COMMAND
-    assert seen[0].seen_timeout == 7.5
-    assert result["total"] == 7
-    assert [c["channel"] for c in result["channels"]] == [1, 6, 11, 36]
-    assert result["command"] == "nmcli -t -f SSID,BSSID,CHAN,SIGNAL,SECURITY dev wifi list"
+    assert [tuple(c.args) for c in seen] == [RADIO_COMMAND, DEVICE_COMMAND, SURVEY_COMMAND]
+    assert all(c.seen_timeout == 7.5 for c in seen)
+    assert result["total"] == 8
+    assert [(c["band"], c["channel"]) for c in result["channels"]] == [
+        ("2.4 GHz", 1), ("2.4 GHz", 6), ("2.4 GHz", 11), ("5 GHz", 36), ("6 GHz", 1),
+    ]
+    assert result["command"] == (
+        "nmcli -t -f SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan no"
+    )
     assert all(tuple(n.keys()) == ENVELOPE_FIELDS for n in result["networks"])
+
+
+def test_wifi_survey_refuses_honestly_when_wifi_radio_is_off_even_though_list_exits_0():
+    # Real nmcli behaviour: with Wi-Fi soft-blocked or off, `nmcli -t -f WIFI radio` prints
+    # `disabled` and `dev wifi list` would print nothing and exit 0. We must refuse "Wi-Fi radio
+    # is off" rather than reporting LIVE with 0 networks.
+    seen = []
+    scanner = WifiSurvey(
+        spawn=_fake_nmcli_spawn(radio_out="disabled\n", list_out="", seen=seen),
+        which=lambda name: "/usr/bin/nmcli",
+        radio_present=lambda: True,
+    )
+    with pytest.raises(SurveyUnavailable, match="Wi-Fi radio is off"):
+        scanner.scan()
+    assert [tuple(c.args) for c in seen] == [RADIO_COMMAND]
+
+
+@pytest.mark.parametrize("devices_out, complaint", [
+    ("wlan0:wifi:unmanaged\neth0:ethernet:connected\n", "no managed Wi-Fi device"),
+    ("eth0:ethernet:connected\nlo:loopback:connected (externally)\n", "no managed Wi-Fi device"),
+    ("wlan0:wifi:unavailable\n", "unavailable"),
+])
+def test_wifi_survey_refuses_when_no_managed_wifi_device_is_available(devices_out, complaint):
+    seen = []
+    scanner = WifiSurvey(
+        spawn=_fake_nmcli_spawn(devices_out=devices_out, list_out="", seen=seen),
+        which=lambda name: "/usr/bin/nmcli",
+        radio_present=lambda: True,
+    )
+    with pytest.raises(SurveyUnavailable, match=complaint):
+        scanner.scan()
+    assert [tuple(c.args) for c in seen] == [RADIO_COMMAND, DEVICE_COMMAND]
 
 
 def test_wifi_survey_refuses_honestly_when_nmcli_is_missing():
@@ -255,38 +364,20 @@ def test_wifi_survey_refuses_honestly_when_no_wifi_radio_exists():
 def test_wifi_survey_stops_timed_out_child_and_refuses(monkeypatch):
     monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.01)
     children = []
-
-    def slow_spawn(argv):
-        child = _FakeScanChild(argv, timeout=True)
-        children.append(child)
-        return child
-
     scanner = WifiSurvey(
-        spawn=slow_spawn,
+        spawn=_fake_nmcli_spawn(timeout_on="list", seen=children),
         which=lambda name: "/usr/bin/nmcli",
         radio_present=lambda: True,
         timeout=2.0,
     )
     with pytest.raises(SurveyUnavailable, match="timed out"):
         scanner.scan()
-    assert children[0].terminated is True
+    assert children[-1].terminated is True
 
 
-def test_wifi_survey_reports_nonzero_exit_and_disabled_wifi_honestly():
-    disabled = WifiSurvey(
-        spawn=lambda argv: _FakeScanChild(
-            argv, returncode=10, stderr="Error: Wi-Fi is disabled.\n"
-        ),
-        which=lambda name: "/usr/bin/nmcli",
-        radio_present=lambda: True,
-    )
-    with pytest.raises(SurveyUnavailable, match="no Wi-Fi radio"):
-        disabled.scan()
-
+def test_wifi_survey_reports_nonzero_exit_from_nmcli_honestly():
     crashed = WifiSurvey(
-        spawn=lambda argv: _FakeScanChild(
-            argv, returncode=4, stderr="Error: NetworkManager is not running.\n"
-        ),
+        spawn=_fake_nmcli_spawn(radio_rc=4, radio_err="Error: NetworkManager is not running.\n"),
         which=lambda name: "/usr/bin/nmcli",
         radio_present=lambda: True,
     )
@@ -299,7 +390,7 @@ def test_wifi_survey_reports_nonzero_exit_and_disabled_wifi_honestly():
 
 def test_api_survey_returns_census_with_envelope_fields_only(tmp_path):
     scanner = WifiSurvey(
-        spawn=lambda argv: _FakeScanChild(argv, stdout=NMCLI_FIXTURE),
+        spawn=_fake_nmcli_spawn(),
         which=lambda name: "/usr/bin/nmcli",
         radio_present=lambda: True,
     )
@@ -308,11 +399,38 @@ def test_api_survey_returns_census_with_envelope_fields_only(tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     assert body["available"] is True
-    assert body["total"] == 7
-    assert body["command"] == "nmcli -t -f SSID,BSSID,CHAN,SIGNAL,SECURITY dev wifi list"
-    assert [c["channel"] for c in body["channels"]] == [1, 6, 11, 36]
+    assert body["total"] == 8
+    assert body["command"] == (
+        "nmcli -t -f SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan no"
+    )
+    assert [(c["band"], c["channel"]) for c in body["channels"]] == [
+        ("2.4 GHz", 1), ("2.4 GHz", 6), ("2.4 GHz", 11), ("5 GHz", 36), ("6 GHz", 1),
+    ]
     assert all(tuple(n.keys()) == ENVELOPE_FIELDS for n in body["networks"])
     assert "payload" not in json.dumps(body).lower()
+
+
+@pytest.mark.parametrize("spawn_kwargs, expected_text", [
+    ({"radio_out": "disabled\n", "list_out": ""}, "Wi-Fi radio is off"),
+    ({"devices_out": "wlan0:wifi:unmanaged\n", "list_out": ""}, "no managed Wi-Fi device"),
+    ({"devices_out": "wlan0:wifi:unavailable\n", "list_out": ""}, "unavailable"),
+])
+def test_api_survey_reports_radio_off_or_unmanaged_as_no_radio_503_not_live(
+    tmp_path, spawn_kwargs, expected_text
+):
+    scanner = WifiSurvey(
+        spawn=_fake_nmcli_spawn(**spawn_kwargs),
+        which=lambda name: "/usr/bin/nmcli",
+        radio_present=lambda: True,
+    )
+    with _client(tmp_path, survey_factory=lambda: scanner) as client:
+        resp = client.get("/api/survey")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["available"] is False
+    assert body["cause"] == "no_radio"
+    assert expected_text in body["reason"]
+    assert body["total"] == 0 and body["channels"] == []
 
 
 def test_api_survey_reports_honest_no_radio_503_and_deduplicates_log(tmp_path):
@@ -402,7 +520,7 @@ def test_m39_renders_sealed_predict_then_survey_panel_without_payload_field(tmp_
         sealed = client.get("/lesson/39").text
         assert "CENSUS HIDDEN" in sealed
         assert "waterfall-wrap--frozen" not in sealed
-        assert "Joffe" not in sealed  # explain stays sealed before prediction
+        assert "746 F.3d 920" not in sealed  # explain stays sealed before prediction
 
         commit = client.post(
             "/api/predict?lesson_id=39",
@@ -418,67 +536,133 @@ def test_m39_renders_sealed_predict_then_survey_panel_without_payload_field(tmp_
         assert 'src="/static/survey.js"' in open_html
         assert 'class="waterfall"' not in open_html
         assert "data-survey-payload" not in open_html
-        assert "Joffe v. Google" in open_html
+        assert "746 F.3d 920" in open_html
 
 
-# --- Joffe v. Google metadata-vs-payload legal-claim guard (both directions) -------------------
+# --- V1: Joffe v. Google amended-opinion legal-claim guard (both directions) -------------------
 
 _JOFFE_CASE = re.compile(r"\bjoffe\s+v\.?\s+google\b", re.I)
 _JOFFE_CITE = re.compile(r"\b746\s+F\.?3d\s+920\b")
-_WIRETAP_2511 = re.compile(r"\b2511\(2\)\(g\)\(i\)")
-_METADATA_LINE = re.compile(
-    r"\b(?:metadata|envelopes?)\b[^.?!]*\bpayload\b|\bpayload\b[^.?!]*\b(?:metadata|envelopes?)\b",
+_NINTH_CIRCUIT = re.compile(r"\bninth\s+circuit\b|\b9th\s+cir\.?\b", re.I)
+_STATUTE_2510 = re.compile(r"\b2510\(16\)")
+_STATUTE_2511 = re.compile(r"\b2511\(2\)\(g\)\(i\)")
+_RADIO_COMM_HOLDING = re.compile(r"radio\s+communication", re.I)
+_MOTION_TO_DISMISS = re.compile(r"\bmotion\s+to\s+dismiss\b|\bpleading\s+stage\b", re.I)
+_ONE_CIRCUIT = re.compile(
+    r"\bbinds?\s+(?:only\s+)?(?:the\s+)?(?:ninth|9th)\s+circuit\b"
+    r"|\bone\s+circuit\b|\bno\s+other\s+(?:federal\s+)?(?:court\s+of\s+appeals|circuit)\b",
     re.I,
 )
-_OPEN_WIFI_PAYLOAD_PROTECTED = re.compile(
-    r"\bopen\s+wi-?fi\b|\bunencrypted\s+wi-?fi\b", re.I
+_BEACON_SILENT = re.compile(
+    r"\b(?:never\s+decided|did\s+not\s+decide|left\s+[^.?!]*undecided|silent)\b"
+    r"[^.?!]*\b(?:beacon|metadata|ssid|header)\b"
+    r"|\b(?:beacon|metadata)\b[^.?!]*\b(?:undecided|not\s+decided|never\s+decided)\b",
+    re.I,
 )
-_FALSE_OPEN_EXEMPT = re.compile(
-    r"\bopen\s+wi-?fi\s+payload\s+(?:is|counts\s+as)\s+(?:legal|lawful|readily\s+accessible|exempt)",
+
+# Defects that must NEVER appear anywhere in lesson 39 learner text:
+_OVERSTATES_VIOLATION = re.compile(
+    r"\b(?:violates?|breaks?|broke)\s+the\s+wiretap\s+act\b"
+    r"|\bfound\s+(?:google\s+)?(?:liable|in\s+violation)\b",
+    re.I,
+)
+_DELETED_SEPT_HOLDING = re.compile(
+    r"\bnor\s+[\"']?readily\s+accessible\b"
+    r"|\bnot\s+[\"']?readily\s+accessible[^.?!]*ordinary\s+meaning\b"
+    r"|\b330\s*feet\b",
+    re.I,
+)
+_NATIONWIDE_OVERCLAIM = re.compile(
+    r"\bfederal\s+law\s+protects\b|\bwhere\s+does\s+federal\s+law\s+draw\b",
+    re.I,
+)
+_FALSE_BEACON_HOLDING = re.compile(
+    r"\b(?:held|ruled)\s+(?:that\s+)?(?:collecting\s+|reading\s+|scanning\s+)?"
+    r"(?:wi-?fi\s+)?(?:beacons?|metadata|headers?)\b[^.?!;]*\b(?:lawful|legal)\b",
     re.I,
 )
 
 
-def _check_joffe_claim(text: str) -> list[str]:
-    """Check that prose states the metadata-vs-payload line with Joffe v. Google and 18 USC 2511."""
+def _check_joffe_explain(explain: str) -> list[str]:
+    """Check that explain states the amended Joffe holding accurately without overclaiming."""
     issues = []
-    if not _JOFFE_CASE.search(text):
+    if not _JOFFE_CASE.search(explain):
         issues.append("missing Joffe v. Google")
-    if not _JOFFE_CITE.search(text):
+    if not _JOFFE_CITE.search(explain):
         issues.append("missing 746 F.3d 920 citation")
-    if not _WIRETAP_2511.search(text):
-        issues.append("missing 18 USC 2511(2)(g)(i)")
-    if not _METADATA_LINE.search(text):
-        issues.append("missing line between metadata/envelopes and payload")
-    if not _OPEN_WIFI_PAYLOAD_PROTECTED.search(text):
-        issues.append("missing open/unencrypted Wi-Fi scope")
-    if _FALSE_OPEN_EXEMPT.search(text):
-        issues.append("falsely claims open Wi-Fi payload is exempt/legal")
+    if not _NINTH_CIRCUIT.search(explain):
+        issues.append("missing Ninth Circuit attribution")
+    if not _STATUTE_2510.search(explain) or not _RADIO_COMM_HOLDING.search(explain):
+        issues.append("missing 18 USC 2510(16) 'radio communication' holding")
+    if not _STATUTE_2511.search(explain):
+        issues.append("missing 18 USC 2511(2)(g)(i) exemption reference")
+    if not _MOTION_TO_DISMISS.search(explain):
+        issues.append("missing motion-to-dismiss / pleading-stage posture")
+    if not _ONE_CIRCUIT.search(explain):
+        issues.append("missing one-circuit scope")
+    if not _BEACON_SILENT.search(explain):
+        issues.append("missing statement that Joffe left beacon metadata undecided")
     return issues
 
 
-def test_joffe_claim_probe_rejects_defects_and_accepts_fair_rewordings():
-    missing_source = (
-        "Count Wi-Fi metadata like SSID and channel, never payload data on open Wi-Fi."
-    )
-    wrong_law = (
-        "Open Wi-Fi payload is legal to read under 2511(2)(g)(i) because Joffe v. Google "
-        "(746 F.3d 920) said metadata and payload are both broadcast radio."
-    )
-    fair_rewording = (
-        "Wi-Fi beacons advertise metadata, not payload. Under Joffe v. Google, 746 F.3d 920, "
-        "payload data on unencrypted Wi-Fi is not readily accessible under 18 USC 2511(2)(g)(i)."
-    )
-    assert _check_joffe_claim(missing_source)
-    assert any("falsely" in item for item in _check_joffe_claim(wrong_law))
-    assert _check_joffe_claim(fair_rewording) == []
+def _check_joffe_overstatements(all_text: str) -> list[str]:
+    """Check all learner-visible prose for the four round-1 legal overstatements."""
+    issues = []
+    if _OVERSTATES_VIOLATION.search(all_text):
+        issues.append("overstates motion-to-dismiss ruling as a Wiretap Act violation")
+    if _DELETED_SEPT_HOLDING.search(all_text):
+        issues.append("teaches the deleted September ordinary-meaning holding")
+    if _NATIONWIDE_OVERCLAIM.search(all_text):
+        issues.append("presents one circuit's ruling as nationwide settled federal law")
+    if _FALSE_BEACON_HOLDING.search(all_text):
+        issues.append("claims Joffe held beacon metadata lawful")
+    return issues
 
 
-def test_m39_explain_states_joffe_metadata_payload_line_with_primary_sources():
+def test_joffe_claim_probe_rejects_round1_overstatements_and_accepts_accurate_rewordings():
+    round1_explain = (
+        "In Joffe v. Google, Inc., 746 F.3d 920 (9th Cir. 2013), the Ninth Circuit held that "
+        "unencrypted Wi-Fi payload data is neither a 'radio communication' under 18 USC 2510(16) "
+        "nor 'readily accessible to the general public' under 18 USC 2511(2)(g)(i), so "
+        "intercepting it violates the Wiretap Act."
+    )
+    assert _check_joffe_explain(round1_explain)
+    assert len(_check_joffe_overstatements(round1_explain)) == 2
+
+    beacon_overclaim = (
+        "Joffe v. Google (746 F.3d 920, 9th Cir.) held beacon metadata lawful while denying "
+        "Google's motion to dismiss on payload under 2510(16) radio communication and "
+        "2511(2)(g)(i), binding only the Ninth Circuit."
+    )
+    assert _check_joffe_overstatements(beacon_overclaim)
+
+    accurate_rewording = (
+        "In the amended opinion in Joffe v. Google, 746 F.3d 920 (9th Cir. 2013), the Ninth "
+        "Circuit held on a motion to dismiss that Wi-Fi payload is not a 'radio communication' "
+        "under 18 USC 2510(16), so the unencrypted-radio rule does not reach 18 USC 2511(2)(g)(i). "
+        "The ruling binds only the Ninth Circuit, found no liability, and left beacon metadata "
+        "undecided."
+    )
+    assert _check_joffe_explain(accurate_rewording) == []
+    assert _check_joffe_overstatements(accurate_rewording) == []
+
+
+def test_m39_legal_text_matches_amended_joffe_opinion_and_cites_primary_sources():
     lesson = load_lesson_file(PACK_M39)
-    assert _check_joffe_claim(lesson.stages["explain"]) == []
+    all_prose = " ".join([
+        lesson.concept,
+        *lesson.stages.values(),
+        lesson.verdict,
+        *(c["label"] for c in lesson.choices),
+    ])
+    assert _check_joffe_explain(lesson.stages["explain"]) == []
+    assert _check_joffe_overstatements(all_prose) == []
+
     raw = yaml.safe_load(PACK_M39.read_text(encoding="utf-8"))
     urls = [str(s.get("url", "")) for s in (raw.get("sources") or []) if isinstance(s, dict)]
-    assert any("govinfo.gov" in u and "11-17483" in u for u in urls), urls
-    assert any("law.cornell.edu" in u and "/18/2511" in u for u in urls), urls
+    assert any("cdn.ca9.uscourts.gov" in u and "11-17483_opinion122713.pdf" in u for u in urls), (
+        urls
+    )
     assert any("law.cornell.edu" in u and "/18/2510" in u for u in urls), urls
+    assert any("law.cornell.edu" in u and "/18/2511" in u for u in urls), urls
+    assert any("supremecourt.gov" in u and "13-1181" in u for u in urls), urls

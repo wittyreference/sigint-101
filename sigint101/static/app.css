@@ -1264,7 +1264,7 @@ body {
 }
 .decoder__item {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas: "model mod" "read tone";
   gap: 2px 10px;
   padding: 7px 10px;
@@ -1408,7 +1408,7 @@ body {
   color: var(--fg-mute);
 }
 .radar__count b { color: var(--accent); font-size: 18px; }
-.decoder__read { grid-area: read; color: var(--fg); }
+.decoder__read { grid-area: read; color: var(--fg); min-width: 0; overflow-wrap: anywhere; }
 .decoder__tone { grid-area: tone; font-family: var(--font-mono); font-size: 13px; color: var(--fg-mute); }
 .decoder__empty {
   flex: none;
