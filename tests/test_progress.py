@@ -193,7 +193,7 @@ def test_recording_a_stage_remembers_it_and_how_far_the_learner_got(tmp_path):
 
 def test_stepping_back_keeps_the_furthest_stage_reached(tmp_path):
     # Re-reading the setup after reaching the explanation must not forget the explanation was
-    # reached: the rail keeps every visited stage tappable.
+    # reached: the progress line keeps every visited stage marked.
     prog = Progress(tmp_path / "progress.db")
     prog.record_stage(1, "explain", 5)
     prog.record_stage(1, "frame", 0)

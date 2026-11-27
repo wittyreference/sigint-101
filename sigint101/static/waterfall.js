@@ -691,6 +691,7 @@
   // A tap on the waterfall tunes to the bin under the finger, read off the newest painted row's
   // own geometry (or the span's edges before the first row lands). No confirmed span, no tune.
   panels.forEach(function (p) {
+    if (p.canvas.getAttribute("data-tune") === null) return;
     p.canvas.addEventListener("click", function (ev) {
       if (!live) return;
       var rect = p.canvas.getBoundingClientRect();
