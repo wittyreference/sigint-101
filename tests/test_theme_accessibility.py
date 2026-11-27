@@ -332,3 +332,31 @@ def test_instructions_and_status_values_are_at_least_18px():
         if size is None or size < 18:
             failures.append((selector, size))
     assert not failures, f"instruction/status-value selectors under 18px: {failures}"
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_primary_keys_are_filled_and_readable_in_every_theme(theme):
+    primary = _decls_for(".btn--primary") | _decls_for(f'.app[data-theme="{theme}"] .btn--primary')
+    tokens = _theme_tokens(theme)
+    assert primary["background"] == "var(--accent)"
+    assert _contrast(_resolve_colour(primary["color"], tokens), tokens["--accent"]) >= 4.5
+    assert primary.get("text-shadow", "none") == "none"
+
+
+@pytest.mark.parametrize("selector", [".btn--prev", ".exam__sim-link", ".exam__skip"])
+def test_secondary_navigation_has_a_quieter_outline(selector):
+    style = _decls_for(selector)
+    assert style["border"] == "2px solid var(--border)"
+    assert style["color"] == "var(--fg-dim)"
+
+
+def test_prev_has_at_least_24_pixels_clearance_from_tune_up():
+    gap = int(_decls_for(".tune")["gap"].removesuffix("px"))
+    extra = _decls_for('.tune-btn[data-tune-step="1"] + .btn--prev').get("margin-left", "0px")
+    assert gap + int(extra.removesuffix("px")) >= 24
+
+
+def test_the_gate_label_is_one_line_of_unboxed_status_text():
+    gate = _decls_for(".rail__gate")
+    assert gate.get("white-space") == "nowrap"
+    assert "border" not in gate

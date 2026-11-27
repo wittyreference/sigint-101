@@ -22,7 +22,7 @@ test("the open stage reads active", () => {
   assert.equal(nav.pipState(2, 2, 4, false), "active");
 });
 
-test("every stage reached before, behind or ahead of the open one, stays tappable", () => {
+test("every stage reached before, behind or ahead of the open one, reads done", () => {
   assert.equal(nav.pipState(0, 2, 4, false), "done");   // went back past it
   assert.equal(nav.pipState(4, 2, 4, false), "done");   // reached, then stepped back from
 });
@@ -35,6 +35,58 @@ test("a sealed stage stays locked whatever the walk says", () => {
   // Before the commit the sealed stages are not rendered at all; nothing about the walk opens them.
   assert.equal(nav.pipState(4, 3, 5, true), "locked");
   assert.equal(nav.pipState(4, 4, 5, true), "locked");
+});
+
+test("Next and Prev update the progress line and leave sealed steps locked", () => {
+  const stages = ["frame", "demo", "predict", "observe"];
+  const states = ["active", "ahead", "ahead", "locked"];
+  const pips = stages.map((name, i) => {
+    const classes = new Set(["rail-pip--" + states[i]]);
+    const attributes = new Map([["data-stage", name]]);
+    return {
+      tagName: "LI",
+      getAttribute: key => attributes.get(key),
+      setAttribute: (key, value) => attributes.set(key, value),
+      removeAttribute: key => attributes.delete(key),
+      classList: {
+        contains: key => classes.has(key),
+        toggle: (key, on) => on ? classes.add(key) : classes.delete(key),
+      },
+    };
+  });
+  const panels = stages.slice(0, -1).map((name, i) => ({
+    hidden: i !== 0,
+    getAttribute: key => key === "data-stage" ? name : null,
+  }));
+  const move = {};
+  const navButton = direction => ({ addEventListener: (_, handler) => { move[direction] = handler; } });
+  const saved = [];
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/lesson-nav.js"), "utf8"), {
+    document: {
+      querySelector: () => ({ getAttribute: key => key === "data-lesson-id" ? "1" : "0" }),
+      querySelectorAll: selector => ({
+        ".stage-panel": panels,
+        ".rail-pip": pips,
+        "[data-nav='next']": [navButton("next")],
+        "[data-nav='prev']": [navButton("prev")],
+      }[selector] || []),
+    },
+    fetch: (_url, options) => { saved.push(options.body); return Promise.resolve(); },
+  });
+  function check(current, expected) {
+    assert.equal(panels.findIndex(panel => !panel.hidden), current);
+    pips.forEach((pip, i) => {
+      const visible = ["active", "done", "ahead", "locked"]
+        .filter(state => pip.classList.contains("rail-pip--" + state));
+      assert.deepEqual(visible, [expected[i]], stages[i]);
+      assert.equal(pip.getAttribute("aria-current"), i === current ? "step" : undefined);
+    });
+  }
+  move.next();
+  check(1, ["done", "active", "ahead", "locked"]);
+  move.prev();
+  check(0, ["active", "done", "ahead", "locked"]);
+  assert.deepEqual(saved, ["stage=demo", "stage=frame"]);
 });
 
 for (const [failure, failSave] of [

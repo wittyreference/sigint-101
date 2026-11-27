@@ -207,13 +207,13 @@ def test_the_check_prompt_stays_sealed_until_a_prediction(tmp_path):
     assert "WHY_HD" not in html
 
 
-def test_a_seven_stage_rail_is_marked_long_so_its_gate_label_fits(tmp_path):
-    # Seven pips leave the "Locked until you predict" label room only to wrap; the long rail
-    # tightens it so both lines stay inside the 40px rail (render-checked at 800x480).
-    with _client(tmp_path, _pack()) as client:
-        assert '<nav class="rail rail--long"' in client.get("/lesson/3").text
-    with _client(tmp_path / "plain", _pack(check=None)) as client:
-        assert '<nav class="rail"' in client.get("/lesson/3").text
+@pytest.mark.parametrize(("with_check", "steps"), [(False, 6), (True, 7)])
+def test_six_and_seven_stage_lessons_share_the_same_progress_rail(tmp_path, with_check, steps):
+    with _client(tmp_path, _pack(check=CHECK if with_check else None)) as client:
+        html = client.get("/lesson/3").text
+    rail = html.split('<div class="rail">', 1)[1].split("</div>", 1)[0]
+    assert rail.count('<li class="rail-pip ') == steps
+    assert '<span class="rail__gate">Locked until you predict</span>' in rail
 
 
 def test_answering_the_check_scores_it_and_reopens_on_the_feedback(tmp_path):
