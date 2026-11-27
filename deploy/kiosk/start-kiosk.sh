@@ -31,15 +31,90 @@ kiosk_alive() {
   pgrep -f "[u]ser-data-dir=$PROFILE" >/dev/null
 }
 
+# The output's logical size as WxH, from wlr-randr when it answers (the first enabled output's
+# current mode, divided by its scale, turned for a 90/270 transform), else the reference panel's
+# 800x480. No window list is needed, and the reference box has no tool for one.
+output_size() {
+  local size=""
+  if command -v wlr-randr >/dev/null 2>&1; then
+    size="$(timeout 5 wlr-randr 2>/dev/null | awk '
+      function emit() {
+        if (on && w > 0 && h > 0) {
+          if (tr ~ /^(flipped-)?(90|270)$/) { t = w; w = h; h = t }
+          if (sc <= 0) sc = 1
+          printf "%dx%d\n", int(w / sc + 0.5), int(h / sc + 0.5)
+          found = 1
+          exit
+        }
+      }
+      /^[^ \t]/ { emit(); on = 0; w = 0; h = 0; sc = 1; tr = "normal"; next }
+      /^[ \t]+Enabled: yes/ { on = 1 }
+      / px, .*current/ { split($1, m, "x"); w = m[1] + 0; h = m[2] + 0 }
+      /^[ \t]+Scale:/ { sc = $2 + 0 }
+      /^[ \t]+Transform:/ { tr = $2 }
+      END { if (!found) emit() }')"
+  fi
+  [[ "$size" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || size="800x480"
+  printf '%s\n' "$size"
+}
+
+# Chromium restores the window bounds it saved at the last close, and a window that does not go
+# fullscreen keeps them: a saved 780x460 left a 20 px strip of the desktop showing down the
+# reference panel's right edge. Drop the saved bounds and keep everything else. Only safe while no
+# kiosk browser runs, which is the only time launch() is called. A missing, unreadable or odd
+# Preferences file is left alone and the course launches anyway.
+forget_window_placement() {
+  local prefs="$PROFILE/Default/Preferences"
+  [ -f "$prefs" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 -I - "$prefs" 9>&- <<'PY' ||
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as f:
+        prefs = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
+browser = prefs.get("browser") if isinstance(prefs, dict) else None
+if not isinstance(browser, dict):
+    sys.exit(0)
+gone = [browser.pop(k) for k in ("window_placement", "app_window_placement") if k in browser]
+if not gone:
+    sys.exit(0)
+# Written beside the file and renamed over it, so Chromium never reads half a Preferences.
+fd, tmp = tempfile.mkstemp(prefix=".Preferences.", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(prefs, f, ensure_ascii=False, separators=(",", ":"))
+    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    echo "sigint101-course: could not clear the saved window bounds; launching anyway" >&2
+}
+
 # Only ever called when no kiosk browser is alive, so a stale singleton from a crash is safe to
 # clear and the "profile in use" dialog never blocks the panel.
+# --kiosk asks the compositor for fullscreen. --start-fullscreen and the explicit position and size
+# make the full output the bounds too, so a window that does not go fullscreen still covers it
+# (Chromium applies these flags over any bounds it saved).
 # --disk-cache-size=1 keeps a stale stylesheet from outliving an update. --password-store=basic
 # stops Chromium asking the desktop keyring, which otherwise covers the panel with a
 # "choose password for new keyring" dialog that a keyboard-free kiosk can never dismiss.
 # The browser must not inherit the watchdog's lock (fd 9), or a second watchdog could never start.
 launch() {
+  local size
   rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonCookie" "$PROFILE/SingletonSocket" 2>/dev/null
-  chromium --kiosk --ozone-platform=wayland --user-data-dir="$PROFILE" --app="$COURSE_URL" \
+  forget_window_placement
+  size="$(output_size)"
+  chromium --kiosk --start-fullscreen --ozone-platform=wayland --user-data-dir="$PROFILE" \
+    --app="$COURSE_URL" --window-position=0,0 --window-size="${size%x*},${size#*x}" \
     --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
     --disable-features=TranslateUI --disk-cache-size=1 --password-store=basic 9>&- &
 }

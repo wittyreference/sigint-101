@@ -1,6 +1,7 @@
 # ABOUTME: Tests for the desktop launchers in deploy/kiosk and deploy/install.sh, run as real bash.
 # ABOUTME: chromium, pgrep, curl, sleep, sudo and systemctl are stubs on PATH (the OS boundary).
 
+import json
 import os
 import shutil
 import socket
@@ -41,6 +42,8 @@ class Box:
         _stub(self.bin, "chromium", f'echo "chromium $*" >> {self.log}')
         _stub(self.bin, "pgrep", f'echo "pgrep $*" >> {self.log}; [ -e {self.alive} ]')
         _stub(self.bin, "curl", "exit 0")
+        # No output size to read unless a test says so (the host's own wlr-randr never answers).
+        _stub(self.bin, "wlr-randr", "exit 1")
         _stub(self.bin, "systemctl", f'echo "systemctl $*" >> {self.log}')
         _stub(self.bin, "loginctl", f'echo "loginctl $*" >> {self.log}')
         # sudo records the system step and runs nothing.
@@ -168,6 +171,133 @@ def test_a_second_watchdog_in_the_same_session_stands_down(box):
     assert result.returncode == 0, result.stderr
     assert box.launches(wait=0.3) == []
     assert box.calls("sleep") == []
+
+
+# --- the kiosk window covers the whole panel, whatever the profile saved ----------
+# On the reference panel a reopened kiosk came back as the 780x460 window its profile had saved,
+# leaving a 20 px strip of the desktop showing down the right edge and along the bottom.
+
+
+def _arg(launch, name):
+    [value] = [a.split("=", 1)[1] for a in launch.split() if a.startswith(name + "=")]
+    return value
+
+
+def _wlr_randr(box, body):
+    _stub(box.bin, "wlr-randr", body)
+
+
+PANEL = """HDMI-A-1 "Panel (HDMI-A-1)"
+  Enabled: yes
+  Modes:
+    640x480 px, 59.940002 Hz
+    800x480 px, 59.977001 Hz (preferred, current)
+  Position: 0,0
+  Transform: {transform}
+  Scale: {scale}
+"""
+
+
+def test_launch_sets_the_window_bounds_itself_at_the_panel_size(box):
+    """With no output size to read, the bounds are the reference panel's own 800x480 at 0,0."""
+    _wlr_randr(box, "exit 1")
+    result = box.run(LAUNCHER, "open")
+    assert result.returncode == 0, result.stderr
+    [launch] = box.launches()
+    assert "--kiosk" in launch.split() and "--start-fullscreen" in launch.split()
+    assert _arg(launch, "--window-position") == "0,0"
+    assert _arg(launch, "--window-size") == "800,480"
+
+
+@pytest.mark.parametrize("transform, scale, size", [
+    ("normal", "1.000000", "800,480"),
+    ("normal", "2.000000", "400,240"),
+    ("90", "1.000000", "480,800"),
+], ids=["panel", "scaled", "rotated"])
+def test_launch_sizes_the_window_to_the_output_wlr_randr_reports(box, transform, scale, size):
+    _wlr_randr(box, "cat <<'EOF'\n" + PANEL.format(transform=transform, scale=scale) + "EOF")
+    result = box.run(LAUNCHER, "open")
+    assert result.returncode == 0, result.stderr
+    assert _arg(box.launches()[0], "--window-size") == size
+
+
+def test_launch_skips_a_disabled_output_for_the_enabled_one(box):
+    other = 'HDMI-A-2 "TV"\n  Enabled: no\n  Modes:\n    1920x1080 px, 60.000000 Hz (current)\n'
+    _wlr_randr(box, "cat <<'EOF'\n" + other + PANEL.format(transform="normal", scale="1.0")
+               + "EOF")
+    result = box.run(LAUNCHER, "open")
+    assert result.returncode == 0, result.stderr
+    assert _arg(box.launches()[0], "--window-size") == "800,480"
+
+
+@pytest.mark.parametrize("body", ['echo "garbage"', "exit 0", 'echo "x" >&2; exit 3'],
+                         ids=["garbage", "silent", "failing"])
+def test_an_unreadable_output_size_falls_back_to_the_panel(box, body):
+    _wlr_randr(box, body)
+    result = box.run(LAUNCHER, "open")
+    assert result.returncode == 0, result.stderr
+    assert _arg(box.launches()[0], "--window-size") == "800,480"
+
+
+def _prefs(box):
+    return box.home / ".config" / "chromium-kiosk" / "Default" / "Preferences"
+
+
+def test_launch_forgets_the_window_bounds_the_profile_saved_and_keeps_the_rest(box):
+    prefs = _prefs(box)
+    prefs.parent.mkdir(parents=True)
+    saved = {
+        "browser": {
+            "window_placement": {"left": 0, "top": 0, "right": 780, "bottom": 460,
+                                 "maximized": False, "work_area_left": 0, "work_area_top": 0,
+                                 "work_area_right": 800, "work_area_bottom": 480},
+            "app_window_placement": {"1_/": {"left": 10, "top": 10, "right": 790,
+                                             "bottom": 470}},
+            "has_seen_welcome_page": True,
+        },
+        "profile": {"name": "Kiosk", "exit_type": "Normal"},
+        "intl": {"selected_languages": "en-US,en"},
+        "zoom": 1.25,
+    }
+    prefs.write_text(json.dumps(saved), encoding="utf-8")
+    prefs.chmod(0o600)
+    result = box.run(LAUNCHER, "open")
+    assert result.returncode == 0, result.stderr
+    assert box.launches()
+    after = json.loads(prefs.read_text(encoding="utf-8"))
+    assert "window_placement" not in after["browser"]
+    assert "app_window_placement" not in after["browser"]
+    del saved["browser"]["window_placement"], saved["browser"]["app_window_placement"]
+    assert after == saved
+    assert prefs.stat().st_mode & 0o777 == 0o600
+    # Written beside it and renamed over it: no temporary file is left behind.
+    assert sorted(p.name for p in prefs.parent.iterdir()) == ["Preferences"]
+
+
+def test_watch_forgets_the_saved_window_bounds_before_it_relaunches(box):
+    prefs = _prefs(box)
+    prefs.parent.mkdir(parents=True)
+    prefs.write_text(json.dumps({"browser": {"window_placement": {"right": 780}}}),
+                     encoding="utf-8")
+    box.start_session()
+    result = box.run(LAUNCHER, "watch")
+    assert result.returncode == 0, result.stderr
+    assert len(box.launches()) == 1
+    assert json.loads(prefs.read_text(encoding="utf-8")) == {"browser": {}}
+
+
+@pytest.mark.parametrize("text", ['{"browser": {"window_placement": {"right": 780', "[1, 2]",
+                                  '{"browser": "odd"}', ""],
+                         ids=["truncated", "not-an-object", "odd-browser", "empty"])
+def test_a_malformed_preferences_file_does_not_stop_the_launch(box, text):
+    prefs = _prefs(box)
+    prefs.parent.mkdir(parents=True)
+    prefs.write_text(text, encoding="utf-8")
+    result = box.run(LAUNCHER, "open")
+    assert result.returncode == 0, result.stderr
+    [launch] = box.launches()
+    assert _arg(launch, "--window-size") == "800,480"
+    assert prefs.read_text(encoding="utf-8") == text
 
 
 def test_an_unknown_mode_is_refused(box):
