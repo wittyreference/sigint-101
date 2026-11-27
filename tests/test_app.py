@@ -27,7 +27,7 @@ from sigint101.dmr import DmrDecoder
 from sigint101.events import log_event, read_events
 from sigint101.flock import FlockDetector
 from sigint101.hardware import RadioProbe, RtlSdrDevice
-from sigint101.lora import LoRaListener, parse_lora_packet
+from sigint101.lora import LoRaListener, parse_lora_packet, radio_settings
 from sigint101.pocsag import PocsagDecoder
 from sigint101.provenance import BIAS_STATE, REFERENCE_HZ, read_baseline
 from sigint101.rayhunter import RayhunterMonitor
@@ -210,6 +210,9 @@ class _StubLora:
 
     def recent(self, limit=None):
         return self._packets if limit is None else self._packets[-limit:]
+
+    def send_state(self):
+        return {"radio": radio_settings(None), "sends": []}
 
     def stop(self):
         self._started = False
