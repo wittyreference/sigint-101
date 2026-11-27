@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,7 +15,9 @@ HOOKS = REPO / ".claude" / "hooks"
 PRE_BASH = HOOKS / "pre-bash-validate.sh"
 PRE_WRITE = HOOKS / "pre-write-validate.sh"
 FLYWHEEL = HOOKS / "flywheel-doc-check.sh"
+WORKTREE_GATE = HOOKS / "worktree-gate.sh"
 CONFIG = REPO / "ff.config.json"
+MAKEFILE = REPO / "Makefile"
 
 
 def _clean_env(project_root: Path, **extra: str) -> dict:
@@ -206,3 +209,56 @@ def test_review_and_autonomous_docs_describe_actual_pre_commit_hook():
     assert "pre-commit identity/comment/review-evidence" not in auto
     assert "identity" in review
     assert "identity" in auto
+
+
+def _makefile_targets(makefile: Path) -> set:
+    targets = set()
+    for line in makefile.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^([A-Za-z0-9_.-]+)\s*:(?!=)", line)
+        if match and not match.group(1).startswith("."):
+            targets.add(match.group(1))
+    return targets
+
+
+def _listed_make_targets(text: str) -> list:
+    return re.findall(r"`make\s+([A-Za-z0-9_.-]+)`", text)
+
+
+def _worktree_gate_default_paths(hook: Path) -> list:
+    assign = next(
+        (line for line in hook.read_text(encoding="utf-8").splitlines()
+         if line.startswith("GUARDED_DEFAULT=")),
+        None,
+    )
+    assert assign is not None, "GUARDED_DEFAULT assignment not found in worktree-gate.sh"
+    res = subprocess.run(
+        ["bash", "-c", f'{assign}; printf "%s\\n" "$GUARDED_DEFAULT"'],
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    return [line for line in res.stdout.splitlines() if line]
+
+
+def test_worktree_gate_default_matches_config_guarded_paths():
+    cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+    expected = cfg["worktree"]["guardedPaths"]
+    assert expected, "ff.config.json worktree.guardedPaths must not be empty"
+    actual = _worktree_gate_default_paths(WORKTREE_GATE)
+    assert actual == expected, (
+        f"worktree-gate.sh GUARDED_DEFAULT {actual!r} != ff.config.json {expected!r}"
+    )
+    aboutme = "\n".join(WORKTREE_GATE.read_text(encoding="utf-8").splitlines()[:4])
+    for path in expected:
+        assert path in aboutme, f"worktree-gate.sh ABOUTME must name {path!r}"
+
+
+def test_autonomous_guide_make_targets_exist_in_makefile():
+    available = _makefile_targets(MAKEFILE)
+    skill = (REPO / ".claude" / "skills" / "autonomous-guide.md").read_text(encoding="utf-8")
+    listed = _listed_make_targets(skill)
+    assert listed, "autonomous-guide.md must list at least one make target"
+    missing = [target for target in listed if target not in available]
+    assert not missing, f"autonomous-guide.md lists unknown make targets: {missing}"
+    # Prove the helper rejects an unknown target.
+    assert [t for t in _listed_make_targets("`make nonexistent-target`") if t not in available] == [
+        "nonexistent-target"
+    ]

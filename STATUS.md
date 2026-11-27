@@ -194,7 +194,7 @@ weather-sensor ID and Flipper name in the test fixtures are made up).
   - #10, #11: `provision.sh` and the quick-start
   - #12: status bar never invents readings; waterfall pixelated
   - #13: audit reports
-- **Kiosk cold boot PASSED (observed 2026-11-02 22:18 PST).** After a reboot, the reference Recon
+- **Kiosk cold boot PASSED (observed 2026-11-03 06:18 UTC).** After a reboot, the reference Recon
   came up with the server service and labwc, ran one kiosk browser, and showed the course home on
   the panel (grim screenshot). The persistent journal kept the previous boot.
 - **The earlier branches (checked 2026-11-16 UTC):** each had merged, closed, or reached main

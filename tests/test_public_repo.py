@@ -103,6 +103,17 @@ WORD_RUN = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")
 # false alarm); the failure message says how to get past it.
 
 
+# Pacific time stamps (word-bounded) are replaced with UTC in tracked text files so dates never
+# depend on a local clock. Built with a character class so this file never carries either token.
+PACIFIC_TZ = re.compile(r"\bP[SD]T\b")
+
+
+def pacific_timezone_lines(text: str) -> list:
+    """The 1-based numbers of the lines in `text` that hold a word-bounded Pacific time stamp."""
+    return [number for number, line in enumerate(text.split("\n"), 1)
+            if PACIFIC_TZ.search(line)]
+
+
 def tailnet_address_lines(text: str) -> list:
     """The 1-based numbers of the lines in `text` that hold a tailnet address.
 
@@ -313,6 +324,12 @@ def test_no_tracked_capture_carries_a_real_devices_hardware_address():
     assert not found, ("tracked captures carry a real device's hardware address in their 802.11 "
                        "address fields; rewrite them with locally administered ones. Where (the "
                        "addresses are withheld): " + ", ".join(found))
+
+
+def test_no_tracked_file_uses_pacific_time():
+    found = findings(pacific_timezone_lines)
+    assert not found, ("tracked files hold a Pacific time stamp; write UTC instead. Where: "
+                       + ", ".join(found))
 
 
 def test_no_tracked_file_names_the_owners_machines_or_private_plans():
@@ -622,9 +639,26 @@ def test_a_capture_this_guard_cannot_read_is_a_finding_not_a_pass(tmp_path, data
     assert capture_findings(tmp_path) == [f"air.cap (this guard cannot read it: {reason})"]
 
 
+@pytest.mark.parametrize("line", [
+    "observed 2026-11-02 22:18 P" + "ST",
+    "From 21:05 to 21:20 P" + "DT (local clock)",
+])
+def test_a_pacific_timezone_stamp_is_found(line):
+    assert pacific_timezone_lines(line) == [1]
+
+
+@pytest.mark.parametrize("line", [
+    "observed 2026-11-03 06:18 UTC",
+    "UPSTREAM and ADAPTER carry the letters inside a longer word",
+])
+def test_utc_and_non_timezone_words_are_left_alone(line):
+    assert pacific_timezone_lines(line) == []
+
+
 def test_the_guard_does_not_trip_on_its_own_source():
     source = Path(__file__).read_text(encoding="utf-8")
     assert tailnet_address_lines(source) == []
     assert foreign_home_lines(source) == []
     assert real_hardware_address_lines(source) == []
     assert private_name_lines(source) == []
+    assert pacific_timezone_lines(source) == []
