@@ -40,8 +40,9 @@ function measureCardSort(expectedTheme) {
   const nextBtn = panel.querySelector('[data-sort-next]');
   if (choices.length !== 3 || !card || !fb || !prevBtn || !nextBtn) return null;
 
-  // Walk back to card 1, then visit every card and tap a choice so feedback is measured on all 12.
-  while (!prevBtn.disabled) prevBtn.click();
+  // Stub fetch before clicking so the render check never POSTs /api/sort to a live console.
+  const origFetch = window.fetch;
+  window.fetch = () => new Promise(() => {});
 
   let choicesFit = true;
   let footerFit = true;
@@ -53,24 +54,31 @@ function measureCardSort(expectedTheme) {
   let maxDocH = document.documentElement.scrollHeight;
   let choiceHeights = choices.map(b => Math.round(b.getBoundingClientRect().height));
 
-  for (let i = 0; i < 20; i += 1) {
-    choices[i % 3].click();
-    cardsChecked += 1;
-    maxDocW = Math.max(maxDocW, document.documentElement.scrollWidth);
-    maxDocH = Math.max(maxDocH, document.documentElement.scrollHeight);
-    const heights = choices.map(b => Math.round(b.getBoundingClientRect().height));
-    choiceHeights = choiceHeights.map((h, idx) => Math.min(h, heights[idx]));
-    if (!choices.every(unclipped)) choicesFit = false;
-    if (!footBtns.every(b => unclipped(b) && b.getBoundingClientRect().height >= 72)) {
-      footerFit = false;
+  try {
+    // Walk back to card 1, then visit every card and tap a choice to measure feedback on all 12.
+    while (!prevBtn.disabled) prevBtn.click();
+
+    for (let i = 0; i < 20; i += 1) {
+      choices[i % 3].click();
+      cardsChecked += 1;
+      maxDocW = Math.max(maxDocW, document.documentElement.scrollWidth);
+      maxDocH = Math.max(maxDocH, document.documentElement.scrollHeight);
+      const heights = choices.map(b => Math.round(b.getBoundingClientRect().height));
+      choiceHeights = choiceHeights.map((h, idx) => Math.min(h, heights[idx]));
+      if (!choices.every(unclipped)) choicesFit = false;
+      if (!footBtns.every(b => unclipped(b) && b.getBoundingClientRect().height >= 72)) {
+        footerFit = false;
+      }
+      const fbRect = fb.getBoundingClientRect();
+      if (fb.hidden || !inViewport(fbRect)) feedbackFits = false;
+      const delta = card.scrollHeight - card.clientHeight;
+      worstDelta = Math.max(worstDelta, delta);
+      if (delta > 1) cardScrolls = true;
+      if (nextBtn.disabled) break;
+      nextBtn.click();
     }
-    const fbRect = fb.getBoundingClientRect();
-    if (fb.hidden || !inViewport(fbRect)) feedbackFits = false;
-    const delta = card.scrollHeight - card.clientHeight;
-    worstDelta = Math.max(worstDelta, delta);
-    if (delta > 1) cardScrolls = true;
-    if (nextBtn.disabled) break;
-    nextBtn.click();
+  } finally {
+    window.fetch = origFetch;
   }
 
   const backRect = back.getBoundingClientRect();

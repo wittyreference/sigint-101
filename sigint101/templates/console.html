@@ -336,6 +336,7 @@
               <span class="sort-head__counter" data-sort-counter>Card 1 of {{ lesson.sort|length }}</span>
               <span class="sort-head__score" data-sort-score>Score 0/0 (0/{{ lesson.sort|length }})</span>
             </div>
+            <p class="sort-intro" data-sort-intro>{{ lesson.stages['try'] }}</p>
             <div class="sort-card">
               <p class="sort-card__text" data-sort-text>{{ lesson.sort[0].text }}</p>
               <div class="sort-feedback verdict" data-sort-feedback hidden>

@@ -2982,11 +2982,11 @@ body {
 .stage-panel--sort {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   align-items: stretch;
   column-gap: 12px;
-  row-gap: 6px;
-  padding: 6px var(--gutter) 8px;
+  row-gap: 5px;
+  padding: 5px var(--gutter) 6px;
 }
 .stage-panel--sort > .sort-head {
   grid-row: 1;
@@ -3002,6 +3002,14 @@ body {
   grid-column: 2;
   align-self: center;
 }
+.stage-panel--sort > .sort-intro {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.2;
+  color: var(--fg-dim);
+}
 .sort-head__counter {
   color: var(--fg);
   letter-spacing: 0.04em;
@@ -3010,14 +3018,14 @@ body {
   color: var(--fg-dim);
 }
 .stage-panel--sort > .sort-card {
-  grid-row: 2;
+  grid-row: 3;
   grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 5px;
   min-height: 0;
-  padding: 6px 12px;
+  padding: 5px 12px;
   border: 2px solid var(--border-strong);
   background: var(--surface-2);
   overflow-y: auto;
@@ -3025,14 +3033,14 @@ body {
 .sort-card__text {
   margin: 0;
   font-size: 19px;
-  line-height: 1.25;
+  line-height: 1.24;
   color: var(--fg);
 }
 .sort-feedback {
   margin: 0;
   padding: 4px 10px;
   font-size: 16px;
-  line-height: 1.22;
+  line-height: 1.2;
 }
 .sort-feedback[hidden] {
   display: none;
@@ -3044,10 +3052,9 @@ body {
   padding: 1px 6px;
   border: 1px solid var(--border);
   background: var(--surface-3);
-  white-space: nowrap;
 }
 .stage-panel--sort > .sort-choices {
-  grid-row: 3;
+  grid-row: 4;
   grid-column: 1 / -1;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3071,7 +3078,7 @@ body {
   border: 3px solid var(--accent);
 }
 .stage-panel--sort > .stage-foot {
-  grid-row: 4;
+  grid-row: 5;
   grid-column: 1 / -1;
 }
 .sort-foot {

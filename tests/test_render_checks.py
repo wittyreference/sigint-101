@@ -662,3 +662,83 @@ def test_card_sort_render_fails_when_law_page_does_not_scroll_or_drops_back(devt
     proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - law red-night"
+
+
+def test_card_sort_render_stubs_fetch_before_clicking_so_no_answers_post():
+    # F4: executing measureCardSort against a live console must never POST /api/sort writes into
+    # the learner's progress.db. Run the actual CARD_SORT JS under node with a click handler that
+    # calls window.fetch and assert zero fetches reach the server.
+    node = shutil.which("node")
+    assert node, "node is required to test the CARD_SORT browser snippet"
+    import ast
+    tree = ast.parse(CARD_SORT.read_text(encoding="utf-8"))
+    snippet = next(
+        node_.value.value
+        for node_ in tree.body
+        if isinstance(node_, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "CARD_SORT" for t in node_.targets)
+    )
+    harness = f"""
+const assert = require("node:assert/strict");
+let fetchCalls = 0;
+const origFetch = () => {{ fetchCalls += 1; return Promise.resolve({{ ok: true }}); }};
+const rect = (h = 80) => ({{
+  width: 100, height: h, left: 10, top: 10, right: 110, bottom: 10 + h,
+}});
+const makeEl = (h = 80) => ({{
+  hidden: false, disabled: false, scrollWidth: 100, clientWidth: 100,
+  scrollHeight: h, clientHeight: h,
+  getBoundingClientRect: () => rect(h),
+  click() {{}},
+}});
+const fb = makeEl(40);
+const card = makeEl(140);
+const prevBtn = Object.assign(makeEl(76), {{ disabled: true }});
+const nextBtn = Object.assign(makeEl(76), {{ disabled: true }});
+const choices = [0, 1, 2].map(() => {{
+  const el = makeEl(80);
+  el.click = () => {{ globalThis.window.fetch("/api/sort?lesson_id=5", {{ method: "POST" }}); }};
+  return el;
+}});
+const footBtns = [prevBtn, nextBtn];
+const panel = {{
+  hidden: false,
+  querySelectorAll(sel) {{
+    if (sel === "[data-sort-choice]") return choices;
+    if (sel.includes(".stage-foot")) return footBtns;
+    return [];
+  }},
+  querySelector(sel) {{
+    if (sel === ".sort-card") return card;
+    if (sel === "[data-sort-feedback]") return fb;
+    if (sel === "[data-sort-prev]") return prevBtn;
+    if (sel === "[data-sort-next]") return nextBtn;
+    return null;
+  }},
+}};
+globalThis.window = {{ fetch: origFetch }};
+globalThis.fetch = origFetch;
+globalThis.innerWidth = 800;
+globalThis.innerHeight = 480;
+globalThis.getComputedStyle = () => ({{ overflowX: "visible", overflowY: "visible" }});
+globalThis.document = {{
+  documentElement: {{ scrollWidth: 800, scrollHeight: 480 }},
+  querySelector(sel) {{
+    if (sel === ".app") return {{ dataset: {{ theme: "dark" }} }};
+    if (sel === ".btn-back") return makeEl(76);
+    if (sel.includes("data-sort-panel")) return panel;
+    return null;
+  }},
+  querySelectorAll(sel) {{
+    if (sel === ".stage-panel") return [panel];
+    return [];
+  }},
+}};
+{snippet}
+const result = measureCardSort("dark");
+assert.equal(result.cardsChecked, 1);
+assert.equal(fetchCalls, 0, "measureCardSort posted to fetch instead of stubbing it first");
+assert.equal(globalThis.window.fetch, origFetch, "window.fetch should be restored afterwards");
+"""
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stdout + proc.stderr

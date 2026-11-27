@@ -35,7 +35,7 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "from unencrypted government, police, fire, or public-safety systems. Some states "
             "restrict mobile scanners in vehicles."
         ),
-        url="https://www.law.cornell.edu/uscode/text/18/2511",
+        url="https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title18-section2511&num=0&edition=prelim",
     ),
     LawSection(
         id="wiretap-limits",
@@ -48,20 +48,22 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "decrypting them is a federal offence on its own — which is why this console shows "
             "POCSAG framing and withholds the words."
         ),
-        url="https://www.law.cornell.edu/uscode/text/18/2510",
+        url="https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title18-section2510&num=0&edition=prelim",
     ),
     LawSection(
         id="joffe-wifi",
-        title="Wi-Fi metadata versus payload (Joffe v. Google)",
+        title="Wi-Fi payload (Joffe v. Google)",
         cite="Joffe v. Google, Inc., 746 F.3d 920 (9th Cir. 2013)",
         summary=(
-            "Access points broadcast beacons (channel, SSID, BSSID, signal, security) so devices "
-            "can see them, and a read-only survey counts those envelopes without connecting. "
-            "Payload data — emails, passwords, web traffic — is protected even on open Wi-Fi: "
-            "the Ninth Circuit held it is neither a 'radio communication' under 18 USC 2510(16) "
-            "nor 'readily accessible to the general public' under 18 USC 2511(2)(g)(i)."
+            "Unencrypted is not the same as public. In its amended opinion, the Ninth Circuit "
+            "held that Wi-Fi payload data (emails, passwords, images, documents) is not a "
+            "'radio communication' — a predominantly auditory broadcast — under 18 USC 2510(16), "
+            "so the unencrypted-radio definition does not bring it into the 18 USC 2511(2)(g)(i) "
+            "exemption. That appeal reviewed a motion to dismiss (finding no liability; the suit "
+            "later settled and certiorari was denied), binds only the Ninth Circuit, and never "
+            "decided whether beacon metadata (SSID, MAC, signal, channel) is covered."
         ),
-        url="https://www.govinfo.gov/content/pkg/USCOURTS-ca9-11-17483/pdf/USCOURTS-ca9-11-17483-1.pdf",
+        url="https://cdn.ca9.uscourts.gov/datastore/general/2013/12/27/11-17483_opinion122713.pdf",
     ),
     LawSection(
         id="divulge-605",
@@ -72,7 +74,7 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "contents of private radio communications you are not authorised to receive, while "
             "carving out broadcasts for the general public, amateur traffic, and distress calls."
         ),
-        url="https://www.law.cornell.edu/uscode/text/47/605",
+        url="https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title47-section605&num=0&edition=prelim",
     ),
     LawSection(
         id="tx-licence",
@@ -83,17 +85,18 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "specific rule authorizes licence-free operation. On the amateur bands, the station "
             "must be under the control of a licensed amateur operator before keying up."
         ),
-        url="https://www.law.cornell.edu/uscode/text/47/301",
+        url="https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title47-section301&num=0&edition=prelim",
     ),
     LawSection(
         id="part15-ism",
         title="Licence-free 915 MHz ISM (Part 15) and waveform rules",
-        cite="47 CFR 15.247(a)(2), 15.249",
+        cite="47 CFR 15.247(a)(2), (b)(3); 15.249",
         summary=(
             "Compliant Part 15 equipment may transmit without an individual licence inside its "
             "power, antenna, region, and no-interference limits. On 902-928 MHz, single-channel "
             "250 kHz presets (LongFast) fall under 15.249 (50 mV/m at 3 m, ~0.75 mW EIRP), while "
-            "500 kHz digital modulation (Long Turbo) meets 15.247(a)(2) and its 1 W limit."
+            "500 kHz digital modulation (Long Turbo) can satisfy the 15.247(a)(2) bandwidth rule "
+            "toward the 1 W limit in 15.247(b)(3)."
         ),
         url="https://www.ecfr.gov/current/title-47/section-15.247",
     ),
@@ -107,7 +110,7 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "(higher power, detachable antennas, repeaters) requires a valid individual GMRS "
             "licence (95.1705)."
         ),
-        url="https://www.law.cornell.edu/cfr/text/47/95.1705",
+        url="https://www.ecfr.gov/current/title-47/section-95.1705",
     ),
     LawSection(
         id="scanner-15121",
@@ -118,6 +121,6 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "and marketed in the US; it does not outlaw owning a general-purpose receiver or SDR "
             "for lawful passive listening."
         ),
-        url="https://www.law.cornell.edu/cfr/text/47/15.121",
+        url="https://www.ecfr.gov/current/title-47/section-15.121",
     ),
 )

@@ -63,11 +63,25 @@ def test_m5_sort_carries_over_m15_pager_line_and_joffe_wifi_payload_line():
     assert pager[0]["answer"] == "illegal"
     assert "2510" in pager[0]["cite"] and "2511" in pager[0]["cite"]
 
+    # F1 & F2: no card citing Joffe may be answered `legal`, and the payload card names the court.
     joffe_cards = [c for c in cards if "joffe" in c["cite"].lower()]
-    assert joffe_cards, "expected card(s) carrying over Joffe v. Google Wi-Fi payload line"
-    assert any(c["answer"] == "illegal" and "payload" in (c["text"] + " " + c["why"]).lower()
-               for c in joffe_cards)
-    assert any("746 F.3d 920" in c["cite"] for c in joffe_cards)
+    assert joffe_cards, "expected card carrying over Joffe v. Google Wi-Fi payload line"
+    assert all(c["answer"] != "legal" for c in joffe_cards), joffe_cards
+    payload_card = next(c for c in joffe_cards if c["key"] == "open-wifi-payload")
+    assert payload_card["answer"] == "illegal"
+    assert "746 F.3d 920" in payload_card["cite"]
+    assert "9th Cir" in payload_card["cite"]
+    assert "ninth circuit" in payload_card["why"].lower()
+    assert "radio communication" in payload_card["why"].lower()
+
+    # F1: wifi-beacons must not cite Joffe as authority making beacon surveys legal.
+    beacon = next(c for c in cards if c["key"] == "wifi-beacons")
+    assert "joffe" not in beacon["cite"].lower()
+
+    # F9: 1 W limit cites 47 CFR 15.247(b)(3) alongside (a)(2) and 15.249.
+    mesh = next(c for c in cards if c["key"] == "meshtastic-tx")
+    assert "15.247(b)(3)" in mesh["why"] or "(b)(3)" in mesh["cite"]
+    assert "(b)(3)" in mesh["cite"]
 
     # Routine marine/aeronautical traffic sits under 18 USC 2511(2)(g)(ii)(IV), not (I) (distress).
     air_marine = [c for c in cards if c["key"] in ("aircraft-am", "adsb-ais")]
@@ -75,25 +89,53 @@ def test_m5_sort_carries_over_m15_pager_line_and_joffe_wifi_payload_line():
     assert all("2511(2)(g)(ii)(IV)" in c["cite"] for c in air_marine)
 
 
+def test_m5_stages_agree_with_twelve_card_sort():
+    # F3: observe and explain must not refer to "the four" as if the learner only saw four.
+    lesson = load_lesson_file(PACK_M5)
+    assert "the four" not in lesson.stages["observe"].lower()
+    assert "the four" not in lesson.stages["explain"].lower()
+
+
 def test_m5_pack_cites_primary_sources_for_sort_authorities():
     raw = yaml.safe_load(PACK_M5.read_text(encoding="utf-8"))
     urls = [str(s.get("url", "")) for s in (raw.get("sources") or []) if isinstance(s, dict)]
+    # F9: official primary government URLs (uscode.house.gov, ecfr.gov, ca9.uscourts.gov), not LII.
+    assert not any("law.cornell.edu" in u for u in urls), urls
     for expected in (
-        "18/2510",
-        "18/2511",
-        "47/301",
-        "47/605",
-        "15.121",
-        "15.247",
-        "15.249",
-        "97.5",
-        "95.305",
-        "95.1705",
-        "11-17483",
+        "title18-section2510",
+        "title18-section2511",
+        "title47-section301",
+        "title47-section605",
+        "ecfr.gov/current/title-47/section-15.121",
+        "ecfr.gov/current/title-47/section-15.247",
+        "ecfr.gov/current/title-47/section-15.249",
+        "ecfr.gov/current/title-47/section-97.5",
+        "ecfr.gov/current/title-47/section-95.305",
+        "ecfr.gov/current/title-47/section-95.1705",
+        "11-17483_opinion122713.pdf",
     ):
         assert any(expected in u for u in urls), (
             f"missing primary source URL for {expected}: {urls}"
         )
+
+
+def test_law_sections_joffe_and_part15_are_exact_to_primary_sources():
+    # F1: Joffe section keeps only the amended 2510(16) radio-communication holding, motion to
+    # dismiss posture, Ninth Circuit reach, and silence on beacons — never the withdrawn holding.
+    joffe = next(s for s in LAW_SECTIONS if s.id == "joffe-wifi")
+    low = joffe.summary.lower()
+    assert "nor 'readily accessible" not in low
+    assert not re.search(r"\bheld\b[^.?!]*readily accessible", low)
+    assert "radio communication" in low and "2510(16)" in joffe.summary
+    assert "motion to dismiss" in low
+    assert "ninth circuit" in low
+    assert "beacon" in low and ("never decided" in low or "nothing about" in low)
+    assert "11-17483_opinion122713.pdf" in joffe.url
+
+    # F9: Part 15 section cites 15.247(b)(3) for the 1 W limit and uses primary government URLs.
+    part15 = next(s for s in LAW_SECTIONS if s.id == "part15-ism")
+    assert "(b)(3)" in part15.cite and "15.247(b)(3)" in part15.summary
+    assert not any("law.cornell.edu" in s.url for s in LAW_SECTIONS)
 
 
 # --- Additive sort_answers storage in progress.py ----------------------------------------------
@@ -185,9 +227,11 @@ def test_complete_works_with_any_sort_score_d16(tmp_path, mode):
 
 
 def test_lesson_5_try_stage_renders_card_sort_and_law_link_keyboard_free(tmp_path):
+    lesson = load_lesson_file(PACK_M5)
     with _client(tmp_path) as client:
         html = client.get("/lesson/5").text
     assert 'data-sort-panel' in html
+    assert lesson.stages["try"] in html_lib.unescape(html)
     assert 'data-sort-choice="legal"' in html
     assert 'data-sort-choice="illegal"' in html
     assert 'data-sort-choice="depends"' in html
