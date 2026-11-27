@@ -92,16 +92,21 @@ def forked_group(request, subreaper):
                     os.waitpid(helper, 0)
 
 
-@pytest.mark.parametrize("reap", ["poll", "wait", "stdlib"])
+@pytest.mark.parametrize("reap", ["poll", "wait", "stdlib", "external"])
 def test_a_reaped_tool_never_signals_its_old_group(reap, monkeypatch):
     with childproc.spawn([sys.executable, "-c", "pass"], stderr=subprocess.DEVNULL) as tool:
         if reap == "poll":
             code = _poll_until_exit(tool.poll)
         elif reap == "wait":
             code = tool.wait(timeout=3)
-        else:
+        elif reap == "stdlib":
             # The stdlib's cleanup uses this same internal poll to reap children.
             code = _poll_until_exit(lambda: subprocess.Popen.poll(tool))
+        else:
+            pid, status = os.waitpid(tool.pid, 0)
+            assert pid == tool.pid
+            code = os.waitstatus_to_exitcode(status)
+            assert tool.returncode is None
         assert code == 0
 
         calls = []
@@ -123,6 +128,33 @@ def _poll_until_exit(poll):
         time.sleep(0.005)
         code = poll()
     return code
+
+
+@pytest.mark.parametrize(("script", "expected"), [
+    pytest.param("raise SystemExit(23)", 23, id="exit-status"),
+    pytest.param("import os, signal; os.kill(os.getpid(), signal.SIGTERM)",
+                 -signal.SIGTERM, id="signal"),
+])
+def test_poll_keeps_the_observed_status_if_another_waiter_reaps_first(
+        script, expected, monkeypatch):
+    with childproc.spawn([sys.executable, "-c", script], stderr=subprocess.DEVNULL) as tool:
+        real_waitpid = os.waitpid
+        reaped_codes = []
+
+        def waitpid(pid, options):
+            if pid == tool.pid:
+                # Poll has observed the exit and swept the group. Reap the leader from
+                # outside Popen before the managed waitpid call reaches the kernel.
+                reaped_pid, status = real_waitpid(pid, 0)
+                assert reaped_pid == pid
+                reaped_codes.append(os.waitstatus_to_exitcode(status))
+            return real_waitpid(pid, options)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "waitpid", waitpid)
+            code = _poll_until_exit(tool.poll)
+        assert reaped_codes == [expected]
+        assert code == tool.returncode == expected
 
 
 @pytest.mark.parametrize("reap", ["poll", "wait"])

@@ -135,26 +135,28 @@ class GroupPopen(subprocess.Popen):
     The child then keeps its own exit status, and its PID is safe to release.
     """
 
-    def _exit_pending(self) -> bool:
+    def _exit_pending(self) -> os.waitid_result | None:
         """Peek at the leader under Popen's waitpid lock, leaving its pid reserved."""
         try:
-            return os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+            return os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             # Match Popen's status when the child was already reaped elsewhere.
             self.returncode = 0
-            return False
+            return None
 
     def poll(self):
         # Use the same lock as Popen's internal poll (including stdlib cleanup) and
         # send_signal. No managed reap can release the pid midway through a signal.
         if self.returncode is None and self._waitpid_lock.acquire(False):
             try:
-                if self.returncode is None and self._exit_pending():
+                if self.returncode is None and (exited := self._exit_pending()) is not None:
                     _quietly(lambda: self._signal_group(signal.SIGKILL))
                     try:
                         _, status = os.waitpid(self.pid, 0)  # waitid confirmed the exit
                     except ChildProcessError:
-                        self.returncode = 0
+                        # Another waiter reaped the leader after waitid observed its exit.
+                        self.returncode = (exited.si_status if exited.si_code == os.CLD_EXITED
+                                           else -exited.si_status)
                     else:
                         self._handle_exitstatus(status)
             finally:
