@@ -174,7 +174,7 @@ class SupervisedReceiver:
         if run is not None:
             run.unreported_death = False
         self.error = None
-        self.watch.superseded()
+        self.watch.superseded(self.freq_hz)
 
     def stop(self):
         with self._life:

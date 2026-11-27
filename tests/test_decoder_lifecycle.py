@@ -20,10 +20,11 @@ from sigint101 import (
     flock,
     pocsag,
     rds,
+    receiver_lifecycle,
     sstv,
 )
 from sigint101.childproc import Pipeline, command_line, spawn
-from tests.child_fakes import USB_BUSY, Child
+from tests.child_fakes import USB_BUSY, Child, LateProc
 
 
 class _Clock:
@@ -284,6 +285,151 @@ def test_a_retune_to_the_same_frequency_still_reports_the_death(tmp_path, name):
     with pytest.raises(unavailable, match="killed by SIGKILL"):
         dec.start()
     assert len(spawned) == 1
+
+
+@pytest.mark.parametrize("name", sorted(RETUNABLE))
+def test_a_tool_that_survived_kill_still_refuses_after_a_retune(tmp_path, name, monkeypatch):
+    # The death is the old run's, but a stage that would not die may still hold the dongle: that
+    # cleanup failure is the radio's state now, and the retune must not clear it.
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.05)
+    build, unavailable, _ = DECODERS[name]
+    stages = []
+
+    def spawn_pipeline(*_args):
+        stages.append((Child(["rtl_fm"]), Child(["multimon-ng"], unkillable=True)))
+        return Pipeline(*stages[-1])
+
+    dec = build(spawn_pipeline, tmp_path)
+    dec.watch.clock = _Clock()
+    dec.EOF_WAIT_S = 0.01
+    dec.start()
+    run = dec._run
+    stages[0][0].kill()                         # rtl_fm is killed; multimon-ng cannot be
+    assert run.physical.wait(5)
+    assert "survived kill" in run.failure
+    dec.retune(RETUNABLE[name])
+    with pytest.raises(unavailable, match="survived kill; the dongle may still be held"):
+        dec.start()
+    assert len(stages) == 1
+    stages[0][1].unkillable = False             # let the supervisor's retry reap it
+    assert run.complete.wait(5)
+
+
+def test_rtl_433_that_survived_kill_still_refuses_after_a_retune(tmp_path):
+    dec, unavailable, spawned, _ = _build("decode", tmp_path,
+                                          lambda: Child(["rtl_433"], unkillable=True))
+    dec.start()
+    dec.retune(315_000_000)                     # the stop inside the retune cannot kill it
+    with pytest.raises(unavailable, match="survived kill; the dongle may still be held"):
+        dec.start()
+    assert len(spawned) == 1
+
+
+# --- C52 round 2: the back-off across a retune (ruling (a)) and rtl_433's decoder -------------
+# A retune lifts the wait of a single death, so one kill and a retune start at once. From the
+# second quick death in a row the back-off has grown (childproc's FIRST_RETRY_S doubles), and
+# that wait survives the retune, with a reason that names the frequency the next try is at.
+
+LATE_TUNED = {**RETUNABLE, "decode": 315_000_000}
+OTHER_HZ = {"acars": 131_550_000, "aprs": 145_010_000, "dmr": 452_000_000,
+            "pocsag": 152_840_000, "rds": 101_100_000, "decode": 868_000_000}
+
+
+@pytest.fixture
+def late_tuned(tmp_path):
+    """Decoders whose tools hold their pipe open until killed, as a real one does."""
+    procs = []
+
+    def make(name):
+        build, unavailable, _ = DECODERS[name]
+        tuned = []
+        holder = []
+
+        def spawn_late(*_args):
+            tuned.append(holder[0].freq_hz)
+            procs.append(LateProc(["rtl_fm", "-f", str(tuned[-1])]))
+            return procs[-1]
+
+        dec = build(spawn_late, tmp_path)
+        holder.append(dec)
+        clock = _Clock()
+        dec.watch.clock = clock
+        return dec, unavailable, procs, tuned, clock
+
+    yield make
+    for proc in procs:
+        proc.close_pipe()
+
+
+def _kill(dec, proc):
+    """The tool is killed: it exits and its pipe closes, and the decoder reads its end."""
+    proc.die(-signal.SIGKILL)
+    proc.close_pipe()
+    dec.drain()
+
+
+def test_rtl_433_retuned_after_a_death_starts_at_once_at_the_new_frequency(late_tuned):
+    dec, _, procs, tuned, _ = late_tuned("decode")
+    home = dec.freq_hz
+    dec.start()
+    _kill(dec, procs[0])
+    assert dec.watch.stopped is True
+    dec.retune(LATE_TUNED["decode"])
+    assert dec.error is None and dec.watch.retry_in() is None
+    dec.start()                                 # no wait: the first poll there spawns
+    assert tuned == [home, LATE_TUNED["decode"]]
+    assert dec.running
+    dec.stop()
+
+
+def test_rtl_433_retuned_to_the_same_frequency_still_reports_the_death(late_tuned):
+    dec, unavailable, procs, _, _ = late_tuned("decode")
+    dec.start()
+    _kill(dec, procs[0])
+    dec.retune(dec.freq_hz)
+    with pytest.raises(unavailable, match="killed by SIGKILL"):
+        dec.start()
+    assert len(procs) == 1
+
+
+@pytest.mark.parametrize("name", sorted(LATE_TUNED))
+def test_quick_deaths_across_retunes_still_wait_and_say_where_the_next_try_is(late_tuned, name):
+    dec, unavailable, procs, tuned, clock = late_tuned(name)
+    dec.start()
+    _kill(dec, procs[0])                        # the first quick death: 2 s
+    dec.retune(LATE_TUNED[name])
+    dec.start()                                 # a single death's wait is lifted
+    assert len(procs) == 2
+    _kill(dec, procs[1])                        # the second in a row: the wait has grown to 4 s
+    dec.retune(OTHER_HZ[name])
+    assert dec.watch.retry_in() == 2 * childproc.FIRST_RETRY_S
+    where = f"{OTHER_HZ[name] / 1e6:.4f} MHz"
+    with pytest.raises(unavailable) as held:
+        dec.start()
+    assert str(held.value) == f"{dec.watch.tool} keeps dying; it tries again at {where}"
+    assert "SIGKILL" not in str(held.value)     # the old death is not told as this frequency's
+    assert len(procs) == 2
+    clock.now += dec.watch.retry_in()
+    dec.start()                                 # once the wait runs out, it tries there
+    assert tuned[-1] == OTHER_HZ[name] and len(procs) == 3
+    dec.stop()
+
+
+@pytest.mark.parametrize("name", sorted(LATE_TUNED))
+def test_a_retune_after_the_grown_wait_ran_out_starts_at_once(late_tuned, name):
+    # The wait only survives while it runs: a retune after it has run out is never held.
+    dec, _, procs, tuned, clock = late_tuned(name)
+    dec.start()
+    _kill(dec, procs[0])
+    dec.retune(LATE_TUNED[name])
+    dec.start()
+    _kill(dec, procs[1])
+    clock.now += 2 * childproc.FIRST_RETRY_S
+    dec.retune(OTHER_HZ[name])
+    assert dec.watch.retry_in() is None and dec.watch.reason is None
+    dec.start()
+    assert tuned[-1] == OTHER_HZ[name] and len(procs) == 3
+    dec.stop()
 
 
 def test_a_real_pipeline_that_traps_sigterm_is_killed_on_stop(tmp_path, monkeypatch):

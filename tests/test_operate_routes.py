@@ -463,6 +463,32 @@ def test_a_retune_after_the_tool_died_answers_with_the_new_run_not_the_old_death
     assert not _events(tmp_path, "aprs_blocked")
 
 
+def test_a_tool_that_keeps_dying_across_retunes_reads_stopped_at_the_new_frequency(tmp_path):
+    # C52 ruling (a): from the second quick death in a row the grown wait survives a retune, and
+    # the panel says so in words that name the new frequency rather than the old death's.
+    spawned = []
+    now = [5000.0]
+    decoder = _aprs_factory(spawned)()
+    decoder.watch.clock = lambda: now[0]
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder) as client:
+        for hz in (144_800_000, 145_010_000):
+            client.get("/api/aprs")
+            decoder._run.proc.kill()            # rtl_fm is killed again, at once
+            decoder.drain()
+            assert client.post("/api/aprs/tune", json={"freq_hz": hz}).status_code == 200
+        held = client.get("/api/aprs")
+        now[0] += 2 * childproc.FIRST_RETRY_S
+        back = client.get("/api/aprs")
+        decoder.stop()
+    assert held.status_code == 503
+    body = held.json()
+    assert body["state"] == body["cause"] == "stopped"
+    assert body["retry_in"] == 2 * childproc.FIRST_RETRY_S
+    assert body["reason"] == "rtl_fm keeps dying; it tries again at 145.0100 MHz"
+    assert back.status_code == 200 and back.json()["freq_hz"] == 145_010_000
+    assert spawned == [144_390_000, 144_800_000, 145_010_000]
+
+
 def test_a_decoder_refuses_a_frequency_outside_its_band_and_stays_put(tmp_path):
     spawned = []
     with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned)) as client:

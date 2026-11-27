@@ -29,6 +29,9 @@ EXIT_GRACE_S = 2.0
 FIRST_RETRY_S = 2.0
 MAX_RETRY_S = 30.0
 STABLE_AFTER_S = 30.0
+# The quick death from which the wait has grown past FIRST_RETRY_S (the second in a row). A retune
+# lifts a shorter wait; from this one on, the wait survives the retune (ChildWatch.superseded).
+RETUNE_KEEPS_WAIT_FROM = 2
 
 # How long a fresh child is "starting" rather than live. rtl_fm takes a few hundred ms to fail on
 # a dongle another process holds, so a tool has not shown it works until it has lived this long.
@@ -520,16 +523,22 @@ class ChildWatch:
         """Record an already observed exit without waiting or reading the diagnostics."""
         return self._commit_end(proc, reason, observed_at)
 
-    def superseded(self) -> None:
-        """A retune moved on: the last death no longer stands, nor its back-off wait.
+    def superseded(self, freq_hz: int) -> None:
+        """A retune moved on to `freq_hz`: the last death is the old run's, not the next one's.
 
-        The count of quick deaths is kept, so a tool that keeps dying at the new frequency still
-        waits longer each time. A late diagnostic of the old death finds no death to enrich.
+        A single death's wait is lifted, so one kill and a retune start at once. From the second
+        quick death in a row the wait has grown (each further quick death doubles FIRST_RETRY_S),
+        and while it runs it stands: the tool keeps dying whatever the frequency, and the reason
+        says so and where the next try is, not the old death. The count of quick deaths is kept.
+        A late diagnostic of the old death finds no death to enrich.
         """
         with self._lock:
             self._death = None
-            self._retry_at = None
-            self.reason = None
+            if (self.reason is not None and self._deaths >= RETUNE_KEEPS_WAIT_FROM
+                    and self._retry_at is not None and self._retry_at > self.clock()):
+                self.reason = f"{self.tool} keeps dying; it tries again at {freq_hz / 1e6:.4f} MHz"
+            else:
+                self.reason = None
 
     def enrich(self, proc, reason: str) -> None:
         """Only the death that is still current can receive its late diagnostic."""

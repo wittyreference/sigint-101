@@ -46,6 +46,10 @@ _ENVELOPE_KEYS = frozenset({"time", "model", "mod", "freq", "freq1", "freq2",
 # reception.
 REPEAT_WINDOW_S = 2.0
 
+# The refusal for an rtl_433 that a stop could not end. It is the radio's state, not the run's,
+# so a retune keeps it.
+SURVIVED_KILL = f"{RTL_433} survived kill; the dongle may still be held"
+
 
 class DecodeUnavailable(RuntimeError):
     """The radio cannot be decoded. Never a reason to synthesise a read — the panel says so."""
@@ -249,6 +253,11 @@ class Decoder:
 
         The reads heard on the old frequency are cleared as release() clears them, but the dongle
         is not handed away. Tuning to where the decoder already is changes nothing.
+
+        The stopped run's death or pipe failure is that run's, not the next run's answer, so it
+        is dropped; the stop has moved the run on and marked the watch stopping first, so the old
+        reader can record neither again. An rtl_433 that survived kill may still hold the dongle,
+        and that refusal stands. The watch keeps a grown back-off (ChildWatch.superseded).
         """
         with self._life:
             if int(freq_hz) == self.freq_hz:
@@ -257,6 +266,9 @@ class Decoder:
             self.freq_hz = int(freq_hz)
             with self._lock:
                 self._reads.clear()
+                if self.error != SURVIVED_KILL:
+                    self.error = None
+            self.watch.superseded(self.freq_hz)
 
     def start(self) -> None:
         """Begin decoding, unless the radio is absent, rtl_433 is missing, or we were released."""
@@ -368,7 +380,7 @@ class Decoder:
         self.watch.stopping()
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
-            self.error = "rtl_433 survived kill; the dongle may still be held"
+            self.error = SURVIVED_KILL
         if self._thread is not None:
             self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
