@@ -821,7 +821,13 @@ button.rail-pip:disabled {
 /* The radio drives selection by tap; it is never shown, so no keyboard appears. */
 .predict-chip input {
   position: absolute;
-  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
   pointer-events: none;
 }
 
@@ -889,6 +895,18 @@ button.rail-pip:disabled {
 
 .btn-commit {
   min-width: 240px;
+}
+
+.app .btn-commit:disabled {
+  opacity: 1;
+  background: var(--surface-2);
+  color: var(--fg-dim);
+  border-style: dashed;
+  text-shadow: none;
+}
+.btn-commit:disabled::after {
+  animation: none;
+  visibility: hidden;
 }
 
 .predict--committed .predict-chip {
@@ -1112,26 +1130,11 @@ button.rail-pip:disabled {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   padding: 3px 9px;
-  color: var(--warn);
-  border: 2px solid var(--warn);
-  background: color-mix(in srgb, var(--warn) 20%, var(--surface));
+  color: var(--fg);
+  border: 2px solid currentColor;
 }
 .decoder__status--live {
   color: var(--ok);
-  border-color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 20%, var(--surface));
-}
-.decoder__status--empty {
-  color: var(--fg-mute);
-  border-color: var(--fg-mute);
-  background: transparent;
-}
-/* A tool that died on its own reads STOPPED in the critical colour, never the LIVE green: an
-   empty list under a dead decoder must not look like a quiet band. */
-.decoder__status--stopped {
-  color: var(--crit);
-  border-color: var(--crit);
-  background: color-mix(in srgb, var(--crit) 20%, var(--surface));
 }
 /* The command strip (R12): the exact command the console is running, read off the live process.
    It rides the panel head between the title and the badge, so the fixed-height panel gives up no
@@ -1821,11 +1824,11 @@ button.rail-pip:disabled {
   border: 2px solid var(--wf-ok);
 }
 
-/* No radio (or no console) — the panel is honestly empty, not a sample pretending to be live. */
-.badge--na {
-  background: color-mix(in srgb, var(--crit) 22%, var(--wf-bg));
+/* Opaque theme paper keeps refusal badges legible over the dark sunlight waterfall. */
+.badge--na, .decoder__status--empty, .decoder__status--stopped {
   color: var(--crit);
-  border: 2px solid var(--crit);
+  background: var(--bg);
+  border: 2px dashed currentColor;
 }
 
 .waterfall__axis {

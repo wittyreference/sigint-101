@@ -116,14 +116,15 @@ def test_meaningful_text_tokens_meet_wcag_aa_on_every_surface(theme):
 def test_tinted_status_badges_and_waterfall_labels_meet_wcag_aa(theme):
     tokens = _theme_tokens(theme)
     # Each (selector, fallback_bg_token) checked with its own CSS color and background.
-    # (.badge--na and .decoder__status--empty keep their own styling; tokens are checked above.)
     pairs = [
         (".decoder__status", "--surface"),
         (".decoder__status--live", "--surface"),
+        (".decoder__status--empty", "--surface"),
         (".decoder__status--stopped", "--surface"),
         (".rayhunter__line--warning", "--surface"),
         (".badge--sample", "--wf-bg"),
         (".badge--live", "--wf-bg"),
+        (".badge--na", "--wf-bg"),
         (".waterfall__sealed", "--wf-bg"),
         (".waterfall__axis", "--wf-bg"),
         (".waterfall__axis b", "--wf-bg"),
@@ -140,6 +141,31 @@ def test_tinted_status_badges_and_waterfall_labels_meet_wcag_aa(theme):
             bg = _resolve_colour(bg_expr, tokens)
         ratio = _contrast(fg, bg)
         assert ratio >= 4.5, f"{theme}: {selector} ({fg} on {bg}) is {ratio:.2f}:1 (< 4.5:1)"
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_waterfall_live_and_sample_keep_separate_tones(theme):
+    tokens = _theme_tokens(theme)
+    live = _decls_for(".badge--live")["color"]
+    sample = _decls_for(".badge--sample")["color"]
+    assert live == "var(--wf-ok)"
+    assert sample == "var(--wf-warn)"
+    assert _resolve_colour(live, tokens) != _resolve_colour(sample, tokens)
+
+
+def test_only_refusals_use_the_critical_dashed_badge():
+    for selector in (".badge--na", ".decoder__status--empty", ".decoder__status--stopped"):
+        badge = _decls_for(selector)
+        assert badge["color"] == "var(--crit)", selector
+        assert badge["background"] == "var(--bg)", selector
+        assert badge["border"] == "2px dashed currentColor", selector
+    for selector in (".badge--sample", ".badge--live", ".decoder__status"):
+        assert "solid" in _decls_for(selector)["border"], selector
+
+
+def test_running_decoder_badges_have_plain_backgrounds():
+    for selector in (".decoder__status", ".decoder__status--live"):
+        assert _decls_for(selector).get("background", "transparent") == "transparent", selector
 
 
 @pytest.mark.parametrize("theme", THEMES)

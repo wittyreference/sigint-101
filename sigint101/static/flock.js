@@ -70,7 +70,7 @@
     DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = detections.length > 0;
-      if (!detections.length) empty.textContent = "listening… no Flock signatures heard yet";
+      if (!detections.length) empty.textContent = DecoderPanel.quietText(body, "no matching signatures heard yet. No alert never means no camera.");
     }
   }
 
@@ -79,7 +79,7 @@
     var empty = panel.querySelector("[data-flock-empty]");
     var badge = panel.querySelector("[data-flock-badge]");
     if (list) list.innerHTML = "";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no monitor radio to watch for Flock");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -95,7 +95,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

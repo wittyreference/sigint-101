@@ -2,7 +2,6 @@
 # ABOUTME: Also the single claim lock, deduplicated refusal logging, and the ppm route's claim.
 
 import json
-import re
 import shlex
 import shutil
 import subprocess
@@ -175,7 +174,7 @@ def test_a_dead_tool_reads_stopped_not_live(tmp_path, path, factory, build, key,
         assert resp.status_code == 503
         body = resp.json()
         assert body["available"] is False
-        assert body["state"] == "stopped"
+        assert body["state"] == body["cause"] == "stopped"
         assert "exit status 1" in body["reason"]
         assert "usb_claim_interface error -6" in body["reason"]
         assert body["retry_in"] > 0
@@ -212,21 +211,18 @@ class _Clock:
 def _panel_shows(kind, bodies):
     """Each refused body as the route's panel shows it: decoder-panel.js's downState, in node.
 
-    The fallback badge is the one the panel's own script passes (sigint101/static/<kind>.js), so
-    what is checked is the badge and line a learner would read on that panel.
+    Each panel passes the API body through unchanged. The helper decides the displayed label
+    from the cause, so this checks the complete API-to-panel contract in both languages.
     """
-    call = re.search(r'DecoderPanel\.showDown\(panel, badge, empty, body, "([^"]+)", "([^"]+)"\)',
-                     (STATIC / f"{kind}.js").read_text(encoding="utf-8"))
-    assert call, f"{kind}.js no longer shows a refusal through DecoderPanel.showDown"
+    assert "DecoderPanel.showDown(panel, badge, empty, body)" in (
+        STATIC / f"{kind}.js").read_text(encoding="utf-8")
     node = shutil.which("node")
     assert node, "node is not on PATH, so the panel's own rendering cannot be checked"
     script = ("const p = require(process.argv[1]);"
-              "const [badge, reason, bodies] = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-              "const down = bodies.map(b => p.downState(b, badge, reason));"
-              "process.stdout.write(JSON.stringify(down));")
+              "const bodies = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+              "process.stdout.write(JSON.stringify(bodies.map(b => p.downState(b))));")
     result = subprocess.run([node, "-e", script, str(STATIC / "decoder-panel.js")],
-                            input=json.dumps([call[1], call[2], bodies]),
-                            capture_output=True, text=True, timeout=60)
+                            input=json.dumps(bodies), capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -289,7 +285,7 @@ def test_after_a_death_a_missing_radio_reads_missing_not_stopped(
     assert shown[0]["badge"] == "STOPPED"
     assert shown[0]["reason"] == died["reason"] + " · retrying in 2 s"
     for down, body in zip(shown[1:], gone):
-        assert down["badge"] == "NO RADIO", down
+        assert down["badge"] == ("UNAVAILABLE" if kind == "flock" else "NO RADIO"), down
         assert down["reason"] == body["reason"], down            # no countdown, no "retrying"
 
 
@@ -350,7 +346,7 @@ def test_after_a_death_a_tool_that_cannot_run_reads_so_not_stopped(
         _assert_refused_not_stopped(body, ["cannot run"])
         assert "Exec format error" in body["reason"]
     for down in _panel_shows(kind, refused):
-        assert down["badge"] == "NO RADIO" and "retrying" not in down["reason"], down
+        assert down["badge"] == "UNAVAILABLE" and "retrying" not in down["reason"], down
     assert back["available"] is True and back["state"] == "starting", back
     assert len(spawned) == 2
 
@@ -591,5 +587,53 @@ def test_decoder_empty_bus_refusal_names_no_waterfall_and_fits_64_chars(
     assert len(reason) <= 64
 
     shown = _panel_shows(kind, [body])[0]
+    assert body["cause"] == "no_radio"
     assert shown["badge"] == "NO RADIO"
     assert shown["reason"] == reason
+
+
+@pytest.mark.parametrize(("reason", "cause", "next_step"), [
+    ("no RTL-SDR on the USB bus — SIGINT 101 will not fake a waterfall", "no_radio",
+     "Plug in the RTL-SDR."),
+    ("cannot survey the bus: rtl_power is not installed, so the USB bus is unknown", "missing_tool",
+     "Run deploy/provision.sh"),
+    ("cannot run rtl_power: Exec format error", "unavailable", None),
+    ("the sweep stopped (rtl_power status 1)", "stopped", None),
+])
+def test_spectrum_reports_the_refusal_cause(tmp_path, reason, cause, next_step):
+    from sigint101.spectrum import SpectrumUnavailable
+
+    class RefusingSweep(_StubSweeper):
+        def start(self):
+            raise SpectrumUnavailable(reason)
+
+        def retry_in(self):
+            return 1.25
+
+    with _client(tmp_path, sweeper_factory=lambda: RefusingSweep([])) as client:
+        response = client.get("/api/spectrum")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["cause"] == cause
+    assert body["reason"] == reason
+    assert body.get("next_step") == next_step
+    if cause == "stopped":
+        assert body["state"] == "stopped" and body["retry_in"] == 1.2
+    else:
+        assert "retry_in" not in body
+
+
+@pytest.mark.parametrize("path,factory,build,key,kind", ROUTES, ids=ROUTE_IDS)
+def test_missing_tool_refusals_name_the_correct_provision_command(
+        tmp_path, path, factory, build, key, kind):
+    dec = build(lambda *_: pytest.fail("must refuse before spawn"), tmp_path)
+    dec._which = lambda tool: tool if kind == "sstv" and tool != "sstv" else None
+    with _client(tmp_path, probe=_present, **{factory: lambda: dec}) as client:
+        response = client.get(path)
+    assert response.status_code == 503
+    body = response.json()
+    assert body["cause"] == "missing_tool"
+    command = "Run deploy/provision.sh"
+    if kind in ("apt", "dmr", "sstv"):
+        command += " --with-optional"
+    assert body["next_step"] == command

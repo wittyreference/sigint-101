@@ -1039,9 +1039,11 @@ def test_after_a_marauder_death_a_missing_bridge_reads_no_radio_not_stopped(tmp_
     shown = _panel_shows("flock", [died, *gone, two])
     assert shown[0]["badge"] == "STOPPED"
     assert shown[0]["reason"] == died["reason"] + " · retrying in 2 s"
-    for down, body in zip(shown[1:], [*gone, two]):
+    for down, body in zip(shown[1:-1], gone):
         assert down["badge"] == "NO RADIO", down
         assert down["reason"] == body["reason"], down
+    assert shown[-1]["badge"] == "UNAVAILABLE", shown[-1]
+    assert shown[-1]["reason"] == two["reason"], shown[-1]
 
 
 # Lesson 18's panel is 124 px tall: under its head it holds two 18 px lines of message, and the

@@ -49,7 +49,7 @@
     } else {
       if (img) { img.hidden = true; img.removeAttribute("src"); }
       if (cap) cap.textContent = "";
-      if (empty) { empty.hidden = false; empty.textContent = "listening… no picture decoded yet"; }
+      if (empty) { empty.hidden = false; empty.textContent = DecoderPanel.quietText(body, "no picture decoded yet"); }
     }
   }
 
@@ -60,7 +60,7 @@
     var badge = panel.querySelector("[data-sstv-badge]");
     if (img) { img.hidden = true; img.removeAttribute("src"); }
     if (cap) cap.textContent = "";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode SSTV");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -76,7 +76,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

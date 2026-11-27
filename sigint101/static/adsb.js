@@ -89,7 +89,7 @@
     var ring = panel.querySelector("[data-adsb-ring]");
     DecoderPanel.showLive(badge, body);
     DecoderPanel.showCommand(panel, body.command);
-    if (count) count.textContent = String(aircraft.length);
+    if (count) { count.textContent = String(aircraft.length); count.parentElement.hidden = false; }
     clear(group);
 
     var located = aircraft.filter(function (a) { return a.range_nm != null && a.bearing_deg != null; });
@@ -101,7 +101,7 @@
     }
 
     if (!hasAircraft(body)) {
-      if (empty) { empty.hidden = false; empty.textContent = "listening… no aircraft overhead yet"; }
+      if (empty) { empty.hidden = false; empty.textContent = DecoderPanel.quietText(body, "no aircraft overhead yet"); }
       return;
     }
     located.forEach(function (a) { drawDot(group, plot(a.range_nm, a.bearing_deg, max), planeLabel(a)); });
@@ -126,8 +126,8 @@
     var badge = panel.querySelector("[data-adsb-badge]");
     var count = panel.querySelector("[data-adsb-count]");
     clear(group);
-    if (count) count.textContent = "0";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode ADS-B");
+    if (count) count.parentElement.hidden = true;
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -143,7 +143,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

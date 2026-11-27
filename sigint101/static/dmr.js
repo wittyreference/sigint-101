@@ -58,7 +58,7 @@
     DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = calls.length > 0;
-      if (!calls.length) empty.textContent = "listening… no calls heard yet";
+      if (!calls.length) empty.textContent = DecoderPanel.quietText(body, "no calls heard yet");
     }
   }
 
@@ -67,7 +67,7 @@
     var empty = panel.querySelector("[data-dmr-empty]");
     var badge = panel.querySelector("[data-dmr-badge]");
     if (list) list.innerHTML = "";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode DMR/P25");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -83,7 +83,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

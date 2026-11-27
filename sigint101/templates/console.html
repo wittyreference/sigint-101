@@ -257,7 +257,7 @@
             </div>
             {% endif %}
             {% endif %}
-            <form class="predict{% if prediction_committed %} predict--committed{% endif %}"
+            <form class="predict{% if prediction_committed %} predict--committed{% endif %}" novalidate data-choice-commit
                   method="post" action="{{ commit_url|default('#') }}">
               <fieldset class="predict-chips">
                 <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
@@ -278,8 +278,8 @@
                   <span class="predict__committed-note">Prediction committed, comrade &mdash; the rest is unlocked</span>
                   <button class="btn btn--primary" type="button" data-nav="next">Next step</button>
                 {% else %}
-                  <span class="predict__hint">Tap a choice, comrade. Nothing unlocks until you commit.</span>
-                  <button class="btn btn--primary btn-commit" type="submit">Commit prediction</button>
+                  <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+                  <button class="btn btn--primary btn-commit" type="submit" disabled>Commit prediction</button>
                 {% endif %}
               </div>
             </form>
@@ -292,7 +292,7 @@
                  lesson. Interactive, so it fits the fixed 800x480 with no scroll. ---- #}
             {% set fb = check_feedback|default(none) %}
             <h1 class="stage-panel__title">&#9773; {{ lesson.check.prompt }}</h1>
-            <form class="predict{% if fb %} predict--committed{% endif %}"
+            <form class="predict{% if fb %} predict--committed{% endif %}" novalidate data-choice-commit
                   method="post" action="{{ check_url|default('#') }}">
               <fieldset class="predict-chips">
                 <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
@@ -320,8 +320,8 @@
                 {% if fb %}
                   {{ complete_lesson() }}
                 {% else %}
-                  <span class="predict__hint">Tap a choice, comrade, then commit.</span>
-                  <button class="btn btn--primary btn-commit" type="submit">Commit answer</button>
+                  <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+                  <button class="btn btn--primary btn-commit" type="submit" disabled>Commit answer</button>
                 {% endif %}
               </div>
             </form>
@@ -461,7 +461,7 @@
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">137.100<span>MHz</span></div>
-                  <div class="tune__caption">NOAA APT &middot; satdump decoding a pass</div>
+                  <div class="tune__caption">NOAA APT &middot; satdump</div>
                 </div>
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
