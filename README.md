@@ -20,9 +20,11 @@ neither.
 
 ```
 ./bootstrap.sh   # makes .venv, installs requirements.txt, arms the git hooks
-make selftest    # the whole test suite, with the 80% coverage gate
+make selftest    # the whole test suite in parallel, with the 80% coverage gate
 make run         # the console at http://127.0.0.1:8008
 ```
+
+Use `make selftest-serial` to run the same coverage gate in one process.
 
 With `make run` active and Chromium installed, run `make render-check` in another terminal for the 800×480 layout checks.
 Use `make render-check RENDER_URL=http://127.0.0.1:8009` for a console on a different port.
