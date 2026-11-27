@@ -23,7 +23,7 @@ from .hardware import (
     probe_rtlsdr,
     rtlsdr_radio_for_run,
 )
-from .receiver_lifecycle import SupervisedReceiver
+from .receiver_lifecycle import SupervisedReceiver, launch_consumer
 
 # Where the APRS lesson listens. 144.390 MHz is the North American 2m APRS channel; a pack can
 # point it elsewhere via tune, but this is the one almost all traffic rides.
@@ -204,12 +204,7 @@ def _popen(freq_hz: int, device: int):
         [RTL_FM, "-M", "fm", "-f", str(freq_hz), "-s", str(APRS_SAMPLE_RATE),
          "-g", "49.6", "-l", "0", "-d", str(device)],
         stdout=subprocess.PIPE)
-    multimon = spawn(
-        [MULTIMON, "-t", "raw", "-a", "AFSK1200", "-A", "-"],
-        stdin=rtl_fm.stdout, stdout=subprocess.PIPE, text=True)
-    # Let rtl_fm see SIGPIPE if multimon-ng dies, rather than fill a pipe nobody drains.
-    if rtl_fm.stdout is not None:
-        rtl_fm.stdout.close()
+    multimon = launch_consumer(rtl_fm, spawn, [MULTIMON, "-t", "raw", "-a", "AFSK1200", "-A", "-"])
     return _Pipeline(rtl_fm, multimon)
 
 

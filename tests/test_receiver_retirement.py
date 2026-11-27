@@ -13,8 +13,14 @@ import time
 import pytest
 
 from sigint101 import aprs, childproc
-from tests.child_fakes import LateProc
-from tests.test_stale_readers import APRS_1, APRS_2
+from tests.child_fakes import Child, LateProc
+from tests.test_app import _client, _present, _StubSweeper
+from tests.test_stale_readers import (
+    APRS_1,
+    APRS_2,
+    SPEC_BY_NAME,
+    late_factory,  # noqa: F401
+)
 
 
 def until(predicate, seconds=5):
@@ -52,6 +58,28 @@ def test_child_exit_retires_reader_without_a_follow_up_request():
         assert len(decoder.stations()) == 1
     finally:
         proc.close_pipe()
+        decoder.stop()
+
+
+@pytest.mark.parametrize("name", ["pocsag", "rds", "acars", "dmr"])
+def test_other_pipe_readers_retire_after_an_idle_exit(late_factory, name):  # noqa: F811
+    spec = SPEC_BY_NAME[name]
+    decoder, children, heard, _clock = late_factory(spec)
+    decoder.start()
+    try:
+        run = decoder._runs.current
+        child = children[0]
+        child.feed(spec.line1)
+        heard.wait_for(1)
+        child.die(7)
+        assert until(lambda: decoder._runs.current != run, seconds=2), (
+            "a later request is still needed to retire the dead reader")
+        child.feed(spec.line2)
+        child.close_pipe()
+        child.reader.join(2)
+        assert spec.listed(decoder) == [spec.key1]
+        assert len(heard.log) == 1
+    finally:
         decoder.stop()
 
 
@@ -136,8 +164,27 @@ def test_upstream_exit_preserves_final_packet_in_the_intermediate_pipe(monkeypat
         assert until(lambda: downstream.poll() == 0)
 
 
-@pytest.mark.parametrize("action", ["stop", "retune"])
-def test_stop_retune_and_handoff_cancel_eof_grace(action):
+@pytest.mark.parametrize("action", ["stop", "retune", "handoff"])
+def test_stop_retune_and_handoff_cancel_eof_grace(tmp_path, action):
+    if action == "handoff":
+        with _pipeline() as (decoder, upstream, downstream, seen, _gate):
+            with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
+                         sweeper_factory=lambda: _StubSweeper([])) as client:
+                _reach_eof(decoder, upstream, downstream, seen)
+                first = threading.Thread(target=lambda: client.get("/api/aprs"), daemon=True)
+                first.start()
+                try:
+                    time.sleep(0.3)
+                    assert downstream.poll() is None
+                    before = time.monotonic()
+                    response = client.get("/api/spectrum")
+                    elapsed = time.monotonic() - before
+                    assert response.status_code == 200
+                    assert downstream.poll() is not None
+                    assert elapsed < 0.75, f"handoff waited {elapsed:.2f}s behind natural EOF"
+                finally:
+                    first.join(5)
+        return
     with _pipeline() as (decoder, upstream, downstream, seen, _gate):
         _reach_eof(decoder, upstream, downstream, seen)
         entered, finished, result = threading.Event(), threading.Event(), []
@@ -156,3 +203,29 @@ def test_stop_retune_and_handoff_cancel_eof_grace(action):
         assert finished.wait(5)
         assert downstream.poll() is not None
         assert elapsed < 0.75, f"{action} waited {elapsed:.2f}s behind natural EOF"
+
+
+def test_the_unpreempted_pipeline_grace_expires_without_a_second_request():
+    with _pipeline() as (decoder, upstream, downstream, seen, _gate):
+        decoder.EOF_WAIT_S = 0.2
+        _reach_eof(decoder, upstream, downstream, seen)
+        assert until(lambda: downstream.poll() is not None, seconds=2)
+        assert "status 7" in decoder.watch.reason
+
+
+def test_a_partially_launched_pipeline_reaps_its_first_stage(monkeypatch):
+    upstream = Child(["rtl_fm"])
+
+    def spawn(argv, **_):
+        if argv[0] == "rtl_fm":
+            return upstream
+        raise OSError("consumer could not open")
+
+    monkeypatch.setattr(aprs, "spawn", spawn)
+    decoder = aprs.AprsDecoder(radio_present=lambda: True, which=lambda tool: tool)
+    try:
+        with pytest.raises(aprs.AprsUnavailable, match="consumer could not open"):
+            decoder.start()
+        assert upstream.poll() is not None, "the first stage still owns the radio"
+    finally:
+        decoder.stop()

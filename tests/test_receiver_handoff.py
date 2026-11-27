@@ -1,14 +1,18 @@
 # ABOUTME: Exercises SDR reservations and bounded shutdown through the console.
 # ABOUTME: Uses process and logging gates instead of requiring a radio.
 
+import asyncio
 import select
 import subprocess
 import sys
 import threading
 
 from sigint101 import app, aprs, childproc
-from tests.child_fakes import Child
+from sigint101.events import read_events
+from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _StubSweeper
+from tests.test_apt_retirement import _decoder as apt_decoder
+from tests.test_stale_readers import APRS_1
 
 
 def _aprs(proc):
@@ -68,6 +72,138 @@ def test_late_diagnostic_failure_cannot_hold_or_clear_a_new_claim(tmp_path, monk
             if second.ident is not None:
                 second.join(6)
         assert client.app.state.sweeper.running
+
+
+def test_arbiter_release_can_finish_while_the_same_run_retires(tmp_path, monkeypatch):
+    proc = Child(["aprs"])
+    decoder = _aprs(proc)
+    entered, resume, swept = (threading.Event() for _ in range(3))
+
+    def tail(_stage):
+        entered.set()
+        assert resume.wait(7)
+        return []
+
+    def start_again():
+        try:
+            decoder.start()
+        except aprs.AprsUnavailable:
+            pass
+
+    class Sweep(_StubSweeper):
+        def start(self):
+            super().start()
+            swept.set()
+
+    monkeypatch.setattr(childproc, "stderr_tail", tail)
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
+                 sweeper_factory=lambda: Sweep([])) as client:
+        decoder.start()
+        proc.code = 7
+        old = threading.Thread(target=start_again, daemon=True)
+        successor = threading.Thread(target=lambda: client.get("/api/spectrum"), daemon=True)
+        old.start()
+        try:
+            assert entered.wait(2)
+            successor.start()
+            assert swept.wait(5), "an off-lock diagnostic still owned the radio"
+            assert decoder.released
+        finally:
+            resume.set()
+            old.join(6)
+            if successor.ident is not None:
+                successor.join(6)
+        assert not decoder.running
+
+
+def test_handoff_waits_for_reap_but_not_for_diagnostics_or_a_reader_hook(tmp_path):
+    entered, hooked, stopping, reaped, swept = (threading.Event() for _ in range(5))
+
+    class Proc(LateProc):
+        def terminate(self):
+            stopping.set()
+
+        def wait(self, timeout=None):
+            if not reaped.wait(timeout):
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            self.returncode = -15
+            return self.returncode
+
+    class Sweep(_StubSweeper):
+        def start(self):
+            super().start()
+            swept.set()
+
+    proc = Proc(["aprs", "--run-one"])
+    decoder = _aprs(proc)
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
+                 sweeper_factory=lambda: Sweep([])) as client:
+        heard = decoder.on_reception
+
+        def park(item, *, command=None, freq_hz=None, radio=None):
+            entered.set()
+            assert hooked.wait(6)
+            heard(item, command=command, freq_hz=freq_hz, radio=radio)
+
+        decoder.on_reception = park
+        decoder.start()
+        runner = threading.Thread(target=lambda: client.get("/api/spectrum"), daemon=True)
+        try:
+            proc.feed(APRS_1)
+            assert entered.wait(2)
+            runner.start()
+            assert stopping.wait(2)
+            assert proc.poll() is None and not swept.is_set()
+            reaped.set()
+            assert swept.wait(1), "the old hook delayed handoff after reap"
+            assert proc.poll() == -15
+        finally:
+            reaped.set()
+            hooked.set()
+            proc.close_pipe()
+            if runner.ident is not None:
+                runner.join(6)
+            proc.reader.join(6)
+        [record] = [row["payload"] for row in read_events(tmp_path / "events.jsonl")
+                    if row["kind"] == "reception"]
+        assert record["command"] == "aprs --run-one"
+        assert record["freq_hz"] == aprs.DEFAULT_APRS_HZ
+        assert record["radio"]["kind"] == "rtl-sdr"
+
+
+def test_shutdown_cancels_grace_and_releases_other_radios_while_reporting_is_blocked(tmp_path):
+    decoder, passes = apt_decoder(tmp_path)
+    entered, resume, flock_stopped = (threading.Event() for _ in range(3))
+
+    class Flock:
+        def stop(self):
+            flock_stopped.set()
+
+    def hold(_item):
+        entered.set()
+        assert resume.wait(6)
+
+    console = _client(tmp_path, apt_factory=lambda: decoder, flock_factory=Flock).app
+
+    async def lifespan():
+        async with console.router.lifespan_context(console):
+            decoder.on_reception = hold
+            decoder.start()
+            proc, output = passes[0]
+            (output / "last.png").touch()
+            proc.code = 0
+
+    worker = threading.Thread(target=lambda: asyncio.run(lifespan()), daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        assert flock_stopped.wait(1), "independent teardown waited for an APT hook"
+        assert worker.is_alive()
+    finally:
+        resume.set()
+        worker.join(6)
+    assert not worker.is_alive()
+    assert console.state.shutdown_errors == []
 
 
 def test_shutdown_interpreter_exits_at_deadline_with_a_stalled_worker(tmp_path):

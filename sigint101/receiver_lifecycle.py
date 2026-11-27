@@ -17,6 +17,25 @@ REAP_RETRY_WAIT_S = 0.1
 DIRECT_CAPTURE_WAIT_S = 10.0
 
 
+class PartialLaunch(RuntimeError):
+    """A later stage refused after its predecessor had already taken the radio."""
+
+    def __init__(self, proc, failure):
+        super().__init__(str(failure))
+        self.proc = proc
+
+
+def launch_consumer(upstream, spawn, argv):
+    try:
+        return spawn(argv, stdin=upstream.stdout, stdout=subprocess.PIPE, text=True)
+    except (OSError, ValueError) as exc:
+        raise PartialLaunch(upstream, exc) from exc
+    finally:
+        # Let the source see SIGPIPE if the consumer cannot read or goes away.
+        if upstream.stdout is not None:
+            upstream.stdout.close()
+
+
 def daemon(target, *args, name):
     thread = threading.Thread(target=target, args=args, name=name, daemon=True)
     thread.start()
@@ -139,6 +158,8 @@ class SupervisedReceiver:
             reports = tuple(self._reports)
         for ticket in reports:
             ticket.complete.wait()
+        if reason := self.release_failure(pending=True):
+            raise self._unavailable(reason)
 
     def _cancel(self):
         self._control += 1
@@ -263,23 +284,31 @@ class SupervisedReceiver:
                 control = self._control
                 intent.spawning = True
                 self._runs.end(self.watch)
-            proc = intent.spawn()
+            launch_failure = None
+            try:
+                proc = intent.spawn()
+            except PartialLaunch as exc:
+                launch_failure = exc
+                proc = exc.proc
             with self._life:
                 self._run = run = intent.run = Run(proc, intent.number, self.watch, intent.args)
                 self.watch.spawned(proc)
                 with self._reports_lock:
                     self._reports.add(run)
                 self.error = None
-                cancelled = control != self._control
+                cancelled = control != self._control or launch_failure is not None
                 if cancelled:
                     run.cancel.set()
                     self._fence(run)
-                if self._read is not None:
+                if self._read is not None and launch_failure is None:
                     run.reader = daemon(self._read_run, run,
                                         name=f"sigint101-{self.watch.tool}-reader")
                 daemon(self._supervise, run, name=f"sigint101-{self.watch.tool}-supervisor")
             if cancelled:
                 self._wait_physical(run, None)
+                if launch_failure is not None:
+                    reason = f"cannot finish starting {run.watch.tool}: {launch_failure}"
+                    raise self._unavailable(run.failure or reason) from launch_failure
                 raise self._unavailable("receiver start was cancelled")
         finally:
             self.discard_start(intent)
@@ -453,6 +482,8 @@ class SupervisedReceiver:
                     return
             except (OSError, subprocess.TimeoutExpired):
                 pass
+            except Exception as exc:
+                run.failure = f"{run.watch.tool} cleanup retry failed: {exc}"
 
     def _report(self, run):
         """Streaming receivers already report each item from their reader."""

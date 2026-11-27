@@ -534,7 +534,7 @@ def test_old_readers_pipe_failing_after_retune_is_not_the_new_runs_failure(late_
     assert dec.running
 
 
-def _park_aprs_diagnostic(dec, procs, found, go_on):
+def _park_supervisor_diagnostic(dec, procs, found, go_on):
     enrich = dec.watch.enrich
     returned = threading.Event()
 
@@ -563,8 +563,8 @@ def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(l
         return reason
 
     diagnostic_done = None
-    if spec.name == "aprs":
-        diagnostic_done = _park_aprs_diagnostic(dec, procs, found, go_on)
+    if hasattr(dec, "_run"):
+        diagnostic_done = _park_supervisor_diagnostic(dec, procs, found, go_on)
     else:
         dec.watch.ended = ended
     dec.start()
@@ -645,6 +645,12 @@ def test_death_on_its_way_in_at_restart_is_not_the_new_runs(late_factory, spec):
     procs[0].feed(spec.line1)
     heard.wait_for(1)
     lock.hold(procs[0].reader)
+    if hasattr(dec, "_run"):
+        # Hold the exit observation as well as the old reader's notification. This is the
+        # stop-first interleaving, so the supervisor must see cancellation before the exit.
+        ticket = dec._run
+        poll = procs[0].poll
+        procs[0].poll = lambda: poll() if ticket.cancel.is_set() else None
     procs[0].die(1)
     procs[0].close_pipe()
     _restart_while_held(dec, lock, clock, spec)
@@ -778,7 +784,7 @@ def test_run_after_retune_still_records_its_own_failure(late_factory, spec, end,
     end(procs[1])
     procs[1].reader.join(5)
     assert not procs[1].reader.is_alive()
-    if spec.name == "aprs" and procs[1].poll() is not None:
+    if hasattr(dec, "_run") and procs[1].poll() is not None:
         assert dec._run.ready.wait(5)
     assert dec.error is not None and reason in dec.error
     dec.stop()
@@ -1050,7 +1056,7 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
     # status while stop/retune/release runs. Computing exit diagnostics must not hold the buffer
     # lock, and once the stop invalidates the run and watch, the old reader cannot commit a retry.
     dec, procs, heard, _ = late_factory(spec)
-    if spec.name == "aprs":
+    if hasattr(dec, "_run"):
         read = dec._read
 
         def finish_old_read(proc, *args):
@@ -1080,7 +1086,7 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
             return 1
         return plain_wait(timeout=timeout)
 
-    if spec.name != "aprs":
+    if not hasattr(dec, "_run"):
         old.wait = slow_wait
     old.close_pipe()
     assert waiting.wait(5)
@@ -1949,8 +1955,8 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
         return reason
 
     diagnostic_done = None
-    if spec.name == "aprs":
-        diagnostic_done = _park_aprs_diagnostic(dec, procs, found, go_on)
+    if hasattr(dec, "_run"):
+        diagnostic_done = _park_supervisor_diagnostic(dec, procs, found, go_on)
     else:
         dec.watch.ended = ended
     dec.start()
