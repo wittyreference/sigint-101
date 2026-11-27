@@ -4,6 +4,7 @@
 import ast
 import hashlib
 import json
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -231,6 +232,65 @@ def test_sstv_stamp_keeps_the_radio_selected_for_the_capture(tmp_path, monkeypat
         assert event["payload"]["radio"] == {"kind": "rtl-sdr", "index": 4, "serial": "first-radio"}
         row = next(row for row in _stamps(client)["stamps"] if row["instrument"] == "sstv")
         assert row["count"] == 1 and row["provenance"]["radio"] == event["payload"]["radio"]
+
+
+@pytest.mark.parametrize("close_store", [False, True], ids=["sealed", "sealed-and-closed"])
+def test_reserved_sstv_stamp_keeps_launch_radio(tmp_path, monkeypatch, close_store):
+    monkeypatch.delenv("SIGINT101_RTLSDR_SERIAL", raising=False)
+    devices = [RtlSdrDevice(4, "first-radio")]
+    launches = []
+
+    def spawn(freq, index, path):
+        child = LateProc([SSTV, "-d", str(index)])
+        launches.append((child, path))
+        return child
+
+    decoder = SstvDecoder(
+        data_dir=tmp_path, output_dir=tmp_path / "sstv", spawn=spawn,
+        which=lambda tool: tool, radio_present=lambda: True, list_devices=lambda: devices)
+    with _client(tmp_path, sstv_factory=lambda: decoder) as client:
+        assert _stamps(client)["error"] is None
+        sink = getattr(client.app.state, "reception_sink", None)
+        pending_at_link = []
+        real_link = os.link
+
+        def link(source, target, *args, **kwargs):
+            real_link(source, target, *args, **kwargs)
+            if Path(target).suffix == ".png" and sink is not None:
+                pending_at_link.append(sink.pending())
+                sink.seal()
+                if close_store:
+                    client.app.state.progress.close()
+
+        monkeypatch.setattr(os, "link", link)
+        decoder.start()
+        child, staged = launches[0]
+        staged.write_bytes(PNG_BYTES)
+        devices[:] = [RtlSdrDevice(8, "replacement-radio")]
+        decoder.device = 8
+        _finish(child)
+        decoder.stop()
+        assert pending_at_link == [1], "publication must reserve its reception before linking"
+        assert sink.pending() == 0
+        _hear(client)
+        [event] = [event for event in events.read_events(tmp_path / "events.jsonl")
+                   if event["kind"] == "reception"]
+        assert event["payload"]["instrument"] == "sstv"
+        radio = {"kind": "rtl-sdr", "index": 4, "serial": "first-radio"}
+        assert event["payload"]["radio"] == radio
+        assert client.app.state.stamp_error is None
+        if not close_store:
+            row = next(row for row in _stamps(client)["stamps"] if row["instrument"] == "sstv")
+            assert row["count"] == 1 and row["provenance"]["radio"] == radio
+            assert row["digest"] == _mint(event)["digest"]
+        else:
+            with closing(sqlite3.connect(tmp_path / "progress.db")) as db:
+                assert db.execute("SELECT count(*) FROM stamps").fetchone() == (0,)
+
+    with _client(tmp_path) as client:
+        row = next(row for row in _stamps(client)["stamps"] if row["instrument"] == "sstv")
+        assert row["count"] == 1 and row["provenance"]["radio"] == radio
+        assert row["digest"] == _mint(event)["digest"]
 
 
 def test_logbook_lists_receivers_and_uses_distinct_marks(tmp_path):

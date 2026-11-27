@@ -19,12 +19,9 @@ from .childproc import (
     ChildWatch,
     RunGuard,
     command_line,
-    emit_reception,
-    running_command,
-    settle_ended,
     spawn,
-    stop_process,
 )
+from .receiver_lifecycle import SupervisedReceiver
 
 # The monitor interface the detector listens on. wlan1 (RTL8821CU) is a separate radio from the
 # SDR dongle, so there is no release/resume arbitration — this owns wlan1 the way meshtasticd owns
@@ -532,7 +529,7 @@ def _popen(interface: str):
         stdout=subprocess.PIPE)
 
 
-class FlockDetector:
+class FlockDetector(SupervisedReceiver):
     """Owns the tcpdump capture on the monitor interface and the roster it assembles.
 
     Unlike the SDR decoders this needs no release/resume: wlan1 is its own radio, so it never
@@ -558,52 +555,25 @@ class FlockDetector:
         # made directly: it cannot end the capture.
         self.on_reception = None
         self._runs = RunGuard()
-        self._life = threading.RLock()
-        self._proc = None
-        self._thread = None
+        self._init_lifecycle()
         self.error = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         self.watch = ChildWatch(TCPDUMP)
 
-    @property
-    def running(self) -> bool:
-        proc = self._proc
-        return proc is not None and proc.poll() is None
+    _unavailable = FlockUnavailable
+    _released_reason = "capture was released; resume Flock to restart it"
 
-    def live_command(self) -> str | None:
-        """The exact command running now, read off the live process; None when nothing runs."""
-        return running_command(self._proc)
+    def _prepare_launch(self, _freq_hz, _number):
+        interface = self._check_radio()
+        radio = {"kind": "wifi", "interface": interface}
 
-    def start(self) -> None:
-        """Begin capturing, unless the monitor interface is absent or tcpdump is missing."""
-        with self._life:
-            self._start_locked()
+        def launch():
+            self.interface = interface
+            return self._open_capture()
 
-    def _start_locked(self) -> None:
-        if self.running:
-            return
-        self._settle()
-        self._check_radio()
-        if self.error:
-            reason, self.error = self.error, None
-            raise FlockUnavailable(reason)
-        # A child that died on its own is not relaunched on every poll: the reason stands, and the
-        # console waits out a back-off that grows while the deaths keep coming.
-        blocked = self.watch.blocked()
-        if blocked:
-            raise FlockUnavailable(blocked)
-        # End any retiring reader from an earlier natural death before starting its replacement.
-        self._runs.end(self.watch)
-        radio = {"kind": "wifi", "interface": self.interface}
-        self._proc = self._open_capture()
-        self.watch.spawned(self._proc)
-        self.error = None
-        self._thread = threading.Thread(target=self._read,
-                                        args=(self._proc, self._runs.current, radio),
-                                        name="sigint101-flock", daemon=True)
-        self._thread.start()
+        return launch, (radio,)
 
-    def _check_radio(self) -> None:
+    def _check_radio(self) -> str:
         """Refuse, saying what is missing, when tcpdump or the monitor interface is absent."""
         if not self._which(TCPDUMP):
             raise FlockUnavailable(
@@ -611,6 +581,7 @@ class FlockDetector:
         if not self._radio_present():
             raise FlockUnavailable(
                 f"no monitor interface {self.interface} — SIGINT 101 will not fake a detection")
+        return self.interface
 
     def _open_capture(self):
         """Launch tcpdump on the monitor interface; its stdout is the pcap stream."""
@@ -640,61 +611,14 @@ class FlockDetector:
                     entry = self._roster.absorb(hit, now=time.time())
                     first = entry.as_dict() if hit.mac not in detected else None
                     cmd = command_line(proc)
-                    hook = self.on_reception
+                    hook = self._admit() if first is not None else None
                 if first is not None:
                     detected.add(hit.mac)
-                    if hook is not None:
-                        emit_reception(hook, first, command=cmd, freq_hz=None, radio=radio)
+                    self._emit(hook, first, command=cmd, freq_hz=None, radio=radio)
         except (OSError, ValueError, struct.error) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):
                     self.error = str(exc)
-        finally:
-            self._note_end(proc, run)
-
-    def _note_end(self, proc, run: int) -> None:
-        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc, runs=self._runs, run=run)
-        if reason:
-            with self._runs:
-                if self._runs.is_current(run) and self.error is None:
-                    self.error = reason
-
-    def _settle(self) -> None:
-        """Account for a child that ended since the last poll, letting its reader drain before
-        ending the run and clearing away what it left.
-        """
-        proc, self._proc = self._proc, None
-        if proc is None:
-            return
-        thread, self._thread = self._thread, None
-        if not settle_ended(proc, thread, self._runs, self.watch,
-                            note_end=self._note_end, wait_s=self.STOP_WAIT_S):
-            self.error = "tcpdump survived kill; the monitor interface may still be held"
-
-    #: How long stop() waits, in seconds, for the reader to end once the capture is stopped.
-    STOP_WAIT_S = 3.0
-
-    def stop(self) -> None:
-        """End the capture and release the monitor interface."""
-        with self._life:
-            self._stop_locked()
-
-    def _stop_locked(self) -> None:
-        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
-        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
-        self._runs.end(self.watch)
-        proc, self._proc = self._proc, None
-        if proc is not None and not stop_process(proc):
-            self.error = "tcpdump survived kill; the monitor interface may still be held"
-        if self._thread is not None:
-            self._thread.join(timeout=self.STOP_WAIT_S)
-            self._thread = None
-
-    def drain(self, timeout: float = 5.0) -> None:
-        """Wait for a finite source to be fully consumed. A real capture never ends."""
-        if self._thread is not None:
-            self._thread.join(timeout)
 
     def detections(self, limit: int | None = None) -> list[dict]:
         """The detected Flock devices as plain dicts for the API, most recently heard first."""
@@ -944,7 +868,7 @@ class MarauderFlockDetector(FlockDetector):
         self._answer_timeout = answer_timeout
         self.watch = _LinkWatch(MARAUDER)
 
-    def _check_radio(self) -> None:
+    def _check_radio(self) -> str:
         """Find the bridge's port, or say there is no monitor radio and how to bring it up."""
         if self._tty:
             ports = [self._tty] if os.path.exists(self._tty) else []
@@ -968,7 +892,7 @@ class MarauderFlockDetector(FlockDetector):
             names = ", ".join(os.path.basename(p) for p in ports)
             raise FlockUnavailable(
                 f"more than one Flipper USB-UART bridge, refusing to guess: {names}")
-        self.interface = ports[0]
+        return ports[0]
 
     def _open_capture(self):
         """Open the bridge's port and type the sniff; the link is the capture."""

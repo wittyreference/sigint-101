@@ -228,6 +228,12 @@ def test_a_real_pipeline_that_traps_sigterm_is_killed_on_stop(tmp_path, monkeypa
             if p.poll() is None:  # pragma: no cover - only when the assertion above failed
                 p.kill()
                 p.wait(timeout=3)
+        # Physical stop returns before the supervisor and reader finish closing streams.
+        ticket = dec._run
+        assert ticket.complete.wait(5)
+        ticket.reader.join(5)
+        assert not ticket.reader.is_alive()
+        for p in procs:
             for stream in (p.stdout, p.stderr):
                 if stream is not None:
                     stream.close()

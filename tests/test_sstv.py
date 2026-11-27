@@ -2,6 +2,7 @@
 # ABOUTME: The pipeline is a fake at the boundary; no radio / no tools / no picture is honest.
 
 import base64
+import io
 import json
 import os
 import subprocess
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from sigint101 import childproc
+from sigint101 import childproc, receiver_lifecycle
 from sigint101.hardware import RTL_FM, RtlSdrDevice
 from sigint101.sstv import (
     DEFAULT_SSTV_HZ,
@@ -475,9 +476,16 @@ def test_sstv_aborted_or_failed_capture_discards_its_picture(capture_files, exit
         child.die(exit_code)
     child.close_pipe()
     dec.stop()
-    assert not staged.exists()
+    assert staged.exists() is (exit_code is not None)
     assert dec.images() == []
     assert heard == []
+    if exit_code is not None:
+        with pytest.raises(SstvUnavailable, match=f"exit status {exit_code}"):
+            dec.start()
+    else:
+        dec.start()
+    assert not staged.exists()
+
 
 
 def test_sstv_unreaped_writer_keeps_its_picture_private(capture_files, monkeypatch):
@@ -509,9 +517,10 @@ def test_sstv_only_clean_reaped_exit_zero_publishes_and_never_overwrites(
         assert client.get("/api/sstv").status_code == 200
         child, staged = launches[0]
         staged.write_bytes(PNG_BYTES)
+        assert dec.images() == []
+        assert client.get("/api/receptions?instrument=sstv").json()["receptions"] == []
         _finish(child)
         dec.drain()
-        assert client.get("/api/receptions?instrument=sstv").json()["receptions"] == []
         dec.stop()
         dec.release()
         [record] = client.get("/api/receptions?instrument=sstv").json()["receptions"]
@@ -667,48 +676,106 @@ def test_sstv_occupied_png_never_borrows_new_mode(capture_files, monkeypatch, wh
     assert not staged.exists()
 
 
-@pytest.mark.parametrize("reaped", [True, False], ids=["reaped", "unknown-reap"])
+@pytest.mark.parametrize("outcome", ["clean", "failed-reap", "unknown-reap", "nonzero"])
 def test_sstv_settle_diagnostic_error_sweeps_only_its_confirmed_reaped_capture(
-        capture_files, monkeypatch, reaped):
+        capture_files, monkeypatch, outcome):
     dec, launches, heard = capture_files
-    upstream = LateProc(["rtl_fm"]) if reaped else _StubbornStage(["rtl_fm"])
+    stage = _StubbornStage if outcome == "failed-reap" else LateProc
+    upstream = stage(["rtl_fm"])
     spawn = dec._spawn
-    real_ended = dec.watch.ended
+    links = []
+    link = os.link
 
     def launch(*args):
-        child = spawn(*args)
-        return childproc.Pipeline(upstream, child, finite=True)
+        return childproc.Pipeline(upstream, spawn(*args), finite=True)
 
-    def broken(*args, **kwargs):
-        raise OSError("diagnostics failed")
+    class BrokenStderr(io.StringIO):
+        def read(self, *args):
+            raise OSError("diagnostics failed")
+
+    def break_stderr(child):
+        child.stderr.close()
+        child.stderr = BrokenStderr()
+
+    def record_link(source, target):
+        link(source, target)
+        links.append(Path(target).suffix)
 
     monkeypatch.setattr(dec, "_spawn", launch)
+    monkeypatch.setattr(os, "link", record_link)
     dec.start()
     child, staged = launches[0]
+    break_stderr(child)
     staged.write_bytes(PNG_BYTES)
     unrelated = staged.with_name("another-capture.png")
     unrelated.write_bytes(PNG_BYTES)
-    child.die(0)
-    monkeypatch.setattr(dec.watch, "ended", broken)
-    try:
-        with pytest.raises(OSError, match="diagnostics failed"):
-            dec.start()
-    finally:
-        monkeypatch.setattr(dec.watch, "ended", real_ended)
-        child.close_pipe()
-        if child.reader is not None:
-            child.reader.join(1)
-    assert upstream.terminated
-    assert (upstream.poll() is not None) is reaped
-    assert not dec.running
-    assert staged.exists()
-    assert heard == []
-    assert dec.images() == []
+    code = 9 if outcome == "nonzero" else 0
+    if outcome == "unknown-reap":
+        monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.02)
+        poll = upstream.poll
 
-    monkeypatch.setattr(dec, "_spawn", spawn)
-    dec.start()
-    assert len(launches) == 2
-    assert staged.exists() is not reaped
+        def unknown():
+            if upstream.terminated:
+                raise OSError("exit status unavailable")
+            return poll()
+
+        monkeypatch.setattr(upstream, "poll", unknown)
+
+    _finish(child, code=code)
+    dec.stop()
+    assert upstream.terminated
+    assert not dec.running
+    assert unrelated.exists()
+
+    if outcome == "clean":
+        assert upstream.poll() is not None and child.poll() == 0
+        dec.stop()
+        [(item, command, freq)] = heard
+        assert item["meta"]["exit_diagnostic"] == {"status": 0, "reason": "diagnostics failed"}
+        assert item["mode"] == "Robot 36"
+        assert command == childproc.command_line(childproc.Pipeline(upstream, child, finite=True))
+        assert freq == DEFAULT_SSTV_HZ
+        assert links == [".png", ".json"]
+        assert not staged.exists()
+        assert len(dec.images()) == 1
+    else:
+        assert staged.exists()
+        assert heard == []
+        assert links == []
+        assert dec.images() == []
+
+    if outcome in ("unknown-reap", "failed-reap"):
+        for _ in range(2):
+            with pytest.raises(SstvUnavailable, match="survived kill|exit status unavailable"):
+                dec.start()
+        assert len(launches) == 1
+        assert staged.exists()
+        if outcome == "unknown-reap":
+            ticket = dec._run
+            monkeypatch.setattr(upstream, "poll", poll)
+            assert ticket.complete.wait(3)
+            assert ticket.reaped and ticket.reap_failed
+            assert heard == [] and links == [] and dec.images() == []
+            assert staged in dec._staged_cleanup and staged.exists()
+            monkeypatch.setattr(dec, "_spawn", spawn)
+            dec.start()
+            assert not staged.exists()
+            # Recovery must not suppress the next capture, or lose its own diagnostic fault.
+            successor, next_staged = launches[1]
+            break_stderr(successor)
+            next_staged.write_bytes(PNG_BYTES)
+            _finish(successor)
+            dec.stop()
+            [(record, _, _)] = heard
+            assert Path(record["path"]).name == next_staged.name
+            assert record["meta"]["exit_diagnostic"] == {
+                "status": 0, "reason": "diagnostics failed",
+            }
+    elif outcome == "nonzero":
+        assert staged in dec._staged_cleanup
+        with pytest.raises(SstvUnavailable, match="exit status 9.*diagnostics failed"):
+            dec.start()
+        assert not staged.exists()
     assert unrelated.exists()
 
 
@@ -722,7 +789,7 @@ def test_sstv_run_numbered_names_isolate_delayed_writers_and_orphan_sidecars(
         clock = dec._clock
 
         def leave_orphan_at_launch():
-            run = getattr(getattr(dec, "_runs", None), "current", None)
+            run = getattr(getattr(dec, "_intent", None), "number", dec._runs.current)
             suffix = "" if run is None else f"-r{run}"
             (dec.output_dir / f"20250101T000000-000{suffix}.json").write_text(
                 marker, encoding="utf-8")
@@ -746,13 +813,21 @@ def test_sstv_run_numbered_names_isolate_delayed_writers_and_orphan_sidecars(
     dec.start()
     first, first_path = launches[0]
     first_run = getattr(getattr(dec, "_runs", None), "current", None)
+    first_path.write_bytes(PNG_BYTES)
     _finish(first)
     dec.stop()
-    assert not first_path.exists()
-    with pytest.raises(SstvUnavailable, match="survived kill"):
-        dec.start()
+    assert first_path.exists()
+    for _ in range(2):
+        with pytest.raises(SstvUnavailable, match="survived kill"):
+            dec.start()
+    assert len(launches) == 1 and heard == []
+    ticket = dec._run
+    upstream.die(7)
+    assert ticket.complete.wait(5)
+    assert first_path.exists()
     monkeypatch.setattr(dec, "_spawn", spawn)
     dec.start()
+    assert not first_path.exists()
     second, second_path = launches[1]
     second_run = getattr(getattr(dec, "_runs", None), "current", None)
 

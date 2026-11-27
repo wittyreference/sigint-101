@@ -336,17 +336,20 @@ def _how(code: int) -> str:
 
 def stderr_tail(proc) -> list:
     """The last few lines a tool wrote to its captured stderr, or [] if none were captured."""
-    stream = getattr(proc, "stderr", None)
-    if stream is None:
-        return []
     try:
-        if not stream.seekable():
-            return []
-        end = stream.seek(0, os.SEEK_END)
-        stream.seek(max(0, end - TAIL_READ_BYTES))
-        text = stream.read()
+        return read_stderr_tail(proc)
     except (OSError, ValueError):  # closed, or never a file
         return []
+
+
+def read_stderr_tail(proc) -> list:
+    """Read captured stderr, propagating a fault in the stream."""
+    stream = getattr(proc, "stderr", None)
+    if stream is None or not stream.seekable():
+        return []
+    end = stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, end - TAIL_READ_BYTES))
+    text = stream.read()
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines[-TAIL_LINES:]
 
@@ -373,6 +376,11 @@ def exit_reason(proc, *, finite=False, tail=None, tool="the decoder") -> str | N
         code = _settled_code(stage, deadline)
         if code is not None:
             ended.append((stage, code))
+    return describe_exits(ended, finite=finite, tail=tail, tool=tool)
+
+
+def describe_exits(ended, *, finite=False, tail=None, tool="the decoder", read_tail=None):
+    """Describe a snapshot without waiting on a child."""
     if not ended:
         return None
     causes = [(stage, code) for stage, code in ended if code not in (0, -signal.SIGPIPE)]
@@ -393,7 +401,7 @@ def exit_reason(proc, *, finite=False, tail=None, tool="the decoder") -> str | N
         if code < 0:
             lines = []
         else:
-            lines = list(tail) if tail is not None else stderr_tail(stage)
+            lines = list(tail) if tail is not None else (read_tail or stderr_tail)(stage)
         parts.append(_describe(_name(stage, tool), code, lines[-TAIL_LINES:]))
     return "; ".join(parts)
 
@@ -472,12 +480,14 @@ class ChildWatch:
         self._started_at = None
         self._deaths = 0
         self._retry_at = None
+        self._death = None
         self.reason = None
 
     def spawned(self, proc) -> None:
         with self._lock:
             self._current = proc
             self._started_at = self.clock()
+            self._death = None
             self.reason = None
 
     def stopping(self) -> None:
@@ -506,16 +516,27 @@ class ChildWatch:
                 return self._commit_end(proc, reason)
         return self._commit_end(proc, reason)
 
-    def _commit_end(self, proc, reason: str | None) -> str | None:
+    def observed(self, proc, reason: str | None, observed_at: float):
+        """Record an already observed exit without waiting or reading the diagnostics."""
+        return self._commit_end(proc, reason, observed_at)
+
+    def enrich(self, proc, reason: str) -> None:
+        """Only the death that is still current can receive its late diagnostic."""
+        with self._lock:
+            if proc is self._death:
+                self.reason = reason
+
+    def _commit_end(self, proc, reason: str | None, observed_at=None) -> str | None:
         with self._lock:
             if proc is not self._current:
                 return None
             if reason is None:
-                if proc.poll() is not None:
+                if observed_at is not None or proc.poll() is not None:
                     self._current = None  # a finite capture's clean end: nothing to report
                 return None
             self._current = None
-            now = self.clock()
+            self._death = proc
+            now = self.clock() if observed_at is None else observed_at
             lived = now - self._started_at if self._started_at is not None else 0.0
             self._deaths = 1 if lived >= STABLE_AFTER_S else self._deaths + 1
             delay = min(FIRST_RETRY_S * 2 ** (self._deaths - 1), MAX_RETRY_S)
@@ -564,9 +585,11 @@ class RunGuard:
         """The active run number, handed to the reader a start() launches (under _life)."""
         return self._run
 
-    def end(self, watch: ChildWatch | None = None) -> int:
+    def end(self, watch: ChildWatch | None = None, *, expected: int | None = None) -> int:
         """End the current run under the lock, and mark `watch` stopping in the same step."""
         with self.lock:
+            if expected is not None and self._run != expected:
+                return self._run
             self._run += 1
             if watch is not None:
                 watch.stopping()

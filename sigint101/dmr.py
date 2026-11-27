@@ -6,7 +6,6 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-import threading
 from collections import deque
 from dataclasses import dataclass
 
@@ -14,17 +13,14 @@ from .childproc import (
     ChildWatch,
     RunGuard,
     command_line,
-    emit_reception,
-    running_command,
-    settle_ended,
     spawn,
-    stop_process,
 )
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
     rtlsdr_radio_for_run,
 )
+from .receiver_lifecycle import SupervisedReceiver
 
 # dsd-fme's binary (the DSD-FME fork, github.com/lwvmobile/dsd-fme). Named here rather than in
 # hardware.py so the parallel decoder builds do not collide on a shared constant.
@@ -203,7 +199,7 @@ def _popen(freq_hz: int, device: int):
 
 
 class _Tail:
-    """One reader's bounded last-lines buffer, snapshotted safely by _settle() without a lock."""
+    """One reader's bounded last-lines buffer, snapshotted by its diagnostic worker."""
 
     def __init__(self, maxlen: int = 3):
         self._maxlen = maxlen
@@ -216,7 +212,7 @@ class _Tail:
         return list(self._lines)
 
 
-class DmrDecoder:
+class DmrDecoder(SupervisedReceiver):
     """Owns one dsd-fme process and the log of DMR/P25 calls it decodes.
 
     A sibling of the ACARS decoder: an SDR-exclusive tool with a reader thread off the request path
@@ -241,29 +237,18 @@ class DmrDecoder:
         # is made directly: it cannot end the decode.
         self.on_reception = None
         self._runs = RunGuard()
-        self._life = threading.RLock()
-        self._proc = None
-        self._thread = None
-        self._released = False
+        self._init_lifecycle()
         self.error = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         self.watch = ChildWatch(DSD_FME)
         # Each run gets its own last-lines buffer so a lingering old reader never pollutes the new
         # run's exit reason. _tail points at the current run's buffer for _settle().
-        self._tail = _Tail()
 
-    @property
-    def running(self) -> bool:
-        proc = self._proc
-        return proc is not None and proc.poll() is None
+    _unavailable = DmrUnavailable
+    _released_reason = "the radio was released to another program; resume DMR/P25 to take it back"
 
-    def live_command(self) -> str | None:
-        """The exact command running now, read off the live process; None when nothing runs."""
-        return running_command(self._proc)
-
-    @property
-    def released(self) -> bool:
-        return self._released
+    def _clear(self):
+        self._log = CallLog()
 
     def _choose_radio(self) -> dict:
         try:
@@ -271,74 +256,23 @@ class DmrDecoder:
         except DeviceSelectionError as exc:
             raise DmrUnavailable(str(exc)) from exc
 
-    def release(self) -> None:
-        """Hand the dongle to another program (the sweeper) and stay off it until resumed."""
-        with self._life:
-            self._released = True
-            self.stop()
-            with self._runs:
-                self._log = CallLog()
-
-    def resume(self) -> None:
-        with self._life:
-            self._released = False
-
-    def retune(self, freq_hz) -> None:
-        """Move to another frequency: the running dsd-fme stops, and the next start() spawns there.
-
-        The calls heard on the old frequency are cleared as release() clears them, but the dongle
-        is not handed away. Tuning to where the decoder already is changes nothing.
-        """
-        with self._life:
-            if int(freq_hz) == self.freq_hz:
-                return
-            self._stop_locked()
-            self.freq_hz = int(freq_hz)
-            with self._runs:
-                self._log = CallLog()
-
-    def start(self) -> None:
-        """Begin decoding DMR/P25, unless the radio is absent, dsd-fme is missing, or released."""
-        with self._life:
-            self._start_locked()
-
-    def _start_locked(self) -> None:
-        if self.running:
-            return
-        self._settle()
-        if self._released:
-            raise DmrUnavailable(
-                "the radio was released to another program; resume DMR/P25 to take it back")
+    def _prepare_launch(self, freq_hz, _number):
         if not self._which(DSD_FME):
             raise DmrUnavailable(
                 f"{DSD_FME} is not installed, so SIGINT 101 cannot decode DMR or P25")
         if not self._radio_present():
             raise DmrUnavailable("no RTL-SDR on the USB bus — SIGINT 101 will not fake a call")
-        if self.error:
-            reason, self.error = self.error, None
-            raise DmrUnavailable(reason)
-        # A child that died on its own is not relaunched on every poll: the reason stands, and the
-        # console waits out a back-off that grows while the deaths keep coming.
-        blocked = self.watch.blocked()
-        if blocked:
-            raise DmrUnavailable(blocked)
         radio = self._choose_radio()
-        self.device = radio["index"]
-        # End any retiring reader from an earlier natural death before starting its replacement.
-        self._runs.end(self.watch)
-        try:
-            self._proc = self._spawn(self.freq_hz, self.device)
-        except (OSError, ValueError) as exc:
-            self._proc = None
-            raise DmrUnavailable(f"cannot run dsd-fme: {exc}") from exc
-        self.watch.spawned(self._proc)
-        tail = _Tail()
-        self._tail = tail
-        self.error = None
-        self._thread = threading.Thread(target=self._read,
-                                        args=(self._proc, self._runs.current, tail, radio),
-                                        name="sigint101-dmr", daemon=True)
-        self._thread.start()
+
+        def launch():
+            try:
+                proc = self._spawn(freq_hz, radio["index"])
+            except (OSError, ValueError) as exc:
+                raise DmrUnavailable(f"cannot run dsd-fme: {exc}") from exc
+            self.device = radio["index"]
+            return proc
+
+        return launch, (_Tail(), radio)
 
     def _read(self, proc, run: int, tail: _Tail, radio: dict) -> None:
         """Consume dsd-fme's decoded lines on a background thread, logging calls until it ends."""
@@ -357,60 +291,17 @@ class DmrDecoder:
                     item = event.as_dict()
                     freq_hz = self.freq_hz
                     cmd = command_line(proc)
-                    report = self.on_reception
-                if report is not None:
-                    emit_reception(report, item, command=cmd, freq_hz=freq_hz, radio=radio)
+                    report = self._admit()
+                self._emit(report, item, command=cmd, freq_hz=freq_hz, radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):
                     self.error = str(exc)
-        finally:
-            self._note_end(proc, run, tail)
 
-    def _note_end(self, proc, run: int, tail: _Tail) -> None:
-        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc, tail=tail.lines(), runs=self._runs, run=run)
-        if reason:
-            with self._runs:
-                if self._runs.is_current(run) and self.error is None:
-                    self.error = reason
-
-    def _settle(self) -> None:
-        """Account for a child that ended since the last poll, letting its reader drain before
-        ending the run and clearing away what it left.
-        """
-        proc, self._proc = self._proc, None
-        if proc is None:
-            return
-        thread, self._thread = self._thread, None
-        if not settle_ended(proc, thread, self._runs, self.watch,
-                            note_end=lambda p, r: self._note_end(p, r, self._tail),
-                            wait_s=self.STOP_WAIT_S):
-            self.error = "dsd-fme survived kill; the dongle may still be held"
-
-    #: How long stop() waits, in seconds, for the reader to end once dsd-fme is stopped.
-    STOP_WAIT_S = 3.0
-
-    def stop(self) -> None:
-        """End decoding and let go of the dongle."""
-        with self._life:
-            self._stop_locked()
-
-    def _stop_locked(self) -> None:
-        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
-        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
-        self._runs.end(self.watch)
-        proc, self._proc = self._proc, None
-        if proc is not None and not stop_process(proc):
-            self.error = "dsd-fme survived kill; the dongle may still be held"
-        if self._thread is not None:
-            self._thread.join(timeout=self.STOP_WAIT_S)
-            self._thread = None
-
-    def drain(self, timeout: float = 5.0) -> None:
-        """Wait for a finite source to be fully consumed. A real DMR/P25 stream never ends."""
-        if self._thread is not None:
-            self._thread.join(timeout)
+    def _diagnostic_tail(self, run):
+        if run.reader is not None:
+            run.reader.join(timeout=self.STOP_WAIT_S)
+        return run.args[0].lines()
 
     def calls(self, limit: int | None = None) -> list:
         """The recent calls as plain dicts for the API, newest first."""
