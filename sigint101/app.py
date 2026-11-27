@@ -33,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .acars import AcarsDecoder, AcarsUnavailable
-from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
+from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbPortOccupied, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
@@ -1281,6 +1281,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reason.startswith("no RTL-SDR on the USB bus"):
             return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
                     "next_step": "Plug in the RTL-SDR."}
+        if isinstance(exc, AdsbPortOccupied):
+            return {"cause": "unavailable", "next_step": "Free the port, then retry ADS-B."}
         if reason == "no Flipper attached":
             return {"cause": "no_radio", "next_step": "Connect the Flipper over USB."}
         if reason.startswith("no monitor radio:"):

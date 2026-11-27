@@ -350,11 +350,16 @@ def test_the_sweep_launches_rtl_power_through_spawn(monkeypatch):
             proc.stderr.close()
 
 
-def test_adsb_launch_failure_stops_dump1090_and_says_so(monkeypatch):
-    # dump1090 exits before opening its SBS port: the launcher stops it and refuses, and the
-    # argv it tried is the real one.
+def test_adsb_launch_failure_stops_dump1090_and_says_so(monkeypatch, adsb_ports):
+    # The launch is refused, then the supervisor owns cleanup of the child and its diagnostics.
+    from contextlib import nullcontext
+
     seen = _record_spawns(monkeypatch, adsb, code=1)
+    monkeypatch.setattr(adsb, "_sbs_peer", lambda _: nullcontext(lambda _: True), raising=False)
+    receiver = adsb.AdsbDecoder(**_common())
     with pytest.raises(adsb.AdsbUnavailable):
-        adsb._popen(0)
+        receiver.start()
     assert seen[0].args[0] == "dump1090-fa"
-    assert "--net-sbs-port" in seen[0].args
+    assert seen[0].args[seen[0].args.index("--net-sbs-port") + 1] == str(adsb_ports)
+    assert receiver._run.proc.procs == tuple(seen)
+    assert receiver._run.complete.wait(3) and receiver._run.reaped
