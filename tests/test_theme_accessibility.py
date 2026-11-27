@@ -334,6 +334,27 @@ def test_instructions_and_status_values_are_at_least_18px():
     assert not failures, f"instruction/status-value selectors under 18px: {failures}"
 
 
+def test_predict_and_check_prompts_use_body_font_at_body_size():
+    # Predict and check prompts are multi-sentence questions, not short display titles: set them
+    # in the mono body face at the body size (matching .stage-panel__body and .exam__question).
+    body_size = _font_size_of(".stage-panel__body")
+    assert body_size == 20
+    for selector in (
+        '.stage-panel[data-stage="predict"] .stage-panel__title',
+        '.stage-panel[data-stage="check"] .stage-panel__title',
+    ):
+        decls = _decls_for(selector)
+        assert decls.get("font-family") == "var(--font-mono)", (selector, decls.get("font-family"))
+        assert _font_size_of(selector) == body_size, (selector, decls.get("font-size"))
+
+
+def test_explain_verdict_values_are_not_underlined():
+    # Underlined mono words read as links on a touchscreen; brightness alone carries emphasis.
+    decls = _decls_for(".verdict__line b")
+    assert "underline" not in decls.get("text-decoration", ""), decls
+    assert "border-bottom" not in decls, decls
+
+
 @pytest.mark.parametrize("theme", THEMES)
 def test_primary_keys_are_filled_and_readable_in_every_theme(theme):
     primary = _decls_for(".btn--primary") | _decls_for(f'.app[data-theme="{theme}"] .btn--primary')

@@ -881,13 +881,15 @@ def test_a_second_commit_is_refused_and_the_first_prediction_stands(tmp_path):
 def test_the_explain_header_shows_the_scored_call_after_a_commit(tmp_path):
     with _client(tmp_path) as client:
         sealed = client.get("/lesson/1").text
+        assert "Your call:" not in sealed
         assert "VERDICT_SENTINEL" not in sealed
         client.post("/api/predict?lesson_id=1", data={"prediction": "a"}, follow_redirects=False)
         html = client.get("/lesson/1").text
-    assert "VERDICT_SENTINEL" in html
     assert "Your call: <b>The gap grows</b>" in html
     # The fixture lesson needs no radio, so its answer reads as a fact.
     assert "In fact: <b>The gap shrinks past a point</b>" in html
+    # The repeated verdict line is dropped on explain; the explain body already says why.
+    assert "VERDICT_SENTINEL" not in html
     assert "MISSED" not in html
 
 

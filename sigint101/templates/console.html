@@ -286,9 +286,9 @@
           {% elif stage == 'check' %}
             {# ---- The post-lesson check: one new situation on the lesson's concept, and scored,
                  unlike the predict. Tap a chip and commit, keyboard-free, as a plain form post.
-                 Once answered the chips keep the choice, the result reads Right or Not yet with
-                 the chosen chip's why (and the key's when they differ), and Complete finishes the
-                 lesson. Interactive, so it fits the fixed 800x480 with no scroll. ---- #}
+                 Once answered the chips keep the choice, the result reads Right or Missed with
+                 the chosen chip's why (and on a miss the right chip carries its own mark and
+                 why), and Complete finishes the lesson. Interactive, so it fits 800x480. ---- #}
             {% set fb = check_feedback|default(none) %}
             <h1 class="stage-panel__title">&#9773; {{ lesson.check.prompt }}</h1>
             <form class="predict{% if fb %} predict--committed{% endif %}" novalidate data-choice-commit
@@ -296,19 +296,20 @@
               <fieldset class="predict-chips">
                 <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
                 {% for c in lesson.check.choices %}
-                  <label class="predict-chip">
+                  {% set is_answer = fb and not fb.correct and c.key == lesson.check.answer %}
+                  <label class="predict-chip{% if is_answer %} predict-chip--answer{% endif %}">
                     <input type="radio" name="choice" value="{{ c.key }}"
                            {% if check_answer|default(none) == c.key %}checked{% endif %}
                            {% if fb %}disabled{% endif %}
                            {% if loop.first %}required{% endif %}>
                     <span class="predict-chip__key" aria-hidden="true">{{ "ABCDEFGH"[loop.index0] }}</span>
-                    <span class="predict-chip__label">{{ c.label }}</span>
+                    <span class="predict-chip__label">{{ c.label }}{% if is_answer %}<span class="predict-chip__mark">&#10003; Answer</span>{% endif %}</span>
                   </label>
                 {% endfor %}
               </fieldset>
               {% if fb %}
               <div class="verdict verdict--{{ 'hit' if fb.correct else 'miss' }} check__result">
-                <div class="verdict__why"><span class="verdict__tag">{{ 'Right' if fb.correct else 'Not yet' }}</span> <b>{{ fb.chosen.label }}:</b> {{ fb.chosen.why }}</div>
+                <div class="verdict__why"><span class="verdict__tag">{{ 'Right' if fb.correct else 'Missed' }}</span> <b>{{ fb.chosen.label }}:</b> {{ fb.chosen.why }}</div>
                 {% if not fb.correct %}
                 <div class="verdict__why"><b>{{ fb.key.label }}:</b> {{ fb.key.why }}</div>
                 {% endif %}
@@ -574,8 +575,9 @@
                rather than ahead of it, where it would push the answer below the fold. #}
             {# The predict reveal: the explain opens on the learner's committed call beside the pack's
                answer, named as what the radio does or, for a knowledge predict, as what is in fact
-               true (lesson.reveal_label), and its one-line verdict, at the top of the scrolling
-               body. A predict is a guess made before the teaching, so it is never scored here: no
+               true (lesson.reveal_label), at the top of the scrolling body. The pack's one-line
+               verdict is not repeated here because the explain body carries the explanation. A
+               predict is a guess made before the teaching, so it is never scored here: no
                RIGHT/MISSED and no hit/miss styling (the stored `correct` is item-analysis data, not
                learner feedback). Explain only renders after a commit, so the answer never reaches
                the page early; a pack with no answer shows no header. #}
@@ -586,7 +588,6 @@
                   {% if scored %}
                   <div class="verdict">
                     <div class="verdict__line">Your call: <b>{{ scored.said }}</b> &middot; {{ lesson.reveal_label }}: <b>{{ scored.answer|join(' or ') }}</b></div>
-                    <div class="verdict__why">{{ scored.verdict }}</div>
                   </div>
                   {% endif %}
                   <p>{{ lesson.stages[stage] }}</p>

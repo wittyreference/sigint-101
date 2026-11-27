@@ -445,14 +445,16 @@ def _verdict_block(html):
 
 
 def test_explain_header_sets_your_call_beside_what_the_radio_does():
-    # A predict about the instrument (a radio lesson) reveals what the radio does.
+    # A predict about the instrument (a radio lesson) reveals what the radio does, without
+    # repeating the lesson's one-line verdict sentence (the explain body already says why).
     html = _console(lesson=_scored_lesson(hardware=["rtl-sdr"]), prediction_committed=True,
                     current_stage="explain", committed_choice="a")
     block = _verdict_block(html)
     assert f"Your call: <b>{CHOICES[0]['label']}</b>" in block
     assert (f"What the radio does: <b>{CHOICES[1]['label']} or {CHOICES[2]['label']}</b>"
             in block)
-    assert "VERDICT_marker" in block
+    assert "VERDICT_marker" not in block
+    assert "verdict__why" not in block
     # The header rides at the top of the explain's scrolling body, so a long eyebrow can never
     # squeeze the reading itself to nothing on the fixed 800x480 panel.
     assert re.search(r'<div class="stage-panel__body">\s*<div class="scroll-copy">\s*'
