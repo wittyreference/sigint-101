@@ -2,6 +2,7 @@
 # ABOUTME: A fake DevTools endpoint stands in for Chrome; the scripts run as real processes.
 
 import base64
+import errno
 import json
 import os
 import shutil
@@ -205,10 +206,19 @@ def devtools():
         fake.close()
 
 
-def _closed_port():
-    """A port on 127.0.0.1 nothing listens on: no browser there."""
-    with socket.create_server(("127.0.0.1", 0)) as s:
-        return s.getsockname()[1]
+@pytest.fixture
+def closed_port():
+    """Hold a loopback port without listening so connects fail even during parallel tests."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        yield sock.getsockname()[1]
+
+
+def test_unreachable_render_port_stays_reserved(closed_port):
+    with socket.socket() as contender:
+        with pytest.raises(OSError) as unavailable:
+            contender.bind(("127.0.0.1", closed_port))
+        assert unavailable.value.errno == errno.EADDRINUSE
 
 
 def run(script, *args, port, fast=True, timeout=60):
@@ -277,9 +287,9 @@ def test_render_fit_cannot_pass_without_a_measurement(devtools, tmp_path, predic
     assert _verdicts(proc)[0].startswith("VERDICT: FAIL - predict:")
 
 
-def test_render_fit_cannot_pass_without_devtools(tmp_path):
+def test_render_fit_cannot_pass_without_devtools(tmp_path, closed_port):
     proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"),
-               port=_closed_port(), timeout=3)
+               port=closed_port, timeout=3)
     assert_no_pass(proc)
 
 
@@ -316,8 +326,8 @@ def test_render_scroll_run_plainly_exits_1_on_fail(devtools):
     assert_ends(proc, 1, "VERDICT: FAIL")
 
 
-def test_render_scroll_with_no_browser_exits_non_zero():
-    proc = run(SCROLL, "http://127.0.0.1:1/lesson/2", "explain", port=_closed_port())
+def test_render_scroll_with_no_browser_exits_non_zero(closed_port):
+    proc = run(SCROLL, "http://127.0.0.1:1/lesson/2", "explain", port=closed_port)
     assert_no_pass(proc)
 
 
@@ -360,19 +370,19 @@ def test_render_figure_run_plainly_exits_1_on_fail(devtools, tmp_path):
     assert_ends(proc, 1, "VERDICT: FAIL")
 
 
-def test_render_figure_errors_exit_non_zero(devtools, tmp_path):
+def test_render_figure_errors_exit_non_zero(devtools, tmp_path, closed_port):
     out = str(tmp_path / "fig")
     # The card's expression threw: a page with no app on it (an error page, a wrong address).
     assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark", out,
                        port=devtools({CARD: THROWS, OVERLAY: OVERLAY_OK})))
     # No browser listening.
-    assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark", out, port=_closed_port()))
+    assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark", out, port=closed_port))
     # The screenshots cannot be saved: their folder does not exist.
     assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark",
                        str(tmp_path / "missing" / "fig"),
                        port=devtools({CARD: CARD_OK, OVERLAY: OVERLAY_OK})))
     # No page address given.
-    assert_no_pass(run(FIGURE, port=_closed_port()))
+    assert_no_pass(run(FIGURE, port=closed_port))
 
 
 @pytest.fixture
@@ -494,8 +504,8 @@ def test_make_render_check_fails_clearly_when_chromium_is_unreachable(
     assert "ran " not in proc.stdout
 
 
-def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make):
-    proc = render_make(RENDER_URL=f"http://127.0.0.1:{_closed_port()}")
+def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make, closed_port):
+    proc = render_make(RENDER_URL=f"http://127.0.0.1:{closed_port}")
     assert proc.returncode != 0
     assert "Cannot reach the console" in proc.stderr, proc.stderr
     assert "ran " not in proc.stdout
