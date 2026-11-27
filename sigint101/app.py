@@ -7,16 +7,20 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
 
 # Form bodies are decoded with parse_qs rather than Starlette's request.form(). Starlette pulls
 # in python-multipart for form parsing even when the body is plain urlencoded, and this console
 # keeps its dependency list short enough to install on an ARM board offline.
 from urllib.parse import parse_qs
+from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
@@ -92,6 +96,7 @@ from .spectrum import (
     validate_target_span,
 )
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
+from .stamps import STAMP_INSTRUMENTS, mint, stamps_from_log
 from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -322,8 +327,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
                                 context_processors=[status_bar, flock_tool])
 
-    # SSTV leaves radio identity to the hook, which uses the latest bus survey for serial lookup.
-    # The other RTL-SDR receivers send the radio they selected at launch.
+    # The RTL-SDR receivers send the radio they selected at launch. A hook invoked without
+    # that metadata can still look up the receiver's current index in the latest survey.
     radio_census = []
 
     def enumerate_radios():
@@ -560,6 +565,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # part of each record's provenance.
         app.state.receptions = None
         app.state.reception_error = None
+        app.state.stamp_error = None
+        app.state.stamp_window = None
+        try:
+            _backfill_stamps(app.state.progress, _stamp_window())
+        except (OSError, sqlite3.Error) as exc:
+            _stamp_failed(exc)
         app.state.last_ppm = None
         for attr, inst in RECEIVERS.items():
             receiver = getattr(app.state, attr)
@@ -1799,6 +1810,26 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     reception_lock = threading.Lock()
 
+    def _stamp_window():
+        try:
+            identity = app.state.events_path.stat()
+        except FileNotFoundError:
+            return None
+        return identity.st_dev, identity.st_ino
+
+    def _stamp_failed(exc):
+        app.state.stamp_error = f"a reception badge could not be saved: {exc}"
+
+    def _backfill_stamps(progress, window, appended=()):
+        # In append order, including rotations. Remembering each credited event tolerates a
+        # clock reset. Compact the watermark when the log rolls without removing earned badges.
+        stamps = stamps_from_log(read_events(app.state.events_path))
+        # A different log writer may already have rotated out the event this hook just appended.
+        # When it is still in the snapshot its event ID makes the second credit a no-op.
+        if progress.record_stamps(chain(stamps, appended), backfill=True):
+            app.state.stamp_window = window
+            app.state.stamp_error = None
+
     def _radio(inst, receiver) -> dict:
         """The radio a reception came in on: an RTL-SDR's serial and index, or the other radio."""
         if inst.radio == "rtl-sdr":
@@ -1820,6 +1851,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         Called from the receiver's reader thread. It never raises: a reception that cannot be
         written is reported through /api/receptions rather than ending the live decode.
         """
+        progress = app.state.progress
+
         def hook(item: dict, *, command: str | None = None, freq_hz=None,
                  radio: dict | None = None) -> None:
             freq = freq_hz if freq_hz is not None else getattr(receiver, "freq_hz", None)
@@ -1838,14 +1871,31 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 # the last measurement this run rides along for whoever reads the record.
                 ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
                 radio=radio if radio is not None else _radio(inst, receiver))
+            # Keep the log order through badge credit. The lock order is reception_lock
+            # before Progress's lock. Progress.close() only needs the latter.
             with reception_lock:
+                if app.state.progress is not progress:
+                    return
                 try:
-                    event = log_event(app.state.events_path, "reception", record)
+                    event = log_event(app.state.events_path, "reception", record,
+                                      event_id=uuid4().hex)
                 except OSError as exc:
                     app.state.reception_error = f"a reception could not be logged: {exc}"
                     return
+                app.state.reception_error = None
                 if app.state.receptions is not None:
-                    app.state.receptions.append(event)
+                    app.state.receptions.append(without_page_words(event))
+                if (stamp := mint(event)) is None:
+                    return
+                try:
+                    window = _stamp_window()
+                    if window != app.state.stamp_window or app.state.stamp_error is not None:
+                        # Recover an earlier logged reception before giving a later one credit.
+                        _backfill_stamps(progress, window, (stamp,))
+                    else:
+                        progress.record_stamps((stamp,))
+                except (OSError, sqlite3.Error) as exc:
+                    _stamp_failed(exc)
 
         return hook
 
@@ -1869,7 +1919,38 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """The receptions logged with provenance, newest first, optionally for one instrument."""
         rows = [event for event in reversed(_recent_receptions())
                 if instrument is None or event["payload"].get("instrument") == instrument]
-        return {"receptions": rows[:max(limit, 0)], "error": app.state.reception_error}
+        return {"receptions": rows[:max(limit, 0)],
+                "error": app.state.reception_error or app.state.stamp_error}
+
+    def _stamp_catalog():
+        error = app.state.stamp_error
+        try:
+            earned = {stamp["instrument"]: stamp for stamp in app.state.progress.stamps()}
+        except (OSError, sqlite3.Error) as exc:
+            return [], error or f"the logbook could not be read: {exc}"
+        empty = {"first_ts": None, "count": 0, "provenance": None, "digest": None}
+        rows = [{"instrument": inst.key, "label": inst.label, **earned.get(inst.key, empty)}
+                for inst in INSTRUMENTS if inst.key in STAMP_INSTRUMENTS]
+        return rows, error
+
+    @app.get("/api/stamps")
+    def stamps():
+        """List the reception badges and the provenance of each first reception."""
+        rows, error = _stamp_catalog()
+        return {"stamps": rows, "error": error}
+
+    @app.get("/logbook", response_class=HTMLResponse)
+    def logbook(request: Request):
+        """Show what the learner has heard and how each first reception was recorded."""
+        rows, error = _stamp_catalog()
+        for row in rows:
+            if row["count"]:
+                row["first_heard"] = datetime.fromtimestamp(row["first_ts"], tz=timezone.utc)
+        return templates.TemplateResponse(
+            request=request, name="logbook.html",
+            context={"title": "Logbook", "back_href": "/operate", "back_label": "Rack",
+                     "stamps": rows, "stamp_error": error},
+        )
 
     @app.get("/operate")
     def operate_home():

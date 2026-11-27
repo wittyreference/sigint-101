@@ -49,11 +49,13 @@ def _rotate_if_full(path: Path, max_bytes: int, keep: int) -> None:
 
 
 def log_event(path, kind: str, payload: dict, *, clock=time.time,
-              max_bytes=None, keep=None) -> dict:
+              max_bytes=None, keep=None, event_id=None) -> dict:
     """Append one event to the JSONL log and return it. Creates the file if needed."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     event = {"ts": round(clock(), 3), "kind": str(kind), "payload": payload}
+    if event_id is not None:
+        event["event_id"] = event_id
     line = json.dumps(event, sort_keys=True) + "\n"
     with _WRITE_LOCK:
         _rotate_if_full(path, MAX_LOG_BYTES if max_bytes is None else max_bytes,
@@ -90,11 +92,13 @@ def read_events(path) -> list:
     """
     path = Path(path)
     events = []
-    for part in [*_rotated(path), path]:
-        try:
-            events.extend(_parse_lines(part.read_text(encoding="utf-8", errors="replace")))
-        except FileNotFoundError:
-            continue
+    # A watermark reconciliation needs one consistent window across rotated files.
+    with _WRITE_LOCK:
+        for part in [*_rotated(path), path]:
+            try:
+                events.extend(_parse_lines(part.read_text(encoding="utf-8", errors="replace")))
+            except FileNotFoundError:
+                continue
     return events
 
 

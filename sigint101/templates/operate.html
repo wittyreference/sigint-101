@@ -4,6 +4,9 @@
 {% import "_panels.html" as panels %}
 
 {% block title %}Operator mode{% endblock %}
+{% block status_actions %}
+<a class="rack__log-link" href="/logbook" aria-label="Open reception logbook">LOG</a>
+{% endblock %}
 
 {# The dial of an instrument that listens where its protocol puts it: the frequency and a caption,
    read as text the way the lesson's fixed dial does. A decoder that names its own frequency

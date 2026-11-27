@@ -1,0 +1,48 @@
+<!-- ABOUTME: The rack's reception logbook, one row for each eligible instrument.
+     ABOUTME: Each badge shows first-heard evidence, with a separate mark for replay. -->
+{% extends "base.html" %}
+{% import "_panels.html" as panels %}
+
+{% macro mhz(hz) -%}
+  {{ ("%d.%06d"|format(hz // 1000000, hz % 1000000)).rstrip("0").rstrip(".") }}
+{%- endmacro %}
+
+{% block content %}
+<section class="logbook" aria-label="Reception badges">
+  <div class="logbook__legend">
+    <p>{{ panels.reception_badge() }} First live reception on each instrument.</p>
+    <p>{{ panels.replay_mark() }} Recordings earn this mark only. None yet.</p>
+  </div>
+  <div class="scroll-frame logbook__frame">
+    <div class="logbook__entries">
+      {% if stamp_error %}<p role="status">{{ stamp_error }}</p>{% endif %}
+      <ul class="logbook__list">
+        {% for stamp in stamps %}
+        <li class="logbook__entry" data-logbook-instrument="{{ stamp.instrument }}">
+          <div class="logbook__heading">
+            <strong>{{ stamp.label }}</strong>
+            {% if stamp.count %}{{ panels.reception_badge() }}{% else %}<span>Not heard yet</span>{% endif %}
+          </div>
+          {% if stamp.count %}
+          {% set p = stamp.provenance %}
+          <p>
+            <time datetime="{{ stamp.first_heard.isoformat() }}">{{ stamp.first_heard.strftime("%Y-%m-%d %H:%M:%S UTC") }}</time>
+            · {{ p.tool }}
+            {% if stamp.instrument != "lora" %}
+              · {% if p.freq_hz is sequence %}{% for hz in p.freq_hz %}{{ mhz(hz) }}{% if not loop.last %} + {% endif %}{% endfor %}{% else %}{{ mhz(p.freq_hz) }}{% endif %} MHz
+            {% endif %}
+          </p>
+          {% if p.radio.kind == "meshtasticd" %}
+          <p>Radio {{ p.radio.host }}</p>
+          {% else %}
+          <p>RTL-SDR {{ p.radio.serial or "index " ~ p.radio.index }}</p>
+          <p><code>{{ p.command }}</code></p>
+          {% endif %}
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</section>
+{% endblock %}

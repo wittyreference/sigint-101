@@ -19,14 +19,16 @@ REPO = Path(__file__).resolve().parent.parent
 SCROLL = REPO / "tools" / "render" / "render_scroll.py"
 FIGURE = REPO / "tools" / "render" / "render_figure.py"
 FIT = REPO / "tools" / "render" / "render_fit.py"
+LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
 # the script's own. Two tests below run the scripts plainly, sleeps and all.
 FAST = (
-    "import runpy, sys, time\n"
+    "import pathlib, runpy, sys, time\n"
     "time.sleep = lambda seconds: None\n"
     "script = sys.argv.pop(1)\n"
+    "sys.path.insert(0, str(pathlib.Path(script).parent))\n"
     "runpy.run_path(script, run_name='__main__')\n"
 )
 
@@ -418,7 +420,7 @@ def render_make(tmp_path, console_url, devtools):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -457,14 +459,16 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
 
 
-@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name],
-                         ids=["all-pass", "fit-fails", "scroll-fails", "figure-fails"])
+@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name],
+                         ids=["all-pass", "fit-fails", "scroll-fails", "figure-fails",
+                              "logbook-fails"])
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
     proc = render_make(FAILING_CHECK=failing)
     assert proc.stdout.splitlines() == [
         f"ran {FIT.name} {console_url}/lesson/29",
         f"ran {SCROLL.name} {console_url}/",
         f"ran {FIGURE.name} {console_url}/exam/review/T6C02",
+        f"ran {LOGBOOK.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -492,3 +496,44 @@ def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make
     assert proc.returncode != 0
     assert "Cannot reach the console" in proc.stderr, proc.stderr
     assert "ran " not in proc.stdout
+
+
+LOGBOOK_FITS = {"back": True, "doc": [800, 480], "scrolls": True, "lastVisible": True,
+                "contrast": [8, 9], "differentMarks": True}
+
+
+def test_logbook_render_checks_all_three_themes(devtools):
+    port = devtools({"rack__log-link": {"visible": True, "target": [76, 72]},
+                     **{f"measureLogbook({json.dumps(theme)})": {**LOGBOOK_FITS, "theme": theme}
+                        for theme in ("dark", "sunlight", "red-night")}})
+    proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == ["VERDICT: PASS - rack LOG key",
+                               "VERDICT: PASS - logbook dark",
+                               "VERDICT: PASS - logbook sunlight",
+                               "VERDICT: PASS - logbook red-night"]
+
+
+@pytest.mark.parametrize("defect", [
+    {"back": False}, {"doc": [801, 480]}, {"doc": [800, 481]}, {"scrolls": False},
+    {"lastVisible": False}, {"contrast": [4.49, 9]}, {"differentMarks": False},
+    {"theme": "dark"},
+])
+def test_logbook_verdict_fails_when_a_later_theme_does_not_fit(devtools, defect):
+    port = devtools({"rack__log-link": {"visible": True, "target": [76, 72]},
+                     "measureLogbook(\"dark\")": {**LOGBOOK_FITS, "theme": "dark"},
+                     "measureLogbook(\"sunlight\")": {**LOGBOOK_FITS, "theme": "sunlight"},
+                     "measureLogbook(\"red-night\")": {
+                         **LOGBOOK_FITS, "theme": "red-night", **defect}})
+    proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - logbook red-night"
+
+
+def test_logbook_render_refuses_an_undersized_rack_log_key(devtools):
+    port = devtools({"rack__log-link": {"visible": True, "target": [76, 71]},
+                     **{f"measureLogbook({json.dumps(theme)})": {**LOGBOOK_FITS, "theme": theme}
+                        for theme in ("dark", "sunlight", "red-night")}})
+    proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "VERDICT: FAIL - rack LOG key" in _verdicts(proc)

@@ -28,7 +28,7 @@ from .hardware import (
     RTL_FM,
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # The colaclanth/sstv command-line decoder. It turns one WAV of SSTV audio into one PNG, printing
@@ -88,6 +88,7 @@ class _Capture:
     staged_path: Path
     published_path: Path
     freq_hz: int
+    radio: dict
     mode: str | None = None
     decoded_at: float | None = None
 
@@ -186,9 +187,9 @@ class SstvDecoder:
         self._capture: _Capture | None = None
         self._released = False
         self.error = None
-        # Retirement calls the console's hook with the published picture, its capture's command
-        # and frequency. The hook logs it as a reception and never raises. A picture already on
-        # disk before the capture is never reported.
+        # Retirement calls the console's hook with the published picture, its capture's command,
+        # frequency and radio. The hook logs it as a reception and never raises. Pictures already
+        # on disk before the capture are never reported.
         self.on_reception = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         # A capture ends by design after DEFAULT_CAPTURE_S, so a clean finish is not a death.
@@ -207,11 +208,9 @@ class SstvDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise SstvUnavailable(str(exc)) from exc
 
@@ -254,7 +253,8 @@ class SstvDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise SstvUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
         run = self._runs.end(self.watch)
         freq_hz = self.freq_hz
         received_at = self._clock()
@@ -263,7 +263,7 @@ class SstvDecoder:
             self._staging_dir.mkdir(parents=True, exist_ok=True)
             for path in tuple(self._staged_cleanup):
                 self._remove_staged(path)
-            capture = self._allocate_capture(received_at, run, freq_hz)
+            capture = self._allocate_capture(received_at, run, freq_hz, radio)
             self._proc = self._spawn(freq_hz, self.device, capture.staged_path)
         except (OSError, ValueError) as exc:
             self._proc = None
@@ -275,7 +275,8 @@ class SstvDecoder:
                                         name="sigint101-sstv", daemon=True)
         self._thread.start()
 
-    def _allocate_capture(self, received_at: float, run: int, freq_hz: int) -> _Capture:
+    def _allocate_capture(self, received_at: float, run: int, freq_hz: int,
+                          radio: dict) -> _Capture:
         """Give this writer a sortable stem distinct from earlier runs and saved files."""
         stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(received_at))
         millis = int((received_at % 1) * 1000)
@@ -287,7 +288,7 @@ class SstvDecoder:
             staged = self._staging_dir / published.name
             paths = (staged, staged.with_suffix(".json"), published, published.with_suffix(".json"))
             if not any(os.path.lexists(path) for path in paths):
-                return _Capture(staged, published, freq_hz)
+                return _Capture(staged, published, freq_hz, radio)
             suffix += 1
 
     def _read(self, proc, run: int, capture: _Capture) -> None:
@@ -376,7 +377,7 @@ class SstvDecoder:
         report = self.on_reception
         if report is not None:
             emit_reception(report, self._describe(capture.published_path).as_dict(),
-                           command=command_line(proc), freq_hz=capture.freq_hz)
+                           command=command_line(proc), freq_hz=capture.freq_hz, radio=capture.radio)
 
     def _publish_capture(self, capture: _Capture) -> bool:
         """The exclusive PNG link commits publication. Install its metadata afterwards."""
