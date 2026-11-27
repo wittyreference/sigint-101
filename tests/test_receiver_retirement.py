@@ -61,7 +61,7 @@ def test_child_exit_retires_reader_without_a_follow_up_request():
         decoder.stop()
 
 
-@pytest.mark.parametrize("name", ["pocsag", "rds", "acars", "dmr"])
+@pytest.mark.parametrize("name", ["pocsag", "rds", "acars", "dmr", "flock"])
 def test_other_pipe_readers_retire_after_an_idle_exit(late_factory, name):  # noqa: F811
     spec = SPEC_BY_NAME[name]
     decoder, children, heard, _clock = late_factory(spec)
