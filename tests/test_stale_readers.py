@@ -1322,3 +1322,244 @@ def test_marauder_buffered_frames_after_stop_do_not_leak_into_new_run(tmp_path):
         for link in links:
             if link.reader is not None:
                 link.reader.join(5)
+
+
+# --- C39: natural-exit socket drain and post-drain invalidation during back-off ----------------
+
+
+def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
+    # Pause the ADS-B reader on its first accepted item, queue a second complete SBS line in the
+    # TCP socket, mark dump1090 exited, and let the reader resume only once _settle() reaches its
+    # join. _settle() must not close the socket before the bounded drain finishes.
+    pairs = []
+    procs = []
+
+    def spawn(device):
+        client_sock, server_sock = socket.socketpair()
+        client_sock.settimeout(adsb.FEED_POLL_S)
+        pairs.append((client_sock, server_sock))
+        proc = _AliveProc(
+            ["dump1090-fa", "--device-index", str(device), "--run", str(len(procs) + 1)])
+        procs.append(proc)
+        return adsb._Feed(proc, client_sock)
+
+    dec = adsb.AdsbDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 2.0
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    heard = _Heard(dec, lambda d: d["hex_ident"], default_freq=adsb.DEFAULT_ADSB_HZ)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        pairs[0][1].sendall((ADSB_1 + "\n").encode())
+        assert paused.wait(5)
+
+        # Queue the second SBS line in the socket buffer and end the child naturally.
+        pairs[0][1].sendall((ADSB_2 + "\n").encode())
+        procs[0].returncode = 1
+
+        real_thread = dec._thread
+        joined = threading.Event()
+
+        class _ReleaseOnJoin:
+            def join(self, timeout=None):
+                joined.set()
+                go_on.set()
+                return real_thread.join(timeout)
+
+        dec._thread = _ReleaseOnJoin()
+
+        with pytest.raises(adsb.AdsbUnavailable, match="status 1"):
+            dec.start()
+        assert joined.is_set()
+        assert not real_thread.is_alive()
+        assert len(procs) == 1
+        assert {a["hex_ident"] for a in dec.aircraft()} == {"A1B2C3", "DDEEFF"}
+        assert heard.log == [
+            ("A1B2C3", adsb.DEFAULT_ADSB_HZ, _line(procs[0])),
+            ("DDEEFF", adsb.DEFAULT_ADSB_HZ, _line(procs[0])),
+        ]
+    finally:
+        go_on.set()
+        dec.stop()
+        for a, b in pairs:
+            for s in (a, b):
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+
+def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
+    # Pause the AIS reader on its first accepted vessel, queue a second complete UDP datagram in
+    # the socket, mark rtl_ais exited, and let the reader resume only once _settle() reaches its
+    # join. _settle() must not close the UDP socket before the bounded drain finishes.
+    socks = []
+    procs = []
+
+    def spawn(device, host, port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        socks.append(sock)
+        proc = _AliveProc(["rtl_ais", "-d", str(device), "--run", str(len(procs) + 1)])
+        procs.append(proc)
+        return ais._Feed(proc, sock)
+
+    dec = ais.AisDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 2.0
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    ais_hz = [ais.AIS_CHANNEL_A_HZ, ais.AIS_CHANNEL_B_HZ]
+    heard = _Heard(dec, lambda d: d["mmsi"], default_freq=ais_hz)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            sender.sendto((AIS_1 + "\n").encode(), socks[0].getsockname())
+            assert paused.wait(5)
+            # Queue the second datagram in the UDP socket buffer and end the child naturally.
+            sender.sendto((AIS_2 + "\n").encode(), socks[0].getsockname())
+        procs[0].returncode = 1
+
+        real_thread = dec._thread
+        joined = threading.Event()
+
+        class _ReleaseOnJoin:
+            def join(self, timeout=None):
+                joined.set()
+                go_on.set()
+                return real_thread.join(timeout)
+
+        dec._thread = _ReleaseOnJoin()
+
+        with pytest.raises(ais.AisUnavailable, match="status 1"):
+            dec.start()
+        assert joined.is_set()
+        assert not real_thread.is_alive()
+        assert len(procs) == 1
+        assert {v["mmsi"] for v in dec.vessels()} == {477553000, 265547250}
+        assert heard.log == [
+            (477553000, ais_hz, _line(procs[0])),
+            (265547250, ais_hz, _line(procs[0])),
+        ]
+    finally:
+        go_on.set()
+        dec.stop()
+        for s in socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_after_natural_exit_drain_times_out_old_reader_output_reaches_nothing(late_factory, spec):
+    # Once _settle()'s bounded drain expires on a natural death, the run must end even when no
+    # replacement starts: anything the lingering reader delivers during retry back-off is dropped.
+    dec, procs, heard, _ = late_factory(spec)
+    dec.start()
+    procs[0].feed(spec.line1)
+    heard.wait_for(1)
+
+    procs[0].die(1)
+    with pytest.raises(spec.unavailable, match="status 1"):
+        dec.start()
+    assert len(procs) == 1
+    assert procs[0].reader.is_alive()
+    assert dec.watch.blocked() is not None
+
+    # Still stopped in retry back-off: late output must neither list nor log.
+    procs[0].feed(spec.line2)
+    _end_pipe(procs[0])
+    assert spec.listed(dec) == [spec.key1]
+    assert heard.log == [(spec.key1, spec.home_hz, _line(procs[0]))]
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_after_natural_exit_drain_times_out_old_reader_error_does_not_refuse_next_start(
+        late_factory, spec):
+    # A pipe failure from a reader that outlived its natural-exit drain must not set dec.error
+    # during retry back-off and make the next eligible start refuse.
+    dec, procs, heard, clock = late_factory(spec)
+    dec.start()
+    procs[0].feed(spec.line1)
+    heard.wait_for(1)
+
+    procs[0].die(1)
+    with pytest.raises(spec.unavailable, match="status 1"):
+        dec.start()
+    assert len(procs) == 1
+    assert procs[0].reader.is_alive()
+    assert dec.error is None
+
+    procs[0].break_pipe(OSError("late pipe failure after drain"))
+    procs[0].reader.join(5)
+    assert not procs[0].reader.is_alive()
+    assert dec.error is None
+
+    clock.now += 60
+    dec.start()
+    assert len(procs) == 2
+    assert dec.running
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_nothing(
+        late_factory, spec):
+    # If the old reader finishes watch.ended() before _settle()'s drain times out and tries to
+    # record dec.error afterwards while stopped in back-off, the ended run must block it so the
+    # next eligible start succeeds rather than refusing again.
+    dec, procs, heard, clock = late_factory(spec)
+    found_ended = dec.watch.ended
+    found, go_on = threading.Event(), threading.Event()
+
+    def ended(proc, **kw):
+        reason = found_ended(proc, **kw)
+        if reason is not None and proc is procs[0]:
+            found.set()
+            go_on.wait(5)
+        return reason
+
+    dec.watch.ended = ended
+    dec.start()
+    procs[0].feed(spec.line1)
+    heard.wait_for(1)
+
+    procs[0].die(1)
+    procs[0].close_pipe()
+    assert found.wait(5)
+    with pytest.raises(spec.unavailable, match="status 1"):
+        dec.start()
+    assert len(procs) == 1
+    assert dec.error is None
+
+    # Release the old reader while still stopped in back-off (before any replacement starts).
+    go_on.set()
+    procs[0].reader.join(5)
+    assert not procs[0].reader.is_alive()
+    assert dec.error is None
+
+    clock.now += 60
+    dec.start()
+    assert len(procs) == 2
+    assert dec.running
