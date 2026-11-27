@@ -1767,6 +1767,12 @@ def test_lesson_gates_recover_the_header_height_without_shrinking_touch_targets(
     assert _px(_css_decl(".app", "--touch")) >= 72
 
 
+def test_rack_picker_selection_uses_the_filled_home_tile_palette():
+    for prop in ("background", "border-color", "color"):
+        assert _css_decl(".rack__pick--on", prop) == _css_decl(".tile--active", prop)
+    assert _css_decl(".rack__pick--on .rack__pick-tool", "color") == "inherit"
+
+
 def test_scroll_cue_frames_wrap_home_lesson_text_and_operator_picker():
     home = _render("home.html", **_status(), tiles=UNITS)
     home = re.sub(r"<!--.*?-->", "", home, flags=re.S)

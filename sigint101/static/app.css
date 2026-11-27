@@ -2658,7 +2658,7 @@ body {
 }
 .rack__chooser {
   flex: none;
-  width: 142px;
+  width: 164px;
 }
 .rack__picker {
   flex: 1 1 auto;
@@ -2679,6 +2679,21 @@ body {
   background: color-mix(in srgb, var(--fg) 45%, transparent);
   border-radius: 5px;
 }
+.rack__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rack__group + .rack__group {
+  margin-top: 4px;
+}
+.rack__group-title {
+  margin: 0;
+  padding: 4px 6px 0;
+  font-size: 16px;
+  line-height: 1.15;
+  color: var(--fg-dim);
+}
 .rack__pick {
   flex: none;
   min-height: 72px;
@@ -2686,25 +2701,42 @@ body {
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  padding: 6px 10px;
+  padding: 4px 6px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--fg);
   text-decoration: none;
 }
+.rack__pick-label,
+.rack__pick-detail {
+  font-size: 18px;
+  line-height: 1.1;
+  letter-spacing: normal;
+}
 .rack__pick-label {
-  font-size: 17px;
-  line-height: 1.15;
+  font-weight: 700;
 }
 .rack__pick-tool {
   font-size: 13px;
+  line-height: 1.1;
   letter-spacing: 0.06em;
   color: var(--fg-dim);
 }
-/* The instrument on the bench: the accent border, the same "you are here" as a rail pip. */
+/* The instrument on the bench uses the same filled selection as the home tile. */
 .rack__pick--on {
-  border: 2px solid var(--accent);
-  color: var(--accent);
+  background: var(--sel-bg);
+  border-color: var(--sel-bg);
+  color: var(--sel-ink);
+  text-shadow: none;
+}
+.rack__pick--on .rack__pick-tool {
+  color: inherit;
+}
+.rack__pick:focus-visible {
+  outline-offset: -4px;
+}
+.rack__pick--on:focus-visible {
+  outline-color: var(--sel-ink);
 }
 .rack__bench {
   flex: 1 1 auto;
