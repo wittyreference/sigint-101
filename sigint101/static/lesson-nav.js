@@ -35,8 +35,10 @@
 
     function syncChoice() {
       var ready = !!form.querySelector('input[type="radio"]:checked:not(:disabled)');
+      var readyText = (status.getAttribute && status.getAttribute("data-ready-text")) ||
+        "Choice set. Lock it in to unlock.";
       commit.disabled = !ready;
-      status.textContent = ready ? "Choice set. Commit to unlock." : "Choose one, comrade";
+      status.textContent = ready ? readyText : "Choose one, comrade";
       return ready;
     }
 

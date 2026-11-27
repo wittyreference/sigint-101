@@ -10,7 +10,7 @@
 <section class="exam">
   <div class="scroll-frame">
     <div class="exam__body">
-      <div class="stage-panel__eyebrow">EXAM &middot; {{ question.id }} &middot; {{ question.group }}</div>
+      <div class="stage-panel__eyebrow">EXAM TRAINER &middot; {{ question.id }} &middot; {{ question.group }}</div>
 
       <div class="exam__ask">
         <h1 class="exam__question">{{ question.question }}</h1>
@@ -50,7 +50,7 @@
   {% if not reviewed %}
     <div class="exam__foot">
       <a class="btn exam__sim-link" href="/exam/sim">Practice exam</a>
-      <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+      <span class="predict__hint" role="status" data-choice-status data-ready-text="Choice set. Ready to commit.">Choose one, comrade</span>
       <button class="btn btn--primary btn-commit" type="submit" disabled form="exam-answer">Commit answer</button>
     </div>
   {% else %}

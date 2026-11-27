@@ -2377,7 +2377,7 @@ def test_exam_serves_a_study_card_with_tap_choices_and_no_answer(tmp_path):
         resp = client.get("/exam")
     assert resp.status_code == 200
     # It surfaces a real pool question (its id is in the eyebrow) with four tap choices.
-    served = re.search(r"EXAM &middot; (T\w+)", resp.text).group(1)
+    served = re.search(r"EXAM TRAINER &middot; (T\w+)", resp.text).group(1)
     assert exam.load_pool().get(served) is not None
     assert resp.text.count('name="choice"') == 4
     # Commit-before-reveal: the correct answer is not marked until the learner has answered.
@@ -2922,12 +2922,13 @@ def _exam_bar(home):
     return words("title"), words("sub")
 
 
-def test_home_exam_bar_invites_practice_while_the_pool_is_good(tmp_path):
+def test_home_exam_bar_invites_study_while_the_pool_is_good(tmp_path):
     with _client(tmp_path) as client:
         home = client.get("/")
         card = client.get("/exam")
     assert card.status_code == 200          # the shipped pool passes its check: the trainer is on
-    assert _exam_bar(home) == ("Licence exam", "Technician practice")
+    assert _exam_bar(home) == ("Licence exam", "Technician study")
+    assert "practice" not in _exam_bar(home)[1].lower()
     assert "trainer disabled" not in unescape(home.text).lower()
 
 

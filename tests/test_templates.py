@@ -539,6 +539,66 @@ def test_a_hardware_lesson_still_renders_the_radio():
     assert "SIGNAL HIDDEN" in html
 
 
+def test_stage_headings_match_hardware_vs_no_hardware_lessons():
+    hw = _console(lesson=_intro_lesson(), prediction_committed=True, committed_choice="a")
+    assert ">Watch it happen</h1>" in _section(hw, "demo")
+    assert ">Your turn</h1>" in _section(hw, "try")
+    assert ">Observe</h1>" in _section(hw, "observe")
+    assert ">What happened</h1>" in _section(hw, "explain")
+
+    no_hw = _console(lesson=_rules_lesson(), prediction_committed=True, committed_choice="a")
+    assert ">The idea</h1>" in _section(no_hw, "demo")
+    assert "Watch it happen" not in no_hw
+    assert ">Think it through</h1>" in _section(no_hw, "try")
+    assert "Your turn" not in no_hw
+    assert ">Check your call</h1>" in _section(no_hw, "observe")
+    assert ">Why it holds</h1>" in _section(no_hw, "explain")
+
+
+@pytest.mark.parametrize("hardware", [["rtl-sdr"], []], ids=["hardware", "no-hardware"])
+def test_observe_shows_the_learners_sealed_call_without_revealing_the_answer(hardware):
+    lesson = _scored_lesson(hardware=hardware)
+    html = _console(lesson=lesson, prediction_committed=True,
+                    current_stage="observe", committed_choice="a")
+    obs = _section(html, "observe")
+    assert 'class="observe-call' in obs
+    assert f"Your call: <b>{CHOICES[0]['label']}</b>" in obs
+    # Observe reminds the learner of their own call without leaking the answer early.
+    for reveal in (CHOICES[1]["label"], CHOICES[2]["label"], "What the radio does", "In fact"):
+        assert reveal not in obs
+
+
+def test_predict_gate_uses_lock_verb_consistently():
+    sealed = _console(lesson=_scored_lesson(hardware=["rtl-sdr"]), prediction_committed=False,
+                      current_stage="predict")
+    assert '<span class="rail__gate">Locked until you predict</span>' in sealed
+    predict = _section(sealed, "predict")
+    assert ">Lock it in</button>" in predict
+    assert "Commit prediction" not in predict
+    assert 'data-ready-text="Choice set. Lock it in to unlock."' in predict
+
+    opened = _console(lesson=_scored_lesson(hardware=["rtl-sdr"]), prediction_committed=True,
+                      current_stage="predict", committed_choice="a")
+    predict_open = _section(opened, "predict")
+    assert "Locked in" in predict_open
+    assert "Prediction committed" not in predict_open
+
+
+def test_exam_trainer_and_practice_exam_are_named_apart():
+    home = _render("home.html", title="SIGINT 101", tiles=[], exit_to_desktop=True,
+                   exam_disabled=False)
+    assert "Technician study" in home
+    assert "Technician practice" not in home
+    q = exam.Question(id="T0A01", subelement="T0", group="T0A", fcc_refs=(),
+                      question="Q?", options={"A": "a", "B": "b", "C": "c", "D": "d"},
+                      answer="A", figure=None)
+    trainer = _render("exam.html", title="Exam Trainer", back_href="/", back_label="Home",
+                      question=q, reviewed=False)
+    assert "EXAM TRAINER" in trainer
+    assert ">Practice exam</a>" in trainer
+    assert 'data-ready-text="Choice set. Ready to commit."' in trainer
+
+
 def _section(html, stage):
     """One stage panel's whole <section>, by its data-stage."""
     m = re.search(r'<section[^>]*data-stage="' + re.escape(stage) + r'".*?</section>', html, re.S)
