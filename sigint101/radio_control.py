@@ -19,6 +19,11 @@ class RadioArbiter:
         self._claim = None
         self._closing = False
 
+    @property
+    def busy(self):
+        with self._lock:
+            return self._claim is not None
+
     def close(self):
         with self._lock:
             self._closing = True

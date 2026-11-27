@@ -315,10 +315,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def status_bar(request: Request) -> dict:
         reading = battery.read()
+        ppm = request.app.state.last_ppm
         if reading is None:
-            return {"battery_pct": None, "battery_charging": False}
+            return {"battery_pct": None, "battery_charging": False, "ppm_value": ppm}
         return {"battery_pct": reading.percent, "battery_charging": reading.charging,
-                "battery_low": reading.low, "battery_volts": reading.voltage}
+                "battery_low": reading.low, "battery_volts": reading.voltage, "ppm_value": ppm}
 
     def flock_tool(request: Request) -> dict:
         """The Flock source's tool, read off the detector the site configured: tcpdump or Marauder.
@@ -1743,13 +1744,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     @app.get("/api/hardware")
     def hardware():
-        """What the radio probe sees right now — present, how it looked, and the detail.
-
-        Re-probed on every call, so a dongle unplugged after boot shows up here instead of a stale
-        "present". Absence is reported as data, never masked.
-        """
+        """Report the current USB probe and whether the console is using the RTL-SDR."""
         radio = probe()
-        return {"present": radio.present, "method": radio.method, "detail": radio.detail}
+        if not radio.known:
+            state = "unknown"
+        elif not radio.present:
+            state = "absent"
+        else:
+            busy = app.state.radio_arbiter.busy
+            for name in sdr_consumers:
+                if busy:
+                    break
+                receiver = getattr(app.state, name)
+                release_failure = getattr(receiver, "release_failure", None)
+                if receiver.running or (release_failure and release_failure(pending=True)):
+                    busy = True
+            state = "busy" if busy else "present"
+        return {"present": radio.present, "method": radio.method, "detail": radio.detail,
+                "state": state, "ppm": app.state.last_ppm}
 
     @app.get("/api/battery")
     def battery_reading():

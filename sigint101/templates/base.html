@@ -1,5 +1,5 @@
 <!-- ABOUTME: Kiosk page skeleton for the 800x480 touch console: the persistent status
-     ABOUTME: bar (ppm chip, SNR, battery, theme toggle), Back (Exit on home), and a content block. -->
+     ABOUTME: bar (radio, PPM, live SNR, battery, theme toggle), Back (Exit on home), and a content block. -->
 <!DOCTYPE html>
 <html lang="en" data-theme="{{ theme|default('dark') }}">
 <head>
@@ -35,28 +35,25 @@
       {% block status_actions %}{% endblock %}
 
       <div class="statusbar__status">
-        {# ppm corrected / RAW — the word carries the state, the dot only echoes it #}
-        <span class="chip chip--ppm chip--{{ 'ok' if ppm_corrected else 'warn' }}"
-              title="Clock-error correction">
-          {% if ppm_corrected %}PPM CORRECTED{% else %}PPM RAW{% if ppm_value %} +{{ ppm_value }}{% endif %}{% endif %}
-        </span>
+        <div class="statusbar__readouts">
+          <span class="readout readout--radio" data-status-radio title="RTL-SDR on the USB bus">RADIO —</span>
+          <span class="readout readout--ppm" data-status-ppm title="Last measured clock error">PPM {{ '%+g'|format(ppm_value or 0) if ppm_value is defined and ppm_value is not none else '—' }}</span>
+          {% if snr_db is defined and snr_db is not none %}
+          <span class="readout readout--snr readout__label" title="Live signal-to-noise ratio">SNR {{ snr_db }} dB</span>
+          {% endif %}
 
-        <span class="readout readout--snr" title="Signal-to-noise ratio">
-          <span class="readout__label">SNR</span>
-          <span class="readout__value">{% if snr_db is not defined or snr_db is none %}&mdash;{% else %}{{ snr_db }} dB{% endif %}</span>
-        </span>
-
-        {# A reading the console does not have is shown as unknown, never as a made-up number. #}
-        {% set batt_known = battery_pct is defined and battery_pct is not none %}
-        <span class="readout readout--batt batt{% if batt_known and battery_low %} batt--low{% endif %}"
-              title="Battery{% if battery_volts is defined and battery_volts is not none %} {{ '%.2f'|format(battery_volts) }} V{% endif %}">
-          <span class="batt__glyph">
-            <span class="batt__fill" style="width: {{ battery_pct if batt_known else 0 }}%"></span>
+          {# A reading the console does not have is shown as unknown, never as a made-up number. #}
+          {% set batt_known = battery_pct is defined and battery_pct is not none %}
+          <span class="readout readout--batt batt{% if batt_known and battery_low %} batt--low{% endif %}"
+                title="Battery{% if battery_volts is defined and battery_volts is not none %} {{ '%.2f'|format(battery_volts) }} V{% endif %}">
+            <span class="batt__glyph">
+              <span class="batt__fill" style="width: {{ battery_pct if batt_known else 0 }}%"></span>
+            </span>
+            {# Always present so battery.js can show or hide it as the charger comes and goes. #}
+            <span class="batt__bolt" aria-hidden="true"{% if not battery_charging %} hidden{% endif %}>&#9889;</span>
+            <span class="readout__value">{% if batt_known %}{{ battery_pct }}%{% else %}&mdash;{% endif %}</span>
           </span>
-          {# Always present so battery.js can show or hide it as the charger comes and goes. #}
-          <span class="batt__bolt" aria-hidden="true"{% if not battery_charging %} hidden{% endif %}>&#9889;</span>
-          <span class="readout__value">{% if batt_known %}{{ battery_pct }}%{% else %}&mdash;{% endif %}</span>
-        </span>
+        </div>
 
         <button class="btn-theme" type="button" data-theme-toggle
                 aria-label="Switch theme (dark, sunlight, red-night)">
@@ -133,6 +130,7 @@
   <script src="/static/scroll-keys.js"></script>
   <!-- The battery gauge redraws itself from /api/battery, so a screen left open stays true. -->
   <script src="/static/battery.js"></script>
+  <script src="/static/status-bar.js"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

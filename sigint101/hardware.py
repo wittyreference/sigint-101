@@ -68,6 +68,7 @@ class RadioProbe:
     present: bool
     method: str
     detail: str
+    known: bool = True
 
 
 def probe_rtlsdr(*, which=shutil.which, run=subprocess.run) -> RadioProbe:
@@ -80,21 +81,22 @@ def probe_rtlsdr(*, which=shutil.which, run=subprocess.run) -> RadioProbe:
     # Truth: an RTL2832U physically present on the USB bus.
     if which("lsusb"):
         try:
-            result = run(["lsusb"], capture_output=True, text=True, timeout=5)
+            result = run(["lsusb"], capture_output=True, text=True, timeout=5, check=True)
             text = (result.stdout or "").lower()
             for usb_id in RTLSDR_USB_IDS:
                 if usb_id in text:
                     return RadioProbe(True, "lsusb", f"RTL2832U {usb_id} on USB bus")
             return RadioProbe(False, "lsusb", "no RTL2832U on USB bus")
         except (subprocess.SubprocessError, OSError) as exc:
-            return RadioProbe(False, "lsusb", f"probe failed: {exc}")
+            return RadioProbe(False, "lsusb", f"probe failed: {exc}", known=False)
 
     # No lsusb available: tools may exist, but that is not proof of an attached radio.
     if which("rtl_test"):
         return RadioProbe(False, "rtl_test",
-                          "rtl-sdr tools installed, but cannot confirm a device (no lsusb)")
+                          "rtl-sdr tools installed, but cannot confirm a device (no lsusb)",
+                          known=False)
 
-    return RadioProbe(False, "none", "no lsusb and no rtl-sdr tools found")
+    return RadioProbe(False, "none", "no lsusb and no rtl-sdr tools found", known=False)
 
 
 @dataclass(frozen=True)

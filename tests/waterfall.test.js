@@ -579,3 +579,17 @@ test("every meter note fits the meter: restarting reads '— starting —', none
       assert.ok(panel.meterNoteText(note, "").length <= 12, note);
     }
   });
+
+test("the status SNR comes from the newest live sweep, including a measured zero", () => {
+  const body = { available: true, command: "rtl_power", stale: null,
+                 rows: [{ snr_db: 32.5 }, { snr_db: 0 }] };
+  assert.equal(panel.liveSnr({ code: 200, body }, true), 0);
+  assert.equal(panel.liveSnr({ code: 200, body }, false), null);
+  for (const stale of ["waiting", "stalled", "resuming", "restarting"]) {
+    assert.equal(panel.liveSnr({ code: 200, body: { ...body, stale } }, true), null);
+  }
+  assert.equal(panel.liveSnr({ code: 503, body }, true), null);
+  assert.equal(panel.liveSnr({ code: 200, body: { ...body, command: null } }, true), null);
+  assert.equal(panel.liveSnr({ code: 200, body: { ...body, rows: [] } }, true), null);
+  assert.equal(panel.liveSnr(null, true), null);
+});
