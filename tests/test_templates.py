@@ -926,7 +926,7 @@ def test_a_flipper_lesson_shows_the_device_panel_not_a_waterfall():
     assert "canvas class=\"waterfall\"" not in html
     # The honest states every panel has: a badge that is not LIVE until the device answers, the
     # device card hidden, and the empty line at the readable size, never a device line up front.
-    assert re.search(r"data-flipper-badge[^>]*>SAMPLE &middot; NOT LIVE<", demo)
+    assert re.search(r"data-flipper-badge[^>]*>CHECKING<", demo)
     assert re.search(r"<div[^>]*data-flipper-card[^>]*\shidden", demo)
     assert re.search(r'class="decoder__empty" data-flipper-empty', demo)
     # Back a step rides the fixed dial beside Next, as on every other panel's stages.
@@ -1579,3 +1579,40 @@ def test_unit_grid_has_no_three_pixel_padding_overflow_without_shrinking_tiles()
     assert _css_decl(".tiles", "overflow-y") == "auto"
     assert _css_decl(".tiles", "grid-auto-rows") == "max-content"
     assert _decls(_css_rule(".tile"))["min-height"] == "124px"
+
+
+@pytest.mark.parametrize("form", ["predict", "check", "exam.html", "exam_sim.html"])
+def test_choice_commit_has_a_themed_gate_without_native_popup(form):
+    if form in ("predict", "check"):
+        lesson = load_lessons(REAL_PACKS)[1]
+        whole = _console(lesson=lesson, current_stage=form, prediction_committed=form == "check")
+        html = _section(whole, form)
+    else:
+        q = exam.load_pool().get("T1A01")
+        whole = html = _render(form, **_exam_ctx(question=q, reviewed=False, can_skip=True))
+    assert '/static/lesson-nav.js' in whole
+    assert re.search(r"<form[^>]*\bnovalidate\b[^>]*>", html)
+    assert re.search(r"<form[^>]*\bdata-choice-commit\b[^>]*>", html)
+    assert re.search(r'<input type="radio"[^>]*\brequired\b[^>]*>', html)
+    assert re.search(r'<button[^>]*\bbtn-commit\b[^>]*\bdisabled\b[^>]*>', html)
+    assert re.search(r'<span[^>]*role="status"[^>]*>Choose one, comrade</span>', html)
+
+
+def test_receiver_macros_start_checking_and_adsb_count_is_hidden():
+    html = _console(lesson=_intro_lesson(), current_stage="demo")
+    assert "Checking receiver…" in html
+    assert "SAMPLE &middot; NOT LIVE" not in html
+    rack = _render("operate.html", **_status(), inst=instrument("adsb"),
+                   instruments=INSTRUMENTS)
+    assert "Checking receiver…" in rack
+    assert re.search(r'<div class="radar__count" hidden>', rack)
+
+
+def test_shared_refusal_badge_reads_on_every_theme_including_the_waterfall():
+    selector = ".badge--na, .decoder__status--empty, .decoder__status--stopped"
+    rule = _decls(_css_rule(selector))
+    ink = re.fullmatch(r"var\((--[a-z-]+)\)", rule["color"])[1]
+    paper = re.fullmatch(r"var\((--[a-z-]+)\)", rule["background"])[1]
+    for theme in THEMES:
+        tokens = _theme_tokens(theme)
+        assert _contrast(tokens[ink], tokens[paper]) >= 4.5, theme

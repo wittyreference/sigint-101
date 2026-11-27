@@ -9,9 +9,9 @@
    read as text the way the lesson's fixed dial does. A decoder that names its own frequency
    shows that; the rest show their band. #}
 {% set FIXED = {
-  'adsb': ('1090', 'MHz', 'Mode S · dump1090 decoding ADS-B'),
+  'adsb': ('1090', 'MHz', 'Mode S · dump1090'),
   'ais': ('162.0', 'MHz', 'Marine AIS · 161.975 + 162.025 · rtl_ais'),
-  'apt': (none, 'MHz', 'NOAA APT · satdump decoding a pass'),
+  'apt': (none, 'MHz', 'NOAA APT · satdump'),
   'sstv': (none, 'MHz', 'SSTV · rtl_fm|sox|sstv decoding a picture'),
   'lora': ('915', 'MHz', 'US LoRa band · meshtastic listening'),
   'flock': ('2.4', 'GHz', 'WiFi · monitor mode, receive-only'),

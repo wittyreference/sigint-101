@@ -69,7 +69,7 @@
     DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = pages.length > 0;
-      if (!pages.length) empty.textContent = "listening… no pages heard yet";
+      if (!pages.length) empty.textContent = DecoderPanel.quietText(body, "no pages heard yet");
     }
   }
 
@@ -78,7 +78,7 @@
     var empty = panel.querySelector("[data-pocsag-empty]");
     var badge = panel.querySelector("[data-pocsag-badge]");
     if (list) list.innerHTML = "";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode POCSAG");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -94,7 +94,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

@@ -47,14 +47,14 @@
   }
 
   // No read: the card hides and the empty line carries the reason (no Flipper on USB, two on the
-  // bus, an app open on it). The badge says only that nothing was read, which is true of all three.
+  // bus, an app open on it). The API supplies the cause to the shared badge.
   function showEmpty(panel, body) {
     var card = panel.querySelector("[data-flipper-card]");
     var empty = panel.querySelector("[data-flipper-empty]");
     var badge = panel.querySelector("[data-flipper-badge]");
     fillCard(panel, null);
     if (card) card.hidden = true;
-    DecoderPanel.showDown(panel, badge, empty, body, "NO READ", "no Flipper on USB");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function render(panel, body) {
@@ -81,7 +81,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

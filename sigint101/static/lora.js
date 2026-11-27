@@ -53,20 +53,19 @@
         '<span class="decoder__tone">' + esc(floorLabel(p)) + "</span>";
       list.appendChild(li);
     });
-    if (badge) { badge.textContent = "LIVE"; badge.className = "decoder__status decoder__status--live"; }
+    DecoderPanel.showLive(badge, body);
     if (empty) {
       empty.hidden = packets.length > 0;
-      if (!packets.length) empty.textContent = "listening… no packets yet";
+      if (!packets.length) empty.textContent = DecoderPanel.quietText(body, "no packets yet");
     }
   }
 
-  function showEmpty(panel, reason) {
+  function showEmpty(panel, body) {
     var list = panel.querySelector("[data-lora-list]");
     var empty = panel.querySelector("[data-lora-empty]");
     var badge = panel.querySelector("[data-lora-badge]");
     if (list) list.innerHTML = "";
-    if (badge) { badge.textContent = "NO RADIO"; badge.className = "decoder__status decoder__status--empty"; }
-    if (empty) { empty.hidden = false; empty.textContent = reason || "no LoRa radio to read"; }
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -75,15 +74,18 @@
       .then(function (res) {
         var waiting = false;
         if (!res.ok || res.body.available === false) {
-          var reason = (res.body && res.body.reason) || "no LoRa radio to read";
-          panels.forEach(function (p) { showEmpty(p, reason); });
+          panels.forEach(function (p) { showEmpty(p, res.body); });
           waiting = true;
         } else {
           panels.forEach(function (p) { render(p, res.body); });
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();
