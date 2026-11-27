@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -76,6 +77,7 @@ from .provenance import (
     gather_provenance,
     record_baseline_sample,
 )
+from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, finish_console
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .safety import notice_for
@@ -124,6 +126,7 @@ def _env_float(name: str):
 # default so the kiosk's "Measure ppm" tap returns promptly; the trade-off is resolution, which the
 # measurement reports so the learner sees how finely it could read.
 PPM_SECONDS = 8.0
+SHUTDOWN_TOTAL_S = 15.0
 
 # How many recent receptions the console keeps in memory for the rack's log line. The events log
 # keeps every one; this only bounds what a poll looks through.
@@ -561,28 +564,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.receptions = None
         app.state.reception_error = None
         app.state.last_ppm = None
+        app.state.radio_arbiter = RadioArbiter()
+        app.state.reception_sink = ReceptionSink()
         for attr, inst in RECEIVERS.items():
             receiver = getattr(app.state, attr)
             receiver.on_reception = _heard(inst, receiver)
+            receiver.reception_sink = app.state.reception_sink
         try:
             yield
         finally:
-            app.state.sweeper.stop()
-            app.state.decoder.stop()
-            app.state.lora.stop()
-            app.state.rds.stop()
-            app.state.adsb.stop()
-            app.state.aprs.stop()
-            app.state.pocsag.stop()
-            app.state.acars.stop()
-            app.state.ais.stop()
-            app.state.dmr.stop()
-            app.state.apt.stop()
-            app.state.sstv.stop()
-            app.state.flock.stop()
-            app.state.rayhunter.stop()
-            app.state.progress.close()
-            app.state.exam_store.close()
+            app.state.radio_arbiter.close()
+            names = (*sdr_consumers, "lora", "flock", "rayhunter")
+            receivers = [(name, getattr(receiver, "shutdown", receiver.stop))
+                         for name in names if (receiver := getattr(app.state, name))]
+            stores = [("progress", app.state.progress.close), ("exam", app.state.exam_store.close)]
+            app.state.shutdown_errors = await finish_console(
+                receivers, stores, app.state.reception_sink, SHUTDOWN_TOTAL_S)
+            for reason in app.state.shutdown_errors:
+                logging.getLogger(__name__).error("console shutdown: %s", reason)
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -1207,24 +1206,43 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
                      "apt", "sstv")
 
-    # Handing the radio over and starting its new tenant happen under one lock, so two pollers (two
-    # open panels, or a late poll after navigating away) cannot land a release inside another
-    # route's start — the audit's thrash drill wedged the dongle exactly that way.
-    sdr_lock = threading.RLock()
+    unavailable = {
+        "ppm": PpmUnavailable, "sweeper": SpectrumUnavailable, "decoder": DecodeUnavailable,
+        "rds": RDSUnavailable, "adsb": AdsbUnavailable, "aprs": AprsUnavailable,
+        "pocsag": PocsagUnavailable, "acars": AcarsUnavailable, "ais": AisUnavailable,
+        "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
+    }
 
     def _claim_sdr(target: str, start=None):
-        """Hand the one RTL-SDR to `target`, standing every other SDR-exclusive consumer down.
-
-        With `start`, the new tenant is started under the same lock and its result returned.
-        """
-        with sdr_lock:
-            for name in sdr_consumers:
-                consumer = getattr(app.state, name)
-                if name == target:
-                    consumer.resume()
-                else:
-                    consumer.release()
-            return start() if start is not None else None
+        """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
+        deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
+        refusal = unavailable[target]
+        consumers = {name: getattr(app.state, name) for name in sdr_consumers}
+        receiver = consumers.get(target)
+        intent = None
+        prepare = getattr(receiver, "prepare_start", None)
+        try:
+            for consumer in consumers.values():
+                failure = getattr(consumer, "release_failure", None)
+                if failure and (reason := failure()):
+                    raise refusal(reason)
+            if prepare is not None:
+                intent = prepare(for_claim=True, deadline=deadline)
+            with app.state.radio_arbiter.reserve(target, refusal, deadline):
+                for name, consumer in consumers.items():
+                    if name != target:
+                        consumer.release()
+                        failure = getattr(consumer, "release_failure", None)
+                        if failure and (reason := failure(pending=True)):
+                            raise refusal(reason)
+                if receiver is not None:
+                    receiver.resume()
+                if prepare is not None:
+                    return receiver.launch_start(intent)
+                return start() if start is not None else None
+        finally:
+            if intent is not None:
+                receiver.discard_start(intent)
 
     # The last refusal logged per route. A route that cannot start answers every poll, and logging
     # every identical refusal is how events.jsonl grew by 42 lines a minute behind a dead Flock. A
@@ -1839,6 +1857,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
                 radio=radio if radio is not None else _radio(inst, receiver))
             with reception_lock:
+                if not app.state.reception_sink.open():
+                    return
                 try:
                     event = log_event(app.state.events_path, "reception", record)
                 except OSError as exc:

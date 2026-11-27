@@ -13,7 +13,6 @@ from .childproc import (
     ChildWatch,
     RunGuard,
     command_line,
-    emit_reception,
     spawn,
 )
 from .childproc import Pipeline as _Pipeline
@@ -286,9 +285,8 @@ class AprsDecoder(SupervisedReceiver):
                     station = _station_dict(self._roster.absorb(packet, now=time.time()))
                     freq_hz = self.freq_hz
                     cmd = command_line(proc)
-                    report = self.on_reception
-                if report is not None:
-                    emit_reception(report, station, command=cmd, freq_hz=freq_hz, radio=radio)
+                    report = self._admit()
+                self._emit(report, station, command=cmd, freq_hz=freq_hz, radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):

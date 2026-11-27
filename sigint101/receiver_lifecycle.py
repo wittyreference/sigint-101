@@ -169,16 +169,31 @@ class SupervisedReceiver:
             run.physical.wait(max(0, deadline - time.monotonic()))
         return run
 
-    def release_failure(self):
+    def release_failure(self, *, pending=False):
         run = self._run
         if run and not run.reaped:
             if run.failure:
                 return run.failure
-            if run.cancel.is_set():
+            if pending and run.cancel.is_set():
                 return f"{run.watch.tool} is still releasing the radio"
         intent = self._intent
-        if intent and intent.spawning and intent.cancelled:
+        if pending and intent and intent.spawning and intent.cancelled:
             return f"{self.watch.tool} is still opening the radio"
+
+    def _admit(self):
+        hook = self.on_reception
+        sink = getattr(self, "reception_sink", None)
+        if hook is not None and (sink is None or sink.admit()):
+            return hook, sink
+
+    def _emit(self, admitted, item, **provenance):
+        if admitted is not None:
+            hook, sink = admitted
+            try:
+                childproc.emit_reception(hook, item, **provenance)
+            finally:
+                if sink is not None:
+                    sink.finished()
 
     def prepare_start(self, *, for_claim=False, deadline=None):
         if deadline is None:
