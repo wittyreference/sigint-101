@@ -78,6 +78,8 @@ def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_pat
         try:
             assert retried.wait(3), "no background retry ran during refused claims"
             assert ticket.physical.is_set() and not ticket.reaped
+            with decoder._runs:
+                assert not decoder._runs.is_current(ticket.number)
             assert proc.poll() is None and launches == []
         finally:
             stop_polls.set()
