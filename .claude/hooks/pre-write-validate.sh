@@ -168,6 +168,7 @@ fi
 # Bypass: SKIP_LEARNINGS_GUARD=true
 
 if [[ "$SKIP_LEARNINGS_GUARD" != "true" ]] && \
+   [ "$HAS_CONTENT_KEY" = "1" ] && \
    [[ "$FILE_PATH" =~ learnings\.md$ ]] && \
    [[ ! "$FILE_PATH" =~ learnings-archive\.md$ ]]; then
     # Resolve the actual file (may be behind a symlink)

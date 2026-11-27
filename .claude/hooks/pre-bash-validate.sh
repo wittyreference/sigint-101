@@ -298,8 +298,8 @@ if echo "$COMMAND" | grep -qE "^git\s+commit"; then
     fi
 
     if [ -n "$TYPE_CHECK_CMD" ]; then
-        TYPE_CHECK_OUT=$(cd "$PROJECT_ROOT" && eval "$TYPE_CHECK_CMD" 2>&1 || true)
-        TYPE_CHECK_EXIT=$?
+        TYPE_CHECK_EXIT=0
+        TYPE_CHECK_OUT=$(cd "$PROJECT_ROOT" && eval "$TYPE_CHECK_CMD" 2>&1) || TYPE_CHECK_EXIT=$?
         # Detect failures: tsc uses 'error TS', others use non-zero exit
         TYPE_CHECK_FAILED=false
         if echo "$TYPE_CHECK_OUT" | grep -q 'error TS'; then

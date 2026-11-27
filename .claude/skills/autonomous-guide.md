@@ -21,22 +21,29 @@ Even in autonomous mode, these gates are never bypassed:
 
 ## Claude Code Path
 
-Launch with pre-approved permissions:
+> **Status:** `./scripts/enable-autonomous.sh` and `scripts/smoke-autonomous.sh` are **not shipped in
+> this repository**. The section below describes the autonomous-launcher contract from the upstream
+> toolkit template.
+
+Launch with pre-approved permissions (when the launcher script is present):
 
 ```bash
-./scripts/enable-autonomous.sh
+./scripts/enable-autonomous.sh  # not shipped in this repository
 ```
 
 Displays a warning, requires typing `I ACKNOWLEDGE THE RISKS` (read from stdin — pipe or type
 it), then launches. It uses `claude --permission-mode acceptEdits` with a curated allow-list —
 **never** `--dangerously-skip-permissions` — so the pre-approval never removes the quality/safety
-gates above. Those are hooks (pre-commit identity/comment/review-evidence, pre-write
-worktree/pipeline, TX safety, coverage) and fire regardless of permission mode. That is the whole
-safety basis for pre-approving anything.
+gates above. In this repository, `githooks/pre-commit` (with `githooks/pre-merge-commit` and
+`githooks/pre-push`) checks **git commit identity only** (author and committer handle and e-mail,
+not comments or review evidence), while `.claude/hooks/` runs `pre-write-validate.sh` (credentials,
+ABOUTME headers, pipeline test gate, learnings archival guard), `worktree-gate.sh`,
+`pre-bash-validate.sh`, and `flywheel-doc-check.sh` regardless of permission mode. That is the
+whole safety basis for pre-approving anything.
 
 **Pre-approved (allow-list):**
 - File operations (Read, Write, Edit, Glob, Grep)
-- Test/lint: `make test`, `make elmer-selftest`, `.venv/bin/pytest`, `.venv/bin/ruff`
+- Test/lint: `make test`, `make selftest`, `.venv/bin/pytest`, `.venv/bin/ruff`
 - Additive / read-only git: `git add`, `git commit`, `git status`, `git diff`, `git log`
 
 **Explicitly denied (deny-list):**
@@ -51,8 +58,9 @@ out of scope). Anything not on the allow-list still prompts. Session markers are
 > `.claude/settings*.json`, `githooks/`, `.claude/hooks/`, `.claude/rules/`, and `CLAUDE.md`
 > (including a nested one) were refused — "denied by your permission settings". These flags are a
 > **claude-version-coupled contract**: a future `claude` could rename a flag or change
-> deny-precedence and the (stub-based) unit tests would not catch it. **Re-run
-> `scripts/smoke-autonomous.sh` after any `claude` upgrade** to confirm the deny-list still enforces.
+> deny-precedence and the (stub-based) unit tests would not catch it. Re-run
+> `scripts/smoke-autonomous.sh` (not shipped in this repository) after any `claude` upgrade where
+> that script is present to confirm the deny-list still enforces.
 
 ## Feature Factory Path
 
@@ -72,9 +80,9 @@ Removes budget/turn limits, auto-approves phase transitions. Session summary dis
 
 ## Headless Path (CI/CD / Unattended)
 
-> **Status (2026-09): NOT YET IMPLEMENTED.** `scripts/run-headless.sh` and its pre-defined tasks
-> below are a design, not a shipped script — the interactive launcher above is built, the headless
-> path is deferred. The `claude -p` patterns are documented here for when it is built.
+> **Status (2026-09): NOT SHIPPED IN THIS REPOSITORY.** `scripts/run-headless.sh` and
+> `scripts/headless-tasks/parallel-refactor.md` are designs from the upstream toolkit, not shipped
+> scripts here. The `claude -p` patterns are documented below for reference only.
 
 Run Claude Code non-interactively with `claude -p`. No terminal UI, no human input -- true fire-and-forget. Acknowledgment via env var (CI/CD pattern).
 
