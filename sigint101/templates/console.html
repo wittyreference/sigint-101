@@ -41,31 +41,19 @@
 {% block title %}{{ lesson.title }}{% endblock %}
 
 {% block content %}
-  {# ---- Stage rail: progress through the loop; sealed stages read as locked ----
-     Every stage up to the furthest one reached is a button that jumps back to it; a stage not yet
-     reached is a disabled button until the walk gets there. A sealed stage before the commit is
-     not a button at all — commit-before-reveal leaves nothing to tap. #}
+  {# Stage order and progress. Prev and Next do the moving. #}
   {% set reached_at = reached|default(0) %}
-  {# Seven stages (an intro lesson with a check) leave the gate label room only to wrap. #}
-  <nav class="rail{% if lesson.stage_order|length > 6 %} rail--long{% endif %}" aria-label="Lesson progress">
-    {% for stage in lesson.stage_order %}
-      {% set sealed = stage in lesson.sealed_stages %}
-      {% if sealed and not prediction_committed %}
-      <span class="rail-pip rail-pip--locked" data-stage="{{ stage }}">
-        <span class="rail-pip__dot"></span>{{ stage }}
-      </span>
-      {% else %}
-      {% set pip_class = 'rail-pip--active' if stage == cur
-          else ('rail-pip--done' if loop.index0 <= reached_at else '') %}
-      <button class="rail-pip {{ pip_class }}" type="button" data-stage="{{ stage }}"
-              data-nav="goto"{% if loop.index0 > reached_at %} disabled{% endif %}>
-        <span class="rail-pip__dot"></span>{{ stage }}
-      </button>
-      {% endif %}
-    {% endfor %}
-    <span class="rail-sep"></span>
+  <div class="rail">
+    <ol class="rail__steps" aria-label="Lesson progress">
+      {% for stage in lesson.stage_order %}
+        {% set sealed = stage in lesson.sealed_stages and not prediction_committed %}
+        {% set state = 'locked' if sealed else ('active' if stage == cur
+            else ('done' if loop.index0 <= reached_at else 'ahead')) %}
+        <li class="rail-pip rail-pip--{{ state }}" data-stage="{{ stage }}"{% if state == 'active' %} aria-current="step"{% endif %}>{{ stage }}</li>
+      {% endfor %}
+    </ol>
     {% if not prediction_committed %}<span class="rail__gate">Locked until you predict</span>{% endif %}
-  </nav>
+  </div>
 
   {# ---- One stage at a time. Sealed stages are not rendered at all until a
          prediction is committed: commit-before-reveal is enforced server-side,
@@ -542,28 +530,32 @@
                (gain, provenance, ppm) beside it and the sweep's command strip under the row. #}
             <div class="instrument">
               <div class="instrument__row">
-                {{ panels.waterfall(tune_band) }}
+                {{ panels.waterfall(tune_band, interactive=stage != "demo") }}
                 {% if 'gain' in lesson.panels %}
-                {{ panels.gain_meter() }}
+                {{ panels.gain_meter(interactive=stage != "demo") }}
                 {% endif %}
                 {% if 'provenance' in lesson.panels %}
-                {{ panels.provenance() }}
+                {{ panels.provenance(primary=false) }}
                 {% endif %}
                 {% if 'ppm' in lesson.panels %}
-                {{ panels.ppm() }}
+                {{ panels.ppm(primary=false) }}
                 {% endif %}
               </div>
               {{ panels.sweep_command_strip() }}
-              {# +/- and a tap on the waterfall retune the live sweep through /api/tune (waterfall.js).
-                 The dial starts on the lesson's target, marked pending, and reads as tuned only once
-                 the radio confirms the span. #}
-              <div class="tune" data-tune-strip data-step-hz="{{ step_hz|default(100000) }}">
+              {# Demo shows the sweep without manual tuning. The dial starts on the lesson's target
+                 and reads as tuned once the radio confirms the span. #}
+              <div class="tune{% if stage == 'demo' %} tune--fixed{% endif %}" data-tune-strip
+                   data-step-hz="{{ step_hz|default(100000) }}">
+                {% if stage != 'demo' %}
                 <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
+                {% endif %}
                 <div class="tune__dial">
                   <div class="tune__freq tune__freq--pending" data-freq>{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
-                  <div class="tune__caption" data-tune-caption>Tap to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz</div>
+                  <div class="tune__caption" data-tune-caption>{% if stage == 'demo' %}Watch the waterfall{% else %}Tap to tune &middot; {{ ((step_hz|default(100000)) / 1000)|int }} kHz{% endif %}</div>
                 </div>
+                {% if stage != 'demo' %}
                 <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+                {% endif %}
                 {# Next-step rides on the tune strip here (not a separate footer) so the fixed 800x480
                    instrument stage keeps a scrollable band for the narration below. #}
                 {{ prev_step(loop.first) }}
@@ -688,7 +680,7 @@
      tap-to-tune retune the live sweep) in /static/waterfall.js, which alone paints the canvas — a
      placeholder spectrogram would be invented signal, which the RF honesty invariant forbids.
      Keyboard scrolling is shared across screens — see /static/scroll-keys.js (loaded in base). -->
-<!-- Stage navigation: Next, Previous and rail-pip jumps; each step is remembered server-side so a
+<!-- Stage navigation: Next and Previous; each step is remembered server-side so a
      reload resumes in place, and Complete leads on to the next lesson or back to the unit. -->
 <script src="/static/lesson-nav.js"></script>
 {% endblock %}

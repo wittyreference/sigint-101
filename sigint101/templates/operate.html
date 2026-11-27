@@ -61,18 +61,18 @@
     {# Free tuning: +/- by the step, or a tap on the waterfall, through /api/tune (waterfall.js).
        The dial reads the frequency tuned to, pending until the radio confirms it. #}
     <div class="tune rack__tune" data-tune-strip data-step-hz="{{ inst.steps[0] }}">
-      <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
+      <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;<span class="rack__adjust-label">Freq</span></button>
       <div class="tune__dial">
         <div class="tune__freq tune__freq--pending" data-freq>{{ "%.3f"|format(freq_hz / 1000000) }}<span>MHz</span></div>
         <div class="tune__caption" data-tune-caption>tap the waterfall to tune</div>
       </div>
-      <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+      <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+<span class="rack__adjust-label">Freq</span></button>
       {{ step_key(inst.steps) }}
       {# Gain, through /api/gain: down, the gain the radio reports (AUTO, or unknown), up. #}
       <div class="rack__gain" aria-label="Tuner gain">
-        <button class="tune-btn" type="button" data-gain-step="-1" aria-label="Gain down">&minus;</button>
+        <button class="tune-btn" type="button" data-gain-step="-1" aria-label="Gain down">&minus;<span class="rack__adjust-label">Gain</span></button>
         <span class="rack__gain-read"><span class="rack__gain-tag">GAIN</span><b class="rack__gain-value" data-gain-value>&mdash;</b></span>
-        <button class="tune-btn" type="button" data-gain-step="1" aria-label="Gain up">+</button>
+        <button class="tune-btn" type="button" data-gain-step="1" aria-label="Gain up">+<span class="rack__adjust-label">Gain</span></button>
       </div>
     </div>
     {% else %}
@@ -100,12 +100,12 @@
          data-band-low="{{ inst.band.low_hz }}" data-band-high="{{ inst.band.high_hz }}"
          data-step-hz="{{ inst.steps[0] }}"
          {% if text_withheld %}data-text-withheld{% endif %}>
-      <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;</button>
+      <button class="tune-btn" type="button" data-tune-step="-1" aria-label="Tune down">&minus;<span class="rack__adjust-label">Freq</span></button>
       <div class="tune__dial">
         <div class="tune__freq" data-decoder-freq>{{ ("%.4f" if inst.key == 'pager' else "%.3f")|format(freq_hz / 1000000) }}<span>MHz</span></div>
         <div class="tune__caption" data-tune-caption data-band-name="{{ inst.band.name }}">{% if text_withheld %}framing only &middot; text withheld{% else %}{{ inst.band.name }}{% endif %}</div>
       </div>
-      <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+</button>
+      <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+<span class="rack__adjust-label">Freq</span></button>
       {{ step_key(inst.steps) }}
     </div>
     {% else %}

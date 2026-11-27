@@ -1076,23 +1076,24 @@ def test_recording_a_stage_on_an_unknown_lesson_is_404(tmp_path):
 
 
 def _pip(html, stage):
-    """The rail pip for one stage: its tag (button = tappable) and attributes."""
-    return re.search(r'<(button|span) class="rail-pip[^"]*"[^>]*data-stage="' + stage + r'"[^>]*>',
+    """The markup for one stage in the progress rail."""
+    return re.search(rf'<\w+ class="rail-pip[^"]*"[^>]*data-stage="{stage}"[^>]*>',
                      html).group(0)
 
 
-def test_the_rail_opens_every_visited_stage_and_no_further(tmp_path):
+def test_the_rail_reports_each_stage_state_without_jump_targets(tmp_path):
     with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
         _stage(client, 1, "try")
         _stage(client, 1, "demo")                 # stepped back: try was still reached
         html = client.get("/lesson/1").text
-    assert "rail-pip--active" in _pip(html, "demo")
-    for visited in ("frame", "try"):
-        pip = _pip(html, visited)
-        assert pip.startswith("<button") and "disabled" not in pip
-    assert "disabled" in _pip(html, "predict")    # not reached yet
-    assert _pip(html, "observe").startswith("<span")   # sealed: not even a button
-    assert "rail-pip--locked" in _pip(html, "observe")
+    assert 'data-nav="goto"' not in html
+    expected = {"frame": "done", "demo": "active", "try": "done",
+                "predict": "ahead", "observe": "locked", "explain": "locked"}
+    for stage, state in expected.items():
+        pip = _pip(html, stage)
+        assert pip.startswith("<li ") and "disabled" not in pip
+        assert f"rail-pip--{state}" in pip
+        assert ('aria-current="step"' in pip) == (stage == "demo")
 
 
 # --- spectrum (no-mock: absence is an answer, never a fake row) ---------------

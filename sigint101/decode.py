@@ -11,12 +11,19 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    command_line,
+    emit_reception,
+    running_command,
+    spawn,
+    stop_process,
+)
 from .hardware import (
     RTL_433,
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # The 433.92 MHz ISM band, where keyfobs, doorbells and the weather/sensor zoo chatter. rtl_433
@@ -174,9 +181,9 @@ class Decoder:
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._reads = deque(maxlen=history)
         # Called with each sensor read as a plain dict, from the reader thread only and outside
-        # the buffer lock. The console's hook logs it as a reception and never raises, so the call
-        # is made directly: it cannot end the decode. A sensor's repeated copies of one
-        # transmission report once (RepeatFilter); the panel's buffer keeps every copy printed.
+        # the buffer lock. The console's hook logs the run's command, frequency and radio with
+        # each reception and never raises. A sensor's repeated copies of one transmission
+        # report once (RepeatFilter); the panel's buffer keeps every copy printed.
         self.on_reception = None
         self._repeats = RepeatFilter()
         # Two locks, same discipline as the sweeper: _lock guards the buffer the reader writes, and
@@ -209,12 +216,10 @@ class Decoder:
         """True while the dongle has been handed to another program on purpose."""
         return self._released
 
-    def _choose_device(self) -> int:
-        """Which radio index to open, re-checked every start (the bus renumbers under us)."""
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
+        """Which radio to open, re-checked every start (the bus renumbers under us)."""
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise DecodeUnavailable(str(exc)) from exc
 
@@ -279,7 +284,8 @@ class Decoder:
         blocked = self.watch.blocked()
         if blocked:
             raise DecodeUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
         try:
             self._proc = self._spawn(self.command())
         except (OSError, ValueError) as exc:
@@ -289,11 +295,13 @@ class Decoder:
         self.error = None
         # Only a stop moves the run on, and stop and start both hold _life, so this is the run
         # now, and it stays this reader's until the next stop.
-        self._thread = threading.Thread(target=self._read, args=(self._proc, self._run),
+        self._thread = threading.Thread(target=self._read,
+                                        args=(self._proc, self._run, command_line(self._proc),
+                                              self.freq_hz, radio),
                                         name="sigint101-decoder", daemon=True)
         self._thread.start()
 
-    def _read(self, proc, run: int) -> None:
+    def _read(self, proc, run: int, command: str | None, freq_hz: int, radio: dict) -> None:
         """Consume rtl_433's JSON on a background thread until the process ends.
 
         The reader can outlive its stop: an rtl_433 that is not reaped keeps the pipe open past
@@ -314,7 +322,8 @@ class Decoder:
                     repeat = self._repeats.is_repeat(decode, time.monotonic())
                 report = self.on_reception
                 if report is not None and not repeat:
-                    report(decode.as_dict())
+                    emit_reception(report, decode.as_dict(), command=command, freq_hz=freq_hz,
+                                   radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._lock:
                 if run == self._run:

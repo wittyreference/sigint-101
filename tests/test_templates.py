@@ -622,15 +622,21 @@ def test_a_gain_lesson_shows_the_gain_meter_beside_the_waterfall():
     assert "data-gain-gap" in html and "data-gain-floor" in html
 
 
-def test_the_gain_panel_carries_a_real_gain_stepper_and_its_value():
-    # M2's try stage is "step the gain from the bottom up": the panel has - and + that drive
-    # /api/gain, and the gain the radio is on is shown beside them (unknown until it reports).
+def test_demo_keeps_the_live_readings_and_reserves_radio_controls_for_try():
     html = _console(lesson=_gain_intro_lesson(), current_stage="demo")
-    demo = re.search(r'<section class="stage-panel[^"]*" data-stage="demo"(.*?)</section>',
-                     html, re.S).group(1)
-    meter = re.search(r'<aside class="gain-meter"(.*?)</aside>', demo, re.S).group(1)
-    assert 'data-gain-step="-1"' in meter and 'data-gain-step="1"' in meter
-    assert re.search(r"data-gain-value[^>]*>&mdash;<", meter)
+    demo = _section(html, "demo")
+    assert "data-tune-step" not in demo
+    assert "data-gain-step" not in demo
+    assert not re.search(r"<canvas[^>]* data-tune(?=\s|>)", demo)
+    assert "Tap to tune" not in demo
+    assert 'class="waterfall"' in demo and "data-gain-value" in demo
+
+    # M2's Try asks the learner to step the gain and watch how the gap changes.
+    try_stage = _section(html, "try")
+    assert re.search(r"<canvas[^>]* data-tune(?=\s|>)", try_stage)
+    assert 'data-tune-step="-1"' in try_stage and 'data-tune-step="1"' in try_stage
+    assert 'data-gain-step="-1"' in try_stage and 'data-gain-step="1"' in try_stage
+    assert re.search(r"data-gain-value[^>]*>&mdash;<", try_stage)
 
 
 def test_the_gain_stepper_buttons_are_full_touch_targets():
@@ -1691,3 +1697,42 @@ def test_lesson_instrument_captions_leave_activity_to_the_status_badge():
             if activity.search(re.sub(r"<[^>]*>", "", caption)):
                 claims.append(f"lesson {lid}: {caption}")
     assert not claims, "\n".join(claims)
+
+
+@pytest.mark.parametrize("key", ["waterfall", "aprs"])
+def test_operator_adjust_keys_name_the_quantity_on_the_key(key):
+    html = _render("operate.html", **_status(), inst=instrument(key), instruments=INSTRUMENTS,
+                   freq_hz=144_390_000)
+    pairs = {"tune": "Freq", "gain": "Gain"} if key == "waterfall" else {"tune": "Freq"}
+    for control, label in pairs.items():
+        for direction in (-1, 1):
+            hook = f'data-{control}-step="{direction}"'
+            button = re.search(rf'<button[^>]*{hook}[^>]*>(.*?)</button>', html, re.S)
+            assert button and f">{label}<" in button[1]
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+@pytest.mark.parametrize("reviewed", [False, True])
+def test_exam_body_has_the_more_below_cue_in_study_and_practice(template, reviewed):
+    html = _render(template, **_exam_ctx(
+        question=exam.load_pool().get("T0A01"), reviewed=reviewed,
+        position=1, total=35, score=0, answered=0, pass_mark=26))
+    assert re.search(r'<div class="scroll-frame">\s*<div class="exam__body">', html)
+    assert 'src="/static/scroll-keys.js"' in html
+
+
+@pytest.mark.parametrize(("lesson_id", "instrument_key", "control"), [
+    (3, "health", "data-prov-capture"),
+    (4, "clock", "data-ppm-measure"),
+])
+def test_lesson_next_is_primary_beside_a_secondary_instrument_action(
+    lesson_id, instrument_key, control,
+):
+    lesson = load_lessons(REAL_PACKS)[lesson_id]
+    demo = _section(_console(lesson=lesson, current_stage="demo"), "demo")
+    keys = re.findall(r'<button[^>]*class="[^"]*btn--primary[^"]*"[^>]*>', demo)
+    assert len(keys) == 1 and 'data-nav="next"' in keys[0]
+    assert re.search(rf'<button class="[^"]*btn--secondary[^"]*"[^>]*{control}', demo)
+    rack = _render("operate.html", **_status(), inst=instrument(instrument_key),
+                   instruments=INSTRUMENTS, freq_hz=98_100_000)
+    assert re.search(rf'<button class="[^"]*btn--primary[^"]*"[^>]*{control}', rack)

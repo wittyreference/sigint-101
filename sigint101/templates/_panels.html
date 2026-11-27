@@ -15,12 +15,11 @@
    a control (D16). Drawn as one line under the LoRa panel head and in the stage foot of M6/M7. #}
 {% macro safety_notice(text) %}{% if text %}<p class="safety-notice" role="note" data-safety-notice><span class="safety-notice__tag" aria-hidden="true">[!]</span> {{ text }}</p>{% endif %}{% endmacro %}
 
-{# ---- Instrument: a waterfall canvas (kept empty until a real sweep arrives) + tap-to-tune. A lesson with no
-   hardware (e.g. the legal rules) has no radio, so its instrument-named stages fall through to the
-   plain text branch instead of drawing a waterfall. ---- #}
-{% macro waterfall(tune_band=none) %}
+{# A waterfall canvas with optional tap-to-tune, kept empty until a real sweep arrives.
+   Lessons with no radio use a plain text stage instead. #}
+{% macro waterfall(tune_band=none, interactive=true) %}
                 <div class="waterfall-wrap">
-                  <canvas class="waterfall" width="760" height="200" data-tune
+                  <canvas class="waterfall" width="760" height="200"{% if interactive %} data-tune{% endif %}
                           {% if tune_band %}data-tune-low="{{ tune_band.low_hz }}" data-tune-high="{{ tune_band.high_hz }}"{% if tune_band.bin_hz %} data-tune-bin="{{ tune_band.bin_hz }}"{% endif %}{% endif %}
                           aria-label="Spectrogram waterfall"></canvas>
                   <span class="badge badge--sample">CHECKING</span>
@@ -46,7 +45,7 @@
    them — the SNR — shaded and labelled. Driven live by waterfall.js from the same sweep as the
    waterfall; no radio shows an honest empty meter. The -/+ stepper beside it really changes the
    sweep's gain through /api/gain, under the gain the radio reports (unknown until it does). #}
-{% macro gain_meter() %}
+{% macro gain_meter(interactive=true) %}
                 <aside class="gain-meter" data-gain-meter aria-label="Gain and SNR level meter">
                   <div class="gain-meter__scale">
                   <div class="gain-meter__title">GAIN</div>
@@ -65,10 +64,12 @@
                   </div>
                   <div class="gain-meter__control">
                     <b class="gain-meter__value" data-gain-value>&mdash;</b>
+                    {% if interactive %}
                     <div class="gain-meter__buttons">
                       <button class="tune-btn gain-meter__btn" type="button" data-gain-step="-1" aria-label="Gain down">&minus;</button>
                       <button class="tune-btn gain-meter__btn" type="button" data-gain-step="1" aria-label="Gain up">+</button>
                     </div>
+                    {% endif %}
                   </div>
                 </aside>
 {% endmacro %}
@@ -76,7 +77,7 @@
 {# Provenance panel (M3): the radio's account of itself and, led large, whether its reference level
    still matches the captured baseline — a dropped reference is the deaf-vs-empty signal. Driven
    live by prov.js; honest "no reference" when nothing reads. #}
-{% macro provenance() %}
+{% macro provenance(primary=true) %}
                 <aside class="prov-panel" data-prov-panel aria-label="Provenance and baseline">
                   <div class="prov__title">PROVENANCE</div>
                   <div class="prov__verdict" data-prov-verdict>&mdash;</div>
@@ -86,7 +87,7 @@
                     <span>temp <b data-prov-temp>&mdash;</b></span>
                     <span>pwr <b data-prov-power>&mdash;</b></span>
                   </div>
-                  <button class="btn btn--primary prov__capture" type="button" data-prov-capture>Capture baseline</button>
+                  <button class="btn {{ "btn--primary" if primary else "btn--secondary" }} prov__capture" type="button" data-prov-capture>Capture baseline</button>
                 </aside>
 {% endmacro %}
 
@@ -94,13 +95,13 @@
    tuner has a reference of its own). Measure-on-demand — the button captures the tuned station's
    19 kHz stereo pilot via /api/ppm/measure; a mono or weak station carries no pilot, and the panel
    says so rather than guess. #}
-{% macro ppm() %}
+{% macro ppm(primary=true) %}
                 <aside class="ppm-panel" data-ppm-panel aria-label="Clock error in ppm">
                   <div class="ppm__title">CLOCK &middot; PPM</div>
                   <div class="ppm__status">correction <b>RAW</b></div>
                   <div class="ppm__result" data-ppm-result>measured &mdash;</div>
                   <div class="ppm__detail" data-ppm-detail>tune strong, then tap</div>
-                  <button class="btn btn--primary ppm__measure" type="button"
+                  <button class="btn {{ "btn--primary" if primary else "btn--secondary" }} ppm__measure" type="button"
                           data-ppm-measure data-ppm-hz="98100000">Measure ppm</button>
                 </aside>
 {% endmacro %}
