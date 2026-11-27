@@ -1,9 +1,11 @@
-# ABOUTME: Tests the five retuning text decoders against stale readers that outlive a stop (C31).
-# ABOUTME: Covers retune, release, stop and died paths, lock ordering, and DMR's per-reader tail.
+# ABOUTME: Tests the retuning and contact decoders against stale readers that outlive a stop (C31).
+# ABOUTME: Covers retune, release, stop and died paths, lock ordering, DMR tail and AIS assembler.
 
 from __future__ import annotations
 
 import shlex
+import socket
+import struct
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,12 +14,12 @@ from typing import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from sigint101 import acars, aprs, dmr, pocsag, rds
+from sigint101 import acars, adsb, ais, aprs, dmr, flock, pocsag, rds
 from sigint101.app import create_app
 from sigint101.childproc import ChildWatch
 from sigint101.events import read_events
 from sigint101.hardware import RadioProbe
-from tests.child_fakes import LateProc
+from tests.child_fakes import LateByteProc, LateProc
 
 FIXTURE_PACKS = Path(__file__).resolve().parent / "fixtures" / "lesson_packs"
 
@@ -49,6 +51,51 @@ POCSAG_2 = "POCSAG1200: Address:  123456  Function: 0  Numeric: 1234567890"
 RDS_1 = '{"pi":"0x6201","group":"0A","ps":"YLEKLAS1"}'
 RDS_2 = '{"pi":"0x7302","group":"0A","ps":"WXYZFM  "}'
 
+ADSB_1 = (
+    "MSG,1,1,1,A1B2C3,1,2026/10/28,10:15:00.000,2026/10/28,10:15:00.100,"
+    "UAL123  ,,,,,,,,0,0,0,0"
+)
+ADSB_2 = (
+    "MSG,3,1,1,DDEEFF,1,2026/10/28,10:15:03.000,2026/10/28,10:15:03.100,"
+    ",39000H,,,37.80000,-122.40000,,,0,0,0,0"
+)
+
+AIS_1 = "!AIVDM,1,1,,B,177KQJ5000G?tO`K>RA1wUbN0TKH,0*5C"
+AIS_2 = "!AIVDM,1,1,,A,13u?etPv2;0n:dDPwUM1U1Cb069D,0*24"
+AIS_TYPE5_FRAG1 = (
+    "!AIVDM,2,1,1,A,55?MbV02;H;s<HtKR20EHE:0@T4@Dn2222222216L961O5Gf0NSQEp6ClRp8,0*1C"
+)
+AIS_TYPE5_FRAG2 = "!AIVDM,2,2,1,A,88888888880,2*25"
+
+_FLOCK_OUI = bytes.fromhex("b41e52")
+_BROADCAST = b"\xff" * 6
+_FLOCK_IES = bytes.fromhex(
+    "0000" "020100" "0c0100" "7f080000000000000000" "dd07506f9a16030103"
+    "2d1a" + "00" * 26 + "bf0c" + "00" * 12 + "dd070050f208000000"
+)
+
+
+def _mgmt_frame(subtype: int, addr1: bytes, addr2: bytes, addr3: bytes, ies: bytes = b"") -> bytes:
+    return bytes([subtype << 4, 0x00]) + b"\x00\x00" + addr1 + addr2 + addr3 + b"\x00\x00" + ies
+
+
+def _pcap_record(dot11: bytes, rt_len: int = 36) -> bytes:
+    rec = struct.pack("<BBH", 0, 0, rt_len) + b"\x00" * (rt_len - 4) + dot11
+    return struct.pack("<IIII", 0, 0, len(rec), len(rec)) + rec
+
+
+PCAP_GLOBAL_HDR = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 512, 127)
+MARAUDER_PCAP_HDR = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 512, 105)
+FLOCK_DOT11_1 = _mgmt_frame(4, _BROADCAST, _FLOCK_OUI + b"\x00\x00\x08", _BROADCAST, _FLOCK_IES)
+FLOCK_DOT11_2 = _mgmt_frame(8, _BROADCAST, _FLOCK_OUI + b"\x00\x00\x09", _BROADCAST)
+FLOCK_1 = _pcap_record(FLOCK_DOT11_1)
+FLOCK_2 = _pcap_record(FLOCK_DOT11_2)
+
+
+def _retune_proc(tool: str):
+    return lambda _run_no, freq_hz, device: LateProc(
+        [tool, "-f", str(freq_hz), "-d", str(device)])
+
 
 @dataclass(frozen=True)
 class DecoderSpec:
@@ -56,15 +103,37 @@ class DecoderSpec:
     build: Callable
     unavailable: type
     tool: str
-    home_hz: int
-    other_hz: int
-    line1: str
+    home_hz: object
+    other_hz: int | None
+    line1: object
     key1: object
-    line2: str
+    line2: object
     key2: object
     item_key: Callable
     listed: Callable
     hold_target: Callable   # dec -> (owner_obj, method_name) called inside the buffer lock
+    make_proc: Callable
+    releases: bool = True
+
+    @property
+    def restarts(self) -> tuple[str, ...]:
+        paths = []
+        if self.other_hz is not None:
+            paths.append("retune")
+        if self.releases:
+            paths.append("release")
+        paths.extend(("stop", "died"))
+        return tuple(paths)
+
+    @property
+    def stand_downs(self) -> tuple[str, ...]:
+        paths = []
+        if self.other_hz is not None:
+            paths.append("retune")
+        if self.releases:
+            paths.append("release")
+        paths.append("stop")
+        return tuple(paths)
 
 
 def _common():
@@ -86,6 +155,7 @@ SPECS = (
         item_key=lambda d: d["flight"],
         listed=lambda dec: [m["flight"] for m in dec.messages()],
         hold_target=lambda dec: (dec._log, "add"),
+        make_proc=_retune_proc("acarsdec"),
     ),
     DecoderSpec(
         name="aprs",
@@ -101,6 +171,7 @@ SPECS = (
         item_key=lambda d: d["source"],
         listed=lambda dec: [s["source"] for s in dec.stations()],
         hold_target=lambda dec: (dec._roster, "absorb"),
+        make_proc=_retune_proc("rtl_fm"),
     ),
     DecoderSpec(
         name="dmr",
@@ -116,6 +187,7 @@ SPECS = (
         item_key=lambda d: d["talkgroup"],
         listed=lambda dec: [c["talkgroup"] for c in dec.calls()],
         hold_target=lambda dec: (dec._log, "add"),
+        make_proc=_retune_proc("dsd-fme"),
     ),
     DecoderSpec(
         name="pocsag",
@@ -131,6 +203,7 @@ SPECS = (
         item_key=lambda d: d["address"],
         listed=lambda dec: [p["address"] for p in dec.pages()],
         hold_target=lambda dec: (dec._log, "add"),
+        make_proc=_retune_proc("rtl_fm"),
     ),
     DecoderSpec(
         name="rds",
@@ -146,10 +219,87 @@ SPECS = (
         item_key=lambda d: d["pi"],
         listed=lambda dec: [dec.station().pi] if dec.station().pi is not None else [],
         hold_target=lambda dec: (dec._station, "absorb"),
+        make_proc=_retune_proc("rtl_fm"),
+    ),
+    DecoderSpec(
+        name="adsb",
+        build=lambda s: adsb.AdsbDecoder(spawn=s, **_common()),
+        unavailable=adsb.AdsbUnavailable,
+        tool="dump1090-fa",
+        home_hz=adsb.DEFAULT_ADSB_HZ,
+        other_hz=None,
+        line1=ADSB_1,
+        key1="A1B2C3",
+        line2=ADSB_2,
+        key2="DDEEFF",
+        item_key=lambda d: d["hex_ident"],
+        listed=lambda dec: [a["hex_ident"] for a in dec.aircraft()],
+        hold_target=lambda dec: (dec._tracker, "absorb"),
+        make_proc=lambda run_no, device: LateProc(
+            ["dump1090-fa", "--device-index", str(device), "--run", str(run_no)]),
+    ),
+    DecoderSpec(
+        name="ais",
+        build=lambda s: ais.AisDecoder(spawn=s, **_common()),
+        unavailable=ais.AisUnavailable,
+        tool="rtl_ais",
+        home_hz=[ais.AIS_CHANNEL_A_HZ, ais.AIS_CHANNEL_B_HZ],
+        other_hz=None,
+        line1=AIS_1,
+        key1=477553000,
+        line2=AIS_2,
+        key2=265547250,
+        item_key=lambda d: d["mmsi"],
+        listed=lambda dec: [v["mmsi"] for v in dec.vessels()],
+        hold_target=lambda dec: (dec._roster, "absorb"),
+        make_proc=lambda run_no, device, host, port: LateProc(
+            ["rtl_ais", "-d", str(device), "-h", str(host), "-P", str(port),
+             "--run", str(run_no)]),
+    ),
+    DecoderSpec(
+        name="flock",
+        build=lambda s: flock.FlockDetector(spawn=s, **_common()),
+        unavailable=flock.FlockUnavailable,
+        tool="tcpdump",
+        home_hz=None,
+        other_hz=None,
+        line1=FLOCK_1,
+        key1="b4:1e:52:00:00:08",
+        line2=FLOCK_2,
+        key2="b4:1e:52:00:00:09",
+        item_key=lambda d: d["mac"],
+        listed=lambda dec: [d["mac"] for d in dec.detections()],
+        hold_target=lambda dec: (dec._roster, "absorb"),
+        make_proc=lambda run_no, interface: LateByteProc(
+            ["tcpdump", "-i", str(interface), "--run", str(run_no)],
+            preamble=PCAP_GLOBAL_HDR),
+        releases=False,
     ),
 )
 
 SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
+RESTART_CASES = [pytest.param(s, r, id=f"{s.name}-{r}") for s in SPECS for r in s.restarts]
+STAND_DOWN_CASES = [pytest.param(s, sd, id=f"{s.name}-{sd}") for s in SPECS for sd in s.stand_downs]
+DURING_STOP_CASES = [
+    pytest.param(s, sd, during, id=f"{s.name}-{sd}-{during}")
+    for s in SPECS
+    for sd in ((["retune", "stop"]) if s.other_hz is not None
+               else (["release", "stop"] if s.releases else ["stop"]))
+    for during in ("stopping", "terminate")
+]
+
+
+def _stand_down_for_restart(dec, spec: DecoderSpec) -> tuple[object, list]:
+    """Stand down `dec` by its strongest path so the next start() launches a fresh run."""
+    if spec.other_hz is not None:
+        dec.retune(spec.other_hz)
+        return spec.other_hz, []
+    if spec.releases:
+        dec.release()
+        dec.resume()
+        return spec.home_hz, []
+    dec.stop()
+    return spec.home_hz, [spec.key1]
 
 
 class _Heard:
@@ -158,14 +308,15 @@ class _Heard:
     Mirrors app.py's S-b hook: explicit `command` and `freq_hz` win over the live attributes.
     """
 
-    def __init__(self, dec, item_key):
+    def __init__(self, dec, item_key, default_freq=None):
         self.dec = dec
         self.item_key = item_key
+        self.default_freq = default_freq
         self.log = []
         self._changed = threading.Condition()
 
     def __call__(self, item, *, command=None, freq_hz=None):
-        freq = freq_hz if freq_hz is not None else self.dec.freq_hz
+        freq = freq_hz if freq_hz is not None else getattr(self.dec, "freq_hz", self.default_freq)
         cmd = command if command is not None else self.dec.live_command()
         with self._changed:
             self.log.append((self.item_key(item), freq, cmd))
@@ -255,8 +406,8 @@ def late_factory():
     def make(spec: DecoderSpec):
         procs = []
 
-        def spawn(freq_hz, device):
-            proc = LateProc([spec.tool, "-f", str(freq_hz), "-d", str(device)])
+        def spawn(*args):
+            proc = spec.make_proc(len(procs) + 1, *args)
             procs.append(proc)
             all_procs.append(proc)
             return proc
@@ -265,7 +416,7 @@ def late_factory():
         dec.STOP_WAIT_S = 0.05
         clock = _Clock()
         dec.watch = ChildWatch(dec.watch.tool, clock=clock)
-        heard = _Heard(dec, spec.item_key)
+        heard = _Heard(dec, spec.item_key, default_freq=spec.home_hz)
         dec.on_reception = heard
         return dec, procs, heard, clock
 
@@ -277,8 +428,7 @@ def late_factory():
             proc.reader.join(5)
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
-@pytest.mark.parametrize("restart", ["retune", "release", "stop", "died"])
+@pytest.mark.parametrize("spec, restart", RESTART_CASES)
 def test_old_reader_outliving_restart_hears_nothing_into_the_new_run(late_factory, spec, restart):
     dec, procs, heard, clock = late_factory(spec)
     dec.start()
@@ -320,12 +470,12 @@ def test_old_reader_outliving_restart_hears_nothing_into_the_new_run(late_factor
     procs[1].feed(spec.line2)
     heard.wait_for(2)
     assert heard.log[1:] == [(spec.key2, new_freq, _line(procs[1]))]
-    assert str(new_freq) in _line(procs[1])
+    if spec.other_hz is not None:
+        assert str(new_freq) in _line(procs[1])
     assert spec.key2 in spec.listed(dec)
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
-@pytest.mark.parametrize("stand_down", ["retune", "release", "stop"])
+@pytest.mark.parametrize("spec, stand_down", STAND_DOWN_CASES)
 def test_old_reader_outliving_stop_hears_nothing_before_the_next_start(
         late_factory, spec, stand_down):
     dec, procs, heard, _ = late_factory(spec)
@@ -349,11 +499,13 @@ def test_old_reader_outliving_stop_hears_nothing_before_the_next_start(
     assert heard.log == [(spec.key1, spec.home_hz, _line(procs[0]))]
     assert spec.listed(dec) == kept
 
-    dec.resume()
+    if spec.releases:
+        dec.resume()
     dec.start()
     procs[1].feed(spec.line2)
     heard.wait_for(2)
-    assert heard.log[1:] == [(spec.key2, dec.freq_hz, _line(procs[1]))]
+    expected_freq = getattr(dec, "freq_hz", spec.home_hz)
+    assert heard.log[1:] == [(spec.key2, expected_freq, _line(procs[1]))]
     assert spec.key2 in spec.listed(dec)
 
 
@@ -363,7 +515,7 @@ def test_old_readers_pipe_failing_after_retune_is_not_the_new_runs_failure(late_
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
-    dec.retune(spec.other_hz)
+    _stand_down_for_restart(dec, spec)
     assert procs[0].reader.is_alive()
     dec.start()
     procs[0].break_pipe(OSError("old pipe failed"))
@@ -411,12 +563,13 @@ def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(l
     assert len(procs) == 3
 
 
-def _restart_while_held(dec, lock, clock, other_hz):
+def _restart_while_held(dec, lock, clock, spec: DecoderSpec) -> list:
     assert lock.arrived.wait(5)
-    dec.retune(other_hz)
+    _, kept = _stand_down_for_restart(dec, spec)
     clock.now += 60
     dec.start()
     lock.go_on.set()
+    return kept
 
 
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
@@ -429,9 +582,9 @@ def test_read_on_its_way_in_at_restart_is_not_listed_or_logged(late_factory, spe
     heard.wait_for(1)
     lock.hold(procs[0].reader)
     procs[0].feed(spec.line2)
-    _restart_while_held(dec, lock, clock, spec.other_hz)
+    kept = _restart_while_held(dec, lock, clock, spec)
     _end_pipe(procs[0])
-    assert spec.listed(dec) == []
+    assert spec.listed(dec) == kept
     assert heard.log == [(spec.key1, spec.home_hz, _line(procs[0]))]
     assert len(procs) == 2
 
@@ -446,7 +599,7 @@ def test_pipe_failure_on_its_way_in_at_restart_is_not_the_new_runs(late_factory,
     heard.wait_for(1)
     lock.hold(procs[0].reader)
     procs[0].break_pipe(OSError("old pipe failed"))
-    _restart_while_held(dec, lock, clock, spec.other_hz)
+    _restart_while_held(dec, lock, clock, spec)
     procs[0].reader.join(5)
     assert not procs[0].reader.is_alive()
     assert dec.error is None
@@ -466,7 +619,7 @@ def test_death_on_its_way_in_at_restart_is_not_the_new_runs(late_factory, spec):
     lock.hold(procs[0].reader)
     procs[0].die(1)
     procs[0].close_pipe()
-    _restart_while_held(dec, lock, clock, spec.other_hz)
+    _restart_while_held(dec, lock, clock, spec)
     procs[0].reader.join(5)
     assert not procs[0].reader.is_alive()
     assert dec.error is None
@@ -477,9 +630,9 @@ def test_death_on_its_way_in_at_restart_is_not_the_new_runs(late_factory, spec):
 
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
 def test_stop_moves_the_run_on_inside_the_buffer_lock(late_factory, spec):
-    # Hold the old reader inside the buffer lock (past its run check) while a retune runs in
-    # another thread. Because stop() ends the run under that same lock, retune waits for the
-    # in-flight update: the reception logs at home_hz and is cleared by the retune.
+    # Hold the old reader inside the buffer lock (past its run check) while a stop/retune/release
+    # runs in another thread. Because stop() ends the run under that same lock, the stopper waits
+    # for the in-flight update: the reception logs under the old run's provenance.
     dec, procs, heard, _ = late_factory(spec)
     lock = _TellingLock()
     dec._runs.lock = lock
@@ -512,25 +665,34 @@ def test_stop_moves_the_run_on_inside_the_buffer_lock(late_factory, spec):
     procs[0].feed(spec.line2)
     assert inside.wait(5)                          # past its run test, holding the buffer lock
 
-    retune = threading.Thread(target=dec.retune, args=(spec.other_hz,))
-    lock.watch_for = retune
-    retune.start()
-    assert lock.tried.wait(5)                      # retune waits on the buffer lock
+    if spec.other_hz is not None:
+        stopper = threading.Thread(target=dec.retune, args=(spec.other_hz,))
+        cleared = True
+    elif spec.releases:
+        stopper = threading.Thread(target=dec.release)
+        cleared = True
+    else:
+        stopper = threading.Thread(target=dec.stop)
+        cleared = False
+    lock.watch_for = stopper
+    stopper.start()
+    assert lock.tried.wait(5)                      # stop waits on the buffer lock
     go_on.set()
-    retune.join(10)
-    assert not retune.is_alive()
+    stopper.join(10)
+    assert not stopper.is_alive()
     procs[0].reader.join(5)
     assert not procs[0].reader.is_alive()
     assert [(key, freq) for key, freq, _ in heard.log] == [
         (spec.key1, spec.home_hz), (spec.key2, spec.home_hz)]
-    assert spec.listed(dec) == []
+    if cleared:
+        assert spec.listed(dec) == []
+    else:
+        assert set(spec.listed(dec)) == {spec.key1, spec.key2}
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
-@pytest.mark.parametrize("stand_down", ["retune", "stop"])
-@pytest.mark.parametrize("during", ["stopping", "terminate"])
+@pytest.mark.parametrize("spec, stand_down, during", DURING_STOP_CASES)
 def test_what_an_old_reader_reads_during_its_stop_is_not_kept(
-        late_factory, spec, during, stand_down):
+        late_factory, spec, stand_down, during):
     dec, procs, heard, _ = late_factory(spec)
     dec.start()
     procs[0].feed(spec.line1)
@@ -553,6 +715,8 @@ def test_what_an_old_reader_reads_during_its_stop_is_not_kept(
     setattr(owner, during, mid_stop)
     if stand_down == "retune":
         dec.retune(spec.other_hz)
+    elif stand_down == "release":
+        dec.release()
     else:
         dec.stop()
     old.reader.join(5)
@@ -560,6 +724,8 @@ def test_what_an_old_reader_reads_during_its_stop_is_not_kept(
     assert heard.log == [(spec.key1, spec.home_hz, _line(old))]
     assert spec.key2 not in spec.listed(dec)
     assert dec.error is None
+    if stand_down == "release":
+        dec.resume()
     dec.start()                                    # not refused with the old run's reason
     assert len(procs) == 2
     assert dec.running
@@ -575,12 +741,12 @@ def test_run_after_retune_still_records_its_own_failure(late_factory, spec, end,
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
-    dec.retune(spec.other_hz)
+    new_freq, _ = _stand_down_for_restart(dec, spec)
     assert procs[0].reader.is_alive()
     dec.start()
     procs[1].feed(spec.line2)
     heard.wait_for(2)
-    assert heard.log[1] == (spec.key2, spec.other_hz, _line(procs[1]))
+    assert heard.log[1] == (spec.key2, new_freq, _line(procs[1]))
     end(procs[1])
     procs[1].reader.join(5)
     assert not procs[1].reader.is_alive()
@@ -673,11 +839,13 @@ def test_reader_stalled_after_unlocking_still_logs_old_runs_frequency_and_comman
     assert paused.wait(5)
     assert lock_free_at_hook == [True]
 
-    dec.retune(spec.other_hz)
+    _stand_down_for_restart(dec, spec)
     dec.start()
     assert len(procs) == 2
-    assert dec.freq_hz == spec.other_hz
+    if spec.other_hz is not None:
+        assert dec.freq_hz == spec.other_hz
     assert dec.live_command() == _line(procs[1])
+    assert _line(procs[0]) != _line(procs[1])
     assert procs[0].reader.is_alive()
 
     go_on.set()
@@ -692,12 +860,12 @@ def test_reader_stalled_after_unlocking_still_logs_old_runs_frequency_and_comman
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
 def test_app_reception_hook_logs_old_provenance_when_reader_stalls_past_retune(tmp_path, spec):
     # End-to-end through app.py's _heard hook: when a reader stalls right after releasing the run
-    # guard until the retuned replacement has started, events.jsonl and /api/receptions still
-    # record the old run's frequency and command.
+    # guard until the replacement has started, events.jsonl and /api/receptions still record the
+    # old run's frequency and command.
     procs = []
 
-    def spawn(freq_hz, device):
-        proc = LateProc([spec.tool, "-f", str(freq_hz), "-d", str(device)])
+    def spawn(*args):
+        proc = spec.make_proc(len(procs) + 1, *args)
         procs.append(proc)
         return proc
 
@@ -738,11 +906,13 @@ def test_app_reception_hook_logs_old_provenance_when_reader_stalls_past_retune(t
             procs[0].feed(spec.line2)
             assert paused.wait(5)
 
-            dec.retune(spec.other_hz)
+            _stand_down_for_restart(dec, spec)
             dec.start()
             assert len(procs) == 2
-            assert dec.freq_hz == spec.other_hz
+            if spec.other_hz is not None:
+                assert dec.freq_hz == spec.other_hz
             assert dec.live_command() == _line(procs[1])
+            assert _line(procs[0]) != _line(procs[1])
 
             go_on.set()
             _end_pipe(procs[0])
@@ -812,7 +982,7 @@ def test_natural_death_lets_retiring_reader_drain_complete_item_with_its_provena
 def test_eof_during_stop_cannot_commit_retry_and_block_retuned_start(late_factory, spec):
     # If the old child exits and its reader handles EOF right as _runs.end() completes, the
     # watch's stop marker must already be set so ChildWatch.ended() never commits a retry
-    # deadline that refuses the retuned start.
+    # deadline that refuses the replacement start.
     dec, procs, heard, _ = late_factory(spec)
     dec.start()
     procs[0].feed(spec.line1)
@@ -830,24 +1000,25 @@ def test_eof_during_stop_cannot_commit_retry_and_block_retuned_start(late_factor
         return result
 
     dec._runs.end = end_with_eof
-    dec.retune(spec.other_hz)
+    _stand_down_for_restart(dec, spec)
     assert not old.reader.is_alive()
     assert dec.watch.stopped is False
     assert dec.watch.blocked() is None
     assert dec.error is None
-    # Without advancing the clock, the retuned start must succeed immediately.
+    # Without advancing the clock, the next start must succeed immediately.
     dec.start()
     assert len(procs) == 2
     assert dec.running
-    assert dec.freq_hz == spec.other_hz
+    if spec.other_hz is not None:
+        assert dec.freq_hz == spec.other_hz
 
 
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
 def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_during_stop(
         late_factory, spec):
     # The old reader has reached EOF and is waiting inside exit_reason() for the child's exit
-    # status while retune() stops the run. Computing exit diagnostics must not hold the buffer
-    # lock, and once retune() invalidates the run and watch, the old reader cannot commit a retry.
+    # status while stop/retune/release runs. Computing exit diagnostics must not hold the buffer
+    # lock, and once the stop invalidates the run and watch, the old reader cannot commit a retry.
     dec, procs, heard, _ = late_factory(spec)
     dec.start()
     procs[0].feed(spec.line1)
@@ -875,7 +1046,7 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
     assert waiting.wait(5)
     assert lock_free_during_wait == [True]
 
-    dec.retune(spec.other_hz)
+    _stand_down_for_restart(dec, spec)
     dec.start()
     assert len(procs) == 2
     assert dec.running
@@ -890,3 +1061,264 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
     dec.start()
     assert len(procs) == 3
     assert dec.running
+
+
+# --- PR 2 specifics: AIS per-reader assembler, release reappearance, real socket/Marauder drain -
+
+
+def test_ais_old_reader_half_message_cannot_combine_with_new_runs_second_half(late_factory):
+    # Each AIS reader owns its own AisAssembler: fragment 1 from a lingering old reader after
+    # release/restart must never pair with fragment 2 on the new run to complete a vessel.
+    spec = SPEC_BY_NAME["ais"]
+    dec, procs, heard, _ = late_factory(spec)
+    dec.start()
+    procs[0].feed(AIS_1)
+    heard.wait_for(1)
+
+    dec.release()
+    dec.resume()
+    dec.start()
+    assert procs[0].reader.is_alive()
+
+    # The old reader receives part 1 of EVER DIADEM (MMSI 351759000) and finishes; the new run
+    # receives only part 2, followed by a real single-sentence vessel to prove it processed past.
+    procs[0].feed(AIS_TYPE5_FRAG1)
+    _end_pipe(procs[0])
+
+    procs[1].feed(AIS_TYPE5_FRAG2, AIS_2)
+    heard.wait_for(2)
+    assert [v["mmsi"] for v in dec.vessels()] == [spec.key2]
+    assert [key for key, _, _ in heard.log] == [spec.key1, spec.key2]
+
+
+@pytest.mark.parametrize("name", ["adsb", "ais"])
+def test_contact_heard_before_release_does_not_reappear_in_new_run(late_factory, name):
+    # A vessel or aircraft already heard before release() must not reappear in the cleared
+    # roster/scope when the lingering old reader receives another message for that same contact.
+    spec = SPEC_BY_NAME[name]
+    dec, procs, heard, _ = late_factory(spec)
+    dec.start()
+    procs[0].feed(spec.line1)
+    heard.wait_for(1)
+
+    dec.release()
+    dec.resume()
+    dec.start()
+    assert procs[0].reader.is_alive()
+
+    procs[0].feed(spec.line1)
+    _end_pipe(procs[0])
+    assert spec.listed(dec) == []
+    assert len(heard.log) == 1
+
+
+class _AliveProc:
+    """Minimal process handle behind a real adsb._Feed or ais._Feed socket."""
+
+    def __init__(self, args):
+        self.args = list(args)
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        if self.returncode is None:
+            self.returncode = -15
+
+    def kill(self):
+        self.terminate()
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def test_adsb_socket_buffered_lines_after_stop_do_not_leak_into_new_run():
+    # Even though adsb._Feed closes its socket on stop(), lines already split from one recv()
+    # chunk keep draining. Stalling on the first line past stop()+start() must drop the second.
+    pairs = []
+    procs = []
+
+    def spawn(device):
+        client_sock, server_sock = socket.socketpair()
+        client_sock.settimeout(adsb.FEED_POLL_S)
+        pairs.append((client_sock, server_sock))
+        proc = _AliveProc(
+            ["dump1090-fa", "--device-index", str(device), "--run", str(len(procs) + 1)])
+        procs.append(proc)
+        return adsb._Feed(proc, client_sock)
+
+    dec = adsb.AdsbDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 0.05
+    heard = _Heard(dec, lambda d: d["hex_ident"], default_freq=adsb.DEFAULT_ADSB_HZ)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        old_thread = dec._thread
+        # Deliver two SBS lines in one TCP chunk so the second stays buffered inside _Feed._lines.
+        pairs[0][1].sendall((ADSB_1 + "\n" + ADSB_2 + "\n").encode())
+        assert paused.wait(5)
+
+        dec.release()
+        dec.resume()
+        dec.start()
+        assert len(procs) == 2
+
+        go_on.set()
+        pairs[0][1].close()
+        old_thread.join(5)
+        assert not old_thread.is_alive()
+        dec.stop()
+        assert dec.aircraft() == []
+        assert heard.log == [("A1B2C3", adsb.DEFAULT_ADSB_HZ, _line(procs[0]))]
+    finally:
+        go_on.set()
+        dec.stop()
+        for a, b in pairs:
+            for s in (a, b):
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+
+def test_ais_udp_buffered_lines_after_stop_do_not_leak_into_new_run():
+    # One UDP datagram carrying two AIVDM lines: closing the socket on stop() does not stop the
+    # inner splitlines() loop from yielding the second line once the hook unblocks.
+    socks = []
+    procs = []
+
+    def spawn(device, host, port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        socks.append(sock)
+        proc = _AliveProc(["rtl_ais", "-d", str(device), "--run", str(len(procs) + 1)])
+        procs.append(proc)
+        return ais._Feed(proc, sock)
+
+    dec = ais.AisDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 0.05
+    heard = _Heard(dec, lambda d: d["mmsi"],
+                   default_freq=[ais.AIS_CHANNEL_A_HZ, ais.AIS_CHANNEL_B_HZ])
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        old_thread = dec._thread
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            sender.sendto((AIS_1 + "\n" + AIS_2 + "\n").encode(), socks[0].getsockname())
+        assert paused.wait(5)
+
+        dec.release()
+        dec.resume()
+        dec.start()
+        assert len(procs) == 2
+
+        go_on.set()
+        old_thread.join(5)
+        assert not old_thread.is_alive()
+        dec.stop()
+        assert dec.vessels() == []
+        assert heard.log == [
+            (477553000, [ais.AIS_CHANNEL_A_HZ, ais.AIS_CHANNEL_B_HZ], _line(procs[0])),
+        ]
+    finally:
+        go_on.set()
+        dec.stop()
+        for s in socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+def test_marauder_buffered_frames_after_stop_do_not_leak_into_new_run(tmp_path):
+    # MarauderFlockDetector inherits FlockDetector's RunGuard: closing the Marauder serial link
+    # on stop() does not discard frames already buffered inside iter_marauder_frames(), so the
+    # run guard must drop the second frame rather than listing or logging it under the new run.
+    tty = tmp_path / "marauder"
+    tty.write_text("", encoding="utf-8")
+
+    def marauder_record(dot11: bytes) -> bytes:
+        return struct.pack("<IIII", 1, 0, len(dot11), len(dot11)) + dot11
+
+    chunk = (
+        flock.MARAUDER_BEGIN
+        + MARAUDER_PCAP_HDR
+        + marauder_record(FLOCK_DOT11_1)
+        + marauder_record(FLOCK_DOT11_2)
+        + flock.MARAUDER_CLOSE
+    )
+    links = []
+
+    class _FakeMarauderLink(LateByteProc):
+        def __init__(self, run_no: int):
+            super().__init__(["sniffprobe", "-serial", "--run", str(run_no)])
+            self.answered = True
+            self.end_reason = None
+
+        def end(self, reason=None):
+            self.end_reason = reason
+            self.terminate()
+
+    dec = flock.MarauderFlockDetector(tty=str(tty))
+    dec.STOP_WAIT_S = 0.05
+
+    def open_capture():
+        link = _FakeMarauderLink(len(links) + 1)
+        links.append(link)
+        return link
+
+    dec._open_capture = open_capture
+    heard = _Heard(dec, lambda d: d["mac"], default_freq=None)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        links[0].feed(chunk)
+        assert paused.wait(5)
+
+        dec.stop()
+        dec.start()
+        assert len(links) == 2
+
+        go_on.set()
+        _end_pipe(links[0])
+        assert [d["mac"] for d in dec.detections()] == ["b4:1e:52:00:00:08"]
+        assert heard.log == [("b4:1e:52:00:00:08", None, _line(links[0]))]
+    finally:
+        go_on.set()
+        for link in links:
+            link.close_pipe()
+        dec.stop()
+        for link in links:
+            if link.reader is not None:
+                link.reader.join(5)

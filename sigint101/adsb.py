@@ -11,7 +11,15 @@ import threading
 import time
 from dataclasses import dataclass
 
-from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    RunGuard,
+    command_line,
+    emit_reception,
+    running_command,
+    spawn,
+    stop_process,
+)
 from .hardware import (
     DUMP1090,
     DeviceSelectionError,
@@ -315,7 +323,7 @@ class AdsbDecoder:
         # the tracker lock. The console's hook logs it as a reception and never raises, so the
         # call is made directly: it cannot end the decode.
         self.on_reception = None
-        self._lock = threading.Lock()
+        self._runs = RunGuard()
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
@@ -350,7 +358,7 @@ class AdsbDecoder:
         with self._life:
             self._released = True
             self.stop()
-            with self._lock:
+            with self._runs:
                 self._tracker = AircraftTracker()
 
     def resume(self) -> None:
@@ -383,6 +391,8 @@ class AdsbDecoder:
         if blocked:
             raise AdsbUnavailable(blocked)
         self.device = self._choose_device()
+        # End any retiring reader from an earlier natural death before starting its replacement.
+        self._runs.end(self.watch)
         try:
             self._proc = self._spawn(self.device)
         except AdsbUnavailable:
@@ -393,41 +403,61 @@ class AdsbDecoder:
             raise AdsbUnavailable(f"cannot run dump1090: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+        self._thread = threading.Thread(target=self._read, args=(self._proc, self._runs.current),
                                         name="sigint101-adsb", daemon=True)
         self._thread.start()
 
-    def _read(self, proc) -> None:
+    def _read(self, proc, run: int) -> None:
         """Consume dump1090's SBS lines on a background thread, assembling the sky until it ends."""
         contacts = set()   # the ICAO addresses this feed has already reported as new contacts
         try:
             for raw in proc.stdout:
                 msg = parse_sbs_message(raw)
-                if msg is not None:
-                    with self._lock:
-                        plane = self._tracker.absorb(msg, now=time.time())
-                        contact = self._row(plane) if msg.hex_ident not in contacts else None
-                    if contact is not None:
-                        contacts.add(msg.hex_ident)
-                        hook = self.on_reception
-                        if hook is not None:
-                            hook(contact)
+                if msg is None:
+                    continue
+                with self._runs:
+                    if not self._runs.is_current(run):
+                        continue
+                    plane = self._tracker.absorb(msg, now=time.time())
+                    contact = self._row(plane) if msg.hex_ident not in contacts else None
+                    cmd = command_line(proc)
+                    hook = self.on_reception
+                if contact is not None:
+                    contacts.add(msg.hex_ident)
+                    if hook is not None:
+                        emit_reception(hook, contact, command=cmd, freq_hz=DEFAULT_ADSB_HZ)
         except (OSError, ValueError) as exc:  # loud, never silent
-            self.error = str(exc)
+            with self._runs:
+                if self._runs.is_current(run):
+                    self.error = str(exc)
         finally:
-            self._note_end(proc)
+            self._note_end(proc, run)
 
-    def _note_end(self, proc) -> None:
+    def _note_end(self, proc, run: int) -> None:
         """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc)
-        if reason and self.error is None:
-            self.error = reason
+        reason = self.watch.ended(proc, runs=self._runs, run=run)
+        if reason:
+            with self._runs:
+                if self._runs.is_current(run) and self.error is None:
+                    self.error = reason
 
     def _settle(self) -> None:
-        """Account for a child that ended since the last poll, then clear away what it left."""
-        if self._proc is not None:
-            self._note_end(self._proc)
-            self._stop_locked()
+        """Account for a child that ended since the last poll, letting its reader drain before
+        clearing away what it left.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        self._note_end(proc, self._runs.current)
+        self.watch.stopping()
+        if not stop_process(proc):
+            self.error = "dump1090 survived kill; the dongle may still be held"
+        if self._thread is not None:
+            self._thread.join(timeout=self.STOP_WAIT_S)
+            self._thread = None
+
+    #: How long stop() waits, in seconds, for the reader to end once dump1090 is stopped.
+    STOP_WAIT_S = 3.0
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -435,13 +465,14 @@ class AdsbDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
-        # Marked first, so the reader seeing the output end never reports our stop as a death.
-        self.watch.stopping()
+        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
+        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
+        self._runs.end(self.watch)
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "dump1090 survived kill; the dongle may still be held"
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
 
     def drain(self, timeout: float = 5.0) -> None:
@@ -452,7 +483,7 @@ class AdsbDecoder:
     def aircraft(self) -> list[dict]:
         """The live sky as plain dicts for the API, closest-ranged aircraft first when located."""
         now = time.time()
-        with self._lock:
+        with self._runs:
             planes = self._tracker.aircraft(now=now, max_age_s=self.max_age_s)
         out = [self._row(p) for p in planes]
         # Closest first when ranges are known; the located aircraft lead the unlocated.

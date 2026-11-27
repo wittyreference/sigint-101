@@ -15,7 +15,15 @@ import time
 import tty
 from dataclasses import dataclass
 
-from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    RunGuard,
+    command_line,
+    emit_reception,
+    running_command,
+    spawn,
+    stop_process,
+)
 
 # The monitor interface the detector listens on. wlan1 (RTL8821CU) is a separate radio from the
 # SDR dongle, so there is no release/resume arbitration — this owns wlan1 the way meshtasticd owns
@@ -548,7 +556,7 @@ class FlockDetector:
         # roster lock. The console's hook logs it as a reception and never raises, so the call is
         # made directly: it cannot end the capture.
         self.on_reception = None
-        self._lock = threading.Lock()
+        self._runs = RunGuard()
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
@@ -583,10 +591,12 @@ class FlockDetector:
         blocked = self.watch.blocked()
         if blocked:
             raise FlockUnavailable(blocked)
+        # End any retiring reader from an earlier natural death before starting its replacement.
+        self._runs.end(self.watch)
         self._proc = self._open_capture()
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+        self._thread = threading.Thread(target=self._read, args=(self._proc, self._runs.current),
                                         name="sigint101-flock", daemon=True)
         self._thread.start()
 
@@ -610,7 +620,7 @@ class FlockDetector:
         """The running capture's frames, each with whether radiotap says it ends in its FCS."""
         return iter_pcap_captures(proc.stdout)
 
-    def _read(self, proc) -> None:
+    def _read(self, proc, run: int) -> None:
         """Consume the pcap stream on a background thread, feeding matched frames to the roster."""
         detected = set()   # the MACs this capture has already reported as new detections
         try:
@@ -619,31 +629,51 @@ class FlockDetector:
                 if frame is None:
                     continue
                 hit = match_signatures(frame, ssid_match_enabled=self.ssid_match_enabled)
-                if hit is not None:
-                    with self._lock:
-                        entry = self._roster.absorb(hit, now=time.time())
-                        first = entry.as_dict() if hit.mac not in detected else None
-                    if first is not None:
-                        detected.add(hit.mac)
-                        hook = self.on_reception
-                        if hook is not None:
-                            hook(first)
+                if hit is None:
+                    continue
+                with self._runs:
+                    if not self._runs.is_current(run):
+                        continue
+                    entry = self._roster.absorb(hit, now=time.time())
+                    first = entry.as_dict() if hit.mac not in detected else None
+                    cmd = command_line(proc)
+                    hook = self.on_reception
+                if first is not None:
+                    detected.add(hit.mac)
+                    if hook is not None:
+                        emit_reception(hook, first, command=cmd, freq_hz=None)
         except (OSError, ValueError, struct.error) as exc:  # loud, never silent
-            self.error = str(exc)
+            with self._runs:
+                if self._runs.is_current(run):
+                    self.error = str(exc)
         finally:
-            self._note_end(proc)
+            self._note_end(proc, run)
 
-    def _note_end(self, proc) -> None:
+    def _note_end(self, proc, run: int) -> None:
         """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc)
-        if reason and self.error is None:
-            self.error = reason
+        reason = self.watch.ended(proc, runs=self._runs, run=run)
+        if reason:
+            with self._runs:
+                if self._runs.is_current(run) and self.error is None:
+                    self.error = reason
 
     def _settle(self) -> None:
-        """Account for a child that ended since the last poll, then clear away what it left."""
-        if self._proc is not None:
-            self._note_end(self._proc)
-            self._stop_locked()
+        """Account for a child that ended since the last poll, letting its reader drain before
+        clearing away what it left.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        self._note_end(proc, self._runs.current)
+        self.watch.stopping()
+        if not stop_process(proc):
+            self.error = "tcpdump survived kill; the monitor interface may still be held"
+        if self._thread is not None:
+            self._thread.join(timeout=self.STOP_WAIT_S)
+            self._thread = None
+
+    #: How long stop() waits, in seconds, for the reader to end once the capture is stopped.
+    STOP_WAIT_S = 3.0
 
     def stop(self) -> None:
         """End the capture and release the monitor interface."""
@@ -651,13 +681,14 @@ class FlockDetector:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
-        # Marked first, so the reader seeing the output end never reports our stop as a death.
-        self.watch.stopping()
+        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
+        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
+        self._runs.end(self.watch)
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "tcpdump survived kill; the monitor interface may still be held"
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
 
     def drain(self, timeout: float = 5.0) -> None:
@@ -667,7 +698,7 @@ class FlockDetector:
 
     def detections(self, limit: int | None = None) -> list[dict]:
         """The detected Flock devices as plain dicts for the API, most recently heard first."""
-        with self._lock:
+        with self._runs:
             rows = self._roster.detections(limit)
         return [d.as_dict() for d in rows]
 

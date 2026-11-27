@@ -10,7 +10,15 @@ import threading
 import time
 from dataclasses import dataclass
 
-from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    RunGuard,
+    command_line,
+    emit_reception,
+    running_command,
+    spawn,
+    stop_process,
+)
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
@@ -465,13 +473,12 @@ class AisDecoder:
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._roster = VesselRoster()
-        self._assembler = AisAssembler()
         # Called with a vessel's dict the first time each MMSI is heard since the feed (re)started
         # — a new contact, not every position report. From the reader thread only and outside the
         # roster lock. The console's hook logs it as a reception and never raises, so the call is
         # made directly: it cannot end the decode.
         self.on_reception = None
-        self._lock = threading.Lock()
+        self._runs = RunGuard()
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
@@ -506,9 +513,8 @@ class AisDecoder:
         with self._life:
             self._released = True
             self.stop()
-            with self._lock:
+            with self._runs:
                 self._roster = VesselRoster()
-                self._assembler = AisAssembler()
 
     def resume(self) -> None:
         with self._life:
@@ -540,7 +546,8 @@ class AisDecoder:
         if blocked:
             raise AisUnavailable(blocked)
         self.device = self._choose_device()
-        self._assembler = AisAssembler()
+        # End any retiring reader from an earlier natural death before starting its replacement.
+        self._runs.end(self.watch)
         try:
             self._proc = self._spawn(self.device, self.host, self.port)
         except AisUnavailable:
@@ -551,41 +558,66 @@ class AisDecoder:
             raise AisUnavailable(f"cannot run rtl_ais: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+        self._thread = threading.Thread(target=self._read, args=(self._proc, self._runs.current),
                                         name="sigint101-ais", daemon=True)
         self._thread.start()
 
-    def _read(self, proc) -> None:
+    def _read(self, proc, run: int) -> None:
         """Consume rtl_ais's NMEA sentences on a thread, building the roster until it ends."""
+        # Each reader owns its own multi-part assembler so a half message left by a retiring
+        # reader can never combine with the new run's second half.
+        assembler = AisAssembler()
         contacts = set()   # the MMSIs this feed has already reported as new contacts
         try:
             for raw in proc.stdout:
-                report = self._assembler.push(raw)
-                if report is not None:
-                    with self._lock:
-                        vessel = self._roster.absorb(report, now=time.time())
-                        contact = vessel.as_dict() if report.mmsi not in contacts else None
-                    if contact is not None:
-                        contacts.add(report.mmsi)
-                        hook = self.on_reception
-                        if hook is not None:
-                            hook(contact)
+                report = assembler.push(raw)
+                if report is None:
+                    continue
+                with self._runs:
+                    if not self._runs.is_current(run):
+                        continue
+                    vessel = self._roster.absorb(report, now=time.time())
+                    contact = vessel.as_dict() if report.mmsi not in contacts else None
+                    cmd = command_line(proc)
+                    hook = self.on_reception
+                if contact is not None:
+                    contacts.add(report.mmsi)
+                    if hook is not None:
+                        emit_reception(
+                            hook, contact, command=cmd,
+                            freq_hz=[AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ])
         except (OSError, ValueError) as exc:  # loud, never silent
-            self.error = str(exc)
+            with self._runs:
+                if self._runs.is_current(run):
+                    self.error = str(exc)
         finally:
-            self._note_end(proc)
+            self._note_end(proc, run)
 
-    def _note_end(self, proc) -> None:
+    def _note_end(self, proc, run: int) -> None:
         """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc)
-        if reason and self.error is None:
-            self.error = reason
+        reason = self.watch.ended(proc, runs=self._runs, run=run)
+        if reason:
+            with self._runs:
+                if self._runs.is_current(run) and self.error is None:
+                    self.error = reason
 
     def _settle(self) -> None:
-        """Account for a child that ended since the last poll, then clear away what it left."""
-        if self._proc is not None:
-            self._note_end(self._proc)
-            self._stop_locked()
+        """Account for a child that ended since the last poll, letting its reader drain before
+        clearing away what it left.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        self._note_end(proc, self._runs.current)
+        self.watch.stopping()
+        if not stop_process(proc):
+            self.error = "rtl_ais survived kill; the dongle may still be held"
+        if self._thread is not None:
+            self._thread.join(timeout=self.STOP_WAIT_S)
+            self._thread = None
+
+    #: How long stop() waits, in seconds, for the reader to end once rtl_ais is stopped.
+    STOP_WAIT_S = 3.0
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -593,13 +625,14 @@ class AisDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
-        # Marked first, so the reader seeing the output end never reports our stop as a death.
-        self.watch.stopping()
+        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
+        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
+        self._runs.end(self.watch)
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "rtl_ais survived kill; the dongle may still be held"
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
 
     def drain(self, timeout: float = 5.0) -> None:
@@ -609,6 +642,6 @@ class AisDecoder:
 
     def vessels(self, limit: int | None = None) -> list:
         """The roster so far, as plain dicts for the API, freshest vessel first."""
-        with self._lock:
+        with self._runs:
             rows = self._roster.vessels(limit)
         return [v.as_dict() for v in rows]
