@@ -2,10 +2,14 @@
 # ABOUTME: newest-first. satdump is a fake at the boundary; no radio / no satdump is honest.
 
 import os
+import shlex
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from sigint101 import apt
+from sigint101.app import create_app
 from sigint101.apt import (
     APT_PIPELINE,
     DEFAULT_APT_HZ,
@@ -14,17 +18,20 @@ from sigint101.apt import (
     AptUnavailable,
     satellite_for,
 )
-from sigint101.hardware import RtlSdrDevice
+from sigint101.events import read_events
+from sigint101.hardware import RadioProbe, RtlSdrDevice
 
 
 class FakeProcess:
     """Stands in for the satdump process at the boundary (it writes PNGs and exits on timeout)."""
 
-    def __init__(self):
+    def __init__(self, args=()):
+        self.args = args
+        self.returncode = None
         self.terminated = False
 
     def poll(self):
-        return None
+        return self.returncode
 
     def terminate(self):
         self.terminated = True
@@ -234,6 +241,64 @@ def test_release_stops_the_process(tmp_path):
     dec.release()
     assert proc.terminated
     assert not dec.running
+
+
+@pytest.mark.parametrize("end", ["console-stop", "timeout"])
+def test_ended_pass_reports_each_images_command_and_frequency(tmp_path, end):
+    pass_freq = 137_620_000
+    args = [SATDUMP, "live", APT_PIPELINE, "pass images", "--frequency", str(pass_freq),
+            "--gain", "35"]
+    first = FakeProcess(args)
+    replacement = FakeProcess([SATDUMP, "live", APT_PIPELINE, "next pass"])
+    passes = iter((first, replacement))
+    dec = _decoder(tmp_path, freq_hz=pass_freq, spawn=lambda f, d, o: next(passes))
+    reported = []
+
+    def report(image, *, command=None, freq_hz=None):
+        reported.append((image["path"], image["satellite"], command, freq_hz))
+
+    dec.on_reception = report
+    dec.start()
+    _drop_png(dec.output_dir, "avhrr.png", mtime=1_000_000)
+    _drop_png(dec.output_dir, "raw.png", mtime=2_000_000)
+    # The settings for the next pass can differ from the ones for the process being reaped.
+    dec.freq_hz = DEFAULT_APT_HZ
+    if end == "timeout":
+        first.returncode = 0
+        dec.start()
+        assert dec.live_command() == shlex.join(replacement.args)
+    dec.stop()
+
+    assert reported == [
+        ("apt/avhrr.png", "NOAA-15", shlex.join(args), pass_freq),
+        ("apt/raw.png", "NOAA-15", shlex.join(args), pass_freq),
+    ]
+
+
+def test_console_logs_the_command_for_an_apt_image_after_the_pass_stops(tmp_path):
+    args = [SATDUMP, "live", APT_PIPELINE, "apt", "--frequency", str(DEFAULT_APT_HZ),
+            "--gain", "49"]
+    dec = _decoder(tmp_path, spawn=lambda f, d, o: FakeProcess(args))
+    console = create_app(
+        pack_dir=Path(__file__).parent / "fixtures" / "lesson_packs",
+        data_dir=tmp_path,
+        probe=lambda: RadioProbe(False, "test", "no RTL-SDR on USB bus"),
+        apt_factory=lambda: dec,
+    )
+    with TestClient(console) as client:
+        assert client.get("/api/apt").status_code == 200
+        _drop_png(dec.output_dir, "avhrr.png")
+        # A sweep request releases APT before the missing radio makes the sweep return 503.
+        assert client.get("/api/spectrum").status_code == 503
+        assert not dec.running
+
+    [event] = [event for event in read_events(tmp_path / "events.jsonl")
+               if event["kind"] == "reception"]
+    payload = event["payload"]
+    assert payload["instrument"] == "apt"
+    assert payload["item"]["path"] == "apt/avhrr.png"
+    assert payload["command"] == shlex.join(args)
+    assert payload["freq_hz"] == DEFAULT_APT_HZ
 
 
 def test_satellite_for_maps_known_apt_frequencies():
