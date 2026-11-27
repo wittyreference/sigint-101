@@ -47,6 +47,8 @@ from tests.test_spectrum import (
     FailingPipeProc,
     FedProc,
     HeldProc,
+    _feed_row,
+    _flush_event,
     _fm_pass,
     wait_for_rows,
 )
@@ -3290,7 +3292,9 @@ def test_the_spectrum_route_marks_a_stall_by_the_rule_the_reading_follows(tmp_pa
     pytest.param("/api/ppm/measure", None, False, id="ppm"),
     pytest.param("/api/gain", {"gain": 29.7}, True, id="restart-then-gain"),
 ])
-def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload, restart_first):
+def test_spectrum_waits_then_stalls_when_the_current_sweeps_first_row_is_late(
+    tmp_path, path, payload, restart_first
+):
     procs, bus, now = [], ["AAAA"], [1000.0]
 
     def measure(**kw):
@@ -3299,6 +3303,7 @@ def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload
     with _client(tmp_path, probe=_present, ppm_measure=measure,
                  sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
         sweeper = client.app.state.sweeper
+        published = _flush_event(sweeper)
 
         def poll():
             response = client.get("/api/spectrum")
@@ -3308,8 +3313,8 @@ def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload
             return body
 
         starting = poll()
-        procs[-1].feed(FM_LINES)
-        wait_for_rows(sweeper, 2)
+        _feed_row(procs[-1], FM_LINES[:9], published)
+        _feed_row(procs[-1], FM_LINES[9:], published)
         before = poll()
         assert before["stale"] is None
         if restart_first:
@@ -3325,17 +3330,31 @@ def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload
             assert client.post(path, json=payload).status_code == 200
 
         waiting = poll()
-        now[0] += sweeper.stale_after() + sweeper.START_ALLOWANCE_S + 0.01
-        still_waiting = poll()
+        bound = sweeper.stale_after() + sweeper.START_ALLOWANCE_S
+        now[0] += bound - 0.01
+        within_allowance = poll()
+        now[0] += 0.02
+        stalled = poll()
+        stalled_capture = client.post("/api/provenance/baseline")
         kept = [] if path in ("/api/tune", "/api/ppm/measure") else before["rows"]
-        procs[-1].feed(_fm_pass(2) + _fm_pass(0))
-        wait_for_rows(sweeper, len(kept) + 1)
-        live = poll()
+        after_stall, captures = [], []
+        for lines in (FM_LINES[:9], FM_LINES[9:17], FM_LINES[17:] + FM_LINES[:1]):
+            _feed_row(procs[-1], lines, published)
+            after_stall.append(poll())
+            captures.append(client.post("/api/provenance/baseline"))
 
-    assert (waiting["stale"], still_waiting["stale"], live["stale"]) == ("waiting", "waiting", None)
     assert (starting["stale"], starting["rows"]) == ("waiting", [])
-    assert waiting["rows"] == still_waiting["rows"] == kept
-    assert live["rows"][:-1] == kept
+    assert (waiting["stale"], within_allowance["stale"], stalled["stale"]) == (
+        "waiting", "waiting", "stalled")
+    assert waiting["rows"] == within_allowance["rows"] == stalled["rows"] == kept
+    assert stalled_capture.status_code == 400
+    assert "has not finished a pass for" in stalled_capture.json()["reason"]
+    assert [body["stale"] for body in after_stall] == ["resuming", "resuming", None]
+    assert [len(body["rows"]) for body in after_stall] == [len(kept) + n for n in (1, 2, 3)]
+    assert after_stall[-1]["rows"][:len(kept)] == kept
+    assert [response.status_code for response in captures] == [400, 400, 200]
+    assert all("after a stall" in response.json()["reason"] for response in captures[:2])
+    assert len(read_baseline(tmp_path / "events.jsonl")) == 1
 
 
 # --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------
