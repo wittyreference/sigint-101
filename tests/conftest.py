@@ -1,8 +1,7 @@
-# ABOUTME: Keeps console tests off real Meshtastic interfaces.
-# ABOUTME: Tests exercise the daemon boundary with an explicitly injected interface.
+# ABOUTME: Isolates console tests from Meshtastic hardware and the live ADS-B port.
+# ABOUTME: Tests can inject a radio interface and use a temporary SBS port.
 
 import socket
-from contextlib import ExitStack
 
 import pytest
 from meshtastic import tcp_interface
@@ -17,16 +16,13 @@ def no_real_meshtastic(monkeypatch):
     monkeypatch.setattr(tcp_interface, "TCPInterface", NoRadioTCP)
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def adsb_ports(monkeypatch):
-    """Give launcher tests distinct ephemeral ports, never the real tool's ports."""
+    """Use an ephemeral SBS port so the suite leaves the console's port alone."""
     from sigint101 import adsb
 
-    with ExitStack() as sockets:
-        ports = {}
-        for attr in ("SBS_PORT", "RAW_OUT_PORT", "BEAST_OUT_PORT"):
-            sock = sockets.enter_context(socket.socket())
-            sock.bind(("127.0.0.1", 0))
-            ports[attr] = sock.getsockname()[1]
-            monkeypatch.setattr(adsb, attr, ports[attr], raising=False)
-    return ports
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    monkeypatch.setattr(adsb, "SBS_PORT", port)
+    return port

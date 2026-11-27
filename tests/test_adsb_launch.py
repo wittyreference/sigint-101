@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 from contextlib import ExitStack, contextmanager, nullcontext
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,11 +19,6 @@ from sigint101.events import read_events
 from tests.child_fakes import Child
 from tests.test_adsb import POSITION
 from tests.test_app import _client, _present, _StubSweeper
-
-
-@pytest.fixture(autouse=True)
-def _isolated_ports(adsb_ports):
-    return adsb_ports
 
 
 def _decoder():
@@ -220,7 +216,7 @@ def _observe_receptions(receiver):
     return delivered
 
 
-def test_adsb_launch_disables_raw_and_beast_inputs_on_loopback(monkeypatch):
+def _launch_argv(monkeypatch):
     seen = []
 
     def spawn(argv, **kwargs):
@@ -231,6 +227,11 @@ def test_adsb_launch_disables_raw_and_beast_inputs_on_loopback(monkeypatch):
     monkeypatch.setattr(adsb, "_sbs_peer", lambda _: nullcontext(lambda _: True), raising=False)
     with pytest.raises(adsb.AdsbUnavailable):
         _decoder().start()
+    return seen
+
+
+def test_adsb_launch_disables_raw_and_beast_inputs_on_loopback(monkeypatch):
+    seen = _launch_argv(monkeypatch)
     assert "--net" in seen and "--net-only" not in seen
     switches = dict(zip(seen[1:], seen[2:]))
     assert {flag: switches.get(flag) for flag in (
@@ -238,8 +239,73 @@ def test_adsb_launch_disables_raw_and_beast_inputs_on_loopback(monkeypatch):
     )} == {"--net-bind-address": "127.0.0.1", "--net-ri-port": "0", "--net-bi-port": "0"}
 
 
-@pytest.mark.parametrize("attr", ["SBS_PORT", "RAW_OUT_PORT", "BEAST_OUT_PORT"])
-def test_adsb_refuses_an_occupied_sbs_port_before_spawning(tmp_path, monkeypatch, adsb_ports, attr):
+def test_adsb_disables_unused_output_ports(monkeypatch):
+    checked = []
+    bind = socket.socket.bind
+
+    def record_bind(sock, address):
+        bind(sock, address)
+        checked.append(address)
+
+    monkeypatch.setattr(socket.socket, "bind", record_bind)
+    argv = _launch_argv(monkeypatch)
+    switches = dict(zip(argv[1:], argv[2:]))
+    assert switches["--net-ro-port"] == switches["--net-bo-port"] == "0"
+    assert switches["--net-sbs-port"] == str(adsb.SBS_PORT)
+    assert checked == [("127.0.0.1", adsb.SBS_PORT)]
+
+
+@pytest.mark.parametrize(("bind_after", "status"), [(1.6, 200), (5.1, 503)],
+                         ids=["bind-within-spawn-budget", "bind-after-spawn-budget"])
+def test_adsb_slow_stand_down_preserves_spawn_budget(tmp_path, monkeypatch, bind_after, status):
+    now = 0.0
+    spawned_at = []
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    class SlowSweeper(_StubSweeper):
+        def release(self):
+            if self.running:
+                advance(3.5)
+            super().release()
+
+    def spawn(argv, **_kwargs):
+        assert not sweep.running
+        spawned_at.append(now)
+        return Child(argv)
+
+    def connect(address, *, timeout):
+        assert address == ("127.0.0.1", adsb.SBS_PORT)
+        if now - spawned_at[0] < bind_after:
+            raise ConnectionRefusedError("the stand-in is still binding")
+        return client_socket
+
+    clock = SimpleNamespace(monotonic=lambda: now, sleep=advance, time=adsb.time.time)
+    monkeypatch.setattr(adsb, "time", clock)
+    monkeypatch.setattr(adsb, "spawn", spawn)
+    monkeypatch.setattr(adsb.socket, "create_connection", connect)
+    monkeypatch.setattr(adsb, "_sbs_peer", lambda _: nullcontext(lambda _: True), raising=False)
+    sweep = SlowSweeper([])
+    receiver = _decoder()
+    with ExitStack() as sockets:
+        client_socket, peer = socket.socketpair()
+        sockets.enter_context(client_socket)
+        sockets.enter_context(peer)
+        with _client(tmp_path, probe=_present, adsb_factory=lambda: receiver,
+                     sweeper_factory=lambda: sweep) as console:
+            assert console.get("/api/spectrum").status_code == 200
+            assert sweep.running
+            reply = console.get("/api/adsb")
+            assert spawned_at == [3.5]
+            assert reply.status_code == status, reply.json()
+            if status == 503:
+                assert "did not open its SBS port" in reply.json()["reason"]
+                assert now == pytest.approx(8.5)
+
+
+def test_adsb_refuses_an_occupied_sbs_port_before_spawning(tmp_path, monkeypatch, adsb_ports):
     launches = []
 
     def spawn(argv, **kwargs):
@@ -254,11 +320,11 @@ def test_adsb_refuses_an_occupied_sbs_port_before_spawning(tmp_path, monkeypatch
         tmp_path, probe=_present, adsb_factory=lambda: receiver, sweeper_factory=lambda: sweep,
     ) as client:
         assert client.get("/api/spectrum").status_code == 200 and sweep.running
-        with _listen(adsb_ports[attr]) as listener:
+        with _listen(adsb_ports) as listener:
             response = client.get("/api/adsb")
             assert response.status_code == 503
             assert "already in use" in response.json()["reason"]
-            assert f"127.0.0.1:{adsb_ports[attr]}" in response.json()["reason"]
+            assert f"127.0.0.1:{adsb_ports}" in response.json()["reason"]
             assert response.json()["next_step"] == "Free the port, then retry ADS-B."
             assert launches == [] and sweep.running
             assert not select.select([listener], [], [], 0)[0]
@@ -277,8 +343,8 @@ def test_adsb_refuses_an_occupied_sbs_port_before_spawning(tmp_path, monkeypatch
 
 def test_adsb_reports_dump1090_stderr_when_a_bind_fails_after_preflight(tmp_path, monkeypatch,
                                                                      adsb_ports):
-    port = adsb_ports["RAW_OUT_PORT"]
-    error = f"Error opening the listening port {port} (Raw TCP output): Address already in use"
+    error = (f"Error opening the listening port {adsb_ports} (Basestation TCP output): "
+             "Address already in use")
 
     def spawn(argv, **kwargs):
         return Child(argv, code=1, said=error)

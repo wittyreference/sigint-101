@@ -39,8 +39,6 @@ DEFAULT_ADSB_HZ = 1_090_000_000
 # dump1090's BaseStation (SBS-1) output port. One CSV line per decoded message; the decoder
 # connects here as a client while dump1090 holds the dongle.
 SBS_PORT = 30003
-RAW_OUT_PORT = 30002
-BEAST_OUT_PORT = 30005
 SBS_HOST = "127.0.0.1"
 SBS_STARTUP_S = 5.0
 
@@ -62,7 +60,7 @@ class AdsbUnavailable(RuntimeError):
 
 
 class AdsbPortOccupied(AdsbUnavailable):
-    """One of dump1090's configured local output ports cannot be bound."""
+    """dump1090's local SBS output port cannot be bound."""
 
 
 def _to_float(text: str):
@@ -304,18 +302,17 @@ class _Feed:
         return self._proc.wait(timeout=timeout)
 
 
-def _probe_ports():
+def _probe_sbs_port():
     # Match dump1090's bind options so a previous run's TIME_WAIT does not look occupied.
-    for port in (SBS_PORT, RAW_OUT_PORT, BEAST_OUT_PORT):
-        address = f"{SBS_HOST}:{port}"
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                probe.bind((SBS_HOST, port))
-        except OSError as exc:
-            if exc.errno == errno.EADDRINUSE:
-                raise AdsbPortOccupied(f"TCP port {address} is already in use.") from exc
-            raise AdsbUnavailable(f"cannot check TCP port {address}: {exc}") from exc
+    address = f"{SBS_HOST}:{SBS_PORT}"
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((SBS_HOST, SBS_PORT))
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            raise AdsbPortOccupied(f"TCP port {address} is already in use.") from exc
+        raise AdsbUnavailable(f"cannot check TCP port {address}: {exc}") from exc
 
 
 def _tcp_endpoint(endpoint, family):
@@ -442,16 +439,13 @@ def _connect_sbs(feed, deadline, owns_peer):
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
 
-def _popen(device: int, *, deadline: float | None = None) -> _Feed:
+def _popen(device: int) -> _Feed:
     """Launch dump1090 on 1090 MHz and attach only to its own SBS connection."""
-    if deadline is None:
-        deadline = time.monotonic() + SBS_STARTUP_S
-    if time.monotonic() >= deadline:
-        raise AdsbUnavailable("ADS-B startup timed out before dump1090 could launch")
+    deadline = time.monotonic() + SBS_STARTUP_S
     proc = spawn(
         [DUMP1090, "--device-index", str(device), "--net", "--net-bind-address", SBS_HOST,
          "--net-ri-port", "0", "--net-bi-port", "0",
-         "--net-ro-port", str(RAW_OUT_PORT), "--net-bo-port", str(BEAST_OUT_PORT),
+         "--net-ro-port", "0", "--net-bo-port", "0",
          "--net-sbs-port", str(SBS_PORT), "--quiet"],
         stdout=subprocess.DEVNULL)
     # Keep the actual child and any candidate socket under one owner from spawn onward.
@@ -527,17 +521,12 @@ class AdsbDecoder(SupervisedReceiver):
             raise AdsbUnavailable("no RTL-SDR on the USB bus — SIGINT 101 will not fake traffic")
         radio = self._choose_radio()
         launcher = self._spawn
-        real_launch = launcher is _popen
-        deadline = time.monotonic() + SBS_STARTUP_S
-        if real_launch:
-            _probe_ports()
+        if launcher is _popen:
+            _probe_sbs_port()
 
         def launch():
             try:
-                if real_launch:
-                    proc = launcher(radio["index"], deadline=deadline)
-                else:
-                    proc = launcher(radio["index"])
+                proc = launcher(radio["index"])
             except (OSError, ValueError) as exc:
                 raise AdsbUnavailable(f"cannot run dump1090: {exc}") from exc
             self.device = radio["index"]

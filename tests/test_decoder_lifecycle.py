@@ -360,6 +360,6 @@ def test_adsb_launch_failure_stops_dump1090_and_says_so(monkeypatch, adsb_ports)
     with pytest.raises(adsb.AdsbUnavailable):
         receiver.start()
     assert seen[0].args[0] == "dump1090-fa"
-    assert seen[0].args[seen[0].args.index("--net-sbs-port") + 1] == str(adsb_ports["SBS_PORT"])
+    assert seen[0].args[seen[0].args.index("--net-sbs-port") + 1] == str(adsb_ports)
     assert receiver._run.proc.procs == tuple(seen)
     assert receiver._run.complete.wait(3) and receiver._run.reaped
