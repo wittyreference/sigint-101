@@ -14,9 +14,6 @@ from .childproc import (
     ChildWatch,
     RunGuard,
     command_line,
-    emit_reception,
-    running_command,
-    settle_ended,
     spawn,
     stop_process,
 )
@@ -25,6 +22,7 @@ from .hardware import (
     probe_rtlsdr,
     rtlsdr_radio_for_run,
 )
+from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
 
 # rtl_ais (github.com/dgiardini/rtl-ais) opens the dongle, demodulates BOTH AIS channels at once,
 # and sends decoded AIVDM/AIVDO NMEA sentences over UDP. These are the two channels it listens on,
@@ -381,6 +379,8 @@ class _Feed:
         self._proc = proc
         self._sock = sock
         self._closed = threading.Event()
+        self._transport_lock = threading.Lock()
+        self._transport_closed = False
         sock.settimeout(FEED_POLL_S)
         # The one process, and its argv, for the exit reason and the command strip.
         self.procs = (proc,)
@@ -389,7 +389,7 @@ class _Feed:
 
     def _lines(self):
         draining = False
-        with self._sock:
+        try:
             while not self._closed.is_set():
                 if not draining and self._proc.poll() is not None:
                     # Once rtl_ais has exited, switch to non-blocking so datagrams already queued
@@ -413,6 +413,8 @@ class _Feed:
                     line = line.strip()
                     if line:
                         yield line
+        finally:
+            self._close_socket()
 
     def poll(self):
         return self._proc.poll()
@@ -423,15 +425,20 @@ class _Feed:
         close() alone leaves a thread parked in recvfrom on the dead descriptor. shutdown() wakes
         it; on an unconnected UDP socket it also reports ENOTCONN, which changes nothing here.
         """
-        self._closed.set()
-        try:
-            self._sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        with self._transport_lock:
+            if self._transport_closed:
+                return
+            self._closed.set()
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self._sock.close()
+            except OSError:
+                if self._sock.fileno() != -1:
+                    raise
+            self._transport_closed = True
 
     def stop_child(self) -> bool:
         """Stop and reap rtl_ais while leaving the UDP socket open to drain queued datagrams."""
@@ -470,10 +477,14 @@ def _popen(device: int, host: str = DEFAULT_AIS_HOST, port: int = DEFAULT_AIS_PO
     except (OSError, ValueError) as exc:
         sock.close()
         raise AisUnavailable(f"cannot run rtl_ais: {exc}") from exc
-    return _Feed(proc, sock)
+    try:
+        return _Feed(proc, sock)
+    except OSError as exc:
+        sock.close()
+        raise PartialLaunch(proc, exc) from exc
 
 
-class AisDecoder:
+class AisDecoder(SupervisedReceiver):
     """Owns one rtl_ais feed and the vessel roster it assembles.
 
     A sibling of the ADS-B decoder: an SDR-exclusive tool with a reader thread off the request path
@@ -498,26 +509,16 @@ class AisDecoder:
         # made directly: it cannot end the decode.
         self.on_reception = None
         self._runs = RunGuard()
-        self._life = threading.RLock()
-        self._proc = None
-        self._thread = None
-        self._released = False
+        self._init_lifecycle()
         self.error = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         self.watch = ChildWatch(RTL_AIS)
 
-    @property
-    def running(self) -> bool:
-        proc = self._proc
-        return proc is not None and proc.poll() is None
+    _unavailable = AisUnavailable
+    _released_reason = "the radio was released to another program; resume AIS to take it back"
 
-    def live_command(self) -> str | None:
-        """The exact command running now, read off the live process; None when nothing runs."""
-        return running_command(self._proc)
-
-    @property
-    def released(self) -> bool:
-        return self._released
+    def _clear(self):
+        self._roster = VesselRoster()
 
     def _choose_radio(self) -> dict:
         try:
@@ -525,61 +526,24 @@ class AisDecoder:
         except DeviceSelectionError as exc:
             raise AisUnavailable(str(exc)) from exc
 
-    def release(self) -> None:
-        """Hand the dongle to another program (the sweeper) and stay off it until resumed."""
-        with self._life:
-            self._released = True
-            self.stop()
-            with self._runs:
-                self._roster = VesselRoster()
-
-    def resume(self) -> None:
-        with self._life:
-            self._released = False
-
-    def start(self) -> None:
-        """Begin decoding AIS, unless the radio is absent, rtl_ais is missing, or released."""
-        with self._life:
-            self._start_locked()
-
-    def _start_locked(self) -> None:
-        if self.running:
-            return
-        self._settle()
-        if self._released:
-            raise AisUnavailable(
-                "the radio was released to another program; resume AIS to take it back")
+    def _prepare_launch(self, _freq_hz, _number):
         if not self._which(RTL_AIS):
             raise AisUnavailable(
                 f"{RTL_AIS} is not installed, so SIGINT 101 cannot decode AIS")
         if not self._radio_present():
             raise AisUnavailable("no RTL-SDR on the USB bus — SIGINT 101 will not fake a vessel")
-        if self.error:
-            reason, self.error = self.error, None
-            raise AisUnavailable(reason)
-        # A child that died on its own is not relaunched on every poll: the reason stands, and the
-        # console waits out a back-off that grows while the deaths keep coming.
-        blocked = self.watch.blocked()
-        if blocked:
-            raise AisUnavailable(blocked)
         radio = self._choose_radio()
-        self.device = radio["index"]
-        # End any retiring reader from an earlier natural death before starting its replacement.
-        self._runs.end(self.watch)
-        try:
-            self._proc = self._spawn(self.device, self.host, self.port)
-        except AisUnavailable:
-            self._proc = None
-            raise
-        except (OSError, ValueError) as exc:
-            self._proc = None
-            raise AisUnavailable(f"cannot run rtl_ais: {exc}") from exc
-        self.watch.spawned(self._proc)
-        self.error = None
-        self._thread = threading.Thread(target=self._read,
-                                        args=(self._proc, self._runs.current, radio),
-                                        name="sigint101-ais", daemon=True)
-        self._thread.start()
+        host, port = self.host, self.port
+
+        def launch():
+            try:
+                proc = self._spawn(radio["index"], host, port)
+            except (OSError, ValueError) as exc:
+                raise AisUnavailable(f"cannot run rtl_ais: {exc}") from exc
+            self.device = radio["index"]
+            return proc
+
+        return launch, (radio,)
 
     def _read(self, proc, run: int, radio: dict) -> None:
         """Consume rtl_ais's NMEA sentences on a thread, building the roster until it ends."""
@@ -598,63 +562,15 @@ class AisDecoder:
                     vessel = self._roster.absorb(report, now=time.time())
                     contact = vessel.as_dict() if report.mmsi not in contacts else None
                     cmd = command_line(proc)
-                    hook = self.on_reception
+                    hook = self._admit() if contact is not None else None
                 if contact is not None:
                     contacts.add(report.mmsi)
-                    if hook is not None:
-                        emit_reception(
-                            hook, contact, command=cmd,
-                            freq_hz=[AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ], radio=radio)
+                    self._emit(hook, contact, command=cmd,
+                               freq_hz=[AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ], radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):
                     self.error = str(exc)
-        finally:
-            self._note_end(proc, run)
-
-    def _note_end(self, proc, run: int) -> None:
-        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc, runs=self._runs, run=run)
-        if reason:
-            with self._runs:
-                if self._runs.is_current(run) and self.error is None:
-                    self.error = reason
-
-    def _settle(self) -> None:
-        """Account for a child that ended since the last poll, letting its reader drain before
-        ending the run and clearing away what it left.
-        """
-        proc, self._proc = self._proc, None
-        if proc is None:
-            return
-        thread, self._thread = self._thread, None
-        if not settle_ended(proc, thread, self._runs, self.watch,
-                            note_end=self._note_end, wait_s=self.STOP_WAIT_S):
-            self.error = "rtl_ais survived kill; the dongle may still be held"
-
-    #: How long stop() waits, in seconds, for the reader to end once rtl_ais is stopped.
-    STOP_WAIT_S = 3.0
-
-    def stop(self) -> None:
-        """End decoding and let go of the dongle."""
-        with self._life:
-            self._stop_locked()
-
-    def _stop_locked(self) -> None:
-        # End the run and mark the watch stopping in one step under the buffer lock, so nothing
-        # its reader reads or sees at EOF from here on is listed, reported or commits a retry.
-        self._runs.end(self.watch)
-        proc, self._proc = self._proc, None
-        if proc is not None and not stop_process(proc):
-            self.error = "rtl_ais survived kill; the dongle may still be held"
-        if self._thread is not None:
-            self._thread.join(timeout=self.STOP_WAIT_S)
-            self._thread = None
-
-    def drain(self, timeout: float = 5.0) -> None:
-        """Wait for a finite source to be fully consumed. A real AIS feed never ends."""
-        if self._thread is not None:
-            self._thread.join(timeout)
 
     def vessels(self, limit: int | None = None) -> list:
         """The roster so far, as plain dicts for the API, freshest vessel first."""

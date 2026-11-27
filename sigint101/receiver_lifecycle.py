@@ -441,6 +441,12 @@ class SupervisedReceiver:
                 run.diagnosed.set()
         except Exception as exc:
             run.failure = f"{run.watch.tool} exit could not be observed: {exc}"
+        if run.cancel.is_set():
+            try:
+                self._close_transport(run.proc)
+            except Exception as exc:
+                # The process must still be stopped. The final close verifies the transport.
+                run.failure = f"{run.watch.tool} transport could not close: {exc}"
         try:
             self._stop_child(run.proc)
             reaped = all(code is not None for _, code in self._statuses(run))

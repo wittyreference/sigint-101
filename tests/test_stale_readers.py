@@ -1612,8 +1612,6 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
         # Queue the second SBS line in the socket buffer and end the child naturally; keep the
         # peer socket open and idle so a blocking recv() would wait out FEED_POLL_S.
         pairs[0][1].sendall((ADSB_2 + "\n").encode())
-        procs[0].returncode = 1
-
         real_thread = dec._thread
         joined = threading.Event()
         alive_after_join = []
@@ -1626,6 +1624,8 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
                 alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _ReleaseOnJoin()
+        procs[0].returncode = 1
+
 
         with pytest.raises(adsb.AdsbUnavailable, match="status 1"):
             dec.start()
@@ -1697,10 +1697,6 @@ def test_adsb_live_read_timeout_as_last_sbs_line_arrives_still_drains():
         pairs[0][1].sendall((ADSB_1 + "\n").encode())
         assert paused.wait(5)
 
-        boundary[0].armed.set()
-        go_on.set()
-        assert timed_out.wait(5)
-
         real_thread = dec._thread
         alive_after_join = []
 
@@ -1710,6 +1706,10 @@ def test_adsb_live_read_timeout_as_last_sbs_line_arrives_still_drains():
                 alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _CheckJoin()
+        boundary[0].armed.set()
+        go_on.set()
+        assert timed_out.wait(5)
+
         with pytest.raises(adsb.AdsbUnavailable, match="status 1"):
             dec.start()
         assert alive_after_join == [False]
@@ -1769,8 +1769,6 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
             assert paused.wait(5)
             # Queue the second datagram in the UDP socket buffer and end the child naturally.
             sender.sendto((AIS_2 + "\n").encode(), socks[0].getsockname())
-        procs[0].returncode = 1
-
         real_thread = dec._thread
         joined = threading.Event()
         alive_after_join = []
@@ -1783,6 +1781,8 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
                 alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _ReleaseOnJoin()
+        procs[0].returncode = 1
+
 
         with pytest.raises(ais.AisUnavailable, match="status 1"):
             dec.start()
@@ -1855,10 +1855,6 @@ def test_ais_live_read_timeout_as_last_datagram_arrives_still_drains():
             sender.sendto((AIS_1 + "\n").encode(), socks[0].getsockname())
         assert paused.wait(5)
 
-        boundary[0].armed.set()
-        go_on.set()
-        assert timed_out.wait(5)
-
         real_thread = dec._thread
         alive_after_join = []
 
@@ -1868,6 +1864,10 @@ def test_ais_live_read_timeout_as_last_datagram_arrives_still_drains():
                 alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _CheckJoin()
+        boundary[0].armed.set()
+        go_on.set()
+        assert timed_out.wait(5)
+
         with pytest.raises(ais.AisUnavailable, match="status 1"):
             dec.start()
         assert alive_after_join == [False]
@@ -2058,10 +2058,9 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
         dec.stop()
 
 
-def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket():
-    # If exit diagnostics raise inside settle_ended() for a socket feed, the run must still end,
-    # the child process must be stopped, and the socket must close so the detached reader cannot
-    # publish a queued SBS line after the failed settle.
+def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket(monkeypatch):
+    # A diagnostic error still leaves an exit reason, a stopped child and a closed socket.
+    # A reader that outlived the drain cannot publish its queued SBS line.
     pairs = []
     procs = []
 
@@ -2105,19 +2104,15 @@ def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket
         assert paused.wait(5)
 
         pairs[0][1].sendall((ADSB_2 + "\n").encode())
-        procs[0].returncode = 1
-
-        real_ended = dec.watch.ended
-
-        def boom(*_args, **_kw):
+        def boom(_stage):
             raise OSError("stderr read failed")
 
-        dec.watch.ended = boom
+        monkeypatch.setattr(childproc, "stderr_tail", boom)
         real_thread = dec._thread
+        procs[0].returncode = 1
 
-        with pytest.raises(OSError, match="stderr read failed"):
+        with pytest.raises(adsb.AdsbUnavailable, match="exit status 1.*stderr read failed"):
             dec.start()
-        dec.watch.ended = real_ended
         assert procs[0].terminated is True
         assert pairs[0][0].fileno() == -1
 
@@ -2125,6 +2120,9 @@ def test_adsb_socket_diagnostic_failure_during_settle_ends_run_and_closes_socket
         go_on.set()
         real_thread.join(5)
         assert not real_thread.is_alive()
+        assert "exit status 1" in dec.watch.reason and "stderr read failed" in dec.watch.reason
+        clock.now += 60
+        dec.start()
         assert dec.watch.stopped is False
         assert dec.error is None
         assert {a["hex_ident"] for a in dec.aircraft()} == {"A1B2C3"}
