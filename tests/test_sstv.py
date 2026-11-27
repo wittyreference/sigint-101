@@ -570,7 +570,65 @@ def test_sstv_publication_commits_at_exclusive_png_link(capture_files, monkeypat
         assert not published.with_suffix(".json").exists()
         assert heard == []
         assert dec.error
+        assert not staged.exists()
     assert attempted == [failure]
+
+
+def test_sstv_rollover_retries_source_cleanup_and_launches_the_next_capture(
+        capture_files, monkeypatch):
+    dec, launches, heard = capture_files
+    dec.start()
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    real_unlink = Path.unlink
+    attempts = 0
+
+    def unlink(path, *args, **kwargs):
+        nonlocal attempts
+        if path == staged:
+            attempts += 1
+            if attempts == 1:
+                raise OSError("staged source unlink failed")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    _finish(child)
+    dec.start()
+
+    assert len(launches) == 2 and dec.running
+    assert dec.error is None
+    assert attempts == 2 and not staged.exists()
+    assert len(heard) == 1
+    assert (dec.output_dir / staged.name).is_file()
+
+
+def test_sstv_persistent_source_cleanup_does_not_mask_the_next_capture_exit(
+        capture_files, monkeypatch):
+    dec, launches, heard = capture_files
+    dec.start()
+    first, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    real_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == staged:
+            raise OSError("staged source unlink failed")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    _finish(first)
+    dec.stop()
+    # Exercise the queued retry separately from the first cleanup failure at retirement.
+    dec.error = None
+    dec.start()
+    assert staged in dec._staged_cleanup and staged.exists()
+    second, _ = launches[1]
+    _finish(second, code=1)
+    dec.drain()
+
+    with pytest.raises(SstvUnavailable, match="exit status 1"):
+        dec.start()
+    assert len(heard) == 1
 
 
 @pytest.mark.parametrize("when", ["before", "at-link"])
@@ -606,6 +664,7 @@ def test_sstv_occupied_png_never_borrows_new_mode(capture_files, monkeypatch, wh
     assert not published.with_suffix(".json").exists()
     assert heard == []
     assert dec.error
+    assert not staged.exists()
 
 
 @pytest.mark.parametrize("reaped", [True, False], ids=["reaped", "unknown-reap"])

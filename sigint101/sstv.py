@@ -269,6 +269,7 @@ class SstvDecoder:
             self._proc = None
             raise SstvUnavailable(f"cannot run the SSTV pipeline: {exc}") from exc
         self._capture = capture
+        self.error = None
         self.watch.spawned(self._proc)
         self._thread = threading.Thread(target=self._read, args=(self._proc, run, capture),
                                         name="sigint101-sstv", daemon=True)
@@ -340,12 +341,11 @@ class SstvDecoder:
         self._finalize_capture(proc, capture, reaped=reaped, exit_code=exit_code)
 
     def _remove_staged(self, path: Path) -> None:
+        """Retry cleanup of this retired path at the next launch if unlink fails."""
         try:
             path.unlink(missing_ok=True)
-        except OSError as exc:
+        except OSError:
             self._staged_cleanup.add(path)
-            if self.error is None:
-                self.error = str(exc)
         else:
             self._staged_cleanup.discard(path)
 
@@ -403,8 +403,7 @@ class SstvDecoder:
         finally:
             if staged_sidecar is not None:
                 self._remove_staged(staged_sidecar)
-            if committed:
-                self._remove_staged(capture.staged_path)
+            self._remove_staged(capture.staged_path)
         return committed
 
     def stop(self) -> None:
