@@ -56,9 +56,12 @@ class Run:
     diagnosed: threading.Event = field(default_factory=threading.Event)
     reader: threading.Thread | None = None
     reaped: bool = False
+    reap_failed: bool = False
     failure: str | None = None
     unreported_death: bool = False
     exit_code: int | None = None
+    preserve_drain: bool = False
+    exit_snapshot: tuple = ()
 
 
 @dataclass(eq=False)
@@ -184,9 +187,18 @@ class SupervisedReceiver:
         if run:
             if run.watch.finite and not run.cancel.is_set() and not run.physical.is_set():
                 # A clean final exit visible before teardown remains eligible for publication.
-                run.exit_code = run.proc.poll()
+                try:
+                    run.exit_code = run.proc.poll()
+                except (OSError, ValueError) as exc:
+                    run.failure = f"{run.watch.tool} exit could not be observed: {exc}"
+                if run.exit_code is not None and not run.exit_snapshot:
+                    final = childproc._stages(run.proc)[-1]
+                    run.exit_snapshot = ((final, run.exit_code),)
+                    self._record_death(run, run.exit_snapshot, run.watch.clock())
+            run.preserve_drain = run.watch.finite and run.reader is not None and run.exit_code == 0
             run.cancel.set()
-            self._fence(run)
+            if not run.preserve_drain:
+                self._fence(run)
             run.wake.set()
         return run, intent
 
@@ -283,15 +295,25 @@ class SupervisedReceiver:
                 self._intent = None
             intent.done.set()
 
-    def launch_start(self, intent):
+    def validate_start(self, intent):
+        """Reject a cancelled preflight before the caller stands another receiver down."""
+        with self._life:
+            if self._closing or (intent is not None and self._intent is not intent):
+                raise self._unavailable("receiver start was cancelled")
         if intent is None:
-            if self.running:
-                return
-            raise self._unavailable("receiver is finishing its previous run")
+            if not self.running:
+                raise self._unavailable("receiver is finishing its previous run")
+
+    def launch_start(self, intent, *, claimed=False):
+        if intent is None:
+            self.validate_start(intent)
+            return
         try:
             with self._life:
-                if self._released or self._closing or self._intent is not intent:
+                if self._closing or self._intent is not intent or (self._released and not claimed):
                     raise self._unavailable("receiver start was cancelled")
+                if claimed:
+                    self._released = False
                 control = self._control
                 intent.spawning = True
                 self._runs.end(self.watch)
@@ -357,7 +379,7 @@ class SupervisedReceiver:
             ended = [(stage, code) for stage, code in statuses if code is not None]
             with self._life:
                 if run.cancel.is_set():
-                    return observed, first_exit
+                    return run.exit_snapshot or observed, first_exit
                 if ended and deadline is None:
                     first_exit = run.watch.clock()
                     deadline = time.monotonic() + self.EOF_WAIT_S
@@ -366,6 +388,7 @@ class SupervisedReceiver:
                         self._record_death(run, ended, first_exit)
                 if ended and (statuses[-1][1] is not None or time.monotonic() >= deadline):
                     run.exit_code = statuses[-1][1]
+                    run.exit_snapshot = tuple(ended)
                     if not run.unreported_death:
                         self._record_death(run, ended, first_exit)
                     return ended, first_exit
@@ -413,7 +436,10 @@ class SupervisedReceiver:
             close()
 
     def _drain_reader(self, run):
-        if run.reader is None or run.cancel.is_set():
+        def cancelled():
+            return run.cancel.is_set() and not run.preserve_drain
+
+        if run.reader is None or cancelled():
             return
 
         def join():
@@ -425,9 +451,9 @@ class SupervisedReceiver:
 
         done = threading.Event()
         daemon(join, name=f"sigint101-{run.watch.tool}-drain")
-        while not run.cancel.is_set() and not done.is_set():
+        while not cancelled() and not done.is_set():
             run.wake.clear()
-            if not run.cancel.is_set() and not done.is_set():
+            if not cancelled() and not done.is_set():
                 run.wake.wait()
 
     def _supervise(self, run):
@@ -453,7 +479,7 @@ class SupervisedReceiver:
             if reaped and not hasattr(run.proc, "close_transport"):
                 run.reaped = True
                 run.physical.set()
-            if reaped and ended:
+            if reaped and (ended or run.preserve_drain):
                 self._drain_reader(run)
         except Exception as exc:
             reaped = False
@@ -466,6 +492,7 @@ class SupervisedReceiver:
                 reaped = False
                 run.failure = f"{run.watch.tool} transport could not close: {exc}"
             run.reaped = reaped
+            run.reap_failed = not reaped
             if not reaped and not run.failure:
                 run.failure = f"{run.watch.tool} survived kill; the dongle may still be held"
             run.physical.set()

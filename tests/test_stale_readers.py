@@ -2243,13 +2243,15 @@ def test_sstv_mode_commit_and_stop_release_boundary(late_sstv, control, boundary
         child.feed("Detected SSTV mode Robot 36", Sentinel("working"))
         assert parsed.wait(2)
 
+    ticket = dec._run
     if boundary == "exited":
-        child.die(0)
         reader_at_join(lambda: _sstv_end(child, mode="Robot 36"))
+        child.die(0)
     else:
         join = reader_at_join()
     getattr(dec, control)()
     if boundary == "exited":
+        assert ticket.complete.wait(2)
         [(image, command, freq)] = heard
         assert (command, freq, image["mode"]) == (
             _line(child), sstv.DEFAULT_SSTV_HZ, "Robot 36")
@@ -2434,17 +2436,17 @@ def test_sstv_stale_reader_never_reads_next_captures_path(late_sstv, monkeypatch
 def test_sstv_late_death_reason_cannot_corrupt_error_or_refuse_next_start(late_sstv, monkeypatch):
     dec, children, _, _, clock, reader_at_join, gate = late_sstv
     diagnosed, resume = gate(), gate()
-    ended = dec.watch.ended
+    enrich = dec.watch.enrich
 
-    def pause_reason(proc, **kwargs):
-        reason = ended(proc, **kwargs)
-        if threading.current_thread() is proc.reader and reason:
+    def pause_reason(proc, reason):
+        if proc is children[0]:
             diagnosed.set()
             assert resume.wait(5)
-        return reason
+        enrich(proc, reason)
 
-    monkeypatch.setattr(dec.watch, "ended", pause_reason)
+    monkeypatch.setattr(dec.watch, "enrich", pause_reason)
     dec.start()
+    ticket = dec._run
     child = children[0]
     join = reader_at_join()
     _sstv_end(child, code=1)
@@ -2454,6 +2456,7 @@ def test_sstv_late_death_reason_cannot_corrupt_error_or_refuse_next_start(late_s
     clock.now += 60
     dec.start()
     resume.set()
+    assert ticket.diagnosed.wait(2)
     join(2)
     assert dec.error is None
     assert not dec.watch.stopped
@@ -2464,31 +2467,33 @@ def test_sstv_late_death_reason_cannot_corrupt_error_or_refuse_next_start(late_s
 
 
 def test_sstv_exit_diagnostics_do_not_hold_the_run_guard(late_sstv, monkeypatch):
-    dec, children, _, _, _, reader_at_join, gate = late_sstv
+    dec, children, _, _, clock, reader_at_join, gate = late_sstv
     inside, resume = gate(), gate()
     dec.start()
+    ticket = dec._run
     child = children[0]
     join = reader_at_join()
-    wait = child.wait
+    tail = childproc.stderr_tail
 
-    def gated_wait(timeout=None):
-        if threading.current_thread() is child.reader:
+    def gated_tail(proc):
+        if proc is child:
             inside.set()
             assert resume.wait(5)
-            return 1
-        return wait(timeout)
+        return tail(proc)
 
-    monkeypatch.setattr(child, "wait", gated_wait)
-    child.close_pipe()
+    monkeypatch.setattr(childproc, "stderr_tail", gated_tail)
+    _sstv_end(child, code=1)
     assert inside.wait(2)
-    # This is lock-discipline coverage for the guard introduced by this change.
-    guard = getattr(dec, "_runs", None)
-    if guard is not None:
-        assert guard.lock.acquire(blocking=False)
-        guard.lock.release()
+    guard = dec._runs
+    assert guard.lock.acquire(blocking=False)
+    guard.lock.release()
+    with pytest.raises(sstv.SstvUnavailable, match="status 1"):
+        dec.start()
+    clock.now += 60
     dec.stop()
     dec.start()
     resume.set()
+    assert ticket.diagnosed.wait(2)
     join(2)
     assert dec.running
     assert not dec.watch.stopped

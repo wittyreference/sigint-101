@@ -1229,16 +1229,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if prepare is not None:
                 intent = prepare(for_claim=True, deadline=deadline)
             with app.state.radio_arbiter.reserve(target, refusal, deadline):
+                if prepare is not None:
+                    receiver.validate_start(intent)
                 for name, consumer in consumers.items():
                     if name != target:
                         consumer.release()
                         failure = getattr(consumer, "release_failure", None)
                         if failure and (reason := failure(pending=True)):
                             raise refusal(reason)
+                if prepare is not None:
+                    return receiver.launch_start(intent, claimed=True)
                 if receiver is not None:
                     receiver.resume()
-                if prepare is not None:
-                    return receiver.launch_start(intent)
                 return start() if start is not None else None
         finally:
             if intent is not None:
