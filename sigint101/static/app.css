@@ -737,6 +737,42 @@ body {
   grid-column: 1 / -1;
   align-self: stretch;
 }
+/* On observe, show the learner's sealed call without spending any vertical pixels on an
+   instrument stage: it rides the title row between the short heading and the step eyebrow. */
+.observe-call {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.25;
+  color: var(--fg-dim);
+  padding: 2px 8px;
+  border: 2px solid var(--border);
+  background: var(--surface-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.observe-call b {
+  color: var(--fg);
+  font-weight: 400;
+}
+.observe-call--text {
+  font-size: 18px;
+  padding: 6px 12px;
+  margin-bottom: 12px;
+  white-space: normal;
+}
+.stage-panel--instrument:has(> .observe-call) {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+.stage-panel--instrument > .observe-call {
+  grid-row: 1;
+  grid-column: 2;
+  justify-self: start;
+  max-width: 100%;
+}
+.stage-panel--instrument:has(> .observe-call) > .stage-panel__eyebrow {
+  grid-column: 3;
+}
 
 /* Secondary actions stay full-sized with a quieter outline. */
 .btn--secondary,

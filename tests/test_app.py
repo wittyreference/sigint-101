@@ -2922,12 +2922,13 @@ def _exam_bar(home):
     return words("title"), words("sub")
 
 
-def test_home_exam_bar_invites_practice_while_the_pool_is_good(tmp_path):
+def test_home_exam_bar_invites_study_while_the_pool_is_good(tmp_path):
     with _client(tmp_path) as client:
         home = client.get("/")
         card = client.get("/exam")
     assert card.status_code == 200          # the shipped pool passes its check: the trainer is on
-    assert _exam_bar(home) == ("Licence exam", "Technician practice")
+    assert _exam_bar(home) == ("Licence exam", "Technician study")
+    assert "practice" not in _exam_bar(home)[1].lower()
     assert "trainer disabled" not in unescape(home.text).lower()
 
 

@@ -138,7 +138,8 @@ for (const [failure, failSave] of [
 test("Commit follows radio selection and a submit without a choice is blocked except Skip", () => {
   const handlers = {};
   const submit = { disabled: true };
-  const status = { textContent: "" };
+  let readyAttr = null;
+  const status = { textContent: "", getAttribute: name => name === "data-ready-text" ? readyAttr : null };
   submit.parentElement = { querySelector: () => status };
   const radio = { checked: true };
   const form = {
@@ -155,8 +156,13 @@ test("Commit follows radio selection and a submit without a choice is blocked ex
     window: { addEventListener: () => {} },
   });
   assert.equal(submit.disabled, false, "a restored selection should be ready at startup");
-  assert.equal(status.textContent, "Choice set. Commit to unlock.");
+  assert.equal(status.textContent, "Choice set. Lock it in to unlock.");
 
+  readyAttr = "Choice set. Ready to commit.";
+  handlers.change();
+  assert.equal(status.textContent, "Choice set. Ready to commit.");
+
+  readyAttr = null;
   radio.checked = false;
   handlers.change();
   assert.equal(submit.disabled, true);

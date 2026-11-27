@@ -60,7 +60,7 @@
         <button class="btn exam__skip" type="submit" form="exam-answer" formnovalidate
                 formaction="/api/exam/sim/skip?question_id={{ question.id }}">Skip</button>
       {% endif %}
-      <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+      <span class="predict__hint" role="status" data-choice-status data-ready-text="Choice set. Ready to commit.">Choose one, comrade</span>
       <button class="btn btn--primary btn-commit" type="submit" disabled form="exam-answer">Commit answer</button>
     </div>
   {% else %}

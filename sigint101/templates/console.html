@@ -5,20 +5,23 @@
    same panel a lesson does. #}
 {% import "_panels.html" as panels %}
 
-{# Headings per stage; the lesson's own stage string is the body beneath them. #}
+{# Headings per stage, by lesson type: hardware lessons put the learner in front of a live
+   instrument, while no-hardware lessons (5, 17, 20-23) walk through ideas and scenarios in text. #}
 {% set HEADINGS = {
   'frame': 'The setup',
-  'demo': 'Watch it happen',
-  'try': 'Your turn',
+  'demo': 'Watch it happen' if lesson.needs_hardware else 'The idea',
+  'try': 'Your turn' if lesson.needs_hardware else 'Think it through',
   'predict': 'Predict first',
   'operate': 'Operate the radio',
-  'observe': 'Observe',
-  'explain': 'What happened',
+  'observe': 'Observe' if lesson.needs_hardware else 'Check your call',
+  'explain': 'What happened' if lesson.needs_hardware else 'Why it holds',
 } %}
 {# Stages that put you in front of the radio get the waterfall + tune controls. #}
 {% set INSTRUMENT = ['demo', 'try', 'operate', 'observe'] %}
 {% set cur = current_stage if current_stage else lesson.stage_order[0] %}
 {% set mhz = (tuned_hz|default(100300000)) / 1000000 %}
+{% set call_choice = (predict_choices | selectattr('key', 'equalto', committed_choice) | list | first)
+    if (prediction_committed and committed_choice) else none %}
 
 {# Previous step: on every stage but the first, in the row that already holds Next (tune strip,
    predict actions or footer), so stepping back costs no screen height. #}
@@ -259,7 +262,7 @@
             <form class="predict{% if prediction_committed %} predict--committed{% endif %}" novalidate data-choice-commit
                   method="post" action="{{ commit_url|default('#') }}">
               <fieldset class="predict-chips">
-                <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
+                <legend class="sr-only">Tap to choose, then lock it in &mdash; no typing</legend>
                 {% for c in predict_choices %}
                   <label class="predict-chip">
                     <input type="radio" name="prediction" value="{{ c.key }}"
@@ -274,11 +277,11 @@
               <div class="predict__actions">
                 {{ prev_step(loop.first) }}
                 {% if prediction_committed %}
-                  <span class="predict__committed-note">Prediction committed, comrade &mdash; the rest is unlocked</span>
+                  <span class="predict__committed-note">Locked in, comrade &mdash; the rest is unlocked</span>
                   <button class="btn btn--primary" type="button" data-nav="next">Next step</button>
                 {% else %}
-                  <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
-                  <button class="btn btn--primary btn-commit" type="submit" disabled>Commit prediction</button>
+                  <span class="predict__hint" role="status" data-choice-status data-ready-text="Choice set. Lock it in to unlock.">Choose one, comrade</span>
+                  <button class="btn btn--primary btn-commit" type="submit" disabled>Lock it in</button>
                 {% endif %}
               </div>
             </form>
@@ -320,7 +323,7 @@
                 {% if fb %}
                   {{ complete_lesson() }}
                 {% else %}
-                  <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+                  <span class="predict__hint" role="status" data-choice-status data-ready-text="Choice set. Ready to commit.">Choose one, comrade</span>
                   <button class="btn btn--primary btn-commit" type="submit" disabled>Commit answer</button>
                 {% endif %}
               </div>
@@ -328,6 +331,9 @@
 
           {% elif stage in INSTRUMENT and lesson.needs_hardware %}
             <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
+            {% if stage == 'observe' and call_choice %}
+            <div class="observe-call">Your call: <b>{{ call_choice.label }}</b></div>
+            {% endif %}
             {% if lesson.uses_decoder %}
             {# Decode instrument (M10): the rtl_433 panel (panels.decode) over a fixed dial. #}
             <div class="instrument instrument--decode">
@@ -592,6 +598,15 @@
                   {% endif %}
                   <p>{{ lesson.stages[stage] }}</p>
                   <p class="stage-panel__concept">{{ lesson.concept }}</p>
+                </div>
+              </div>
+            </div>
+            {% elif stage == 'observe' and call_choice %}
+            <div class="scroll-frame">
+              <div class="stage-panel__body">
+                <div class="scroll-copy">
+                  <div class="observe-call observe-call--text">Your call: <b>{{ call_choice.label }}</b></div>
+                  <p>{{ lesson.stages[stage] }}</p>
                 </div>
               </div>
             </div>
