@@ -46,11 +46,13 @@ def _which_for(*available):
     return lambda name: f"/usr/bin/{name}" if name in have else None
 
 
-def test_dongle_on_usb_is_present():
+def test_dongle_on_usb_is_present(tmp_path):
     class Result:
         stdout = "Bus 001 Device 004: ID 0bda:2838 Realtek RTL2838 DVB-T"
 
-    probe = probe_rtlsdr(which=_which_for("lsusb"), run=lambda *a, **k: Result())
+    # No sysfs tree, so the host's own /sys (a deauthorized radio on the Recon) cannot leak in.
+    probe = probe_rtlsdr(which=_which_for("lsusb"), run=lambda *a, **k: Result(),
+                         sysfs_root=tmp_path / "no-sysfs")
     assert probe.present is True
     assert probe.method == "lsusb"
 
@@ -250,3 +252,82 @@ def test_unconfirmed_presence_is_not_a_confirmed_absence(available):
     probe = probe_rtlsdr(which=_which_for(*available), run=fail)
     assert not probe.present  # Existing gates still require a positively detected device.
     assert not probe.known
+
+
+# --- C50: a radio the kernel has deauthorized is not a radio the tools can open ----------------
+
+# lsusb on the reference Recon after `echo 0 > /sys/bus/usb/devices/<port>/authorized`: the
+# deauthorized RTL2832U is still listed, but no tool can claim it (usb_claim_interface error -5).
+LSUSB_WITH_RADIO = ("Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub\n"
+                    "Bus 001 Device 004: ID 0bda:2838 Realtek Semiconductor Corp. RTL2838 DVB-T\n")
+
+
+def _lsusb(stdout=LSUSB_WITH_RADIO):
+    class Result:
+        pass
+    Result.stdout = stdout
+    return lambda *a, **k: Result()
+
+
+def sysfs_tree(root, *devices):
+    """A stand-in for /sys/bus/usb/devices: (port, "vvvv:pppp", authorized or None) per device.
+
+    It also carries a root hub and an interface directory, as the real tree does, and an
+    authorized of None leaves that file out.
+    """
+    root.mkdir(parents=True)
+    entries = [("usb1", "1d6b:0002", "1"), *devices]
+    for port, usb_id, authorized in entries:
+        node = root / port
+        node.mkdir()
+        vendor, product = usb_id.split(":")
+        (node / "idVendor").write_text(vendor + "\n")
+        (node / "idProduct").write_text(product + "\n")
+        if authorized is not None:
+            (node / "authorized").write_text(authorized + "\n")
+    (root / "1-1.2:1.0").mkdir()  # an interface: no idVendor, never a device
+    return root
+
+
+def test_a_deauthorized_radio_lsusb_still_lists_is_absent(tmp_path):
+    root = sysfs_tree(tmp_path / "usb", ("1-1.2", "0bda:2838", "0"))
+    probe = probe_rtlsdr(which=_which_for("lsusb"), run=_lsusb(), sysfs_root=root)
+    assert probe.present is False
+    assert probe.known is True  # sysfs said so: an answer, not a failure to look
+    assert probe.method == "sysfs"
+    assert "deauthorized" in probe.detail
+
+
+def test_an_authorized_radio_lsusb_lists_is_present(tmp_path):
+    root = sysfs_tree(tmp_path / "usb", ("1-1.2", "0bda:2838", "1"))
+    probe = probe_rtlsdr(which=_which_for("lsusb"), run=_lsusb(), sysfs_root=root)
+    assert probe.present is True
+    assert probe.method == "lsusb"
+
+
+def test_one_authorized_radio_among_deauthorized_ones_is_present(tmp_path):
+    root = sysfs_tree(tmp_path / "usb", ("1-1.2", "0bda:2838", "0"), ("1-1.3", "0bda:2832", "1"))
+    probe = probe_rtlsdr(which=_which_for("lsusb"), run=_lsusb(), sysfs_root=root)
+    assert probe.present is True
+
+
+def test_without_a_sysfs_tree_the_lsusb_answer_stands(tmp_path):
+    # Not Linux, or no /sys mounted: unable to look is not a reason to invent an absence.
+    probe = probe_rtlsdr(which=_which_for("lsusb"), run=_lsusb(),
+                         sysfs_root=tmp_path / "no-sysfs")
+    assert probe.present is True
+    assert probe.method == "lsusb"
+
+
+def test_a_sysfs_that_shows_no_radio_cannot_overrule_lsusb(tmp_path):
+    # Only an explicit authorized=0 turns lsusb's sighting into an absence; a tree that does not
+    # show the radio at all (a container's partial /sys) says nothing about it.
+    root = sysfs_tree(tmp_path / "usb")
+    probe = probe_rtlsdr(which=_which_for("lsusb"), run=_lsusb(), sysfs_root=root)
+    assert probe.present is True
+
+
+def test_a_radio_with_no_authorized_file_counts_as_authorized(tmp_path):
+    root = sysfs_tree(tmp_path / "usb", ("1-1.2", "0bda:2838", None))
+    probe = probe_rtlsdr(which=_which_for("lsusb"), run=_lsusb(), sysfs_root=root)
+    assert probe.present is True

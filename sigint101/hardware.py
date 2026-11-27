@@ -8,9 +8,13 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 # RealTek RTL2832U — the chip inside common RTL-SDR / DVB-T dongles (incl. the Nomad's).
 RTLSDR_USB_IDS = ("0bda:2838", "0bda:2832")
+
+# Where the kernel lists each USB device with its ids and whether it is authorized to be used.
+SYSFS_USB_DEVICES = "/sys/bus/usb/devices"
 
 # Pin a radio by serial because its index can change with plug order.
 RTLSDR_SERIAL_ENV = "SIGINT101_RTLSDR_SERIAL"
@@ -71,12 +75,50 @@ class RadioProbe:
     known: bool = True
 
 
-def probe_rtlsdr(*, which=shutil.which, run=subprocess.run) -> RadioProbe:
+def _sysfs_authorization(root) -> tuple | None:
+    """(authorized, deauthorized) counts of the RTL2832U devices sysfs lists, or None.
+
+    None means sysfs could not be read at all (not Linux, no /sys), which is no answer about the
+    radio. A device with no readable `authorized` file counts as authorized: the kernel's
+    default, and only an explicit 0 is evidence that the tools cannot claim it.
+    """
+    try:
+        nodes = list(Path(root).iterdir())
+    except OSError:
+        return None
+    authorized = deauthorized = 0
+    for node in nodes:
+        try:
+            usb_id = (f"{(node / 'idVendor').read_text().strip()}:"
+                      f"{(node / 'idProduct').read_text().strip()}").lower()
+        except OSError:  # an interface or a hub port: no device ids of its own
+            continue
+        if usb_id not in RTLSDR_USB_IDS:
+            continue
+        try:
+            allowed = (node / "authorized").read_text().strip() != "0"
+        except OSError:
+            allowed = True
+        if allowed:
+            authorized += 1
+        else:
+            deauthorized += 1
+    return authorized, deauthorized
+
+
+def probe_rtlsdr(*, which=shutil.which, run=subprocess.run,
+                 sysfs_root=SYSFS_USB_DEVICES) -> RadioProbe:
     """Detect an actual RTL-SDR on the USB bus.
 
     Presence means a device is physically attached — not merely that the rtl-sdr
     tools are installed. Absence is a real answer, and the OPERATE step stays gated
     until a genuine radio shows up.
+
+    lsusb still lists a radio the kernel has deauthorized (`authorized` 0 in sysfs), yet no
+    tool can claim it: each dies with usb_claim_interface error -5. So an lsusb sighting is
+    checked against sysfs, and reads as absent only when every RTL2832U sysfs lists is
+    deauthorized. A sysfs that cannot be read, or that lists no RTL2832U, leaves lsusb's
+    answer standing.
     """
     # Truth: an RTL2832U physically present on the USB bus.
     if which("lsusb"):
@@ -85,6 +127,11 @@ def probe_rtlsdr(*, which=shutil.which, run=subprocess.run) -> RadioProbe:
             text = (result.stdout or "").lower()
             for usb_id in RTLSDR_USB_IDS:
                 if usb_id in text:
+                    counts = _sysfs_authorization(sysfs_root)
+                    if counts is not None and counts[0] == 0 and counts[1] > 0:
+                        return RadioProbe(False, "sysfs",
+                                          f"RTL2832U {usb_id} on USB bus but deauthorized "
+                                          "(sysfs authorized=0)")
                     return RadioProbe(True, "lsusb", f"RTL2832U {usb_id} on USB bus")
             return RadioProbe(False, "lsusb", "no RTL2832U on USB bus")
         except (subprocess.SubprocessError, OSError) as exc:

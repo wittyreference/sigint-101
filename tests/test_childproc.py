@@ -296,6 +296,22 @@ def test_the_stderr_tail_is_bounded():
     assert len(reason) < 400
 
 
+# rtl_433's start-up narration: every protocol it registered, on one line far longer than the cap.
+RTL_433_PROTOCOLS = ("Registered 186 out of 223 device decoding protocols [ 1-4 8 11-12 15-17 "
+                     "19-21 23 25-26 29-36 38-60 63 67-71 73-100 102-105 108-116 119-121 124-128 "
+                     "130-149 151-161 163-168 170-175 177-197 199 201-215 217-223 ]")
+
+
+def test_an_error_line_outranks_start_up_narration_in_the_reason():
+    # C50, R19 on the reference Recon: the claim error and the protocol list were the last two
+    # lines, and the list alone filled the 160 characters the reason keeps.
+    assert len(RTL_433_PROTOCOLS) > childproc.TAIL_CHARS
+    proc = _Ended(["rtl_433"], 2)
+    reason = exit_reason(proc, tail=["usb_claim_interface error -5", RTL_433_PROTOCOLS])
+    assert reason.startswith("rtl_433 stopped (exit status 2)")
+    assert "usb_claim_interface error -5" in reason
+
+
 # --- Pipeline ---------------------------------------------------------------------------------
 
 

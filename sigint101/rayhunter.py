@@ -272,7 +272,8 @@ def _default_fetch(url: str, timeout: float) -> tuple[int, bytes]:
         with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 (http on the LAN)
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
+        with exc:
+            return exc.code, exc.read()
 
 
 def _no_answer(where: str, exc: Exception) -> str:

@@ -7,6 +7,7 @@ import ctypes
 import inspect
 import os
 import queue
+import re
 import shlex
 import signal
 import subprocess
@@ -45,6 +46,10 @@ SETTLE_S = 2.0
 TAIL_LINES = 2
 TAIL_CHARS = 160
 TAIL_READ_BYTES = 4096
+
+# A tail line that reports a failure rather than narrating start-up. When the tail is longer than
+# TAIL_CHARS, only such lines are kept, so the cap cannot cut the cause away.
+_ERROR_LINE = re.compile(r"error|fail|unable|cannot|can't|usb_claim_interface", re.IGNORECASE)
 
 _PR_SET_PDEATHSIG = 1
 
@@ -359,6 +364,13 @@ def read_stderr_tail(proc) -> list:
 
 def _describe(name: str, code: int, tail) -> str:
     said = " | ".join(tail)
+    if len(said) > TAIL_CHARS:
+        # Too long to keep whole, so the lines that say what went wrong go first. rtl_433's
+        # protocol-registration narration is longer than the cap by itself, and cutting from the
+        # front dropped the usb_claim_interface error that sat beside it.
+        errors = [line for line in tail if _ERROR_LINE.search(line)]
+        if errors:
+            said = " | ".join(errors)
     if len(said) > TAIL_CHARS:
         said = "…" + said[-TAIL_CHARS:]
     return f"{name} stopped ({_how(code)})" + (f": {said}" if said else "")
