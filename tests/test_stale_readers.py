@@ -534,6 +534,21 @@ def test_old_readers_pipe_failing_after_retune_is_not_the_new_runs_failure(late_
     assert dec.running
 
 
+def _park_aprs_diagnostic(dec, procs, found, go_on):
+    enrich = dec.watch.enrich
+    returned = threading.Event()
+
+    def wait_before_enrich(proc, reason):
+        if proc is procs[0]:
+            found.set()
+            assert go_on.wait(5)
+        enrich(proc, reason)
+        returned.set()
+
+    dec.watch.enrich = wait_before_enrich
+    return returned
+
+
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
 def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(late_factory, spec):
     dec, procs, heard, clock = late_factory(spec)
@@ -547,7 +562,11 @@ def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(l
             go_on.wait(5)                          # held between finding the death and recording it
         return reason
 
-    dec.watch.ended = ended
+    diagnostic_done = None
+    if spec.name == "aprs":
+        diagnostic_done = _park_aprs_diagnostic(dec, procs, found, go_on)
+    else:
+        dec.watch.ended = ended
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
@@ -560,9 +579,13 @@ def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(l
     dec.start()
     assert len(procs) == 2
     go_on.set()
+    if diagnostic_done is not None:
+        assert diagnostic_done.wait(5)
     procs[0].reader.join(5)
     assert not procs[0].reader.is_alive()
     assert dec.error is None
+    if diagnostic_done is not None:
+        assert dec.watch.reason is None
     dec.stop()
     dec.start()                                    # not refused with the old run's reason
     assert len(procs) == 3
@@ -755,6 +778,8 @@ def test_run_after_retune_still_records_its_own_failure(late_factory, spec, end,
     end(procs[1])
     procs[1].reader.join(5)
     assert not procs[1].reader.is_alive()
+    if spec.name == "aprs" and procs[1].poll() is not None:
+        assert dec._run.ready.wait(5)
     assert dec.error is not None and reason in dec.error
     dec.stop()
     with pytest.raises(spec.unavailable, match=reason):
@@ -1025,6 +1050,15 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
     # status while stop/retune/release runs. Computing exit diagnostics must not hold the buffer
     # lock, and once the stop invalidates the run and watch, the old reader cannot commit a retry.
     dec, procs, heard, _ = late_factory(spec)
+    if spec.name == "aprs":
+        read = dec._read
+
+        def finish_old_read(proc, *args):
+            read(proc, *args)
+            if proc is procs[0]:
+                slow_wait()
+
+        dec._read = finish_old_read
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
@@ -1046,7 +1080,8 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
             return 1
         return plain_wait(timeout=timeout)
 
-    old.wait = slow_wait
+    if spec.name != "aprs":
+        old.wait = slow_wait
     old.close_pipe()
     assert waiting.wait(5)
     assert lock_free_during_wait == [True]
@@ -1477,6 +1512,7 @@ def test_pipeline_natural_exit_reaps_live_downstream_and_drains_buffered_pipe(mo
         return Pipeline(up, down)
 
     dec = aprs.AprsDecoder(spawn=spawn, **_common())
+    dec.EOF_WAIT_S = 0.05
     dec.STOP_WAIT_S = 1.0
     clock = _Clock()
     dec.watch = ChildWatch(dec.watch.tool, clock=clock)
@@ -1912,7 +1948,11 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
             go_on.wait(5)
         return reason
 
-    dec.watch.ended = ended
+    diagnostic_done = None
+    if spec.name == "aprs":
+        diagnostic_done = _park_aprs_diagnostic(dec, procs, found, go_on)
+    else:
+        dec.watch.ended = ended
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
@@ -1927,6 +1967,8 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
 
     # Release the old reader while still stopped in back-off (before any replacement starts).
     go_on.set()
+    if diagnostic_done is not None:
+        assert diagnostic_done.wait(5)
     procs[0].reader.join(5)
     assert not procs[0].reader.is_alive()
     assert dec.error is None
@@ -1937,7 +1979,8 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
     assert dec.running
 
 
-def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_drops_queued_item():
+def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_drops_queued_item(
+        monkeypatch):
     # If exit diagnostics raise inside settle_ended(), the run must still end and the process must
     # still be stopped so a detached reader resuming with a queued item cannot publish it.
     procs = []
@@ -1979,19 +2022,15 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
 
         # Queue a second complete packet and mark the child exited, then fail exit diagnostics.
         procs[0].feed(APRS_2)
-        procs[0].die(1)
-
-        real_ended = dec.watch.ended
-
-        def boom(*_args, **_kw):
+        def boom(_stage):
             raise OSError("stderr read failed")
 
-        dec.watch.ended = boom
+        monkeypatch.setattr(childproc, "stderr_tail", boom)
+        procs[0].die(1)
         real_thread = dec._thread
 
-        with pytest.raises(OSError, match="stderr read failed"):
+        with pytest.raises(aprs.AprsUnavailable, match="exit status 1.*stderr read failed"):
             dec.start()
-        dec.watch.ended = real_ended
         assert procs[0].terminated is True
 
         # Resuming the detached reader must publish nothing to the roster or reception hook.
@@ -1999,6 +2038,9 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
         procs[0].close_pipe()
         real_thread.join(5)
         assert not real_thread.is_alive()
+        assert "exit status 1" in dec.watch.reason and "stderr read failed" in dec.watch.reason
+        clock.now += 60
+        dec.start()
         assert dec.watch.stopped is False
         assert dec.error is None
         assert [s["source"] for s in dec.stations()] == ["KD2ABC-9"]
