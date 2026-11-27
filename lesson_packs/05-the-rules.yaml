@@ -34,11 +34,8 @@ stages:
     FCC Part 15, for compliant equipment inside its power, antenna and no-interference conditions.
     So the line is simple: listen within those limits, transmit only where you are authorised.
   try: >-
-    Your turn, comrade — sort these four in your head before the next screen. One: you watch an
-    unencrypted aircraft channel scroll by. Two: you record a neighbour's encrypted phone call and
-    descramble it. Three: you key up on a ham repeater with no licence. Four: you send a text to a
-    friend's Meshtastic node on the LoRa band. Which sit on the safe side of the line — and which
-    one is the single power the whole rule is really about?
+    Your turn, comrade — sort twelve real situations into lawful, off-limits, or it depends. Each
+    card cites the rule behind it, and nothing here locks the rest of the course.
   predict: >-
     You listened to the local ham repeater all evening. Now you key up and transmit on it yourself,
     with no licence. Is that legal? Lock it in — the rest stays hidden until you do.
@@ -72,7 +69,98 @@ answer: ["illegal"]
 verdict: >-
   Illegal: listening to the repeater was fine, but transmitting on it needs an amateur licence.
 
+# Twelve real situations for the try stage's card sort (4 legal, 4 illegal, 4 depends).
+# Score is shown for feedback and never gates Complete (D16).
+sort:
+  - key: aircraft-am
+    text: "Tune your RTL-SDR to unencrypted VHF air-band traffic (ACARS or tower voice) and listen."
+    answer: legal
+    why: "Receiving unencrypted aviation transmissions is carved out as lawful listening."
+    cite: "18 USC 2511(2)(g)(ii)(IV)"
+  - key: adsb-ais
+    text: "Decode ADS-B aircraft positions at 1090 MHz and marine AIS ship beacons on VHF."
+    answer: legal
+    why: "Ship and aircraft safety broadcasts are open to receive under federal law."
+    cite: "18 USC 2511(2)(g)(ii)(IV)"
+  - key: wifi-beacons
+    text: "Run a read-only Wi-Fi survey that counts channels, SSIDs, and BSSIDs without connecting."
+    answer: legal
+    why: "Access points broadcast beacon metadata for discovery; counting envelopes reads no payload."
+    cite: "18 USC 2511(2)(g)(i); Joffe v. Google, 746 F.3d 920"
+  - key: own-wideband-rx
+    text: "Own a wideband SDR receiver covering 24 MHz to 1.7 GHz for passive listening."
+    answer: legal
+    why: "The scanner rule governs equipment certification and sale, not owning a passive SDR."
+    cite: "47 CFR 15.121"
+  - key: ham-tx-unlicensed
+    text: "Key up and transmit on a local 2-meter amateur repeater with no amateur licence."
+    answer: illegal
+    why: "Transmitting on amateur frequencies requires an FCC amateur licence grant."
+    cite: "47 USC 301; 47 CFR 97.5(a)"
+  - key: pocsag-words
+    text: "Decode and read the text of a commercial carrier's unencrypted POCSAG pager messages."
+    answer: illegal
+    why: "Carrier text pages are not public radio; framing is shown here and words are withheld."
+    cite: "18 USC 2510(16)(D), 2511(1)(a)"
+  - key: open-wifi-payload
+    text: "Capture emails, logins, or web traffic from a neighbour's unencrypted Wi-Fi network."
+    answer: illegal
+    why: "Open Wi-Fi payload is protected under the Wiretap Act even without encryption."
+    cite: "18 USC 2511(1)(a); Joffe v. Google, 746 F.3d 920"
+  - key: break-encryption
+    text: "Record an encrypted digital voice or cellular call and crack it to listen in."
+    answer: illegal
+    why: "Scrambled or encrypted transmissions are never readily accessible; breaking in is a crime."
+    cite: "18 USC 2510(16)(A), 2511(1)(a)"
+  - key: meshtastic-tx
+    text: "Transmit a Meshtastic text on 915 MHz without holding an individual FCC licence."
+    answer: depends
+    why: "Compliant gear needs 500 kHz Long Turbo for 1 W (15.247); 250 kHz LongFast caps at ~0.75 mW."
+    cite: "47 CFR 15.247(a)(2), 15.249"
+  - key: police-scanner-car
+    text: "Listen to unencrypted local police dispatch on a receiver mounted in your car."
+    answer: depends
+    why: "Federal law allows clear public-safety listening, but several states restrict mobile scanners."
+    cite: "18 USC 2511(2)(g)(ii)(II)"
+  - key: share-private-rx
+    text: "Post online or act on a radio message you picked up while tuning around the band."
+    answer: depends
+    why: "Public broadcasts and ham traffic are fine, but divulging private interceptions is barred."
+    cite: "47 USC 605(a)"
+  - key: gmrs-handheld-tx
+    text: "Transmit on a 462 MHz walkie-talkie channel shared by FRS and GMRS radios."
+    answer: depends
+    why: "Compliant FRS handhelds are licence-free, while GMRS operation requires an individual licence."
+    cite: "47 CFR 95.305, 95.1705"
+
 sources:
+  - title: "18 U.S.C. 2510 — Wiretap Act definitions ('electronic communication', 'readily accessible')"
+    url: "https://www.law.cornell.edu/uscode/text/18/2510"
+    read: "2026-11-27"
+  - title: "18 U.S.C. 2511 — Wiretap Act interception prohibition and public/radio exceptions"
+    url: "https://www.law.cornell.edu/uscode/text/18/2511"
+    read: "2026-11-27"
+  - title: "Joffe v. Google, Inc., 746 F.3d 920 (9th Cir. 2013) (amended opinion, No. 11-17483)"
+    url: "https://www.govinfo.gov/content/pkg/USCOURTS-ca9-11-17483/pdf/USCOURTS-ca9-11-17483-1.pdf"
+    read: "2026-11-27"
+  - title: "47 U.S.C. 301 — License for radio communication or transmission of energy"
+    url: "https://www.law.cornell.edu/uscode/text/47/301"
+    read: "2026-11-27"
+  - title: "47 U.S.C. 605 — Unauthorized publication or use of communications"
+    url: "https://www.law.cornell.edu/uscode/text/47/605"
+    read: "2026-11-27"
+  - title: "47 CFR 15.121 — Scanning receivers and frequency converters"
+    url: "https://www.law.cornell.edu/cfr/text/47/15.121"
+    read: "2026-11-27"
+  - title: "47 CFR 97.5 — Amateur Radio Service station license required"
+    url: "https://www.law.cornell.edu/cfr/text/47/97.5"
+    read: "2026-11-27"
+  - title: "47 CFR 95.305 — Personal Radio Services authorization (FRS licence-by-rule)"
+    url: "https://www.law.cornell.edu/cfr/text/47/95.305"
+    read: "2026-11-27"
+  - title: "47 CFR 95.1705 — GMRS individual licenses required"
+    url: "https://www.law.cornell.edu/cfr/text/47/95.1705"
+    read: "2026-11-27"
   - title: "47 CFR 15.247 — Operation within the bands 902-928 MHz, 2400-2483.5 MHz, and 5725-5850 MHz"
     url: "https://www.ecfr.gov/current/title-47/section-15.247"
     read: "2026-11-27"

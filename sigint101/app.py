@@ -61,7 +61,8 @@ from .hardware import (
     select_rtlsdr_index,
 )
 from .kiosk import request_exit
-from .lessons import CHECK_STAGE, COMMIT_STAGE, load_lessons
+from .law import LAW_CAUTION, LAW_SECTIONS
+from .lessons import CHECK_STAGE, COMMIT_STAGE, SORT_ANSWERS, load_lessons
 from .lora import LoRaListener, LoRaUnavailable
 from .operate import (
     DEFAULT_INSTRUMENT,
@@ -753,6 +754,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             context["check_answer"] = answered["choice"] if answered else None
             context["check_feedback"] = (lesson.check_feedback(answered["choice"])
                                          if answered else None)
+        if lesson.sort:
+            context["sort_answers"] = app.state.progress.get_sort_answers(lesson_id)
         # A lesson that names its own band starts the instrument there instead of the default FM
         # sweep: the dial reads its centre and step, and the live waterfall carries the band edges
         # the console retunes the sweep to. A lesson with no band leaves these unset, so the
@@ -826,6 +829,61 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.progress.record_stage(lesson_id, CHECK_STAGE,
                                         lesson.stage_order.index(CHECK_STAGE))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    @app.post("/api/sort")
+    async def sort_answer(lesson_id: int, request: Request):
+        """Record one card-sort answer (M5's 12-card law sort) and return its why and citation.
+
+        Law is taught as knowledge, never a lockout (D16): any card may be sorted or re-sorted
+        freely, and the score never gates moving on or completing the lesson.
+        """
+        _require_lesson(lesson_id)
+        lesson = app.state.lessons[lesson_id]
+        if not lesson.sort:
+            return JSONResponse(status_code=404, content={
+                "recorded": False, "reason": f"lesson {lesson_id} has no card sort"})
+        card = (await _field(request, "card")).strip()
+        choice = (await _field(request, "choice")).strip()
+        known_cards = {c["key"] for c in lesson.sort}
+        if card not in known_cards:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"'{card}' is not one of the sort cards"})
+        if choice not in SORT_ANSWERS:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"'{choice}' is not a valid sort answer"})
+        fb = lesson.sort_feedback(card, choice)
+        app.state.progress.record_sort_answer(lesson_id, card, choice, correct=fb["correct"])
+        log_event(app.state.events_path, "sort_answer",
+                  {"lesson": lesson_id, "card": card, "choice": choice, "correct": fb["correct"]})
+        saved = app.state.progress.get_sort_answers(lesson_id)
+        answered = sum(1 for c in lesson.sort if c["key"] in saved)
+        score = sum(1 for c in lesson.sort if saved.get(c["key"], {}).get("correct"))
+        if "application/json" in request.headers.get("accept", "") or (
+            "application/json" in request.headers.get("content-type", "")
+        ):
+            return {"recorded": True, **fb, "answered": answered, "score": score,
+                    "total": len(lesson.sort)}
+        return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    def _safe_back(back: str | None) -> tuple[str, str]:
+        """Resolve an optional internal back path for /law, refusing any external URL."""
+        if back and back.startswith("/") and not back.startswith("//"):
+            if re.fullmatch(r"/lesson/\d+", back):
+                return back, f"Lesson {back.rsplit('/', 1)[-1]}"
+            if re.fullmatch(r"/unit/\d+", back):
+                return back, f"Unit {back.rsplit('/', 1)[-1]}"
+        return "/", "Home"
+
+    @app.get("/law", response_class=HTMLResponse)
+    def law_reference(request: Request, back: str | None = None):
+        """Show me the law: a scrolling quick-reference citing each authority behind the rules."""
+        back_href, back_label = _safe_back(back)
+        return templates.TemplateResponse(
+            request=request,
+            name="law.html",
+            context={"title": "The Law", "back_href": back_href, "back_label": back_label,
+                     "caution": LAW_CAUTION, "sections": LAW_SECTIONS},
+        )
 
     @app.post("/api/stage")
     async def stage(lesson_id: int, request: Request):

@@ -65,7 +65,7 @@
     {% for stage in lesson.stage_order %}
       {% set sealed = stage in lesson.sealed_stages %}
       {% if (not sealed) or prediction_committed %}
-        <section class="stage-panel{% if stage in INSTRUMENT and lesson.needs_hardware %} stage-panel--instrument{% endif %}" data-stage="{{ stage }}"{% if stage != cur %} hidden{% endif %}>
+        <section class="stage-panel{% if stage in INSTRUMENT and lesson.needs_hardware %} stage-panel--instrument{% endif %}{% if stage == 'try' and lesson.sort %} stage-panel--sort{% endif %}" data-stage="{{ stage }}"{% if stage == 'try' and lesson.sort %} data-sort-panel data-lesson-id="{{ lesson.id }}"{% endif %}{% if stage != cur %} hidden{% endif %}>
           {# The eyebrow is the step and stage only. Reprinting the concept here squeezed the
              frame/explain bodies to a few px on the long-concept lessons and ate the instrument
              narration band, and on the frame it gave away the predict answer. The concept is the
@@ -328,6 +328,32 @@
                 {% endif %}
               </div>
             </form>
+
+          {% elif stage == 'try' and lesson.sort %}
+            {# ---- One-card-at-a-time legal card sort (M5): three 80 px buttons, instant why +
+                 citation, and Show me the law one tap away. Score never gates Next or Complete. ---- #}
+            <div class="sort-head">
+              <span class="sort-head__counter" data-sort-counter>Card 1 of {{ lesson.sort|length }}</span>
+              <span class="sort-head__score" data-sort-score>Score 0/0 (0/{{ lesson.sort|length }})</span>
+            </div>
+            <div class="sort-card">
+              <p class="sort-card__text" data-sort-text>{{ lesson.sort[0].text }}</p>
+              <div class="sort-feedback verdict" data-sort-feedback hidden>
+                <div class="verdict__why">
+                  <span class="verdict__tag" data-sort-tag></span>
+                  <b data-sort-answer></b>
+                  <span data-sort-why></span>
+                  <code class="sort-feedback__cite" data-sort-cite></code>
+                </div>
+              </div>
+            </div>
+            <div class="sort-choices" role="group" aria-label="Sort this situation">
+              <button class="btn sort-btn" type="button" data-sort-choice="legal" aria-pressed="false"><span data-sort-mark aria-hidden="true"></span>Legal</button>
+              <button class="btn sort-btn" type="button" data-sort-choice="illegal" aria-pressed="false"><span data-sort-mark aria-hidden="true"></span>Illegal</button>
+              <button class="btn sort-btn" type="button" data-sort-choice="depends" aria-pressed="false"><span data-sort-mark aria-hidden="true"></span>Depends</button>
+            </div>
+            <script type="application/json" data-sort-deck>{{ lesson.sort|tojson }}</script>
+            <script type="application/json" data-sort-saved>{{ (sort_answers|default({}))|tojson }}</script>
 
           {% elif stage in INSTRUMENT and lesson.needs_hardware %}
             <h1 class="stage-panel__title">{{ HEADINGS[stage] }}</h1>
@@ -619,8 +645,13 @@
              theirs in their own action row; every other stage (the text stages, and the no-hardware
              instrument stages that render as text) keeps the footer. #}
           {% if stage not in ('predict', 'check') and not (stage in INSTRUMENT and lesson.needs_hardware) %}
-            <footer class="stage-foot{% if loop.last %} predict__actions{% endif %}">
+            <footer class="stage-foot{% if loop.last %} predict__actions{% endif %}{% if stage == 'try' and lesson.sort %} sort-foot{% endif %}">
               {{ prev_step(loop.first) }}
+              {% if stage == 'try' and lesson.sort %}
+              <a class="btn btn--secondary sort-law-link" href="/law?back=/lesson/{{ lesson.id }}">Show me the law</a>
+              <button class="btn btn--secondary sort-nav-btn" type="button" data-sort-prev aria-label="Previous card">&lsaquo; Card</button>
+              <button class="btn btn--secondary sort-nav-btn" type="button" data-sort-next>Next card</button>
+              {% endif %}
               {% if safety_notice and not lesson.uses_lora %}
               {{ panels.safety_notice(safety_notice) }}
               {% endif %}
@@ -699,4 +730,5 @@
 <!-- Stage navigation: Next and Previous; each step is remembered server-side so a
      reload resumes in place, and Complete leads on to the next lesson or back to the unit. -->
 <script src="/static/lesson-nav.js"></script>
+<script src="/static/card-sort.js"></script>
 {% endblock %}

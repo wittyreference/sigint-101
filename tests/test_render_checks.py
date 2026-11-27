@@ -20,6 +20,7 @@ SCROLL = REPO / "tools" / "render" / "render_scroll.py"
 FIGURE = REPO / "tools" / "render" / "render_figure.py"
 FIT = REPO / "tools" / "render" / "render_fit.py"
 LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
+CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -420,7 +421,7 @@ def render_make(tmp_path, console_url, devtools):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, CARD_SORT):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -459,9 +460,10 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
 
 
-@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name],
+@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name,
+                                     CARD_SORT.name],
                          ids=["all-pass", "fit-fails", "scroll-fails", "figure-fails",
-                              "logbook-fails"])
+                              "logbook-fails", "card-sort-fails"])
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
     proc = render_make(FAILING_CHECK=failing)
     assert proc.stdout.splitlines() == [
@@ -469,6 +471,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {SCROLL.name} {console_url}/",
         f"ran {FIGURE.name} {console_url}/exam/review/T6C02",
         f"ran {LOGBOOK.name} {console_url}",
+        f"ran {CARD_SORT.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -555,3 +558,84 @@ def test_rack_render_fails_if_the_later_theme_overflows_or_blocks_the_strip(devt
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-2:] == ["VERDICT: FAIL - rack red-night",
                                    "VERDICT: PASS - logbook red-night"]
+
+
+CARD_SORT_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "choicesFit": True,
+    "choiceHeights": [80, 80, 80],
+    "footerFit": True,
+    "feedbackFits": True,
+    "cardScrolls": False,
+}
+LAW_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "scrolls": True,
+    "lastVisible": True,
+    "sections": 8,
+}
+
+
+def _card_sort_pages(*, sort_defect=None, law_defect=None):
+    pages = {}
+    for theme in THEMES:
+        sort = {**CARD_SORT_FITS, "theme": theme}
+        law = {**LAW_FITS, "theme": theme}
+        if theme == "red-night":
+            sort.update(sort_defect or {})
+            law.update(law_defect or {})
+        pages[f"measureCardSort({json.dumps(theme)})"] = sort
+        pages[f"measureLaw({json.dumps(theme)})"] = law
+    return pages
+
+
+def test_card_sort_render_checks_card_screen_and_law_in_all_three_themes(devtools):
+    port = devtools(_card_sort_pages())
+    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - card-sort dark",
+        "VERDICT: PASS - law dark",
+        "VERDICT: PASS - card-sort sunlight",
+        "VERDICT: PASS - law sunlight",
+        "VERDICT: PASS - card-sort red-night",
+        "VERDICT: PASS - law red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"back": False},
+    {"doc": [801, 480]},
+    {"doc": [800, 481]},
+    {"choicesFit": False},
+    {"choiceHeights": [80, 71, 80]},
+    {"footerFit": False},
+    {"feedbackFits": False},
+    {"cardScrolls": True},
+    {"theme": "dark"},
+])
+def test_card_sort_render_fails_when_card_screen_overflows_or_shrinks_buttons(devtools, defect):
+    port = devtools(_card_sort_pages(sort_defect=defect))
+    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-2:] == [
+        "VERDICT: FAIL - card-sort red-night",
+        "VERDICT: PASS - law red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"back": False},
+    {"doc": [800, 481]},
+    {"scrolls": False},
+    {"lastVisible": False},
+    {"sections": 0},
+    {"theme": "dark"},
+])
+def test_card_sort_render_fails_when_law_page_does_not_scroll_or_drops_back(devtools, defect):
+    port = devtools(_card_sort_pages(law_defect=defect))
+    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - law red-night"
