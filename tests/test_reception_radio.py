@@ -159,6 +159,78 @@ def test_delayed_reader_logs_the_radio_that_heard_its_item(tmp_path, monkeypatch
     assert new["radio"] == expected[1]
 
 
+def test_delayed_ism_read_logs_its_launch_radio_command_and_frequency(tmp_path, monkeypatch):
+    monkeypatch.delenv(RTLSDR_SERIAL_ENV, raising=False)
+    bus = [RtlSdrDevice(0, "radio-first")]
+    app = _console(tmp_path, lambda: tuple(bus))
+    procs = []
+    paused, resume, logged = threading.Event(), threading.Event(), threading.Event()
+
+    def spawn(cmd):
+        proc = LateProc([*cmd, "-v"])
+        procs.append(proc)
+        return proc
+
+    with TestClient(app):
+        decoder = app.state.decoder
+        decoder.STOP_WAIT_S = 0.05
+        decoder._which = lambda tool: tool
+        decoder._spawn = spawn
+        heard = decoder.on_reception
+        first_hz = decoder.freq_hz
+
+        def hold_after_admission(item, *, radio=None, **provenance):
+            first = item["readings"]["id"] == 12
+            if first:
+                paused.set()
+                assert resume.wait(5)
+            heard(item, radio=radio, **provenance)
+            if not first:
+                logged.set()
+
+        decoder.on_reception = hold_after_admission
+        try:
+            decoder.start()
+            procs[0].feed('{"model":"TestSensor","id":12,"freq":433.91}')
+            assert paused.wait(5)
+            assert [read.model for read in decoder.recent()] == ["TestSensor"]
+
+            decoder.retune(915_000_000)
+            bus[:] = [RtlSdrDevice(1, "radio-second")]
+            decoder.start()
+            assert len(procs) == 2 and decoder.running and decoder.device == 1
+            assert decoder.live_command() == command_line(procs[1])
+            procs[1].feed('{"model":"TestSensor","id":34,"freq":915.01}')
+            assert logged.wait(5)
+
+            resume.set()
+            procs[0].close_pipe()
+            procs[0].reader.join(5)
+            assert not procs[0].reader.is_alive()
+        finally:
+            resume.set()
+            for proc in procs:
+                proc.close_pipe()
+            decoder.stop()
+            for proc in procs:
+                if proc.reader is not None:
+                    proc.reader.join(5)
+                    assert not proc.reader.is_alive()
+
+    new, old = _receptions(tmp_path)
+    for record, sensor_id in ((old, 12), (new, 34)):
+        assert record["instrument"] == "ism" and record["item"]["model"] == "TestSensor"
+        assert record["item"]["readings"]["id"] == sensor_id
+    assert (old["radio"], old["command"], old["freq_hz"]) == (
+        {"kind": "rtl-sdr", "index": 0, "serial": "radio-first"},
+        command_line(procs[0]), first_hz,
+    )
+    assert (new["radio"], new["command"], new["freq_hz"]) == (
+        {"kind": "rtl-sdr", "index": 1, "serial": "radio-second"},
+        command_line(procs[1]), 915_000_000,
+    )
+
+
 @pytest.mark.parametrize("end", ["stop", "timeout"])
 def test_apt_logs_the_pass_radio_after_the_census_changes(tmp_path, monkeypatch, end):
     monkeypatch.delenv(RTLSDR_SERIAL_ENV, raising=False)
