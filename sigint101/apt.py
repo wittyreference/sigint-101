@@ -9,7 +9,14 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .childproc import ChildWatch, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    command_line,
+    emit_reception,
+    running_command,
+    spawn,
+    stop_process,
+)
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
@@ -103,7 +110,7 @@ class AptDecoder:
         # satdump writes files rather than lines, so the pass's end is where its images are read.
         # The console's hook logs each as a reception and never raises, so it is called directly.
         self.on_reception = None
-        self._before_pass = None
+        self._pass_start: tuple[int, set[Path]] | None = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         # A pass ends by design when satdump's timeout runs out, so a clean exit is not a death.
         self.watch = ChildWatch(SATDUMP, finite=True)
@@ -174,13 +181,14 @@ class AptDecoder:
             raise AptUnavailable(blocked)
         self.device, source_id = self._choose_device()
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._before_pass = set(self._pngs())
+        freq_hz = self.freq_hz
+        before = set(self._pngs())
         try:
-            self._proc = self._spawn(self.freq_hz, source_id, self.output_dir)
+            self._proc = self._spawn(freq_hz, source_id, self.output_dir)
         except (OSError, ValueError) as exc:
             self._proc = None
-            self._before_pass = None
             raise AptUnavailable(f"cannot run satdump: {exc}") from exc
+        self._pass_start = (freq_hz, before)
         self.watch.spawned(self._proc)
         self.error = None
 
@@ -207,18 +215,20 @@ class AptDecoder:
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
             self.error = "satdump survived kill; the dongle may still be held"
-        self._report_pass()
+        self._report_pass(proc)
 
-    def _report_pass(self) -> None:
+    def _report_pass(self, proc) -> None:
         """Report the images the pass just ended wrote: each once, and none from before it."""
-        before, self._before_pass = self._before_pass, None
+        pass_start, self._pass_start = self._pass_start, None
         report = self.on_reception
-        if before is None or report is None:
+        if pass_start is None or report is None:
             return
+        freq_hz, before = pass_start
+        command = command_line(proc)
         written = [png for png in self._pngs() if png not in before]
         written.sort(key=lambda png: png.stat().st_mtime)
         for png in written:
-            report(self._row(png))
+            emit_reception(report, self._row(png, freq_hz), command=command, freq_hz=freq_hz)
 
     def drain(self, timeout: float = APT_PASS_TIMEOUT_S) -> None:
         """Wait for the current pass to finish. Unlike a live feed, a satdump capture is finite."""
@@ -235,7 +245,7 @@ class AptDecoder:
         pngs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         if limit:
             pngs = pngs[:limit]
-        return [self._row(png) for png in pngs]
+        return [self._row(png, self.freq_hz) for png in pngs]
 
     def _pngs(self) -> list[Path]:
         """Every PNG under output_dir, including satdump's per-satellite subdirectories."""
@@ -243,13 +253,13 @@ class AptDecoder:
             return []
         return [p for p in self.output_dir.rglob("*.png") if p.is_file()]
 
-    def _row(self, png: Path) -> dict:
+    def _row(self, png: Path, freq_hz: int) -> dict:
         """One decoded image as the API hands it out."""
         stat = png.stat()
         received_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
         return {
             "path": png.relative_to(self.data_dir).as_posix(),
             "received_at": received_at,
-            "satellite": satellite_for(self.freq_hz),
+            "satellite": satellite_for(freq_hz),
             "meta": {"filename": png.name, "size_bytes": stat.st_size},
         }
