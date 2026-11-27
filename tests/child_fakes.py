@@ -5,7 +5,6 @@ import io
 import queue
 import signal
 import subprocess
-import tempfile
 import threading
 
 # What rtl_fm and friends print when another process already holds the dongle.
@@ -40,9 +39,7 @@ class Child:
         self.args = list(args)
         self.code = code
         self.stdout = Output(said.splitlines())
-        self.stderr = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-        self.stderr.write(said)
-        self.stderr.flush()
+        self.stderr = io.StringIO(said)
         self.stubborn = stubborn or unkillable
         self.unkillable = unkillable
         self.sent = []

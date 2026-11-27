@@ -1,14 +1,16 @@
 # ABOUTME: Tests the shared radio-child helpers: own session, dies with the console, kill path.
 # ABOUTME: Real short-lived processes prove the OS behaviour; fakes at the boundary pin the reasons.
 
+import gc
+import io
 import os
 import signal
 import subprocess
 import sys
-import tempfile
 import textwrap
 import threading
 import time
+import warnings
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,7 @@ from sigint101.childproc import (
     spawn,
     stop_process,
 )
+from tests.child_fakes import Child
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -182,9 +185,7 @@ class _Ended:
         self.args = args
         self._code = code
         self.stdout = None                  # a Popen without stdout=PIPE carries None here
-        self.stderr = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-        self.stderr.write(said)
-        self.stderr.flush()
+        self.stderr = io.StringIO(said)
 
     def poll(self):
         return self._code
@@ -809,3 +810,16 @@ def test_settle_ended_cleans_up_socket_feed_when_step_raises(fail_at):
             ("note_end", True), ("stop_child", True), ("join", True),
             ("close_transport", False),
         ]
+
+
+def test_fake_children_do_not_leak_unclosed_stderr_files():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        child = Child(["rtl_433"], code=1, said=RTL_FM_BUSY)
+        ended = _Ended(["rtl_433"], 1, RTL_FM_BUSY)
+        assert "usb_claim_interface error -6" in exit_reason(child)
+        assert "usb_claim_interface error -6" in exit_reason(ended)
+        del child, ended
+        gc.collect()
+    resource_warnings = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert resource_warnings == []
