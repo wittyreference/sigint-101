@@ -22,7 +22,11 @@ stages:
     noise and read one packet. Tonight you climb one floor up. That same radio does not just carry
     packets — it runs a network. Meshtastic: small nodes that find each other, join channels, and
     hand short encrypted messages down a chain until they reach someone no single node could hear
-    alone. The chirp was the wire. This is what talks over it.
+    alone. One US preset note before you read the list: LongFast uses 250 kHz on one channel with
+    no hopping, which qualifies only under 47 CFR 15.249 (50 mV/m at 3 m, about 0.75 mW EIRP — far
+    below Meshtastic's +30 dBm US default), while Long Turbo uses 500 kHz to meet 47 CFR
+    15.247(a)(2) and its 1 W conducted limit, which is why this Recon runs Long Turbo. The chirp
+    was the wire. This is what talks over it.
   demo: >-
     Watch — hands off. The Nomad's LoRa radio runs meshtasticd: node id, SNR, and text — or
     "(encrypted — not on our channel)". Empty? A mesh of one hears nothing.
@@ -54,3 +58,20 @@ answer: ["relayed"]
 verdict: >-
   It reaches, relayed: the node between rebroadcasts it, and the hop limit (three by default) stops
   the echo.
+
+sources:
+  - title: "47 CFR 15.247 — Operation within the bands 902-928 MHz, 2400-2483.5 MHz, and 5725-5850 MHz"
+    url: "https://www.ecfr.gov/current/title-47/section-15.247"
+    read: "2026-11-27"
+  - title: "47 CFR 15.249 — Operation within the bands 902-928 MHz, 2400-2483.5 MHz, 5725-5875 MHz, and 24.0-24.25 GHz"
+    url: "https://www.ecfr.gov/current/title-47/section-15.249"
+    read: "2026-11-27"
+  - title: "Meshtastic Radio Settings (Long Fast 250 kHz, Long Turbo 500 kHz)"
+    url: "https://meshtastic.org/docs/overview/radio-settings/"
+    read: "2026-11-27"
+  - title: "Meshtastic LoRa Configuration (US 902-928 MHz, +30 dBm limit)"
+    url: "https://meshtastic.org/docs/configuration/radio/lora/"
+    read: "2026-11-27"
+  - title: "Meshtastic — Let's talk about 2.8 (500 kHz § 15.247 bandwidth and Long Turbo)"
+    url: "https://meshtastic.org/blog/lets-talk-about-2-8/"
+    read: "2026-11-27"
