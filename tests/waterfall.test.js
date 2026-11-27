@@ -522,6 +522,13 @@ test("a pressed key stays shown but cannot be pressed again until the console an
   assert.deepEqual(panel.restartKey(POLL("stalled"), true), { shown: true, disabled: true });
 });
 
+test("after a gain step the restart key appears if waiting for the first row becomes stalled", () => {
+  const poll = (stale) => ({ code: 200, body: { ...FM_BODY, gain: 29.7, stale } });
+  assert.equal(panel.restartKey(poll("waiting"), false).shown, false);
+  assert.equal(panel.restartKey(poll("stalled"), false).shown, true);
+  assert.equal(panel.restartKey(poll("resuming"), false).shown, false);
+});
+
 test("a restarting sweep's meter drops its floor and peak", () => {
   // A guard: meterState already gives any stale state its note.
   assert.deepEqual(panel.meterState({ floor: -9.5, peak: 20.2 }, [], "restarting"),

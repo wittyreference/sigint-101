@@ -609,7 +609,6 @@ def test_a_restarted_sweep_reads_only_its_own_rows_and_they_age_too():
     sweeper.set_gain(0.0)
     sweeper.start()
     assert sweeper.reading()[0] is None
-    clock.now += 60
     procs[-1].feed(FM_LINES)
     wait_for_rows(sweeper, 4)
     assert sweeper.reading()[0] == sweeper.rows()[-1]
@@ -2021,6 +2020,13 @@ def _flush_event(sweeper):
     return done
 
 
+def _feed_row(proc, lines, published):
+    """Feed enough chunks to publish one row and wait for the reader to append it."""
+    published.clear()
+    proc.feed(lines)
+    assert published.wait(5), "the reader did not publish the pass"
+
+
 def test_restart_stops_a_stalled_sweep_keeps_its_rows_and_the_next_start_is_a_new_run():
     clock = _Clock()
     sweeper, procs = _sweeping(clock)
@@ -2075,6 +2081,67 @@ def test_a_restarted_run_with_no_row_reads_stalled_again_after_its_allowance():
     sweeper.start()
     assert len(procs) == 3
     sweeper.stop()
+
+
+@pytest.mark.parametrize("late", [True, False], ids=["past-allowance", "within-allowance"])
+def test_a_restarted_sweeps_first_row_is_a_reading_only_within_its_allowance(late):
+    clock, procs = _Clock(), []
+    sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, clock=clock)
+    published = _flush_event(sweeper)
+    try:
+        sweeper.start()
+        _feed_row(procs[-1], FM_LINES[:9], published)
+        _stall(clock, sweeper)
+        sweeper.restart()
+        sweeper.start()
+        bound = sweeper.stale_after() + sweeper.START_ALLOWANCE_S
+        clock.now += bound + (0.01 if late else -0.01)
+
+        states, readable = [], []
+        for lines in (FM_LINES[:9], FM_LINES[9:17], FM_LINES[17:] + FM_LINES[:1]):
+            _feed_row(procs[-1], lines, published)
+            row, state, _ = sweeper.newest()
+            assert row is sweeper.rows()[-1]
+            states.append(state)
+            readable.append(sweeper.reading()[0] is row)
+        assert states == (["resuming", "resuming", None] if late else [None] * 3)
+        assert readable == ([False, False, True] if late else [True] * 3)
+    finally:
+        sweeper.stop()
+
+
+@pytest.mark.parametrize("change", ["initial start", "gain", "retune", "death"])
+def test_each_start_without_a_first_row_stalls_and_can_be_restarted(change):
+    clock, procs = _Clock(), []
+    sweeper = Sweeper(spawn=_fed(procs), radio_present=lambda: True, clock=clock)
+    published = _flush_event(sweeper)
+    try:
+        if change != "initial start":
+            sweeper.start()
+            _feed_row(procs[-1], FM_LINES[:9], published)
+            clock.now += 60
+        if change == "gain":
+            sweeper.set_gain(29.7)
+        elif change == "retune":
+            sweeper.retune(88_000_000, 90_000_000)
+        elif change == "death":
+            procs[-1].die(1)
+            sweeper.drain()
+            clock.now += 60                    # past back-off, report the death one last time
+            with pytest.raises(SpectrumUnavailable):
+                sweeper.start()
+
+        sweeper.start()
+        bound = sweeper.stale_after() + sweeper.START_ALLOWANCE_S
+        clock.now += bound - 0.01
+        assert sweeper.newest() == (None, None, None)
+        clock.now += 0.02
+        assert sweeper.newest() == (None, "stalled", pytest.approx(bound + 0.01))
+        assert sweeper.reading()[0] is None
+        assert sweeper.restart() == (pytest.approx(bound + 0.01), None)
+        assert procs[-1].terminated and not sweeper.running
+    finally:
+        sweeper.stop()
 
 
 def _not_stalled(case):
