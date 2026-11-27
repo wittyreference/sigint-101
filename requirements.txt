@@ -3,6 +3,7 @@ uvicorn[standard]
 jinja2
 httpx
 meshtastic
+smbus2
 pytest
 pytest-cov
 ruff

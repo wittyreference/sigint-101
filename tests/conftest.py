@@ -1,5 +1,8 @@
-# ABOUTME: Keeps console tests off real Meshtastic interfaces.
-# ABOUTME: Tests exercise the daemon boundary with an explicitly injected interface.
+# ABOUTME: Keeps console tests off real Meshtastic and UPS I2C interfaces.
+# ABOUTME: Hardware tests substitute explicitly at either boundary.
+
+import sys
+from types import SimpleNamespace
 
 import pytest
 from meshtastic import tcp_interface
@@ -12,3 +15,11 @@ def no_real_meshtastic(monkeypatch):
             raise OSError("meshtasticd is unavailable in tests")
 
     monkeypatch.setattr(tcp_interface, "TCPInterface", NoRadioTCP)
+
+
+@pytest.fixture(autouse=True)
+def no_real_i2c(monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise FileNotFoundError("the I2C bus is unavailable in tests")
+
+    monkeypatch.setitem(sys.modules, "smbus2", SimpleNamespace(SMBus=refuse))
