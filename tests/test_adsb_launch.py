@@ -423,18 +423,20 @@ def test_adsb_refuses_when_peer_identity_cannot_be_verified(tmp_path, monkeypatc
     real_has_socket = getattr(adsb, "_child_has_socket", None)
     real_open = os.pidfd_open
     real_close = os.close
+    child = None
     pidfds = []
     closed = []
 
-    def open_pidfd(pid):
-        fd = real_open(pid)
-        pidfds.append(fd)
+    def open_pidfd(pid, flags=0):
+        fd = real_open(pid, flags)
+        if child is not None and pid == child.pid:
+            pidfds.append(fd)
         return fd
 
     def close(fd):
-        if fd in pidfds:
-            closed.append(fd)
         real_close(fd)
+        if fd in pidfds and fd not in closed:
+            closed.append(fd)
 
     def lookup(pid, inode):
         if real_has_socket(pid, inode):
@@ -447,6 +449,9 @@ def test_adsb_refuses_when_peer_identity_cannot_be_verified(tmp_path, monkeypatc
     monkeypatch.setattr(os, "pidfd_open", open_pidfd)
     monkeypatch.setattr(os, "close", close)
     monkeypatch.setattr(adsb, "_child_has_socket", lookup, raising=False)
+    # asyncio can open a pidfd with explicit flags before the receiver spawns its child.
+    os.close(os.pidfd_open(os.getpid(), 0))
+    assert not pidfds and not closed
     if fault == "reused-pid":
         # Both kernel observations can match a reused numeric PID. Only the original pidfd
         # says that the launch whose identity those observations were meant to prove has exited.
@@ -457,9 +462,10 @@ def test_adsb_refuses_when_peer_identity_cannot_be_verified(tmp_path, monkeypatc
         tmp_path, probe=_present, adsb_factory=lambda: receiver,
     ) as client:
         def spawn(argv, **kwargs):
-            spawn.child = children.enter_context(_stand_in(
+            nonlocal child
+            child = children.enter_context(_stand_in(
                 _SERVE_SBS, adsb.SBS_PORT, False, _OWNED.hex(), ready=True))
-            return spawn.child
+            return child
 
         monkeypatch.setattr(adsb, "spawn", spawn)
         response = client.get("/api/adsb")
@@ -470,7 +476,7 @@ def test_adsb_refuses_when_peer_identity_cannot_be_verified(tmp_path, monkeypatc
                 else "exited during SBS ownership verification") in reason
         assert receiver._run.complete.wait(3) and receiver._run.reaped
         assert len(pidfds) == 1 and closed == pidfds
-        assert spawn.child.poll() is not None
+        assert child.poll() is not None
         assert len(opened) == 1 and opened[0].fileno() == -1
         _assert_no_reception(client, tmp_path, response.json())
 
@@ -480,10 +486,11 @@ def test_adsb_refuses_when_peer_identity_cannot_be_verified(tmp_path, monkeypatc
 def test_adsb_waits_for_owned_peer_and_keeps_its_provenance(tmp_path, monkeypatch, case):
     inspected = []
     real_has_socket = getattr(adsb, "_child_has_socket", None)
+    child = None
 
     def lookup(pid, inode):
         if case == "pidfd-fallback":
-            assert spawn.child._waitpid_lock.locked()
+            assert child._waitpid_lock.locked()
         owns = real_has_socket(pid, inode)
         if owns:
             inspected.append((pid, inode))
@@ -492,11 +499,19 @@ def test_adsb_waits_for_owned_peer_and_keeps_its_provenance(tmp_path, monkeypatc
         return owns
 
     monkeypatch.setattr(adsb, "_child_has_socket", lookup, raising=False)
-    if case == "pidfd-fallback":
-        def no_pidfd(*args):
-            raise OSError(errno.ENOSYS, "pidfd unavailable")
+    real_open = getattr(os, "pidfd_open", None)
+    if case == "pidfd-fallback" and real_open is not None:
+        def no_pidfd(pid, flags=0):
+            if child is not None and pid == child.pid:
+                raise OSError(errno.ENOSYS, "pidfd unavailable")
+            return real_open(pid, flags)
 
-        monkeypatch.setattr(os, "pidfd_open", no_pidfd, raising=False)
+        monkeypatch.setattr(os, "pidfd_open", no_pidfd)
+        with pytest.raises(OSError) as original:
+            real_open(-1, 0)
+        with pytest.raises(OSError) as delegated:
+            os.pidfd_open(-1, 0)
+        assert delegated.value.errno == original.value.errno
     if case == "dual-stack":
         try:
             with socket.socket(socket.AF_INET6) as probe:
@@ -509,9 +524,10 @@ def test_adsb_waits_for_owned_peer_and_keeps_its_provenance(tmp_path, monkeypatc
         tmp_path, probe=_present, adsb_factory=lambda: receiver,
     ) as client:
         def spawn(argv, **kwargs):
-            spawn.child = children.enter_context(_stand_in(
+            nonlocal child
+            child = children.enter_context(_stand_in(
                 _SERVE_SBS, adsb.SBS_PORT, case == "dual-stack", _OWNED.hex(), ready=True))
-            return spawn.child
+            return child
 
         monkeypatch.setattr(adsb, "spawn", spawn)
         delivered = _observe_receptions(receiver)
@@ -519,4 +535,4 @@ def test_adsb_waits_for_owned_peer_and_keeps_its_provenance(tmp_path, monkeypatc
         assert response.status_code == 200
         assert len(inspected) == (2 if case == "inode-before-fd" else 1)
         assert len(set(inspected)) == 1
-        _assert_owned_reception(client, receiver, spawn.child, delivered, tmp_path)
+        _assert_owned_reception(client, receiver, child, delivered, tmp_path)

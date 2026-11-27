@@ -1,6 +1,7 @@
 # ABOUTME: Integration tests for the FastAPI console — its routes and the server-side
 # ABOUTME: commit-before-reveal gate, driven through the TestClient against a fixture pack.
 
+import asyncio
 import inspect
 import io
 import json
@@ -8,6 +9,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from html import unescape
 from pathlib import Path
 
@@ -3507,46 +3509,75 @@ def test_the_restart_route_restarts_a_stalled_sweep_end_to_end(tmp_path):
     assert _kinds(tmp_path, "spectrum_restart") == [{"stalled_for_s": 60.0, "error": None}]
 
 
+@contextmanager
 def _not_stalled_console(tmp_path, case):
     """A console whose sweep is in a state a press must leave alone, and the state to name."""
     procs, bus, now = [], ([] if case == "no radio" else ["AAAA"]), [1000.0]
-    client = _client(tmp_path, probe=_present,
-                     sweeper_factory=lambda: _fed_sweeper(procs, bus, now),
-                     decoder_factory=lambda: _StubDecoder(_reads()))
-    client.__enter__()
-    sweeper = client.app.state.sweeper
-    if case == "no radio":
-        assert client.get("/api/spectrum").status_code == 503
-        return client, procs, "stopped"
-    client.get("/api/spectrum")
-    procs[-1].feed(FM_LINES)
-    wait_for_rows(sweeper, 2)
-    if case == "live":
-        return client, procs, "live"
-    if case == "rtl_433":
-        client.get("/api/decode")                   # rtl_433 takes the dongle
-        return client, procs, "released"
-    now[0] += 60
-    if case == "resuming":
-        procs[-1].feed(_fm_pass(0))
-        wait_for_rows(sweeper, 3)
-        return client, procs, "resuming"
-    assert client.post("/api/spectrum/restart").status_code == 200   # the first press
-    return client, procs, "restarting"
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now),
+                 decoder_factory=lambda: _StubDecoder(_reads())) as client:
+        response = client.get("/api/spectrum")
+        if case == "no radio":
+            assert response.status_code == 503
+            yield client, procs, "stopped"
+            return
+        sweeper = client.app.state.sweeper
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        if case == "rtl_433":
+            client.get("/api/decode")               # rtl_433 takes the dongle
+            state = "released"
+        elif case == "resuming":
+            now[0] += 60
+            procs[-1].feed(_fm_pass(0))
+            wait_for_rows(sweeper, 3)
+            state = "resuming"
+        elif case == "second press":
+            now[0] += 60
+            assert client.post("/api/spectrum/restart").status_code == 200  # the first press
+            state = "restarting"
+        else:
+            state = "live"
+        yield client, procs, state
+
+
+def test_restart_case_closes_its_client_if_setup_fails(tmp_path, monkeypatch):
+    clients, loops = [], []
+    make_client = _client
+
+    def capture_client(*args, **kwargs):
+        client = make_client(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    def fail_wait(*args):
+        [client] = clients
+        loops.append(client.portal.call(asyncio.get_running_loop))
+        raise RuntimeError("sweep setup failed")
+
+    monkeypatch.setattr("tests.test_app._client", capture_client)
+    monkeypatch.setattr("tests.test_app.wait_for_rows", fail_wait)
+    try:
+        with pytest.raises(RuntimeError, match="sweep setup failed"):
+            with _not_stalled_console(tmp_path, "live"):
+                pass
+        [loop] = loops
+        assert loop.is_closed()
+    finally:
+        for client in clients:
+            if client.portal is not None:
+                client.__exit__(None, None, None)
 
 
 @pytest.mark.parametrize("case", ["live", "resuming", "second press", "rtl_433", "no radio"])
 def test_the_restart_route_changes_nothing_when_the_sweep_is_not_stalled(tmp_path, case):
-    client, procs, state = _not_stalled_console(tmp_path, case)
-    try:
+    with _not_stalled_console(tmp_path, case) as (client, procs, state):
         sweeper, decoder = client.app.state.sweeper, client.app.state.decoder
         before = (len(procs), [p.terminated for p in procs], len(sweeper.rows()),
                   sweeper.released, decoder.running, decoder._released)
         pressed = client.post("/api/spectrum/restart")
         after = (len(procs), [p.terminated for p in procs], len(sweeper.rows()),
                  sweeper.released, decoder.running, decoder._released)
-    finally:
-        client.__exit__(None, None, None)
     assert pressed.status_code == 409
     assert pressed.json()["restarted"] is False and pressed.json()["state"] == state
     assert after == before
