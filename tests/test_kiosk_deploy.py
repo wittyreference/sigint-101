@@ -239,6 +239,28 @@ def test_an_unreadable_output_size_falls_back_to_the_panel(box, body):
     assert _arg(box.launches()[0], "--window-size") == "800,480"
 
 
+def _mode(mode, transform="normal", scale="1.000000"):
+    return (f'HDMI-A-1 "P"\n  Enabled: yes\n  Modes:\n    {mode} px, 60.000000 Hz (current)\n'
+            f"  Transform: {transform}\n  Scale: {scale}\n")
+
+
+@pytest.mark.parametrize("text, size", [
+    (_mode("800x480", scale="0.010000"), "800,480"),
+    (_mode("80000x48000"), "800,480"),
+    (_mode("200x100"), "800,480"),
+    (_mode("9999999x480"), "800,480"),
+    (_mode("7680x4320"), "7680,4320"),
+    (_mode("3840x2160", transform="270"), "2160,3840"),
+    (_mode("320x240"), "320,240"),
+], ids=["tiny-scale", "absurd-mode", "too-small", "too-many-digits", "8k", "4k-rotated", "qvga"])
+def test_an_output_size_no_screen_has_falls_back_to_the_panel_and_real_ones_stay(box, text,
+                                                                                   size):
+    _wlr_randr(box, "cat <<'EOF'\n" + text + "EOF")
+    result = box.run(LAUNCHER, "open")
+    assert result.returncode == 0, result.stderr
+    assert _arg(box.launches()[0], "--window-size") == size
+
+
 def _prefs(box):
     return box.home / ".config" / "chromium-kiosk" / "Default" / "Preferences"
 
@@ -260,7 +282,8 @@ def test_launch_forgets_the_window_bounds_the_profile_saved_and_keeps_the_rest(b
         "zoom": 1.25,
     }
     prefs.write_text(json.dumps(saved), encoding="utf-8")
-    prefs.chmod(0o600)
+    # Not 0600, which a fresh temporary file gets anyway: the mode must be copied across.
+    prefs.chmod(0o644)
     result = box.run(LAUNCHER, "open")
     assert result.returncode == 0, result.stderr
     assert box.launches()
@@ -269,7 +292,7 @@ def test_launch_forgets_the_window_bounds_the_profile_saved_and_keeps_the_rest(b
     assert "app_window_placement" not in after["browser"]
     del saved["browser"]["window_placement"], saved["browser"]["app_window_placement"]
     assert after == saved
-    assert prefs.stat().st_mode & 0o777 == 0o600
+    assert prefs.stat().st_mode & 0o777 == 0o644
     # Written beside it and renamed over it: no temporary file is left behind.
     assert sorted(p.name for p in prefs.parent.iterdir()) == ["Preferences"]
 

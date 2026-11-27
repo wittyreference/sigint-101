@@ -54,7 +54,15 @@ output_size() {
       /^[ \t]+Transform:/ { tr = $2 }
       END { if (!found) emit() }')"
   fi
-  [[ "$size" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || size="800x480"
+  [[ "$size" =~ ^[1-9][0-9]{0,5}x[1-9][0-9]{0,5}$ ]] || size="800x480"
+  # A size no screen has (an odd scale, a bad mode) would make a worse window than the panel's own,
+  # so keep to 320x240 up to 7680x4320 (8K), either way up; a Pi drives nothing above 4K.
+  local w="${size%x*}" h="${size#*x}" long short
+  if [ "$w" -ge "$h" ]; then long="$w" short="$h"; else long="$h" short="$w"; fi
+  if [ "$long" -lt 320 ] || [ "$short" -lt 240 ] || [ "$long" -gt 7680 ] || [ "$short" -gt 4320 ]
+  then
+    size="800x480"
+  fi
   printf '%s\n' "$size"
 }
 
@@ -101,9 +109,11 @@ PY
 
 # Only ever called when no kiosk browser is alive, so a stale singleton from a crash is safe to
 # clear and the "profile in use" dialog never blocks the panel.
-# --kiosk asks the compositor for fullscreen. --start-fullscreen and the explicit position and size
-# make the full output the bounds too, so a window that does not go fullscreen still covers it
-# (Chromium applies these flags over any bounds it saved).
+# Do not count on --kiosk (or --start-fullscreen) for fullscreen: Chromium's source suggests that
+# on Linux an --app window is never put in fullscreen, which would explain the strip. What covers
+# the output is --window-position and --window-size, which Chromium applies over any bounds it
+# saved. Clearing the saved placement alone would not do: Chromium's default window for an
+# 800x480 screen is exactly 780x460 at 10,10. On the reference panel this is unverified.
 # --disk-cache-size=1 keeps a stale stylesheet from outliving an update. --password-store=basic
 # stops Chromium asking the desktop keyring, which otherwise covers the panel with a
 # "choose password for new keyring" dialog that a keyboard-free kiosk can never dismiss.
