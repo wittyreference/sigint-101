@@ -1420,10 +1420,8 @@ def _reap_stage(proc) -> None:
 @pytest.mark.parametrize("action", ["stop", "retune"])
 def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_retune(
         monkeypatch, action):
-    # When an upstream pipeline stage dies while a downstream stage stays alive holding stdout
-    # open, _settle() must bring every stage down before joining the reader so a concurrent stop
-    # or retune never waits out STOP_WAIT_S on the lifecycle lock.
-    monkeypatch.setattr(childproc, "EXIT_GRACE_S", 0.05)
+    # While the downstream still holds stdout open during EOF grace, stop and retune must
+    # cancel retirement without joining the blocked reader under the lifecycle lock.
     stages = []
     upstream_in = []
 
@@ -1442,10 +1440,20 @@ def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_r
 
     dec = aprs.AprsDecoder(spawn=spawn, **_common())
     dec.STOP_WAIT_S = 0.6
+    dec.EOF_WAIT_S = 5
     clock = _Clock()
     dec.watch = ChildWatch(dec.watch.tool, clock=clock)
     heard = _Heard(dec, lambda d: d["source"], default_freq=aprs.DEFAULT_APRS_HZ)
     dec.on_reception = heard
+    observed_eof = threading.Event()
+    record_death = dec._record_death
+
+    def mark_eof(*args):
+        result = record_death(*args)
+        observed_eof.set()
+        return result
+
+    monkeypatch.setattr(dec, "_record_death", mark_eof)
     try:
         dec.start()
         heard.wait_for(1)
@@ -1454,15 +1462,6 @@ def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_r
         stages[0].wait(timeout=5)
         assert stages[0].poll() == 1
         assert stages[1].poll() is None
-
-        settling = threading.Event()
-        real_stopping = dec.watch.stopping
-
-        def mark_stopping():
-            real_stopping()
-            settling.set()
-
-        dec.watch.stopping = mark_stopping
 
         start_error = []
 
@@ -1474,7 +1473,9 @@ def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_r
 
         starter = threading.Thread(target=run_start)
         starter.start()
-        assert settling.wait(5)
+        assert observed_eof.wait(5)
+        assert stages[1].poll() is None
+        assert not dec._run.physical.is_set()
 
         t0 = time.monotonic()
         if action == "stop":

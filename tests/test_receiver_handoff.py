@@ -3,11 +3,12 @@
 
 import asyncio
 import select
+import signal
 import subprocess
 import sys
 import threading
 
-from sigint101 import app, aprs, childproc
+from sigint101 import app, aprs, childproc, receiver_lifecycle
 from sigint101.events import read_events
 from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _StubSweeper
@@ -34,6 +35,59 @@ def test_two_failed_teardown_claims_refuse_without_retrying_under_reservation(tm
         assert not client.app.state.sweeper.running
         proc.unkillable = False
         proc.stubborn = False
+
+
+def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.05)
+    can_reap, stop_polls, polled, retried = (threading.Event() for _ in range(4))
+    claims, launches = [], []
+
+    class RecoveringChild(Child):
+        def kill(self):
+            self.unkillable = not can_reap.is_set()
+            super().kill()
+            if polled.is_set() and len(self.sent) > 2:
+                retried.set()
+
+    proc = RecoveringChild(["aprs"], unkillable=True)
+    decoder = _aprs(proc)
+
+    class Sweep(_StubSweeper):
+        def start(self):
+            launches.append(proc.poll())
+            super().start()
+
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
+                 sweeper_factory=lambda: Sweep([])) as client:
+        decoder.start()
+        ticket = decoder._run
+
+        def poll_for_sweep():
+            while not stop_polls.is_set():
+                claims.append(client.get("/api/spectrum").status_code)
+                if len(claims) >= 2:
+                    polled.set()
+                stop_polls.wait(0.01)
+
+        poller = threading.Thread(target=poll_for_sweep, daemon=True)
+        poller.start()
+        try:
+            assert retried.wait(3), "no background retry ran during refused claims"
+            assert ticket.physical.is_set() and not ticket.reaped
+            assert proc.poll() is None and launches == []
+        finally:
+            stop_polls.set()
+            poller.join(3)
+            can_reap.set()
+
+        assert not poller.is_alive()
+        assert claims and set(claims) == {503}
+        assert ticket.complete.wait(3), "the killable child was never reaped"
+        assert ticket.reaped and proc.poll() == -signal.SIGKILL
+        assert proc.sent[0] == "TERM"
+        assert len(proc.sent) >= 4 and set(proc.sent[1:]) == {"KILL"}
+        assert client.get("/api/spectrum").status_code == 200
+        assert launches == [-signal.SIGKILL]
 
 
 def test_late_diagnostic_failure_cannot_hold_or_clear_a_new_claim(tmp_path, monkeypatch):
