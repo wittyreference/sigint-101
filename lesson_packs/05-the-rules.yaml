@@ -16,8 +16,12 @@ stages:
   frame: >-
     Tonight, comrade, the one rule — the single line that keeps this instrument a gift and not a
     problem. The radio in your hands can hear almost the whole spectrum and can talk on part of it,
-    and the law treats those two powers very differently. Learn where the line sits once, and you
-    never have to guess again.
+    and the law treats those two powers very differently. Even inside licence-free 902–928 MHz, the
+    rule follows the waveform: Meshtastic's LongFast (250 kHz on one channel, no hopping) sits
+    under 47 CFR 15.249 at 50 mV/m at 3 m — about 0.75 mW EIRP, far below Meshtastic's +30 dBm US
+    default — while Long Turbo (500 kHz) meets 47 CFR 15.247(a)(2) and its 1 W conducted limit,
+    which is why this Recon runs Long Turbo. Learn where the line sits once, and you never have to
+    guess again.
   demo: >-
     Here is the whole of it, and it is simpler than people fear. Receiving — listening — is broad
     and, in most places, lawful: you may tune and watch nearly anything your radio can hear, the way
@@ -67,3 +71,20 @@ choices:
 answer: ["illegal"]
 verdict: >-
   Illegal: listening to the repeater was fine, but transmitting on it needs an amateur licence.
+
+sources:
+  - title: "47 CFR 15.247 — Operation within the bands 902-928 MHz, 2400-2483.5 MHz, and 5725-5850 MHz"
+    url: "https://www.ecfr.gov/current/title-47/section-15.247"
+    read: "2026-11-27"
+  - title: "47 CFR 15.249 — Operation within the bands 902-928 MHz, 2400-2483.5 MHz, 5725-5875 MHz, and 24.0-24.25 GHz"
+    url: "https://www.ecfr.gov/current/title-47/section-15.249"
+    read: "2026-11-27"
+  - title: "Meshtastic Radio Settings (Long Fast 250 kHz, Long Turbo 500 kHz)"
+    url: "https://meshtastic.org/docs/overview/radio-settings/"
+    read: "2026-11-27"
+  - title: "Meshtastic LoRa Configuration (US 902-928 MHz, +30 dBm limit)"
+    url: "https://meshtastic.org/docs/configuration/radio/lora/"
+    read: "2026-11-27"
+  - title: "Meshtastic — Let's talk about 2.8 (500 kHz § 15.247 bandwidth and Long Turbo)"
+    url: "https://meshtastic.org/blog/lets-talk-about-2-8/"
+    read: "2026-11-27"

@@ -9,11 +9,11 @@ concept: >-
   A polar-orbiting weather satellite paints a picture of the clouds below it and sends it down on
   137 MHz as APT — Automatic Picture Transmission — an analog facsimile, not packets: a 2400 Hz tone
   whose loudness is pixel brightness, 120 lines a minute, two channels (visible and infrared) side by
-  side. satdump decodes it live, or aptdec and noaa-apt decode a recorded pass, stacking the lines
-  into an image of your own sky. Because it is analog it degrades gracefully — a weak pass is grainy
-  long before it is gone. The catch: the NOAA APT birds were decommissioned in 2025, so a live image
-  now means a transmitting satellite (Meteor-M N2-3 or N2-4 LRPT, near 137.9 MHz), a 137 MHz antenna
-  and a timed pass.
+  side. Because it is analog it degrades gracefully — a weak pass is grainy long before it is gone.
+  No NOAA satellite has transmitted APT since August 2025 (NESDIS: NOAA-18 on 6 June, NOAA-19 on
+  13 August, NOAA-15 on 19 August 2025): APT will be shown from a labelled recording (satdump,
+  aptdec or noaa-apt), and the live 137 MHz pass will be Meteor-M N2-3 or N2-4 LRPT on 137.900 MHz
+  once its decoder lands.
 requires_tx: false
 hardware: [rtl-sdr]
 panels: [apt]
@@ -44,12 +44,12 @@ stages:
   explain: >-
     A grainy but real image, comrade. APT is analog, so it fails gracefully: noise rides along as
     false brightness, and a weak pass comes down faded and speckled, banded with static where the
-    signal dropped — yet real clouds over real coastline. Honest coda: NOAA-15 (137.620), NOAA-18
-    (137.9125) and NOAA-19 (137.100) were decommissioned through 2025, the last that August. The
-    panel stays empty until you aim a 137 megahertz V-dipole or quadrifilar helix at a predicted
-    pass of a live bird: Russia's Meteor-M N2-3 or N2-4, near 137.9 MHz, sending digital LRPT.
-    Carry this out the door: digital decoders behind you were all-or-nothing; analog gets noisier,
-    then gone — and a picture shouted in the clear is yours to read.
+    signal dropped — yet real clouds over real coastline. Honest coda: no NOAA satellite has
+    transmitted APT since August 2025 (NESDIS: NOAA-18 6 June, NOAA-19 13 August, NOAA-15 19 August
+    2025), so none fills this panel. APT will be shown from a labelled recording; live passes will
+    be Meteor-M LRPT on 137.900 MHz once its decoder lands. Carry this out the door: digital
+    decoders behind you were all-or-nothing; analog gets noisier, then gone — and a picture shouted
+    in the clear is yours to read.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:
@@ -62,3 +62,17 @@ answer: ["grainy"]
 verdict: >-
   A grainy but real picture: APT is analog, so noise speckles it; no checksum throws a line
   away.
+
+sources:
+  - title: "NESDIS — Suspension of POES data to Users after June 16, 2025 and Decommissioning"
+    url: "https://www.nesdis.noaa.gov/news/suspension-of-poes-data-users-after-june-16-2025-and-decommissioning"
+    read: "2026-11-27"
+  - title: "NESDIS — A Legacy in Orbit: NOAA Decommissions the POES Satellite Constellation"
+    url: "https://www.nesdis.noaa.gov/news/legacy-orbit-noaa-decommissions-the-poes-satellite-constellation"
+    read: "2026-11-27"
+  - title: "WMO OSCAR — Meteor-M N2-3 (VHF 137 MHz LRPT operational)"
+    url: "https://space.oscar.wmo.int/satellites/view/meteor_m_n2_3"
+    read: "2026-11-27"
+  - title: "WMO OSCAR — Meteor-M N2-4 (VHF 137 MHz LRPT operational)"
+    url: "https://space.oscar.wmo.int/satellites/view/meteor_m_n2_4"
+    read: "2026-11-27"
