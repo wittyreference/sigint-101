@@ -1,4 +1,4 @@
-// ABOUTME: Runs the Flipper panel's own poll (flipper.js over decoder-panel.js) against one answer,
+// ABOUTME: Runs the Flipper panel's own poll (flipper.js over decoder-panel.js) against replies,
 // ABOUTME: in a vm with a stand-in page built from the panel macro; reports what the panel shows.
 
 "use strict";
@@ -63,20 +63,26 @@ function fetchAnswering(status, text) {
   };
 }
 
-// Load both scripts into one page as the browser does (decoder-panel.js first), answer the first
-// poll, let its promises settle, and read the panel.
-async function showPoll(status, text) {
+// Load both scripts as the browser does, let each poll's promises settle, and read the panel.
+async function showPoll(status, text, next, beforeNext) {
   const { document, parts } = standInPage();
   const timers = [];
+  let nextPoll;
   const context = vm.createContext({
     document: document,
     fetch: fetchAnswering(status, text),
-    setTimeout: (fn, ms) => { timers.push(ms); return timers.length; },
+    setTimeout: (fn, ms) => { nextPoll = fn; return timers.push(ms); },
   });
   for (const name of ["decoder-panel.js", "flipper.js"]) {
     vm.runInContext(fs.readFileSync(path.join(STATIC, name), "utf8"), context, { filename: name });
   }
-  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  if (next) {
+    if (beforeNext) beforeNext(context.DecoderPanel);
+    context.fetch = fetchAnswering(...next);
+    nextPoll();
+    await new Promise((r) => setImmediate(r));
+  }
   const badge = parts["[data-flipper-badge]"];
   const empty = parts["[data-flipper-empty]"];
   return {

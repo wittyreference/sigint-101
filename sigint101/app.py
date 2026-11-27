@@ -1283,6 +1283,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     "next_step": "Plug in the RTL-SDR."}
         if isinstance(exc, AdsbPortOccupied):
             return {"cause": "unavailable", "next_step": "Free the port, then retry ADS-B."}
+        if reason == "no Flipper on USB":
+            return {"cause": "no_radio", "message": "No Flipper on USB.",
+                    "next_step": "Connect the Flipper over USB."}
         if reason == "no Flipper attached":
             return {"cause": "no_radio", "next_step": "Connect the Flipper over USB."}
         if reason.startswith("no monitor radio:"):
