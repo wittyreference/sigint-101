@@ -111,7 +111,11 @@ The script can be re-run safely, and it skips anything already in place. Your pr
 `~/sigint-101/data` and survives updates.
 
 Provisioning sets the US and Long Turbo defaults the first time it can configure the local
-Meshtastic service. You can change them afterward. The `--check` report shows the current settings.
+Meshtastic service. You can change them afterward. Provisioning also keeps the configured transmit
+power at 8 dBm by default. `--check` reports the current settings and any pending power change.
+For a kit with a different module, set `SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM` to its documented
+ceiling in dBm each time you run provisioning. Set `SIGINT101_MESHTASTIC_TX_POWER_DBM` to request a
+specific power at or below it. Both settings use nonzero whole numbers in dBm.
 
 Three decoders are not installed by default: digital voice (M27), NOAA APT (M24) and SSTV
 (M25). Until they are, those lessons say so. To build them, run

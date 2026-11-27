@@ -4,6 +4,13 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-11-27: Meshtastic's radio power value is narrower than its protobuf field
+**Finding.** The LoRa protobuf accepts a signed 32-bit `tx_power`. The firmware stores it in a
+signed byte before interpreting zero as automatic power. For example, a value of -226 can become
+30 after narrowing. [Meshtastic RadioInterface](https://github.com/meshtastic/firmware/blob/master/src/mesh/RadioInterface.cpp)
+**How to apply.** Validate the representable range and reject zero before comparing a requested
+power against a module ceiling. Keep the configured value's readback separate from RF measurement.
+
 ## 2026-10-27: M12 decodes RDS (PSK) with rtl_fm|redsea — but the reference Recon's FM antenna can't hear it
 **Finding.** RDS is the data on an FM station's 57 kHz subcarrier (PSK — phase, which the waterfall
 can never show). M12 decodes it with `rtl_fm -M fm -l 0 -A std -s 171k -F 9 -f <hz> | redsea -r

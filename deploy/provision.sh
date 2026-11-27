@@ -591,23 +591,40 @@ step_kiosk() {
   apply "run deploy/install.sh (differs: ${stale[*]})" "$d/install.sh"
 }
 
+# FCC grant 2ALPH-E22900M22S (2021-10-29), Ebyte E22-900M22S: 0.0076 W conducted
+# (about 8.8 dBm). Use 8 dBm as the provisioning ceiling for US Long Turbo.
+readonly MESH_TX_POWER_CEILING_DBM=8
+
+validate_mesh_tx_power() {
+  local name="$1" value="$2"
+  # Meshtastic narrows the setting to int8_t before checking for automatic power.
+  if [[ "$value" =~ ^-?[1-9][0-9]{0,2}$ ]] &&
+     (( value >= -128 && value <= 127 )); then
+    return 0
+  fi
+  die "$name must be a nonzero whole number from -128 to 127 dBm (0 uses the radio default)"
+}
+
 read_mesh_lora() {
   local settings
-  settings="$("$@" --get lora.region --get lora.modem_preset --get lora.use_preset)" || return 1
+  settings="$("$@" --get lora.region --get lora.modem_preset --get lora.use_preset \
+                   --get lora.tx_power)" || return 1
   # The CLI prints enum numbers and Python's True/False for individual preferences.
   awk '
     /^lora\.region: [0-9]+$/ { region = $2 }
     /^lora\.modem_preset: [0-9]+$/ { preset = $2 }
     /^lora\.use_preset: (True|False)$/ { use = $2 }
+    /^lora\.tx_power: -?[0-9]+$/ { power = $2 }
     END {
-      if (region == "" || preset == "" || use == "") exit 1
-      print region, preset, use
+      if (region == "" || preset == "" || use == "" || power == "") exit 1
+      print region, preset, use, power
     }
   ' <<< "$settings"
 }
 
 step_meshtastic_defaults() {
   step "Meshtastic LoRa defaults (M11 LoRa, M28 Meshtastic)"
+  local target_power="$1"
   if ! systemctl --quiet is-active meshtasticd 2>/dev/null; then
     warn "meshtasticd is not running; the LoRa lessons read its API on port 4403"
     return 0
@@ -619,12 +636,12 @@ step_meshtastic_defaults() {
     return 0
   fi
   local cli=(timeout 15 "$mesh" --host 127.0.0.1 --timeout 5)
-  local settings region preset use region_name preset_name
+  local settings region preset use power region_name preset_name power_name
   if ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)"; then
     warn "could not read LoRa settings from local meshtasticd"
     return 0
   fi
-  read -r region preset use <<< "$settings"
+  read -r region preset use power <<< "$settings"
   # Values from Meshtastic's LoRaConfig.RegionCode and ModemPreset enums.
   region_name="$region"
   case "$region" in 0) region_name=UNSET ;; 1) region_name=US ;; esac
@@ -634,25 +651,34 @@ step_meshtastic_defaults() {
   if [[ "$preset" =~ ^([0-9]|1[0-3])$ ]]; then
     preset_name="${presets[preset]}"
   fi
-  ok "meshtasticd LoRa region $region_name, modem preset $preset_name (use preset: $use)"
+  power_name="$power dBm"
+  [ "$power" != 0 ] || power_name="radio default (0)"
+  ok "meshtasticd LoRa region $region_name, modem preset $preset_name (use preset: $use), tx_power $power_name"
 
-  # A one-time provisioning default. Later runs report the node's choices.
-  [ ! -d "$marker" ] || return 0
-  if [[ "$settings" != "1 9 True" ]]; then
-    if [ "$CHECK" = 1 ]; then
-      would "set local meshtasticd LoRa defaults to US / LONG_TURBO"
-      return 0
-    fi
-    if ! "${cli[@]}" --set lora.region US --set lora.modem_preset LONG_TURBO \
-                      --set lora.use_preset true >/dev/null 2>&1 ||
-       ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)" ||
-       [[ "$settings" != "1 9 True" ]]; then
-      warn "could not confirm US / LONG_TURBO on meshtasticd; defaults can be retried"
-      return 0
-    fi
-    did "set local meshtasticd LoRa defaults to US / LONG_TURBO"
+  # Region and preset are one-time defaults. Reconcile power on every run, including upgraded kits.
+  local profile=()
+  local expected="$region $preset $use $target_power"
+  local goal="tx_power $target_power dBm" action="tx_power to $target_power dBm"
+  if [ ! -d "$marker" ]; then
+    profile=(--set lora.region US --set lora.modem_preset LONG_TURBO --set lora.use_preset true)
+    expected="1 9 True $target_power"
+    goal="US / LONG_TURBO with $goal"
+    action="defaults to $goal"
   fi
-  if [ "$CHECK" = 0 ]; then
+  if [[ "$settings" != "$expected" ]]; then
+    if [ "$CHECK" = 1 ]; then
+      would "set local meshtasticd LoRa $action"
+      return 0
+    fi
+    if ! "${cli[@]}" "${profile[@]}" --set lora.tx_power "$target_power" >/dev/null 2>&1 ||
+       ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)" ||
+       [[ "$settings" != "$expected" ]]; then
+      warn "could not confirm $goal on meshtasticd (retry on the next run)"
+      return 0
+    fi
+    did "set local meshtasticd LoRa $action"
+  fi
+  if [ "$CHECK" = 0 ] && [ ! -d "$marker" ]; then
     mkdir -p "$marker"
   fi
 }
@@ -715,6 +741,9 @@ usage: provision.sh [--check] [--with-optional] [--with-flock-adapter] [--branch
   --with-optional       also build dsd-fme, satdump and sstv (hours on a Pi 4)
   --with-flock-adapter  monitor mode at boot for the RTL8821CU adapter (needs a powered USB hub)
   --branch NAME         follow a course branch other than main
+
+  SIGINT101_MESHTASTIC_TX_POWER_DBM      request a power at or below the ceiling (defaults to it)
+  SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM  use another module's documented ceiling in dBm
 U
 }
 
@@ -735,6 +764,14 @@ main() {
     shift
   done
 
+  local mesh_ceiling="${SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM-$MESH_TX_POWER_CEILING_DBM}"
+  local mesh_target="${SIGINT101_MESHTASTIC_TX_POWER_DBM-$mesh_ceiling}"
+  validate_mesh_tx_power SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM "$mesh_ceiling"
+  validate_mesh_tx_power SIGINT101_MESHTASTIC_TX_POWER_DBM "$mesh_target"
+  if (( mesh_target > mesh_ceiling )); then
+    die "requested Meshtastic tx_power $mesh_target dBm exceeds the $mesh_ceiling dBm ceiling"
+  fi
+
   step_preflight
   step_node
   step_desktop_autologin
@@ -748,7 +785,7 @@ main() {
   step_monitor_mode
   step_glyph_font
   step_kiosk
-  step_meshtastic_defaults
+  step_meshtastic_defaults "$mesh_target"
   step_stock_report
   step_handover_report
 
