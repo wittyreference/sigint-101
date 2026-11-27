@@ -4,9 +4,12 @@
 import base64
 import json
 import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
+from sigint101 import childproc
 from sigint101.hardware import RTL_FM, RtlSdrDevice
 from sigint101.sstv import (
     DEFAULT_SSTV_HZ,
@@ -17,6 +20,8 @@ from sigint101.sstv import (
     parse_mode,
     pipeline_commands,
 )
+from tests.child_fakes import LateProc
+from tests.test_app import _client, _present
 
 # A real 1x1 PNG, used as a stand-in for a completed decode. The module never reads pixels; this
 # only has to be a genuine image file on disk, the way sstv would leave one behind.
@@ -51,6 +56,8 @@ class FakePipeline:
     PNG at the output path, the way a finished decode leaves an image behind.
     """
 
+    code = None
+
     def __init__(self, lines, output_path=None):
         self.stdout = iter(lines)
         self.terminated = False
@@ -60,7 +67,7 @@ class FakePipeline:
                 handle.write(PNG_BYTES)
 
     def poll(self):
-        return None
+        return self.code
 
     def terminate(self):
         self.terminated = True
@@ -264,7 +271,9 @@ def test_a_finished_decode_is_discoverable_with_its_mode(tmp_path):
     ]
     dec = _decoder(tmp_path, lines)
     dec.start()
+    dec._proc.code = 0
     dec.drain()
+    dec.stop()
     imgs = dec.images()
     assert len(imgs) == 1
     assert imgs[0]["mode"] == "Martin 1"
@@ -274,7 +283,9 @@ def test_a_finished_decode_is_discoverable_with_its_mode(tmp_path):
 def test_a_decode_with_no_reported_mode_writes_no_sidecar(tmp_path):
     dec = _decoder(tmp_path, ["Decoding image... done"])
     dec.start()
+    dec._proc.code = 0
     dec.drain()
+    dec.stop()
     img = dec.images()[0]
     assert img["mode"] is None
     assert img["meta"] == {}
@@ -316,7 +327,9 @@ def test_start_refuses_once_released_until_resumed(tmp_path):
     dec.resume()
     assert dec.released is False
     dec.start()
+    dec._proc.code = 0
     dec.drain()
+    dec.stop()
     assert dec.images()[0]["mode"] == "Robot 36"
 
 
@@ -368,10 +381,16 @@ def test_start_is_a_no_op_while_already_running(tmp_path):
 def test_release_keeps_the_pictures_it_already_received(tmp_path):
     # Received pictures are durable artifacts on disk, not an in-memory roster: handing the dongle
     # to the sweeper must not throw away a picture the learner already pulled out of the air.
-    dec = _decoder(tmp_path, ["Detected SSTV mode Martin 2"])
+    now = 1735689600.0
+    dec = _decoder(tmp_path, ["Detected SSTV mode Martin 2"], clock=lambda: now)
     dec.start()
+    dec._proc.code = 0
     dec.drain()
+    dec.stop()
     assert dec.images()
+    now += 1
+    dec.start()
+    assert dec.running
     dec.release()
     assert len(dec.images()) == 1
 
@@ -391,3 +410,301 @@ def test_a_reader_error_is_recorded_not_swallowed(tmp_path):
     dec.start()
     dec.drain()
     assert dec.error == "pipe died"
+
+
+# --- publication belongs to the capture that supplied the bytes ------------------
+
+
+@pytest.fixture
+def capture_files(tmp_path):
+    launches = []
+    heard = []
+
+    def spawn(freq, device, path):
+        child = LateProc([SSTV, "-o", str(path), "--test-frequency", str(freq)])
+        launches.append((child, path))
+        return child
+
+    dec = _decoder(tmp_path, spawn=spawn, clock=lambda: 1735689600.0)
+
+    def report(item, *, command=None, freq_hz=None):
+        heard.append((item, command, freq_hz))
+
+    dec.on_reception = report
+    yield dec, launches, heard
+    for child, _ in launches:
+        child.close_pipe()
+    dec.stop()
+
+
+def _finish(child, *, mode="Robot 36", code=0):
+    if mode is not None:
+        child.feed(f"Detected SSTV mode {mode}")
+    child.die(code)
+    child.close_pipe()
+
+
+class _StubbornStage(LateProc):
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        if self.poll() is None:
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return self.poll()
+
+
+def test_sstv_live_picture_cannot_be_listed_or_served(tmp_path, capture_files):
+    dec, launches, _ = capture_files
+    with _client(tmp_path, probe=_present, sstv_factory=lambda: dec) as client:
+        assert client.get("/api/sstv").status_code == 200
+        _, staged = launches[0]
+        staged.write_bytes(PNG_BYTES)
+        listed = dec.images()
+        served = client.get(f"/media/{staged.relative_to(tmp_path)}").status_code
+        assert (listed, served) == ([], 404)
+
+
+@pytest.mark.parametrize("exit_code", [None, 1], ids=["live-abort", "failed-exit"])
+def test_sstv_aborted_or_failed_capture_discards_its_picture(capture_files, exit_code):
+    dec, launches, heard = capture_files
+    dec.start()
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    if exit_code is not None:
+        child.die(exit_code)
+    child.close_pipe()
+    dec.stop()
+    assert not staged.exists()
+    assert dec.images() == []
+    assert heard == []
+
+
+def test_sstv_unreaped_writer_keeps_its_picture_private(capture_files, monkeypatch):
+    dec, launches, heard = capture_files
+    upstream = _StubbornStage(["rtl_fm"])
+    spawn = dec._spawn
+
+    def launch(*args):
+        return childproc.Pipeline(upstream, spawn(*args), finite=True)
+
+    monkeypatch.setattr(childproc, "EXIT_GRACE_S", 0)
+    monkeypatch.setattr(dec, "_spawn", launch)
+    dec.start()
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    _finish(child)
+    dec.stop()
+    assert "survived kill" in dec.error
+    assert upstream.poll() is None
+    assert staged.is_file()
+    assert dec.images() == []
+    assert heard == []
+
+
+def test_sstv_only_clean_reaped_exit_zero_publishes_and_never_overwrites(
+        tmp_path, capture_files):
+    dec, launches, _ = capture_files
+    with _client(tmp_path, probe=_present, sstv_factory=lambda: dec) as client:
+        assert client.get("/api/sstv").status_code == 200
+        child, staged = launches[0]
+        staged.write_bytes(PNG_BYTES)
+        _finish(child)
+        dec.drain()
+        assert client.get("/api/receptions?instrument=sstv").json()["receptions"] == []
+        dec.stop()
+        dec.release()
+        [record] = client.get("/api/receptions?instrument=sstv").json()["receptions"]
+        payload = record["payload"]
+        [image] = dec.images()
+        assert payload["command"] == childproc.command_line(child)
+        assert payload["freq_hz"] == DEFAULT_SSTV_HZ
+        assert payload["item"] == image
+        assert image["mode"] == "Robot 36"
+        assert Path(image["path"]).name == staged.name
+        assert client.get(f"/media/{image['path']}").status_code == 200
+
+
+@pytest.mark.parametrize("failure", ["sidecar-write", "png-link", "source-unlink"])
+def test_sstv_publication_commits_at_exclusive_png_link(capture_files, monkeypatch, failure):
+    dec, launches, heard = capture_files
+    dec.start()
+    child, staged = launches[0]
+    published = dec.output_dir / staged.name
+    staged.write_bytes(PNG_BYTES)
+    real_link, real_unlink, real_open = os.link, Path.unlink, Path.open
+    attempted = []
+
+    def open_path(path, mode="r", *args, **kwargs):
+        if failure == "sidecar-write" and mode in ("w", "x") and path.suffix == ".json":
+            attempted.append("sidecar-write")
+            raise OSError("sidecar write failed")
+        return real_open(path, mode, *args, **kwargs)
+
+    def link(src, dst, *args, **kwargs):
+        if failure == "png-link" and Path(dst) == published:
+            attempted.append("png-link")
+            raise OSError("PNG link failed")
+        return real_link(src, dst, *args, **kwargs)
+
+    def unlink(path, *args, **kwargs):
+        if failure == "source-unlink" and path == staged:
+            attempted.append("source-unlink")
+            raise OSError("staged source unlink failed")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_path)
+    monkeypatch.setattr(os, "link", link)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    _finish(child)
+    dec.stop()
+    dec.stop()
+    if failure == "source-unlink":
+        assert staged != published  # Source cleanup follows a separate, visible commit.
+        [report] = heard
+        assert report[1] == childproc.command_line(child)
+        assert report[0]["mode"] == "Robot 36"
+        assert published.is_file() and staged.is_file()
+    else:
+        assert dec.images() == []
+        assert not published.with_suffix(".json").exists()
+        assert heard == []
+        assert dec.error
+    assert attempted == [failure]
+
+
+@pytest.mark.parametrize("when", ["before", "at-link"])
+def test_sstv_occupied_png_never_borrows_new_mode(capture_files, monkeypatch, when):
+    dec, launches, heard = capture_files
+    dec.start()
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    published = dec.output_dir / staged.name
+    original_size = 1
+    seen = []
+    real_link = os.link
+
+    def inspect_gallery():
+        seen.extend(image["mode"] for image in dec.images())
+
+    def link(src, dst, *args, **kwargs):
+        if Path(dst) == published and when == "at-link":
+            published.write_bytes(b"x")
+        inspect_gallery()
+        return real_link(src, dst, *args, **kwargs)
+
+    if when == "before":
+        published.write_bytes(b"x")
+        inspect_gallery()
+    monkeypatch.setattr(os, "link", link)
+    _finish(child)
+    dec.stop()
+    assert all(mode is None for mode in seen)
+    [image] = dec.images()
+    assert image["mode"] is None
+    assert published.stat().st_size == original_size
+    assert not published.with_suffix(".json").exists()
+    assert heard == []
+    assert dec.error
+
+
+@pytest.mark.parametrize("reaped", [True, False], ids=["reaped", "unknown-reap"])
+def test_sstv_settle_diagnostic_error_sweeps_only_its_confirmed_reaped_capture(
+        capture_files, monkeypatch, reaped):
+    dec, launches, heard = capture_files
+    upstream = LateProc(["rtl_fm"]) if reaped else _StubbornStage(["rtl_fm"])
+    spawn = dec._spawn
+    real_ended = dec.watch.ended
+
+    def launch(*args):
+        child = spawn(*args)
+        return childproc.Pipeline(upstream, child, finite=True)
+
+    def broken(*args, **kwargs):
+        raise OSError("diagnostics failed")
+
+    monkeypatch.setattr(dec, "_spawn", launch)
+    dec.start()
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    unrelated = staged.with_name("another-capture.png")
+    unrelated.write_bytes(PNG_BYTES)
+    child.die(0)
+    monkeypatch.setattr(dec.watch, "ended", broken)
+    try:
+        with pytest.raises(OSError, match="diagnostics failed"):
+            dec.start()
+    finally:
+        monkeypatch.setattr(dec.watch, "ended", real_ended)
+        child.close_pipe()
+        if child.reader is not None:
+            child.reader.join(1)
+    assert upstream.terminated
+    assert (upstream.poll() is not None) is reaped
+    assert not dec.running
+    assert staged.exists()
+    assert heard == []
+    assert dec.images() == []
+
+    monkeypatch.setattr(dec, "_spawn", spawn)
+    dec.start()
+    assert len(launches) == 2
+    assert staged.exists() is not reaped
+    assert unrelated.exists()
+
+
+@pytest.mark.parametrize("collision", ["unreaped-writer", "orphan-sidecar"])
+def test_sstv_run_numbered_names_isolate_delayed_writers_and_orphan_sidecars(
+        capture_files, monkeypatch, collision):
+    dec, launches, heard = capture_files
+    if collision == "orphan-sidecar":
+        dec.output_dir.mkdir()
+        marker = json.dumps({"mode": "Scottie 1", "freq_hz": 145_800_000})
+        clock = dec._clock
+
+        def leave_orphan_at_launch():
+            run = getattr(getattr(dec, "_runs", None), "current", None)
+            suffix = "" if run is None else f"-r{run}"
+            (dec.output_dir / f"20250101T000000-000{suffix}.json").write_text(
+                marker, encoding="utf-8")
+            return clock()
+
+        monkeypatch.setattr(dec, "_clock", leave_orphan_at_launch)
+        dec.start()
+        child, staged = launches[0]
+        staged.write_bytes(PNG_BYTES)
+        _finish(child, mode=None)
+        dec.stop()
+        [image] = dec.images()
+        assert (image["mode"], image["meta"]) == (None, {})
+        return
+
+    spawn = dec._spawn
+    upstream = _StubbornStage(["rtl_fm"])
+    monkeypatch.setattr(childproc, "EXIT_GRACE_S", 0)
+    monkeypatch.setattr(
+        dec, "_spawn", lambda *args: childproc.Pipeline(upstream, spawn(*args), finite=True))
+    dec.start()
+    first, first_path = launches[0]
+    first_run = getattr(getattr(dec, "_runs", None), "current", None)
+    _finish(first)
+    dec.stop()
+    assert not first_path.exists()
+    with pytest.raises(SstvUnavailable, match="survived kill"):
+        dec.start()
+    monkeypatch.setattr(dec, "_spawn", spawn)
+    dec.start()
+    second, second_path = launches[1]
+    second_run = getattr(getattr(dec, "_runs", None), "current", None)
+
+    assert first_path != second_path
+    assert first_path.stem.endswith(f"-r{first_run}")
+    assert second_path.stem.endswith(f"-r{second_run}")
+    first_path.write_bytes(b"x")
+    second_path.write_bytes(PNG_BYTES)
+    _finish(second)
+    dec.stop()
+    [report] = heard
+    assert Path(report[0]["path"]).name == second_path.name
+    assert (dec.output_dir / second_path.name).stat().st_size == len(PNG_BYTES)
+    assert first_path.exists()
