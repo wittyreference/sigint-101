@@ -62,16 +62,15 @@ if [ "$FORCE" = false ] && [ -f "$LAST_RUN_FILE" ]; then
 fi
 
 # Update last run timestamp
+mkdir -p "$(dirname "$LAST_RUN_FILE")"
 date +%s > "$LAST_RUN_FILE"
 
 # Get timestamp for display
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M')
 
-# Check if we're in a git repo
+# Check if we're in a git repo (including linked worktrees, where .git is a file)
 cd "$PROJECT_ROOT" || exit 0
-if [ ! -d ".git" ]; then
-    exit 0
-fi
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
 
 # ============================================
 # COLLECT FILES FROM ALL THREE SOURCES
@@ -172,18 +171,8 @@ while IFS=$'\t' read -r SOURCE_PATTERN DOC_TARGET; do
     fi
 done < <(ff_doc_mappings)
 
-# Tracked source changed without the todo being updated.
-TRACKED_DIRS=$(ff_config_array ".trackedDirectories" 2>/dev/null)
-TODO_FILE="todo.md"
-[ "$CLAUDE_META_MODE" = "true" ] && TODO_FILE=".meta/todo.md"
-if [ -n "$TRACKED_DIRS" ] && ! touched "$TODO_FILE"; then
-    while IFS= read -r dir; do
-        if [ -n "$dir" ] && echo "$BLOCKING_SCOPE" | grep -q "^${dir}"; then
-            SUGGESTIONS="${SUGGESTIONS}• ${dir} changed but ${TODO_FILE} did not\n"
-            break
-        fi
-    done <<< "$TRACKED_DIRS"
-fi
+# This repository has no todo.md; living state lives in STATUS.md, updated after merges or
+# pushes rather than on every branch commit, so tracked-directory edits do not gate on todo.md.
 
 # New env vars without the example file following.
 if staged ".env" && ! touched ".env.example"; then

@@ -46,19 +46,14 @@ Complete ALL checklists below.
 
 Provide clear APPROVED, NEEDS_CHANGES, or REJECTED decision.
 
-### Step 5: Record the Evidence (D7)
+### Step 5: Record the Verdict
 
-The commit gate (`githooks/pre-commit`) refuses staged code that lacks review evidence
-*for its current content*, so a review that isn't recorded may as well not have happened:
+> **Note:** `scripts/review-evidence.py` is not shipped in this repository.
 
-```bash
-scripts/review-evidence.py --record --verdict '<what the review found>'
-```
-
-Record once per review, after the verdict — one review covers the whole staged batch, and
-evidence is keyed to content hashes, so any later edit to a reviewed file invalidates its
-evidence by itself (re-review and re-record). On NEEDS_CHANGES or REJECTED, fix first and
-re-review; recording a failing verdict just documents that the gate should block.
+`githooks/pre-commit` (along with `githooks/pre-merge-commit` and `githooks/pre-push`) checks
+**git commit identity only** — that both author and committer match the repository's configured
+handle and e-mail. It does not check review evidence. Record the verdict and findings in your
+review output or PR notes; on NEEDS_CHANGES or REJECTED, fix first and re-review.
 
 ---
 
