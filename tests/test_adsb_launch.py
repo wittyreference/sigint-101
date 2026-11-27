@@ -1,13 +1,22 @@
 # ABOUTME: Exercises ADS-B startup and its fixed SBS endpoint without opening a radio.
 # ABOUTME: Checks process ownership, SDR handoff, and reception records through the console.
 
+import errno
+import os
+import select
+import shlex
+import socket
+import subprocess
+import sys
 import threading
+from contextlib import ExitStack, contextmanager, nullcontext
 
 import pytest
 
 from sigint101 import adsb, childproc, receiver_lifecycle
 from sigint101.events import read_events
 from tests.child_fakes import Child
+from tests.test_adsb import POSITION
 from tests.test_app import _client, _present, _StubSweeper
 
 
@@ -45,6 +54,7 @@ def test_adsb_post_spawn_fault_retains_child_until_reaped(tmp_path, monkeypatch,
 
     class BrokenSocket:
         closed = False
+
         def settimeout(self, _timeout):
             fault_raised.set()
             raise OSError("socket timeout setup failed")
@@ -73,13 +83,8 @@ def test_adsb_post_spawn_fault_retains_child_until_reaped(tmp_path, monkeypatch,
             raise ConnectionRefusedError("socket not listening")
         return sock
 
-    def verify_peer(_proc):
-        from contextlib import nullcontext
-
-        return nullcontext(lambda _sock: True)
-
     monkeypatch.setattr(adsb, "spawn", spawn)
-    monkeypatch.setattr(adsb, "_sbs_peer", verify_peer, raising=False)
+    monkeypatch.setattr(adsb, "_sbs_peer", lambda _: nullcontext(lambda _: True), raising=False)
     monkeypatch.setattr(adsb.socket, "create_connection", connect)
     monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.01)
     monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.02)
@@ -109,3 +114,343 @@ def test_adsb_post_spawn_fault_retains_child_until_reaped(tmp_path, monkeypatch,
         assert len(proc.sent) >= 3
         assert sock.closed is (fault == "socket-setup-and-close")
         assert client.get("/api/spectrum").status_code == 200 and sweep.running
+
+
+# Stream data is a checked-in test fixture. The stand-ins do not execute dump1090 or use RF.
+_FOREIGN = (POSITION.replace("A1B2C3", "A0A0A0") + "\n").encode("ascii")
+_OWNED = (POSITION.replace("A1B2C3", "B0B0B0") + "\n").encode("ascii")
+
+_SERVE_SBS = """
+import socket
+import sys
+
+port, dual_stack, payload = sys.argv[1:]
+family = socket.AF_INET6 if dual_stack == "True" else socket.AF_INET
+with socket.socket(family) as server:
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if family == socket.AF_INET6:
+        server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    server.bind(("::" if family == socket.AF_INET6 else "127.0.0.1", int(port)))
+    server.listen()
+    print("ready", flush=True)
+    with server.accept()[0] as peer:
+        peer.sendall(bytes.fromhex(payload))
+        while peer.recv(1):
+            pass
+    sys.stdin.buffer.read()
+"""
+
+
+@contextmanager
+def _stand_in(script, *args, pass_fds=(), ready=False):
+    proc = childproc.GroupPopen(
+        [sys.executable, "-c", script, *map(str, args)], start_new_session=True, pass_fds=pass_fds,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        if ready:
+            assert select.select([proc.stdout], [], [], 3)[0], "child did not bind"
+            assert proc.stdout.readline() == b"ready\n"
+        yield proc
+    finally:
+        childproc.stop_process(proc)
+        proc.stdin.close()
+        proc.stdout.close()
+
+
+def _listen(port):
+    server = socket.socket()
+    try:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen()
+        return server
+    except BaseException:
+        server.close()
+        raise
+
+
+def _short_startup(monkeypatch):
+    monkeypatch.setattr(adsb, "SBS_STARTUP_S", 1.5, raising=False)
+
+
+def _trace_connections(monkeypatch):
+    opened = []
+    connect = socket.create_connection
+
+    def dial(*args, **kw):
+        peer = connect(*args, **kw)
+        opened.append(peer)
+        return peer
+
+    monkeypatch.setattr(adsb.socket, "create_connection", dial)
+    return opened
+
+
+def _stamp_count(client):
+    return next(row["count"] for row in client.get("/api/stamps").json()["stamps"]
+                if row["instrument"] == "adsb")
+
+
+def _assert_no_reception(client, tmp_path, body):
+    assert body["aircraft"] == [] and body["command"] is None
+    assert _records(tmp_path) == [] and _stamp_count(client) == 0
+
+
+def _assert_owned_reception(client, receiver, child, delivered, tmp_path):
+    assert delivered.wait(3), "the managed child did not deliver its aircraft"
+    assert [plane["hex_ident"] for plane in receiver.aircraft()] == ["B0B0B0"]
+    records = _records(tmp_path)
+    assert len(records) == 1
+    assert records[0]["item"]["hex_ident"] == "B0B0B0"
+    assert records[0]["command"] == shlex.join(child.args)
+    assert records[0]["radio"] == {"kind": "rtl-sdr", "index": 2, "serial": "adsb-test"}
+    assert records[0]["freq_hz"] == 1_090_000_000
+    assert _stamp_count(client) == 1
+
+
+def _observe_receptions(receiver):
+    delivered = threading.Event()
+    hook = receiver.on_reception
+
+    def receive(item, *, command, freq_hz, radio):
+        hook(item, command=command, freq_hz=freq_hz, radio=radio)
+        delivered.set()
+
+    receiver.on_reception = receive
+    return delivered
+
+
+def test_adsb_launch_disables_raw_and_beast_inputs_on_loopback(monkeypatch):
+    seen = []
+
+    def spawn(argv, **kwargs):
+        seen.extend(argv)
+        return Child(argv, code=1)
+
+    monkeypatch.setattr(adsb, "spawn", spawn)
+    monkeypatch.setattr(adsb, "_sbs_peer", lambda _: nullcontext(lambda _: True), raising=False)
+    with pytest.raises(adsb.AdsbUnavailable):
+        _decoder().start()
+    assert "--net" in seen and "--net-only" not in seen
+    switches = dict(zip(seen[1:], seen[2:]))
+    assert {flag: switches.get(flag) for flag in (
+        "--net-bind-address", "--net-ri-port", "--net-bi-port"
+    )} == {"--net-bind-address": "127.0.0.1", "--net-ri-port": "0", "--net-bi-port": "0"}
+
+
+@pytest.mark.parametrize("attr", ["SBS_PORT", "RAW_OUT_PORT", "BEAST_OUT_PORT"])
+def test_adsb_refuses_an_occupied_sbs_port_before_spawning(tmp_path, monkeypatch, adsb_ports, attr):
+    launches = []
+
+    def spawn(argv, **kwargs):
+        child = Child(argv, code=1)
+        launches.append(child)
+        return child
+
+    monkeypatch.setattr(adsb, "spawn", spawn)
+    receiver = _decoder()
+    sweep = _StubSweeper([])
+    with ExitStack() as children, _client(
+        tmp_path, probe=_present, adsb_factory=lambda: receiver, sweeper_factory=lambda: sweep,
+    ) as client:
+        assert client.get("/api/spectrum").status_code == 200 and sweep.running
+        with _listen(adsb_ports[attr]) as listener:
+            response = client.get("/api/adsb")
+            assert response.status_code == 503
+            assert "already in use" in response.json()["reason"]
+            assert f"127.0.0.1:{adsb_ports[attr]}" in response.json()["reason"]
+            assert response.json()["next_step"] == "Free the port, then retry ADS-B."
+            assert launches == [] and sweep.running
+            assert not select.select([listener], [], [], 0)[0]
+            _assert_no_reception(client, tmp_path, response.json())
+
+        def start_child(argv, **kwargs):
+            child = children.enter_context(_stand_in(_SERVE_SBS, adsb.SBS_PORT, False, _OWNED.hex(),
+                                                      ready=True))
+            launches.append(child)
+            return child
+
+        monkeypatch.setattr(adsb, "spawn", start_child)
+        response = client.get("/api/adsb")
+        assert response.status_code == 200 and len(launches) == 1
+
+
+def test_adsb_reports_dump1090_stderr_when_a_bind_fails_after_preflight(tmp_path, monkeypatch,
+                                                                     adsb_ports):
+    port = adsb_ports["RAW_OUT_PORT"]
+    error = f"Error opening the listening port {port} (Raw TCP output): Address already in use"
+
+    def spawn(argv, **kwargs):
+        return Child(argv, code=1, said=error)
+
+    monkeypatch.setattr(adsb, "spawn", spawn)
+    monkeypatch.setattr(adsb, "_sbs_peer", lambda _: nullcontext(lambda _: True), raising=False)
+    receiver = _decoder()
+    with _client(tmp_path, probe=_present, adsb_factory=lambda: receiver) as client:
+        response = client.get("/api/adsb")
+        assert response.status_code == 503 and error in response.json()["reason"]
+        assert receiver._run.complete.wait(3) and receiver._run.reaped
+        _assert_no_reception(client, tmp_path, response.json())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux socket ownership proof")
+@pytest.mark.parametrize("owner", ["foreign-binder", "shared-listener"])
+def test_adsb_rejects_an_unowned_sbs_connection_after_preflight(tmp_path, monkeypatch, owner):
+    _short_startup(monkeypatch)
+    opened = _trace_connections(monkeypatch)
+    receiver = _decoder()
+    with ExitStack() as children, _client(
+        tmp_path, probe=_present, adsb_factory=lambda: receiver,
+    ) as client:
+        def spawn(argv, **kwargs):
+            listener = children.enter_context(_listen(adsb.SBS_PORT))
+            inherited = (listener.fileno(),) if owner == "shared-listener" else ()
+            child = children.enter_context(_stand_in("import sys; sys.stdin.buffer.read()",
+                                                      pass_fds=inherited))
+
+            served = threading.Event()
+
+            def serve():
+                with listener.accept()[0] as peer:
+                    peer.sendall(_FOREIGN)
+                    served.set()
+                    while peer.recv(1):
+                        pass
+
+            listener.settimeout(3)
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            children.callback(thread.join, 3)
+            spawn.child = child
+            spawn.served = served
+            return child
+
+        monkeypatch.setattr(adsb, "spawn", spawn)
+        refused = client.get("/api/adsb")
+        assert refused.status_code == 503
+        assert "verify" in refused.json()["reason"]
+        assert spawn.served.is_set(), "the unowned peer never sent its fixture line"
+        assert receiver._run.complete.wait(3) and receiver._run.reaped
+        assert spawn.child.poll() is not None
+        assert len(opened) == 1 and opened[0].fileno() == -1
+        _assert_no_reception(client, tmp_path, refused.json())
+        children.close()
+
+        def restart(argv, **kwargs):
+            restart.child = children.enter_context(_stand_in(
+                _SERVE_SBS, adsb.SBS_PORT, False, _OWNED.hex(), ready=True))
+            return restart.child
+
+        monkeypatch.setattr(adsb, "spawn", restart)
+        delivered = _observe_receptions(receiver)
+        available = client.get("/api/adsb")
+        assert available.status_code == 200
+        _assert_owned_reception(client, receiver, restart.child, delivered, tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "linux" or not hasattr(os, "pidfd_open"), reason="Linux pidfd")
+@pytest.mark.parametrize("fault", ["unreadable-fds", "reused-pid"])
+def test_adsb_refuses_when_peer_identity_cannot_be_verified(tmp_path, monkeypatch, fault):
+    opened = _trace_connections(monkeypatch)
+    _short_startup(monkeypatch)
+    matched = threading.Event()
+    real_has_socket = getattr(adsb, "_child_has_socket", None)
+    real_open = os.pidfd_open
+    real_close = os.close
+    pidfds = []
+    closed = []
+
+    def open_pidfd(pid):
+        fd = real_open(pid)
+        pidfds.append(fd)
+        return fd
+
+    def close(fd):
+        if fd in pidfds:
+            closed.append(fd)
+        real_close(fd)
+
+    def lookup(pid, inode):
+        if real_has_socket(pid, inode):
+            matched.set()
+            if fault == "unreadable-fds":
+                raise PermissionError(errno.EACCES, "cannot inspect child socket fds")
+            return True
+        return False
+
+    monkeypatch.setattr(os, "pidfd_open", open_pidfd)
+    monkeypatch.setattr(os, "close", close)
+    monkeypatch.setattr(adsb, "_child_has_socket", lookup, raising=False)
+    if fault == "reused-pid":
+        # Both kernel observations can match a reused numeric PID. Only the original pidfd
+        # says that the launch whose identity those observations were meant to prove has exited.
+        monkeypatch.setattr(adsb, "_pidfd_exited", lambda _fd: matched.is_set(), raising=False)
+
+    receiver = _decoder()
+    with ExitStack() as children, _client(
+        tmp_path, probe=_present, adsb_factory=lambda: receiver,
+    ) as client:
+        def spawn(argv, **kwargs):
+            spawn.child = children.enter_context(_stand_in(
+                _SERVE_SBS, adsb.SBS_PORT, False, _OWNED.hex(), ready=True))
+            return spawn.child
+
+        monkeypatch.setattr(adsb, "spawn", spawn)
+        response = client.get("/api/adsb")
+        assert response.status_code == 503
+        assert matched.is_set()
+        reason = response.json()["reason"]
+        assert ("cannot inspect child socket fds" if fault == "unreadable-fds"
+                else "exited during SBS ownership verification") in reason
+        assert receiver._run.complete.wait(3) and receiver._run.reaped
+        assert len(pidfds) == 1 and closed == pidfds
+        assert spawn.child.poll() is not None
+        assert len(opened) == 1 and opened[0].fileno() == -1
+        _assert_no_reception(client, tmp_path, response.json())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux socket ownership proof")
+@pytest.mark.parametrize("case", ["inode-before-fd", "dual-stack", "pidfd-fallback"])
+def test_adsb_waits_for_owned_peer_and_keeps_its_provenance(tmp_path, monkeypatch, case):
+    inspected = []
+    real_has_socket = getattr(adsb, "_child_has_socket", None)
+
+    def lookup(pid, inode):
+        if case == "pidfd-fallback":
+            assert spawn.child._waitpid_lock.locked()
+        owns = real_has_socket(pid, inode)
+        if owns:
+            inspected.append((pid, inode))
+            if case == "inode-before-fd" and len(inspected) == 1:
+                return False  # The kernel has published the inode, accept has yet to install fd.
+        return owns
+
+    monkeypatch.setattr(adsb, "_child_has_socket", lookup, raising=False)
+    if case == "pidfd-fallback":
+        def no_pidfd(*args):
+            raise OSError(errno.ENOSYS, "pidfd unavailable")
+
+        monkeypatch.setattr(os, "pidfd_open", no_pidfd, raising=False)
+    if case == "dual-stack":
+        try:
+            with socket.socket(socket.AF_INET6) as probe:
+                probe.bind(("::", 0))
+        except OSError:
+            pytest.skip("dual-stack loopback unavailable")
+
+    receiver = _decoder()
+    with ExitStack() as children, _client(
+        tmp_path, probe=_present, adsb_factory=lambda: receiver,
+    ) as client:
+        def spawn(argv, **kwargs):
+            spawn.child = children.enter_context(_stand_in(
+                _SERVE_SBS, adsb.SBS_PORT, case == "dual-stack", _OWNED.hex(), ready=True))
+            return spawn.child
+
+        monkeypatch.setattr(adsb, "spawn", spawn)
+        delivered = _observe_receptions(receiver)
+        response = client.get("/api/adsb")
+        assert response.status_code == 200
+        assert len(inspected) == (2 if case == "inode-before-fd" else 1)
+        assert len(set(inspected)) == 1
+        _assert_owned_reception(client, receiver, spawn.child, delivered, tmp_path)
