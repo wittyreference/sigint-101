@@ -12,6 +12,7 @@ from sigint101.rayhunter import (
     RayhunterMonitor,
     RayhunterUnavailable,
     RayhunterWarning,
+    _default_fetch,
     parse_analysis,
     parse_manifest,
 )
@@ -434,6 +435,21 @@ def test_a_genuine_report_with_no_finding_is_still_clean(report):
     mon.start()
     assert mon.status() == "clean"
     assert mon.warnings() == []
+
+
+def test_default_fetch_closes_the_http_error_body(tmp_path, monkeypatch):
+    with (tmp_path / "response").open("w+b") as body:
+        body.write(b"Not Found")
+        body.seek(0)
+        url = "http://testserver/report"
+        error = urllib.error.HTTPError(url, 404, "Not Found", None, body)
+
+        def not_found(_url, timeout):
+            raise error
+
+        monkeypatch.setattr("urllib.request.urlopen", not_found)
+        assert _default_fetch(url, 1) == (404, b"Not Found")
+        assert body.closed
 
 
 # What urlopen raises when nothing answers: the cause rides in URLError.reason. The refusal names
