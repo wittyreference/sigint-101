@@ -562,19 +562,21 @@ def test_sstv_reports_the_picture_its_capture_decoded(tmp_path):
 
     def spawn(freq, device, output_path):
         _png(output_path)                                # sstv's picture for this capture
-        return _talking("Searching for calibration header... Found!",
+        child = _talking("Searching for calibration header... Found!",
                         "Detected SSTV mode Robot 36", "Decoding image... done")
+        child.code = 0
+        return child
 
     _png(out / "20250101T000000-000.png")                # a picture from before: never reported
     dec = sstv.SstvDecoder(output_dir=out, data_dir=tmp_path, spawn=spawn, **_common())
     hook = _hook(dec)
     dec.start()
     dec.drain()
+    dec.stop()
     assert len(hook.calls) == 1
     assert hook.calls[0]["mode"] == "Robot 36"
     assert hook.calls[0] == next(i for i in dec.images() if i["path"] == hook.calls[0]["path"])
     assert hook.calls[0]["path"] != "sstv/20250101T000000-000.png"
-    dec.stop()
 
 
 def test_sstv_reports_nothing_for_a_capture_that_decoded_no_picture(tmp_path):

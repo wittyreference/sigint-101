@@ -458,10 +458,11 @@
   }
 
   // The reason the band is empty, as page text over the canvas (null hides it).
-  function showReason(p, message) {
+  function showReason(p, down) {
     if (!p.reason) return;
-    p.reason.firstElementChild.textContent = message || "";
-    p.reason.hidden = !message;
+    p.reason.hidden = !down;
+    if (down) window.DecoderPanel.renderRefusal(p.reason.firstElementChild, down);
+    else p.reason.firstElementChild.textContent = "";
   }
 
   // A stage that declares the gain panel (M2) carries a vertical level meter beside its waterfall.
@@ -571,11 +572,11 @@
   }
   var pendingNote = null;   // "tuning to …" while taps are gathered or a request is in flight
   var tuneNote = null;      // why the last retune was refused, until the next tap
-  var radioNote = null;     // why nothing is tuned (no radio), until the radio answers
+  var radioNote = null;     // short dial caption while the sweep is unavailable
   var restartNoteText = null;   // why a Restart sweep press was refused, until a later poll answers
 
   function renderCaptions() {
-    var text = pendingNote || restartNoteText || tuneNote || radioNote;
+    var text = radioNote || pendingNote || restartNoteText || tuneNote;
     strips.forEach(function (s) {
       if (!s.caption) return;
       s.caption.textContent = text || s.base;
@@ -755,10 +756,7 @@
     });
   });
 
-  // The badge is the per-wrap label. It is born as the honest SAMPLE placeholder; the live path
-  // replaces it with the real state (live / no radio), so a learner is never shown a sample that
-  // pretends to be live, nor a blank panel that hides a dead radio. The full reason rides in the
-  // title attribute, since the badge itself stays short.
+  // Keep the badge short and put the full reason in the panel and the badge's title.
   function say(text, kind, title) {
     panels.forEach(function (p) {
       if (!p.badge) return;
@@ -822,19 +820,9 @@
     }
   }
 
-  // The honest empty state: the band is drawn at its empty colour and the reason is shown over it
-  // as page text. No carriers, no invented signal — just why there is nothing to show.
-  function showEmpty(p, message) {
-    p.sized = false;
-    p.ctx.fillStyle = emptyColour(p);
-    p.ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
-    showReason(p, message);
-    clearGainMeter(p);
-  }
-
   function resetView() {
-    // A row carries its own frequency axis. Rows from the previous span would be painted against
-    // the new one, so the canvas starts clean after every retune.
+    // Reset the painted history when the span changes or the sweep becomes unavailable. After
+    // recovery, the next replay of measured rows can fill the canvas again.
     seen = [];
     total = 0;
     lastRow = null;
@@ -877,6 +865,26 @@
     if (seen.length > 400) seen = seen.slice(-200);
   }
 
+  function showUnavailable(body) {
+    var down = window.DecoderPanel.downState(body);
+    var reason = window.DecoderPanel.refusalText(down);
+    if (!waiting) {
+      waiting = true;
+      span = null;
+      live = null;
+      liveGain = null;
+      radioNote = "Not tuned";
+      renderDials();
+      renderCaptions();
+      renderGain(null, null);
+      resetView();
+      panels.forEach(function (p) { clearGainMeter(p, "offline"); });
+    }
+    panels.forEach(function (p) { showReason(p, down); });
+    say(down.badge, "na", reason);
+    showCommand(null);
+  }
+
   function tick() {
     if (stopped) return;
     var seq = ++pollSeq;
@@ -891,24 +899,8 @@
           restartNoteText = null;
           renderCaptions();
         }
-        if (result.code === 503) {
-          // An honest refusal, reported verbatim — but keep checking, because the radio usually
-          // comes back (another program borrows the dongle and hands it back). The reason is shown
-          // once on the transition rather than redrawn each retry.
-          var reason = (result.body && result.body.reason) || "the radio is unavailable";
-          if (!waiting) {
-            waiting = true;
-            span = null;
-            live = null;
-            liveGain = null;
-            radioNote = "no radio · not tuned";
-            renderDials();
-            renderCaptions();
-            renderGain(null, null);
-            say("no radio", "na", reason);
-            panels.forEach(function (p) { showEmpty(p, reason); });
-            showCommand(null);
-          }
+        if (result.code !== 200 || result.body.available === false) {
+          showUnavailable(result.body);
           return;
         }
         showCommand(result.body.command);
@@ -949,10 +941,10 @@
         var badge = sweepBadge(result.body, total);
         say(badge.text, badge.kind, badge.title);
       })
-      .catch(function (err) {
+      .catch(function () {
         lastPoll = null;
         renderRestart();
-        say("no console", "na", "lost contact with the console: " + err.message);
+        showUnavailable({ reason: "Lost contact with the console." });
       })
       .then(function () {
         // Poll gently while the radio is away — another program holds the dongle, and hammering
@@ -977,6 +969,6 @@
     return Promise.resolve();
   }
 
-  say("connecting", "sample", "starting the sweep");
+  say("checking", "sample", "Checking receiver…");
   autoTuneToBand().then(tick);
 })();

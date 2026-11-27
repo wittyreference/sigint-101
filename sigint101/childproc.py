@@ -129,19 +129,66 @@ _SPAWNER = _Spawner()
 
 
 class GroupPopen(subprocess.Popen):
-    """A Popen whose terminate() and kill() reach the tool's whole session, not just its leader.
+    """Signal the tool's group while its leader still holds the group ID.
 
-    A tool that forks (a shell wrapper, a helper process) would otherwise leave a child holding the
-    dongle after its parent was stopped.
+    A leader that exits is kept unreaped until SIGKILL has reached any helpers in its group.
+    The child then keeps its own exit status, and its PID is safe to release.
     """
 
+    def _exit_pending(self) -> bool:
+        """Peek at the leader under Popen's waitpid lock, leaving its pid reserved."""
+        try:
+            return os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            # Match Popen's status when the child was already reaped elsewhere.
+            self.returncode = 0
+            return False
+
+    def poll(self):
+        # Use the same lock as Popen's internal poll (including stdlib cleanup) and
+        # send_signal. No managed reap can release the pid midway through a signal.
+        if self.returncode is None and self._waitpid_lock.acquire(False):
+            try:
+                if self.returncode is None and self._exit_pending():
+                    _quietly(lambda: self._signal_group(signal.SIGKILL))
+                    try:
+                        _, status = os.waitpid(self.pid, 0)  # waitid confirmed the exit
+                    except ChildProcessError:
+                        self.returncode = 0
+                    else:
+                        self._handle_exitstatus(status)
+            finally:
+                self._waitpid_lock.release()
+        return self.returncode
+
+    def _wait(self, timeout):
+        # Popen.wait calls this hook. Sleep outside the lock so a parallel stop can
+        # still send its signal while the leader is running.
+        deadline = None if timeout is None else time.monotonic() + timeout
+        delay = 0.0005
+        while (code := self.poll()) is None:
+            delay = min(2 * delay, 0.05)
+            if deadline is None:
+                time.sleep(delay)
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                time.sleep(min(delay, remaining))
+        return code
+
     def send_signal(self, sig):
-        self.poll()
-        if self.returncode is not None:
-            return
+        with self._waitpid_lock:
+            if self.returncode is None:
+                self._exit_pending()  # ECHILD means there is no longer an owned leader.
+                if self.returncode is None:
+                    self._signal_group(sig)
+
+    def _signal_group(self, sig):
+        """Signal with the waitpid lock held and the leader still owned."""
         try:
             os.killpg(self.pid, sig)
-        except ProcessLookupError:  # the session is already gone, which is what was wanted
+        except ProcessLookupError:
             pass
 
 
@@ -227,24 +274,24 @@ def _quietly(signal_call):
 
 
 def stop_process(proc) -> bool:
-    """Ask a tool to stop, insist if it ignores the ask, and confirm the OS has reaped it.
+    """Ask the tool to stop, insist if necessary, and wait for its leaders to be reaped.
 
-    Returns False only when even SIGKILL left it unreaped (a process in uninterruptible sleep):
-    the caller reports that, because the next tool will find the dongle busy and deserves to know
-    why.
+    GroupPopen sweeps the leader's group before reaping it. Only a leader that
+    survives the SIGKILL wait leaves the stop unconfirmed.
     """
     _quietly(proc.terminate)
-    try:
-        proc.wait(timeout=STOP_WAIT_S)
+    if _wait_stopped(proc, STOP_WAIT_S):
         return True
-    except subprocess.TimeoutExpired:
-        pass
     _quietly(proc.kill)
+    return _wait_stopped(proc, STOP_WAIT_S)
+
+
+def _wait_stopped(proc, timeout: float) -> bool:
     try:
-        proc.wait(timeout=STOP_WAIT_S)
-        return True
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         return False
+    return True
 
 
 def _stages(proc) -> tuple:

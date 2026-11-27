@@ -63,7 +63,7 @@
     DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = messages.length > 0;
-      if (!messages.length) empty.textContent = "listening… no messages heard yet";
+      if (!messages.length) empty.textContent = DecoderPanel.quietText(body, "no messages yet");
     }
   }
 
@@ -72,7 +72,7 @@
     var empty = panel.querySelector("[data-acars-empty]");
     var badge = panel.querySelector("[data-acars-badge]");
     if (list) list.innerHTML = "";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode ACARS");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -88,7 +88,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

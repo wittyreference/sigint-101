@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import threading
 import time
@@ -1228,6 +1229,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # refusal is logged when it changes, and again after the next successful start.
     last_refusal = {}
 
+    def _receiver_cause(kind, exc, reason):
+        """Classify the refusal that actually fired, without polling hardware again."""
+        if reason.startswith("no RTL-SDR on the USB bus"):
+            return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
+                    "next_step": "Plug in the RTL-SDR."}
+        if reason == "no Flipper attached":
+            return {"cause": "no_radio", "next_step": "Connect the Flipper over USB."}
+        if reason.startswith("no monitor radio:"):
+            return {"cause": "no_radio"}  # This refusal already says how to seat the devboard.
+
+        missing = re.match(r"(?:cannot survey the bus: )?([\w.+-]+) is not installed\b", reason)
+        tool = missing[1] if missing else None
+        if (kind == "spectrum" and reason.startswith("cannot run rtl_power:")
+                and isinstance(exc.__cause__, FileNotFoundError)
+                and exc.__cause__.filename == "rtl_power"):
+            tool = "rtl_power"
+        if tool:
+            command = "Run deploy/provision.sh"
+            if tool in {"dsd-fme", "satdump", "sstv"}:
+                command += " --with-optional"
+            return {"cause": "missing_tool", "message": f"{tool} is not installed.",
+                    "next_step": command}
+        return {"cause": "unavailable"}
+
     def _refused(kind: str, exc, empty: dict, watch=None):
         """A 503 that says why. A tool that died on its own reads as stopped, with its retry.
 
@@ -1242,10 +1267,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, f"{kind}_blocked", {"reason": reason})
         body = {"available": False, "reason": reason, "command": None, **empty}
         death = watch.reason if watch is not None else None
-        if death is not None and reason == death:
-            retry = watch.retry_in()
-            body["state"] = "stopped"
+        sweep_died = kind == "spectrum" and reason.startswith(
+            ("the sweep stopped (", "the sweep was killed mid-pass (",
+             "rtl_power closed its output but did not exit"))
+        if (death is not None and reason == death) or sweep_died:
+            retry = (app.state.sweeper if sweep_died else watch).retry_in()
+            body["cause"] = body["state"] = "stopped"
             body["retry_in"] = round(retry, 1) if retry is not None else 0
+        else:
+            body.update(_receiver_cause(kind, exc, reason))
         return JSONResponse(status_code=503, content=body)
 
     def _started(kind: str, payload: dict) -> None:

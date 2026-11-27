@@ -27,6 +27,30 @@
     return;
   }
 
+  // The exam submit buttons live in the pinned footer, outside their form.
+  document.querySelectorAll("form[data-choice-commit]").forEach(function (form) {
+    var commit = Array.prototype.find.call(form.elements, function (control) {
+      return control.classList.contains("btn-commit");
+    });
+    if (!commit) return;
+    var status = commit.parentElement.querySelector("[data-choice-status]");
+
+    function syncChoice() {
+      var ready = !!form.querySelector('input[type="radio"]:checked:not(:disabled)');
+      commit.disabled = !ready;
+      status.textContent = ready ? "Choice set. Commit to unlock." : "Choose one, comrade";
+      return ready;
+    }
+
+    form.addEventListener("change", syncChoice);
+    form.addEventListener("submit", function (event) {
+      if (event.submitter && event.submitter.formNoValidate) return; // Practice exam Skip.
+      if (!syncChoice()) event.preventDefault();
+    });
+    window.addEventListener("pageshow", syncChoice);
+    syncChoice();
+  });
+
   var stageEl = document.querySelector(".stage");
   if (!stageEl) return;
   var lessonId = stageEl.getAttribute("data-lesson-id");

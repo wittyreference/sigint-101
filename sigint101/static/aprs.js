@@ -66,7 +66,7 @@
     DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = stations.length > 0;
-      if (!stations.length) empty.textContent = "listening… no stations heard yet";
+      if (!stations.length) empty.textContent = DecoderPanel.quietText(body, "no stations heard yet");
     }
   }
 
@@ -75,7 +75,7 @@
     var empty = panel.querySelector("[data-aprs-empty]");
     var badge = panel.querySelector("[data-aprs-badge]");
     if (list) list.innerHTML = "";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode APRS");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -91,7 +91,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

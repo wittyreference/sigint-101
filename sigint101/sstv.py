@@ -4,14 +4,26 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .childproc import ChildWatch, Pipeline, running_command, spawn, stop_process
+from .childproc import (
+    ChildWatch,
+    Pipeline,
+    RunGuard,
+    command_line,
+    emit_reception,
+    running_command,
+    settle_ended,
+    spawn,
+    stop_process,
+)
 from .hardware import (
     RTL_FM,
     DeviceSelectionError,
@@ -71,6 +83,28 @@ class SstvImage:
         }
 
 
+@dataclass
+class _Capture:
+    staged_path: Path
+    published_path: Path
+    freq_hz: int
+    mode: str | None = None
+    decoded_at: float | None = None
+
+
+def _confirmed_reaped(proc) -> bool:
+    """Check every stage after a settle that did not return its stop result."""
+    try:
+        stages = getattr(proc, "procs", (proc,))
+        if any(stage.poll() is None for stage in stages):
+            return False
+        # Use the pipeline's wait contract as well, including process groups when supported.
+        proc.wait(timeout=0)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
 def parse_mode(line: str) -> str | None:
     """Pull the SSTV mode out of one sstv stdout line, or None if it is not the mode line.
 
@@ -127,6 +161,8 @@ class SstvDecoder:
     release() leaves the already-received pictures in place.
     """
 
+    STOP_WAIT_S = 3.0
+
     def __init__(self, *, freq_hz=DEFAULT_SSTV_HZ, device=0, spawn=_popen,
                  output_dir=DEFAULT_OUTPUT_DIR, data_dir=None,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None,
@@ -135,6 +171,8 @@ class SstvDecoder:
         self.device = device
         self.serial = serial or None
         self.output_dir = Path(output_dir)
+        self._staging_dir = self.output_dir.parent / f".{self.output_dir.name}.staging"
+        self._staged_cleanup: set[Path] = set()
         self.data_dir = Path(data_dir) if data_dir is not None else self.output_dir.parent
         self._list_devices = list_devices
         self._spawn = spawn
@@ -142,14 +180,15 @@ class SstvDecoder:
         self._clock = clock
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._life = threading.RLock()
+        self._runs = RunGuard()
         self._proc = None
         self._thread = None
-        self._pending = None
+        self._capture: _Capture | None = None
         self._released = False
         self.error = None
-        # Called with the picture's dict (as images() lists it) when a capture's own decode leaves
-        # one on disk, from the reader thread only; a picture already there is never reported. The
-        # console's hook logs it as a reception and never raises, so the call is made directly.
+        # Retirement calls the console's hook with the published picture, its capture's command
+        # and frequency. The hook logs it as a reception and never raises. A picture already on
+        # disk before the capture is never reported.
         self.on_reception = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         # A capture ends by design after DEFAULT_CAPTURE_S, so a clean finish is not a death.
@@ -198,7 +237,7 @@ class SstvDecoder:
     def _start_locked(self) -> None:
         if self.running:
             return
-        self._settle()
+        self._settle_locked()
         if self._released:
             raise SstvUnavailable(
                 "the radio was released to another program; resume SSTV to take it back")
@@ -216,78 +255,156 @@ class SstvDecoder:
         if blocked:
             raise SstvUnavailable(blocked)
         self.device = self._choose_device()
+        run = self._runs.end(self.watch)
+        freq_hz = self.freq_hz
         received_at = self._clock()
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = self.output_dir / self._name_for(received_at)
         try:
-            self._proc = self._spawn(self.freq_hz, self.device, output_path)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self._staging_dir.mkdir(parents=True, exist_ok=True)
+            for path in tuple(self._staged_cleanup):
+                self._remove_staged(path)
+            capture = self._allocate_capture(received_at, run, freq_hz)
+            self._proc = self._spawn(freq_hz, self.device, capture.staged_path)
         except (OSError, ValueError) as exc:
             self._proc = None
             raise SstvUnavailable(f"cannot run the SSTV pipeline: {exc}") from exc
-        self.watch.spawned(self._proc)
+        self._capture = capture
         self.error = None
-        self._pending = (output_path, received_at)
-        self._thread = threading.Thread(target=self._read, args=(self._proc,),
+        self.watch.spawned(self._proc)
+        self._thread = threading.Thread(target=self._read, args=(self._proc, run, capture),
                                         name="sigint101-sstv", daemon=True)
         self._thread.start()
 
-    @staticmethod
-    def _name_for(received_at: float) -> str:
-        """A sortable, collision-resistant file name for one capture's picture."""
+    def _allocate_capture(self, received_at: float, run: int, freq_hz: int) -> _Capture:
+        """Give this writer a sortable stem distinct from earlier runs and saved files."""
         stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(received_at))
         millis = int((received_at % 1) * 1000)
-        return f"{stamp}-{millis:03d}.png"
+        base = f"{stamp}-{millis:03d}-r{run}"
+        suffix = 0
+        while True:
+            stem = base if suffix == 0 else f"{base}-{suffix}"
+            published = self.output_dir / f"{stem}.png"
+            staged = self._staging_dir / published.name
+            paths = (staged, staged.with_suffix(".json"), published, published.with_suffix(".json"))
+            if not any(os.path.lexists(path) for path in paths):
+                return _Capture(staged, published, freq_hz)
+            suffix += 1
 
-    def _read(self, proc) -> None:
-        """Watch sstv's output for the mode it detects, then record a sidecar for the picture.
-
-        The PNG is sstv's to write; the mode it prints is ours to keep, so when the decode ends we
-        pair the two in a sidecar next to the image. A decode that announced no mode writes none —
-        a picture with an unknown mode is honest, an invented mode is not.
-        """
-        output_path, received_at = self._pending or (None, None)
-        mode = None
+    def _read(self, proc, run: int, capture: _Capture) -> None:
+        """Keep the mode sstv announced in memory while this capture is still current."""
         try:
             for raw in proc.stdout:
                 found = parse_mode(raw)
                 if found is not None:
-                    mode = found
+                    decoded_at = round(self._clock(), 3)
+                    with self._runs:
+                        if self._runs.is_current(run):
+                            capture.mode = found
+                            capture.decoded_at = decoded_at
         except (OSError, ValueError) as exc:  # loud, never silent
-            self.error = str(exc)
-            return
+            with self._runs:
+                if self._runs.is_current(run):
+                    self.error = str(exc)
         finally:
-            self._note_end(proc)
-        if mode is not None and output_path is not None:
-            self._write_sidecar(output_path, mode, received_at)
-        # The picture this capture decoded, if sstv wrote one. Each capture writes to a name stamped
-        # with its own start time (_name_for), so a file there is this decode's product.
-        report = self.on_reception
-        if report is not None and output_path is not None and output_path.is_file():
-            report(self._describe(output_path).as_dict())
+            self._note_end(proc, run)
 
-    def _note_end(self, proc) -> None:
-        """Record why the child ended, if it was not us, so the next poll reports it as stopped."""
-        reason = self.watch.ended(proc)
-        if reason and self.error is None:
-            self.error = reason
+    def _note_end(self, proc, run: int) -> None:
+        """Record why the current child ended so the next poll can report it as stopped."""
+        reason = self.watch.ended(proc, runs=self._runs, run=run)
+        if reason:
+            with self._runs:
+                if self._runs.is_current(run) and self.error is None:
+                    self.error = reason
 
-    def _settle(self) -> None:
-        """Account for a child that ended since the last poll, then clear away what it left."""
-        if self._proc is not None:
-            self._note_end(self._proc)
-            self._stop_locked()
+    def _detach(self) -> tuple[_Capture, threading.Thread | None]:
+        capture, self._capture = self._capture, None
+        thread, self._thread = self._thread, None
+        self._proc = None
+        assert capture is not None
+        return capture, thread
 
-    def _write_sidecar(self, output_path: Path, mode: str, received_at: float) -> None:
-        sidecar = output_path.with_suffix(".json")
-        payload = {
-            "mode": mode,
-            "freq_hz": self.freq_hz,
-            "decoded_at": round(self._clock(), 3),
-        }
+    def _settle_locked(self) -> None:
+        """Reap the finished pipeline, then drain its remaining mode lines and retire it."""
+        proc = self._proc
+        if proc is None or (exit_code := proc.poll()) is None:
+            return
+        capture, thread = self._detach()
         try:
-            sidecar.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        except OSError as exc:  # loud, never silent
-            self.error = str(exc)
+            reaped = settle_ended(proc, thread, self._runs, self.watch,
+                                  note_end=self._note_end, wait_s=self.STOP_WAIT_S)
+        except Exception:
+            # The helper attempts a stop when diagnostics fail, but can only return its reap
+            # result on a normal return. Keep any file whose writer might still be alive.
+            if _confirmed_reaped(proc):
+                self._staged_cleanup.add(capture.staged_path)
+            raise
+        self._finalize_capture(proc, capture, reaped=reaped, exit_code=exit_code)
+
+    def _remove_staged(self, path: Path) -> None:
+        """Retry cleanup of this retired path at the next launch if unlink fails."""
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            self._staged_cleanup.add(path)
+        else:
+            self._staged_cleanup.discard(path)
+
+    def _finalize_capture(self, proc, capture: _Capture, *, reaped: bool,
+                          exit_code: int | None) -> None:
+        """Publish a clean, reaped capture and report it with its own launch provenance."""
+        if not reaped:
+            self.error = "the SSTV pipeline survived kill; the dongle may still be held"
+            return
+        if exit_code != 0:
+            self._remove_staged(capture.staged_path)
+            return
+        try:
+            info = capture.staged_path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if self.error is None:
+                self.error = str(exc)
+            return
+        if not stat.S_ISREG(info.st_mode):
+            return
+        if not info.st_size:
+            self._remove_staged(capture.staged_path)
+            return
+        if not self._publish_capture(capture):
+            return
+        report = self.on_reception
+        if report is not None:
+            emit_reception(report, self._describe(capture.published_path).as_dict(),
+                           command=command_line(proc), freq_hz=capture.freq_hz)
+
+    def _publish_capture(self, capture: _Capture) -> bool:
+        """The exclusive PNG link commits publication. Install its metadata afterwards."""
+        png = capture.published_path
+        sidecar = png.with_suffix(".json")
+        staged_sidecar = None
+        committed = False
+        try:
+            if os.path.lexists(png) or os.path.lexists(sidecar):
+                raise FileExistsError(f"the SSTV picture stem is already occupied: {png.name}")
+            if capture.mode is not None:
+                candidate = capture.staged_path.with_suffix(".json")
+                with candidate.open("x", encoding="utf-8") as handle:
+                    staged_sidecar = candidate
+                    json.dump({"mode": capture.mode, "freq_hz": capture.freq_hz,
+                               "decoded_at": capture.decoded_at}, handle, sort_keys=True)
+            os.link(capture.staged_path, png)
+            committed = True
+            if staged_sidecar is not None:
+                os.link(staged_sidecar, sidecar)
+        except OSError as exc:
+            if self.error is None:
+                self.error = str(exc)
+        finally:
+            if staged_sidecar is not None:
+                self._remove_staged(staged_sidecar)
+            self._remove_staged(capture.staged_path)
+        return committed
 
     def stop(self) -> None:
         """End decoding and let go of the dongle."""
@@ -295,19 +412,25 @@ class SstvDecoder:
             self._stop_locked()
 
     def _stop_locked(self) -> None:
-        # Marked first, so the reader seeing the output end never reports our stop as a death.
-        self.watch.stopping()
-        proc, self._proc = self._proc, None
-        if proc is not None and not stop_process(proc):
-            self.error = "the SSTV pipeline survived kill; the dongle may still be held"
-        if self._thread is not None:
-            self._thread.join(timeout=3)
-            self._thread = None
+        proc = self._proc
+        if proc is None:
+            return
+        if proc.poll() is not None:
+            self._settle_locked()
+            return
+        # Invalidate before signaling so EOF from a deliberate stop cannot commit a death.
+        self._runs.end(self.watch)
+        capture, thread = self._detach()
+        reaped = stop_process(proc)
+        if thread is not None:
+            thread.join(timeout=self.STOP_WAIT_S)
+        self._finalize_capture(proc, capture, reaped=reaped, exit_code=None)
 
     def drain(self, timeout: float = 5.0) -> None:
-        """Wait for one capture to finish decoding. A fixed-length recording does end."""
-        if self._thread is not None:
-            self._thread.join(timeout)
+        """Wait for one capture's reader to finish. Retirement publishes the picture."""
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
 
     def images(self, limit: int | None = None) -> list:
         """The decoded pictures as plain dicts for the API, newest first, read fresh from disk."""

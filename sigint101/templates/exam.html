@@ -18,7 +18,7 @@
 
     {% if not reviewed %}
       {# ---- Answer card: tap a choice, then commit. No typing (keyboard-free gate). ---- #}
-      <form class="exam-form" id="exam-answer" method="post" action="/api/exam/answer?question_id={{ question.id }}">
+      <form class="exam-form" novalidate data-choice-commit id="exam-answer" method="post" action="/api/exam/answer?question_id={{ question.id }}">
         <fieldset class="predict-chips exam-chips">
           <legend class="sr-only">Tap your answer, then commit &mdash; no typing</legend>
           {% for letter, text in question.options.items()|sort %}
@@ -48,8 +48,8 @@
   {% if not reviewed %}
     <div class="exam__foot">
       <a class="btn exam__sim-link" href="/exam/sim">Practice exam</a>
-      <span class="predict__hint">Tap your answer, comrade &mdash; then commit.</span>
-      <button class="btn btn--primary btn-commit" type="submit" form="exam-answer">Commit answer</button>
+      <span class="predict__hint" role="status" data-choice-status>Choose one, comrade</span>
+      <button class="btn btn--primary btn-commit" type="submit" disabled form="exam-answer">Commit answer</button>
     </div>
   {% else %}
     <div class="exam__foot exam-reveal">
@@ -62,3 +62,5 @@
   {% endif %}
 </section>
 {% endblock %}
+
+{% block scripts %}<script src="/static/lesson-nav.js"></script>{% endblock %}

@@ -11,21 +11,21 @@
 {% macro command_strip() %}<button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
                           aria-label="The command this panel is running; tap the panel to show it whole"><code data-command-text></code></button>{% endmacro %}
 
-{# ---- Instrument: a waterfall canvas (static SAMPLE for now) + tap-to-tune. A lesson with no
+{# ---- Instrument: a waterfall canvas (kept empty until a real sweep arrives) + tap-to-tune. A lesson with no
    hardware (e.g. the legal rules) has no radio, so its instrument-named stages fall through to the
    plain text branch instead of drawing a waterfall. ---- #}
 {% macro waterfall(tune_band=none) %}
                 <div class="waterfall-wrap">
-                  <canvas class="waterfall" width="760" height="200" data-tune data-sample="1"
+                  <canvas class="waterfall" width="760" height="200" data-tune
                           {% if tune_band %}data-tune-low="{{ tune_band.low_hz }}" data-tune-high="{{ tune_band.high_hz }}"{% if tune_band.bin_hz %} data-tune-bin="{{ tune_band.bin_hz }}"{% endif %}{% endif %}
-                          aria-label="Spectrogram waterfall (sample render, not live signal)"></canvas>
-                  <span class="badge badge--sample">SAMPLE &middot; NOT LIVE</span>
+                          aria-label="Spectrogram waterfall"></canvas>
+                  <span class="badge badge--sample">CHECKING</span>
                   {# Restart sweep: hidden until waterfall.js reads STALLED from the console, the only
                      state it shows in. A press stops the stalled rtl_power (/api/spectrum/restart). #}
                   <button class="btn waterfall__restart" type="button" data-wf-restart hidden>Restart sweep</button>
                   {# Why the band is empty (no radio, radio busy), as page text over the canvas: text
                      drawn into the stretched canvas bitmap came out ~7 px tall. #}
-                  <div class="waterfall__reason" data-wf-reason hidden><span></span></div>
+                  <div class="waterfall__reason" data-wf-reason><span>Checking receiver…</span></div>
                   {# The axis labels only a span the sweep is pointed at: the lesson's own band until
                      the radio reports, otherwise blank. waterfall.js redraws it from each live span. #}
                   <div class="waterfall__axis" aria-hidden="true">
@@ -56,7 +56,7 @@
                     <div class="gain-meter__mark gain-meter__mark--floor" data-gain-floor hidden>
                       <span class="gain-meter__tag">FLOOR</span><b data-gain-floor-v>&mdash;</b>
                     </div>
-                    <div class="gain-meter__empty" data-gain-empty>&mdash; no radio &mdash;</div>
+                    <div class="gain-meter__empty" data-gain-empty>&mdash; checking &mdash;</div>
                   </div>
                   </div>
                   <div class="gain-meter__control">
@@ -120,10 +120,10 @@
                 <div class="decoder__head">
                   <span class="decoder__title">rtl_433 &middot; DECODE</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-decode-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-decode-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-decode-list></ul>
-                <div class="decoder__empty" data-decode-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+                <div class="decoder__empty" data-decode-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -136,10 +136,10 @@
                    aria-label="Live LoRa packets the Nomad received">
                 <div class="decoder__head">
                   <span class="decoder__title">meshtastic &middot; LoRa</span>
-                  <span class="decoder__status" data-lora-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-lora-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-lora-list></ul>
-                <div class="decoder__empty" data-lora-empty>listening for packets&hellip;</div>
+                <div class="decoder__empty" data-lora-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -152,7 +152,7 @@
                 <div class="decoder__head">
                   <span class="decoder__title">redsea &middot; RDS</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-rds-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-rds-badge>CHECKING</span>
                 </div>
                 <div class="rds" hidden data-rds-card>
                   <div class="rds__ps" data-rds-ps>&mdash;</div>
@@ -163,7 +163,7 @@
                   </div>
                   <div class="rds__rt" data-rds-rt></div>
                 </div>
-                <div class="decoder__empty" data-rds-empty>listening for RDS&hellip;</div>
+                <div class="decoder__empty" data-rds-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -177,28 +177,31 @@
                 <div class="decoder__head">
                   <span class="decoder__title">dump1090 &middot; ADS-B</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-adsb-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-adsb-badge>CHECKING</span>
                 </div>
                 <div class="radar__scope">
-                  <svg class="radar__svg" viewBox="0 0 200 200" aria-hidden="true">
-                    <g class="radar__grid">
-                      <circle cx="100" cy="100" r="90"/>
-                      <circle cx="100" cy="100" r="60"/>
-                      <circle cx="100" cy="100" r="30"/>
-                      <line x1="100" y1="10" x2="100" y2="190"/>
-                      <line x1="10" y1="100" x2="190" y2="100"/>
-                    </g>
-                    <circle class="radar__me" cx="100" cy="100" r="2.5"/>
-                    <g class="radar__dots" data-adsb-dots></g>
-                    <text class="radar__compass" x="100" y="8">N</text>
-                    <text class="radar__compass" x="196" y="103">E</text>
-                    <text class="radar__compass" x="100" y="199">S</text>
-                    <text class="radar__compass" x="4" y="103">W</text>
-                  </svg>
+                  <div class="radar__plot">
+                    <svg class="radar__svg" viewBox="0 0 200 200" aria-hidden="true">
+                      <g class="radar__grid">
+                        <circle cx="100" cy="100" r="90"/>
+                        <circle cx="100" cy="100" r="60"/>
+                        <circle cx="100" cy="100" r="30"/>
+                        <line x1="100" y1="10" x2="100" y2="190"/>
+                        <line x1="10" y1="100" x2="190" y2="100"/>
+                      </g>
+                      <circle class="radar__me" cx="100" cy="100" r="2.5"/>
+                      <g class="radar__dots" data-adsb-dots></g>
+                    </svg>
+                    <span class="radar__compass radar__compass--n">N</span>
+                    <span class="radar__compass radar__compass--e">E</span>
+                    <span class="radar__compass radar__compass--s">S</span>
+                    <span class="radar__compass radar__compass--w">W</span>
+                    <div class="radar__labels" data-adsb-labels></div>
+                  </div>
                   <div class="radar__ring-label" data-adsb-ring>&mdash;</div>
                 </div>
-                <div class="radar__count"><b data-adsb-count>0</b> contacts</div>
-                <div class="decoder__empty" data-adsb-empty>listening on 1090 MHz&hellip;</div>
+                <div class="radar__count" hidden><b data-adsb-count>0</b> contacts</div>
+                <div class="decoder__empty" data-adsb-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -211,10 +214,10 @@
                 <div class="decoder__head">
                   <span class="decoder__title">multimon-ng &middot; APRS</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-aprs-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-aprs-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-aprs-list></ul>
-                <div class="decoder__empty" data-aprs-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+                <div class="decoder__empty" data-aprs-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -228,10 +231,10 @@
                 <div class="decoder__head">
                   <span class="decoder__title">multimon-ng &middot; POCSAG</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-pocsag-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-pocsag-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-pocsag-list></ul>
-                <div class="decoder__empty" data-pocsag-empty>listening on {{ "%.4f"|format(mhz) }} MHz&hellip;</div>
+                <div class="decoder__empty" data-pocsag-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -244,10 +247,10 @@
                 <div class="decoder__head">
                   <span class="decoder__title">acarsdec &middot; ACARS</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-acars-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-acars-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-acars-list></ul>
-                <div class="decoder__empty" data-acars-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+                <div class="decoder__empty" data-acars-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -260,10 +263,10 @@
                 <div class="decoder__head">
                   <span class="decoder__title">rtl_ais &middot; AIS</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-ais-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-ais-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-ais-list></ul>
-                <div class="decoder__empty" data-ais-empty>listening on 161.975 / 162.025 MHz&hellip;</div>
+                <div class="decoder__empty" data-ais-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -276,10 +279,10 @@
                 <div class="decoder__head">
                   <span class="decoder__title">dsd-fme &middot; DMR / P25</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-dmr-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-dmr-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-dmr-list></ul>
-                <div class="decoder__empty" data-dmr-empty>listening on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+                <div class="decoder__empty" data-dmr-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -292,13 +295,13 @@
                 <div class="decoder__head">
                   <span class="decoder__title">satdump &middot; NOAA APT</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-apt-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-apt-badge>CHECKING</span>
                 </div>
                 <figure class="gallery__frame">
                   <img class="gallery__img" data-apt-img alt="Decoded NOAA APT weather image" hidden>
                   <figcaption class="gallery__cap" data-apt-cap></figcaption>
                 </figure>
-                <div class="decoder__empty" data-apt-empty>waiting for a pass on 137.100 MHz&hellip;</div>
+                <div class="decoder__empty" data-apt-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -311,13 +314,13 @@
                 <div class="decoder__head">
                   <span class="decoder__title">sstv &middot; SSTV</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-sstv-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-sstv-badge>CHECKING</span>
                 </div>
                 <figure class="gallery__frame">
                   <img class="gallery__img" data-sstv-img alt="Decoded SSTV picture" hidden>
                   <figcaption class="gallery__cap" data-sstv-cap></figcaption>
                 </figure>
-                <div class="decoder__empty" data-sstv-empty>waiting for a picture on {{ "%.3f"|format(mhz) }} MHz&hellip;</div>
+                <div class="decoder__empty" data-sstv-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -345,10 +348,10 @@
                 <div class="decoder__head">
                   <span class="decoder__title">{{ tool }} &middot; Flock detector</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-flock-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-flock-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-flock-list></ul>
-                <div class="decoder__empty" data-flock-empty>listening on 2.4 GHz&hellip;</div>
+                <div class="decoder__empty" data-flock-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -360,11 +363,11 @@
               <div class="decoder" data-rayhunter-panel aria-label="Live Rayhunter cell-site-simulator findings">
                 <div class="decoder__head">
                   <span class="decoder__title">Rayhunter &middot; Orbic</span>
-                  <span class="decoder__status" data-rayhunter-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-rayhunter-badge>CHECKING</span>
                 </div>
-                <div class="rayhunter__line" data-rayhunter-line>&mdash; recording line &mdash;</div>
+                <div class="rayhunter__line" data-rayhunter-line hidden>&mdash; recording line &mdash;</div>
                 <ul class="decoder__list" data-rayhunter-list></ul>
-                <div class="decoder__empty" data-rayhunter-empty>polling 192.168.1.1:8080&hellip;</div>
+                <div class="decoder__empty" data-rayhunter-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
 
@@ -377,7 +380,7 @@
               <div class="decoder" data-flipper-panel aria-label="The attached Flipper Zero, read over USB">
                 <div class="decoder__head">
                   <span class="decoder__title">Flipper &middot; USB CLI</span>
-                  <span class="decoder__status" data-flipper-badge>SAMPLE &middot; NOT LIVE</span>
+                  <span class="decoder__status" data-flipper-badge>CHECKING</span>
                 </div>
                 <div class="flipper" data-flipper-card hidden>
                   <div class="flipper__head">
@@ -386,6 +389,6 @@
                   </div>
                   <div class="flipper__line" data-flipper-line></div>
                 </div>
-                <div class="decoder__empty" data-flipper-empty>reading the Flipper over USB&hellip;</div>
+                <div class="decoder__empty" data-flipper-empty>Checking receiver…</div>
               </div>
 {% endmacro %}

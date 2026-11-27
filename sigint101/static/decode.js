@@ -81,7 +81,7 @@
     DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = decodes.length > 0;
-      if (!decodes.length) empty.textContent = "listening… nothing decoded yet";
+      if (!decodes.length) empty.textContent = DecoderPanel.quietText(body, "nothing decoded yet");
     }
   }
 
@@ -90,7 +90,7 @@
     var empty = panel.querySelector("[data-decode-empty]");
     var badge = panel.querySelector("[data-decode-badge]");
     if (list) list.innerHTML = "";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -106,7 +106,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

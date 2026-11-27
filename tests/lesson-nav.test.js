@@ -82,3 +82,43 @@ for (const [failure, failSave] of [
     ]);
   });
 }
+
+test("Commit follows radio selection and a submit without a choice is blocked except Skip", () => {
+  const handlers = {};
+  const submit = { disabled: true };
+  const status = { textContent: "" };
+  submit.parentElement = { querySelector: () => status };
+  const radio = { checked: true };
+  const form = {
+    elements: [submit],
+    querySelector: () => radio.checked ? radio : null,
+    addEventListener: (event, handler) => { handlers[event] = handler; },
+  };
+  submit.classList = { contains: name => name === "btn-commit" };
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/lesson-nav.js"), "utf8"), {
+    document: {
+      querySelectorAll: selector => selector === "form[data-choice-commit]" ? [form] : [],
+      querySelector: () => null,
+    },
+    window: { addEventListener: () => {} },
+  });
+  assert.equal(submit.disabled, false, "a restored selection should be ready at startup");
+  assert.equal(status.textContent, "Choice set. Commit to unlock.");
+
+  radio.checked = false;
+  handlers.change();
+  assert.equal(submit.disabled, true);
+  assert.equal(status.textContent, "Choose one, comrade");
+  let prevented = 0;
+  const attempt = submitter => handlers.submit({ submitter, preventDefault() { prevented++; } });
+  attempt(submit);
+  assert.equal(prevented, 1);
+  attempt({ formNoValidate: true });
+  assert.equal(prevented, 1, "Skip must work without a choice");
+
+  radio.checked = true;
+  handlers.change();
+  attempt(submit);
+  assert.equal(prevented, 1);
+  assert.equal(submit.disabled, false);
+});

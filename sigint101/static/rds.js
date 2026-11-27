@@ -64,7 +64,7 @@
       if (card) card.hidden = true;
       if (empty) {
         empty.hidden = false;
-        empty.textContent = "listening… no RDS decoded yet";
+        empty.textContent = DecoderPanel.quietText(body, "no RDS decoded yet");
       }
     }
   }
@@ -74,7 +74,7 @@
     var empty = panel.querySelector("[data-rds-empty]");
     var badge = panel.querySelector("[data-rds-badge]");
     if (card) card.hidden = true;
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode RDS");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -90,7 +90,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

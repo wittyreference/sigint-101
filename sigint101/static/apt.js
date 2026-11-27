@@ -46,7 +46,7 @@
     } else {
       if (img) { img.hidden = true; img.removeAttribute("src"); }
       if (cap) cap.textContent = "";
-      if (empty) { empty.hidden = false; empty.textContent = "listening… no pass decoded yet"; }
+      if (empty) { empty.hidden = false; empty.textContent = DecoderPanel.quietText(body, "no pass decoded yet"); }
     }
   }
 
@@ -57,7 +57,7 @@
     var badge = panel.querySelector("[data-apt-badge]");
     if (img) { img.hidden = true; img.removeAttribute("src"); }
     if (cap) cap.textContent = "";
-    DecoderPanel.showDown(panel, badge, empty, body, "NO RADIO", "no radio to decode APT");
+    DecoderPanel.showDown(panel, badge, empty, body);
   }
 
   function tick() {
@@ -73,7 +73,11 @@
         }
         if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
       })
-      .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
+      .catch(function () {
+        if (stopped) return;
+        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+        setTimeout(tick, RETRY_MS);
+      });
   }
 
   tick();

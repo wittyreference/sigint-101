@@ -39,8 +39,7 @@ stages:
     message shows who it was for. You're not naming a modulation any more: you're reading a framed
     message, return address and all.
   predict: >-
-    A 2m APRS burst is a half-second blip on the waterfall. Decoded, what is inside it — a framed
-    packet, or just a tone? Lock it in.
+    A 2m APRS burst is a half-second blip on the waterfall. Decoded, what is inside it? Lock it in.
   observe: >-
     Look at a row. The waterfall said "a brief signal at 144.39"; the decoder says "this licensed
     station, relayed by these digipeaters, is standing here and said this." How much of that
