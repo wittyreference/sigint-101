@@ -443,6 +443,26 @@ def test_a_decoder_retunes_inside_its_band_and_the_next_poll_runs_there(tmp_path
         "instrument": "aprs", "freq_hz": 144_800_000}
 
 
+def test_a_retune_after_the_tool_died_answers_with_the_new_run_not_the_old_death(tmp_path):
+    # C52 (R23): rtl_fm was killed during a decode and the rack retuned at once. The first poll
+    # at the new frequency answered with the old run's death and no frequency.
+    spawned = []
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned)) as client:
+        client.get("/api/aprs")
+        decoder = client.app.state.aprs
+        decoder._run.proc.kill()                # rtl_fm is killed under the decode
+        decoder.drain()                         # and its death is recorded before the retune
+        assert client.post("/api/aprs/tune", json={"freq_hz": 144_800_000}).status_code == 200
+        resp = client.get("/api/aprs")
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["available"] is True and body["state"] == "starting"
+    assert body["freq_hz"] == 144_800_000
+    assert spawned == [144_390_000, 144_800_000]
+    # The old death is dropped with its run, not told as the new run's refusal.
+    assert not _events(tmp_path, "aprs_blocked")
+
+
 def test_a_decoder_refuses_a_frequency_outside_its_band_and_stays_put(tmp_path):
     spawned = []
     with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned)) as client:

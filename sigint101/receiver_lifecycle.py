@@ -158,7 +158,23 @@ class SupervisedReceiver:
             with self._runs:
                 self.freq_hz = freq_hz
                 self._clear()
+                self._drop_death(run)
         self._wait_physical(run, intent)
+
+    def _drop_death(self, run):
+        """The death of the run a retune cancelled is that run's, not the next run's answer.
+
+        Held under _life and the run guard's lock, after _cancel() cancelled and fenced the run: a
+        death the supervisor records takes _life and checks the cancel first, and an error from a
+        reader or a late diagnostic must find its run current under the run guard, so none of them
+        can record it again afterwards. (A finite capture that ended cleanly is left unfenced to
+        finish its drain; it has no death to drop.) A cleanup failure (run.failure) is physical and
+        still refuses the next start.
+        """
+        if run is not None:
+            run.unreported_death = False
+        self.error = None
+        self.watch.superseded()
 
     def stop(self):
         with self._life:

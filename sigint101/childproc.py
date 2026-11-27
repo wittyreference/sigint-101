@@ -520,6 +520,17 @@ class ChildWatch:
         """Record an already observed exit without waiting or reading the diagnostics."""
         return self._commit_end(proc, reason, observed_at)
 
+    def superseded(self) -> None:
+        """A retune moved on: the last death no longer stands, nor its back-off wait.
+
+        The count of quick deaths is kept, so a tool that keeps dying at the new frequency still
+        waits longer each time. A late diagnostic of the old death finds no death to enrich.
+        """
+        with self._lock:
+            self._death = None
+            self._retry_at = None
+            self.reason = None
+
     def enrich(self, proc, reason: str) -> None:
         """Only the death that is still current can receive its late diagnostic."""
         with self._lock:

@@ -4,6 +4,7 @@
 import io
 import shlex
 import signal
+import threading
 
 import pytest
 
@@ -201,6 +202,88 @@ def test_an_apt_pass_that_times_out_cleanly_is_not_a_death(tmp_path):
     dec.start()
     assert len(spawned) == 2
     assert dec.watch.stopped is False
+
+
+# --- C52: a retune starts a new run; the death of the run it cancelled is not that run's answer --
+# WHY: on the reference device (R23) rtl_fm was killed during an APRS decode and the frequency was
+# changed at once. The first poll at the new frequency answered with the old run's death, and only
+# the next poll showed the new run. The retune cancels the run that died, so its death, its error
+# and its back-off end with it; the next start launches at the new frequency.
+
+RETUNABLE = {"acars": 131_725_000, "aprs": 144_800_000, "dmr": 451_000_000,
+             "pocsag": 929_662_500, "rds": 94_700_000}
+
+
+def _build_tuned(name, tmp_path):
+    """A decoder that records the frequency of each spawn; its tools run until a test kills them."""
+    build, unavailable, _ = DECODERS[name]
+    spawned, tuned = [], []
+
+    def spawn_child(freq_hz, _device):
+        spawned.append(Child(["rtl_fm", "-f", str(freq_hz)]))
+        tuned.append(freq_hz)
+        return spawned[-1]
+
+    dec = build(spawn_child, tmp_path)
+    dec.watch.clock = _Clock()      # the back-off never runs out by itself
+    return dec, unavailable, spawned, tuned
+
+
+@pytest.mark.parametrize("name", sorted(RETUNABLE))
+def test_a_retune_after_a_death_starts_the_new_run_not_the_old_death(tmp_path, name):
+    dec, _, spawned, tuned = _build_tuned(name, tmp_path)
+    home = dec.freq_hz
+    dec.start()
+    spawned[0].kill()                           # the tool is killed under the decode
+    dec.drain()                                 # and its death is recorded before the retune
+    assert dec.watch.stopped is True
+    dec.retune(RETUNABLE[name])
+    assert dec.error is None
+    assert dec.watch.stopped is False and dec.watch.retry_in() is None
+    dec.start()                                 # the first poll at the new frequency
+    assert tuned == [home, RETUNABLE[name]]
+    assert dec.running
+    dec.stop()
+
+
+@pytest.mark.parametrize("name", sorted(RETUNABLE))
+def test_a_late_diagnostic_of_the_old_death_does_not_return_after_the_retune(tmp_path, name):
+    # The exit diagnostic runs on its own thread and can land after the retune; it must not put
+    # the old death back on record.
+    dec, _, spawned, tuned = _build_tuned(name, tmp_path)
+    enrich = dec.watch.enrich
+    found, go_on, enriched = threading.Event(), threading.Event(), threading.Event()
+
+    def held_enrich(proc, reason):
+        found.set()
+        assert go_on.wait(5)
+        enrich(proc, reason)
+        enriched.set()
+
+    dec.watch.enrich = held_enrich
+    dec.start()
+    spawned[0].kill()
+    assert found.wait(5)                        # the death is recorded; its diagnostic waits
+    dec.retune(RETUNABLE[name])
+    go_on.set()
+    assert enriched.wait(5)
+    assert dec.error is None and dec.watch.reason is None
+    dec.start()
+    assert tuned[-1] == RETUNABLE[name] and len(spawned) == 2
+    dec.stop()
+
+
+@pytest.mark.parametrize("name", sorted(RETUNABLE))
+def test_a_retune_to_the_same_frequency_still_reports_the_death(tmp_path, name):
+    # Tuning to where the decoder already is changes nothing, so the death is still told once.
+    dec, unavailable, spawned, _ = _build_tuned(name, tmp_path)
+    dec.start()
+    spawned[0].kill()
+    dec.drain()
+    dec.retune(dec.freq_hz)
+    with pytest.raises(unavailable, match="killed by SIGKILL"):
+        dec.start()
+    assert len(spawned) == 1
 
 
 def test_a_real_pipeline_that_traps_sigterm_is_killed_on_stop(tmp_path, monkeypatch):
