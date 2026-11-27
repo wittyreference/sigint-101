@@ -591,17 +591,78 @@ step_kiosk() {
   apply "run deploy/install.sh (differs: ${stale[*]})" "$d/install.sh"
 }
 
+read_mesh_lora() {
+  local settings
+  settings="$("$@" --get lora.region --get lora.modem_preset --get lora.use_preset)" || return 1
+  # The CLI prints enum numbers and Python's True/False for individual preferences.
+  awk '
+    /^lora\.region: [0-9]+$/ { region = $2 }
+    /^lora\.modem_preset: [0-9]+$/ { preset = $2 }
+    /^lora\.use_preset: (True|False)$/ { use = $2 }
+    END {
+      if (region == "" || preset == "" || use == "") exit 1
+      print region, preset, use
+    }
+  ' <<< "$settings"
+}
+
+step_meshtastic_defaults() {
+  step "Meshtastic LoRa defaults (M11 LoRa, M28 Meshtastic)"
+  if ! systemctl --quiet is-active meshtasticd 2>/dev/null; then
+    warn "meshtasticd is not running; the LoRa lessons read its API on port 4403"
+    return 0
+  fi
+  local mesh="$COURSE_DIR/.venv/bin/meshtastic"
+  local marker="$HOME/.local/state/sigint101/meshtastic-defaults"
+  if [ ! -x "$mesh" ]; then
+    warn "the course venv has no meshtastic CLI; LoRa settings not checked"
+    return 0
+  fi
+  local cli=(timeout 15 "$mesh" --host 127.0.0.1 --timeout 5)
+  local settings region preset use region_name preset_name
+  if ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)"; then
+    warn "could not read LoRa settings from local meshtasticd"
+    return 0
+  fi
+  read -r region preset use <<< "$settings"
+  # Values from Meshtastic's LoRaConfig.RegionCode and ModemPreset enums.
+  region_name="$region"
+  case "$region" in 0) region_name=UNSET ;; 1) region_name=US ;; esac
+  local presets=(LONG_FAST LONG_SLOW VERY_LONG_SLOW MEDIUM_SLOW MEDIUM_FAST SHORT_SLOW SHORT_FAST
+                 LONG_MODERATE SHORT_TURBO LONG_TURBO LITE_FAST LITE_SLOW NARROW_FAST NARROW_SLOW)
+  preset_name="$preset"
+  if [[ "$preset" =~ ^([0-9]|1[0-3])$ ]]; then
+    preset_name="${presets[preset]}"
+  fi
+  ok "meshtasticd LoRa region $region_name, modem preset $preset_name (use preset: $use)"
+
+  # A one-time provisioning default. Later runs report the node's choices.
+  [ ! -d "$marker" ] || return 0
+  if [[ "$settings" != "1 9 True" ]]; then
+    if [ "$CHECK" = 1 ]; then
+      would "set local meshtasticd LoRa defaults to US / LONG_TURBO"
+      return 0
+    fi
+    if ! "${cli[@]}" --set lora.region US --set lora.modem_preset LONG_TURBO \
+                      --set lora.use_preset true >/dev/null 2>&1 ||
+       ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)" ||
+       [[ "$settings" != "1 9 True" ]]; then
+      warn "could not confirm US / LONG_TURBO on meshtasticd; defaults can be retried"
+      return 0
+    fi
+    did "set local meshtasticd LoRa defaults to US / LONG_TURBO"
+  fi
+  if [ "$CHECK" = 0 ]; then
+    mkdir -p "$marker"
+  fi
+}
+
 step_stock_report() {
   step "Stock Recon pieces the course relies on (reported, never changed)"
   if command -v vcgencmd >/dev/null; then
     ok "vcgencmd (power/throttle provenance)"
   else
     warn "no vcgencmd; the throttle readout will say it can't read"
-  fi
-  if systemctl --quiet is-active meshtasticd 2>/dev/null; then
-    ok "meshtasticd is running (M11 LoRa, M28 Meshtastic)"
-  else
-    warn "meshtasticd is not running; the LoRa lessons read its API on port 4403"
   fi
   local usb=""
   if command -v lsusb >/dev/null; then
@@ -687,6 +748,7 @@ main() {
   step_monitor_mode
   step_glyph_font
   step_kiosk
+  step_meshtastic_defaults
   step_stock_report
   step_handover_report
 

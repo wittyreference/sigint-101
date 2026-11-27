@@ -13,6 +13,6 @@ def test_quickstart_says_how_to_set_up_the_second_meshtastic_node():
     rows = [line.lower() for line in QUICKSTART.read_text(encoding="utf-8").splitlines()
             if line.startswith("| A second Meshtastic node |")]
     assert len(rows) == 1, "the kit table must have one row for 'A second Meshtastic node'"
-    missing = [words for words in ("antenna", "region", "longfast", "primary channel")
+    missing = [words for words in ("antenna", "region", "long turbo", "primary channel")
                if words not in rows[0]]
     assert not missing, f"the second-node row must name {missing}"
