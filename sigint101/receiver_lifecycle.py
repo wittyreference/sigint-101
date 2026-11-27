@@ -115,6 +115,17 @@ class SupervisedReceiver:
     def released(self):
         return self._released
 
+    @property
+    def error(self):
+        run = self._run
+        if run and not run.reaped and run.failure:
+            return run.failure
+        return self._error
+
+    @error.setter
+    def error(self, message):
+        self._error = message
+
     def resume(self):
         with self._life:
             self._released = False
@@ -450,7 +461,7 @@ class SupervisedReceiver:
                 run.failure = f"{run.watch.tool} transport could not close: {exc}"
             run.reaped = reaped
             if not reaped and not run.failure:
-                run.failure = f"{run.watch.tool} survived kill; the radio may still be held"
+                run.failure = f"{run.watch.tool} survived kill; the dongle may still be held"
             run.physical.set()
         if not run.reaped:
             self._retry(run)

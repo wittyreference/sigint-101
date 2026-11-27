@@ -199,7 +199,7 @@ def _popen(freq_hz: int, device: int):
 
 
 class _Tail:
-    """One reader's bounded last-lines buffer, snapshotted safely by _settle() without a lock."""
+    """One reader's bounded last-lines buffer, snapshotted by its diagnostic worker."""
 
     def __init__(self, maxlen: int = 3):
         self._maxlen = maxlen

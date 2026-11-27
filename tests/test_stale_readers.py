@@ -1987,8 +1987,8 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
 
 def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_drops_queued_item(
         monkeypatch):
-    # If exit diagnostics raise inside settle_ended(), the run must still end and the process must
-    # still be stopped so a detached reader resuming with a queued item cannot publish it.
+    # A failed diagnostic leaves a usable exit reason. Reap and fence the old reader so a queued
+    # item cannot publish after the drain deadline or change the replacement run's watch.
     procs = []
 
     class _TrackedLateProc(LateProc):
