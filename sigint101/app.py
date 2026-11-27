@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
+from secrets import token_hex, token_urlsafe
 from time import monotonic
 
 # Form bodies are decoded with parse_qs rather than Starlette's request.form(). Starlette pulls
@@ -62,7 +63,7 @@ from .hardware import (
 )
 from .kiosk import request_exit
 from .lessons import CHECK_STAGE, COMMIT_STAGE, load_lessons
-from .lora import LoRaListener, LoRaUnavailable
+from .lora import LoRaListener, LoRaSendLost, LoRaTxDisabled, LoRaUnavailable
 from .operate import (
     DEFAULT_INSTRUMENT,
     INSTRUMENTS,
@@ -85,7 +86,7 @@ from .provenance import (
 from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, finish_console
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
-from .safety import notice_for
+from .safety import notice_for, rack_lora_send
 from .spectrum import (
     DEFAULT_BIN,
     DEFAULT_HIGH,
@@ -375,6 +376,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         build_lora = LoRaListener
     else:
         build_lora = lora_factory
+    lora_send_permit = token_urlsafe(24)
+
+    def record_transmission(kind, payload):
+        try:
+            log_event(app.state.events_path, kind, payload)
+        except OSError as exc:
+            logging.getLogger(__name__).warning("could not log LoRa %s: %s", kind, exc)
 
     # The RDS decoder runs rtl_fm|redsea, so it holds the one dongle the sweeper and rtl_433 decoder
     # also want — it joins their release/resume turn-taking. Wired to the same probe and enumerator.
@@ -531,6 +539,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.sweeper = build_sweeper()
         app.state.decoder = build_decoder()
         app.state.lora = build_lora()
+        app.state.lora.on_transmission = record_transmission
         app.state.rds = build_rds()
         app.state.adsb = build_adsb()
         app.state.aprs = build_aprs()
@@ -1433,7 +1442,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             try:
                 listener.start()
             except LoRaUnavailable as exc:
-                return _refused("lora", exc, {"packets": []})
+                return _refused("lora", exc, {"packets": [], **listener.send_state()})
             _started("lora", {"host": listener.hostname, "port": listener.port})
         return {
             "available": True,
@@ -1442,7 +1451,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "host": listener.hostname,
             "port": listener.port,
             "packets": [p.as_dict() for p in listener.recent(limit)],
+            **listener.send_state(),
         }
+
+    @app.post("/api/lora/send")
+    def lora_send(request: Request):
+        """One explicit rack tap hands one fixed test text to the local radio."""
+        try:
+            with rack_lora_send(request, lora_send_permit):
+                send = app.state.lora.send(f"SIGINT 101 test {token_hex(2)}")
+        except PermissionError as exc:
+            return JSONResponse(status_code=403, content={"reason": str(exc)})
+        except LoRaTxDisabled as exc:
+            return JSONResponse(status_code=409, content={"reason": str(exc)})
+        except LoRaSendLost as exc:
+            return JSONResponse(status_code=503, content={"reason": str(exc), "send": exc.send})
+        except LoRaUnavailable as exc:
+            return JSONResponse(status_code=503, content={"reason": str(exc)})
+        return {"send": send}
 
     @app.get("/api/flock")
     def flock(limit: int | None = None):
@@ -2016,6 +2042,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
                      # The pager shows framing only wherever it is tuned; its dial says so.
                      "text_withheld": inst.key == "pager",
+                     "lora_send_permit": lora_send_permit if inst.key == "lora" else None,
                      "safety_notice": notice_for(instrument=inst)},
         )
 

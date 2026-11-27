@@ -1,6 +1,7 @@
 # ABOUTME: Tests the non-blocking antenna hardware-protection notice (sigint101/safety.py):
 # ABOUTME: exact screen coverage, no disabled controls (D16), theme contrast, and TX-verb guard.
 
+import ast
 import re
 from pathlib import Path
 
@@ -285,3 +286,43 @@ def test_transmit_verbs_appear_only_in_safety_module():
     assert not offenders, (
         "transmit verbs found outside sigint101/safety.py:\n" + "\n".join(offenders)
     )
+
+
+def test_only_the_rack_route_reaches_the_transmit_boundary():
+    expected = {
+        "sendText": [("safety.py", "send_lora_text")],
+        "send_lora_text": [("lora.py", "send")],
+        "app.state.lora.send": [("app.py", "lora_send")],
+        "rack_lora_send": [("app.py", "lora_send")],
+    }
+    actual = {name: [] for name in expected}
+
+    class CallSites(ast.NodeVisitor):
+        def __init__(self, path):
+            self.path = path
+            self.function = None
+
+        def visit_FunctionDef(self, node):
+            outer, self.function = self.function, node.name
+            self.generic_visit(node)
+            self.function = outer
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            name = ast.unparse(node.func)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "sendText":
+                name = node.func.attr
+            if name in actual:
+                actual[name].append((self.path.name, self.function))
+            self.generic_visit(node)
+
+    for path in PKG_DIR.rglob("*.py"):
+        CallSites(path).visit(ast.parse(path.read_text(encoding="utf-8")))
+    assert actual == expected
+    js = (STATIC_DIR / "lora.js").read_text(encoding="utf-8")
+    click = js.split('addEventListener("click"', 1)[1].split("\n    });", 1)[0]
+    assert 'fetch("/api/lora/send"' in click
+    assert js.count("/api/lora/send") == 1
+    assert not any("/api/lora/send" in path.read_text(encoding="utf-8")
+                   for path in STATIC_DIR.rglob("*.js") if path.name != "lora.js")
