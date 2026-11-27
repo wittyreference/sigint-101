@@ -141,11 +141,30 @@ def test_m11_verdict_gives_the_long_turbo_limit_and_short_and_medium_presets_fai
         "the verdict must say the Short and Medium presets fail sooner")
 
 
+CALLS_8DBM_THE_GRANT = re.compile(
+    r"\b8\s*dBm\s+(?:fcc\s+)?grant\b"
+    r"|\b(?:fcc\s+)?grant\s+(?:of|is|at|:)\s+8\s*dBm\b"
+    r"|\b8\s*dBm\s+is\s+(?:the|its)\s+(?:module['’]?s\s+)?(?:fcc\s+)?grant\b",
+    re.I,
+)
+EIGHT_DBM_UNDER_GRANT = re.compile(
+    r"\b8\s*dBm\b[^.?!]*\b(?:under|below|within|inside)\b[^.?!]*\b(?:fcc\s+)?grant\b"
+    r"|\b(?:under|below|within|inside)\b[^.?!]*\b(?:fcc\s+)?grant\b[^.?!]*\b8\s*dBm\b",
+    re.I,
+)
+
+
 def test_m11_explain_names_long_turbo_500khz_lesson_05_and_8dbm():
-    explain = load_lesson_file(PACK).stages["explain"]
+    lesson = load_lesson_file(PACK)
+    explain = lesson.stages["explain"]
     assert LONG_TURBO.search(explain), "explain must name Long Turbo"
     assert not LONGFAST.search(explain), "explain must not label this radio's preset LongFast"
     assert re.search(r"\b500\s*kHz\b", explain, re.I), "explain must note 500 kHz"
     assert SF11_LIMIT.search(explain), "explain must state the SF11 SNR limit"
     assert re.search(r"\blesson\s+0?5\b", explain, re.I), "explain must point to Lesson 05"
-    assert re.search(r"\b8\s*dBm\b", explain), "explain must note the 8 dBm FCC grant power"
+    assert EIGHT_DBM_UNDER_GRANT.search(explain), (
+        "explain must place 8 dBm under/below the module's FCC grant")
+    all_prose = " ".join([lesson.concept, *lesson.stages.values(), lesson.verdict])
+    assert not CALLS_8DBM_THE_GRANT.search(all_prose), (
+        "M11 must not call 8 dBm the module's FCC grant "
+        "(the E22-900M22S grant is ~9 dBm at 500 kHz)")

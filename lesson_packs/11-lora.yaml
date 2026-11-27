@@ -38,8 +38,8 @@ stages:
     Clean, from below zero. LoRa — Long Range — is chirp spread spectrum: each symbol a chirp
     sweeping across the band, multiplied by a reference down-chirp. De-chirping collapses the
     symbol into one tone; unmatched noise stays spread thin. That processing gain lets packets
-    decode at minus ten, even about minus seventeen dB SNR on Long Turbo (SF11, 500 kHz; see
-    Lesson 05 for why the kit uses it with power kept to its 8 dBm FCC grant), where a waterfall
+    decode at minus ten, even about minus seventeen dB SNR on Long Turbo (SF11, 500 kHz; Lesson 05
+    covers why, with power kept at 8 dBm, under its module's FCC grant), where a waterfall
     shows nothing. You read these because the sender shares your channel's key; another channel
     lands as "encrypted", its SNR just as real: received, not readable. Carry this out the door:
     hearing a signal and reading it are two different things.

@@ -22,8 +22,8 @@ stages:
     noise and read one packet. Tonight you climb one floor up. That same radio does not just carry
     packets — it runs a network. Meshtastic: small nodes that find each other, join channels, and
     hand short encrypted messages down a chain until they reach someone no single node could hear
-    alone. This Recon runs Long Turbo (500 kHz) to satisfy the US Part 15 bandwidth rule taught in
-    Lesson 05, with provisioning keeping transmit power within the module's 8 dBm FCC grant. The
+    alone. This Recon runs Long Turbo (500 kHz) to satisfy the US Part 15 bandwidth rule in
+    Lesson 05, with provisioning keeping transmit power at 8 dBm, under the module's FCC grant. The
     chirp was the wire. This is what talks over it.
   demo: >-
     Watch — hands off. The Nomad's LoRa radio runs meshtasticd: node id, SNR, and text — or
