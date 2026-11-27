@@ -1348,8 +1348,28 @@ body {
   font-family: var(--font-mono);
   font-size: 18px;
 }
+/* Hardware-protection notice (sigint101/safety.py): one plain line, never dims or blocks.
+   Distinct in word and left-bar shape so red-night tells it apart without relying on hue. */
+.safety-notice {
+  flex: none;
+  margin: 0;
+  padding: 3px 10px;
+  border-left: 3px solid var(--warn);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.25;
+}
+.safety-notice__tag {
+  font-weight: 700;
+}
 .decoder:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) > :not(.decoder__head, .decoder__empty) {
   display: none;
+}
+.decoder:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) > .safety-notice {
+  display: block;
 }
 .decoder:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) > .decoder__empty {
   flex: 0 1 auto;
@@ -1971,7 +1991,16 @@ body {
 .stage-foot {
   flex: none;
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 12px;
+}
+.stage-foot .safety-notice {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: 0;
+  background: var(--surface);
+  padding: 6px 10px;
 }
 .stage-foot .btn--prev {
   margin-right: auto;            /* back on the left, onward on the right */
