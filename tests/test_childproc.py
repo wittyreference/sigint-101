@@ -612,7 +612,7 @@ def test_watch_ended_computes_exit_diagnostics_outside_run_guard_lock():
     assert watch.blocked() is None
 
 
-def test_settle_ended_joins_before_ending_run_and_stopping_process():
+def test_settle_ended_stops_pipe_process_before_joining_and_ends_run_after():
     watch, _ = _watch()
     guard = childproc.RunGuard()
     first = guard.current
@@ -638,8 +638,50 @@ def test_settle_ended_joins_before_ending_run_and_stopping_process():
     assert reaped is True
     assert events == [
         ("note_end", True, True, True),
+        ("terminate", True),
         ("join", 1.25, True),
-        ("terminate", False),
+    ]
+    with guard:
+        assert guard.is_current(first) is False
+    assert watch.stopped is True
+
+
+def test_settle_ended_stops_socket_child_before_join_and_closes_transport_after():
+    watch, _ = _watch()
+    guard = childproc.RunGuard()
+    first = guard.current
+    events = []
+
+    class _SocketFeed(_Ended):
+        def stop_child(self):
+            events.append(("stop_child", guard.is_current(first)))
+            return True
+
+        def close_transport(self):
+            events.append(("close_transport", guard.is_current(first)))
+
+        def terminate(self):  # pragma: no cover - settle_ended must use stop_child, not terminate
+            events.append(("terminate", guard.is_current(first)))
+
+    class _FakeThread:
+        def join(self, timeout=None):
+            events.append(("join", timeout, guard.is_current(first)))
+
+    proc = _SocketFeed(["dump1090-fa"], 1)
+    watch.spawned(proc)
+
+    def note_end(p, run):
+        events.append(("note_end", p is proc, run == first, guard.is_current(first)))
+        watch.ended(p, runs=guard, run=run)
+
+    reaped = childproc.settle_ended(
+        proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=0.75)
+    assert reaped is True
+    assert events == [
+        ("note_end", True, True, True),
+        ("stop_child", True),
+        ("join", 0.75, True),
+        ("close_transport", False),
     ]
     with guard:
         assert guard.is_current(first) is False

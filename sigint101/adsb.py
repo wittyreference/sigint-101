@@ -218,21 +218,25 @@ class _Feed:
 
     def _lines(self):
         buffer = ""
+        draining = False
         with self._sock:
             while not self._closed.is_set():
-                if self._proc.poll() is not None:
+                if not draining and self._proc.poll() is not None:
                     # Once dump1090 has exited, switch to non-blocking so complete lines already
                     # queued in the socket drain at once without waiting out FEED_POLL_S.
                     try:
                         self._sock.settimeout(0.0)
                     except OSError:
                         return
+                    draining = True
                 try:
                     chunk = self._sock.recv(4096)
                 except TimeoutError:
+                    if draining:
+                        return
                     # No aircraft for a moment is an empty sky, not an ended feed: keep listening
-                    # while dump1090 lives. Once it has exited, loop once more in non-blocking
-                    # mode to drain anything queued at the boundary, then return.
+                    # while dump1090 lives. If it just exited, loop once more in non-blocking mode
+                    # to drain anything queued at the boundary, then return.
                     continue
                 except OSError:
                     return
@@ -257,6 +261,14 @@ class _Feed:
             self._sock.close()
         except OSError:
             pass
+
+    def stop_child(self) -> bool:
+        """Stop and reap dump1090 while leaving the SBS socket open to drain queued lines."""
+        return stop_process(self._proc)
+
+    def close_transport(self) -> None:
+        """Close the SBS socket once any natural-exit drain has finished or timed out."""
+        self._close_socket()
 
     def terminate(self):
         self._close_socket()

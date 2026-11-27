@@ -531,18 +531,30 @@ class RunGuard:
 
 def settle_ended(proc, thread, runs: RunGuard, watch: ChildWatch, *,
                  note_end, wait_s: float) -> bool:
-    """Account for a child that ended on its own, drain its reader, then end the run and reap it.
+    """Account for a child that ended on its own, reap every stage, drain its reader, then end
+    the run.
 
     Unlike an explicit stop (which invalidates the run and shuts down the transport at once), a
     natural exit records the death first and gives the retiring reader up to `wait_s` to drain
-    complete items still queued in its pipe or socket under the dead run's provenance. Once that
-    bounded drain finishes or times out, the run ends so nothing the reader later delivers during
-    retry back-off can list, log or refuse the next start, and the process/transport is stopped.
-    Returns False only when even SIGKILL left the child unreaped.
+    complete items still buffered in its pipe or socket under the dead run's provenance. Every
+    child stage is brought down before joining the reader so a live downstream process holding a
+    pipe open can never stall the drain (pipes remain readable after their writers exit). Socket
+    feeds (ADS-B, AIS) expose `stop_child` and `close_transport` so their child process is reaped
+    before the join while the socket stays open until the bounded drain ends. Once the join
+    finishes or times out, the run ends and any open transport closes so nothing the reader later
+    delivers during retry back-off can list, log or refuse the next start.
+    Returns False only when even SIGKILL left a child stage unreaped.
     """
     note_end(proc, runs.current)
     watch.stopping()
-    if thread is not None:
-        thread.join(timeout=wait_s)
-    runs.end(watch)
-    return stop_process(proc)
+    stop_child = getattr(proc, "stop_child", None)
+    close_transport = getattr(proc, "close_transport", None)
+    try:
+        reaped = stop_child() if stop_child is not None else stop_process(proc)
+        if thread is not None:
+            thread.join(timeout=wait_s)
+    finally:
+        runs.end(watch)
+        if close_transport is not None:
+            close_transport()
+    return reaped

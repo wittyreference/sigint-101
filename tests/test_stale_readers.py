@@ -6,7 +6,10 @@ from __future__ import annotations
 import shlex
 import socket
 import struct
+import subprocess
+import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -14,9 +17,10 @@ from typing import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from sigint101 import acars, adsb, ais, aprs, dmr, flock, pocsag, rds
+from sigint101 import acars, adsb, ais, aprs, childproc, dmr, flock, pocsag, rds
 from sigint101.app import create_app
-from sigint101.childproc import ChildWatch
+from sigint101.childproc import ChildWatch, Pipeline
+from sigint101.childproc import spawn as spawn_child
 from sigint101.events import read_events
 from sigint101.hardware import RadioProbe
 from tests.child_fakes import LateByteProc, LateProc
@@ -1324,13 +1328,210 @@ def test_marauder_buffered_frames_after_stop_do_not_leak_into_new_run(tmp_path):
                 link.reader.join(5)
 
 
-# --- C39: natural-exit socket drain and post-drain invalidation during back-off ----------------
+# --- C39: natural-exit socket drain, live downstream settle, and post-drain invalidation -------
+
+
+class _BoundarySocket:
+    """Real socket whose first post-arm recv times out just as final bytes and child exit land."""
+
+    def __init__(self, sock: socket.socket, on_timeout):
+        self._sock = sock
+        self._on_timeout = on_timeout
+        self.armed = threading.Event()
+        self._fired = False
+
+    def recv(self, bufsize: int):
+        if self.armed.is_set() and not self._fired:
+            self._fired = True
+            self._on_timeout()
+            raise TimeoutError("timed out")
+        return self._sock.recv(bufsize)
+
+    def __enter__(self):
+        self._sock.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._sock.__exit__(*exc)
+
+    def __getattr__(self, name: str):
+        return getattr(self._sock, name)
+
+
+def _reap_stage(proc) -> None:
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:  # pragma: no cover
+        pass
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+@pytest.mark.parametrize("action", ["stop", "retune"])
+def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_retune(
+        monkeypatch, action):
+    # When an upstream pipeline stage dies while a downstream stage stays alive holding stdout
+    # open, _settle() must bring every stage down before joining the reader so a concurrent stop
+    # or retune never waits out STOP_WAIT_S on the lifecycle lock.
+    monkeypatch.setattr(childproc, "EXIT_GRACE_S", 0.05)
+    stages = []
+    upstream_in = []
+
+    def spawn(freq_hz, device):
+        up = spawn_child(
+            [sys.executable, "-c", "import sys; sys.stdin.read(1); sys.exit(1)"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        down = spawn_child(
+            [sys.executable, "-c",
+             "import sys, time; print(sys.argv[1], flush=True); time.sleep(30)", APRS_1],
+            stdin=up.stdout, stdout=subprocess.PIPE, text=True)
+        up.stdout.close()
+        stages.extend((up, down))
+        upstream_in.append(up.stdin)
+        return Pipeline(up, down)
+
+    dec = aprs.AprsDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 0.6
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    heard = _Heard(dec, lambda d: d["source"], default_freq=aprs.DEFAULT_APRS_HZ)
+    dec.on_reception = heard
+    try:
+        dec.start()
+        heard.wait_for(1)
+        # Kill the upstream stage while the downstream stage remains alive holding stdout open.
+        upstream_in[0].close()
+        stages[0].wait(timeout=5)
+        assert stages[0].poll() == 1
+        assert stages[1].poll() is None
+
+        settling = threading.Event()
+        real_stopping = dec.watch.stopping
+
+        def mark_stopping():
+            real_stopping()
+            settling.set()
+
+        dec.watch.stopping = mark_stopping
+
+        start_error = []
+
+        def run_start():
+            try:
+                dec.start()
+            except Exception as exc:
+                start_error.append(exc)
+
+        starter = threading.Thread(target=run_start)
+        starter.start()
+        assert settling.wait(5)
+
+        t0 = time.monotonic()
+        if action == "stop":
+            dec.stop()
+        else:
+            dec.retune(144_800_000)
+        elapsed = time.monotonic() - t0
+        starter.join(5)
+
+        assert not starter.is_alive()
+        assert len(start_error) == 1 and isinstance(start_error[0], aprs.AprsUnavailable)
+        assert stages[1].poll() is not None
+        assert elapsed < dec.STOP_WAIT_S / 2
+    finally:
+        dec.stop()
+        for stage in stages:
+            _reap_stage(stage)
+
+
+def test_pipeline_natural_exit_reaps_live_downstream_and_drains_buffered_pipe(monkeypatch):
+    # Stopping a live downstream stage before the join leaves already-buffered stdout readable in
+    # the pipe: the downstream process is already dead when join() runs, yet the second buffered
+    # APRS packet still drains under the dead run's provenance.
+    monkeypatch.setattr(childproc, "EXIT_GRACE_S", 0.05)
+    stages = []
+    upstream_in = []
+
+    def spawn(freq_hz, device):
+        up = spawn_child(
+            [sys.executable, "-c", "import sys; sys.stdin.read(1); sys.exit(1)"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        down = spawn_child(
+            [sys.executable, "-c",
+             "import sys, time; print(sys.argv[1], flush=True); "
+             "print(sys.argv[2], flush=True); time.sleep(30)",
+             APRS_1, APRS_2],
+            stdin=up.stdout, stdout=subprocess.PIPE, text=True)
+        up.stdout.close()
+        stages.extend((up, down))
+        upstream_in.append(up.stdin)
+        return Pipeline(up, down)
+
+    dec = aprs.AprsDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 1.0
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    heard = _Heard(dec, lambda d: d["source"], default_freq=aprs.DEFAULT_APRS_HZ)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        assert paused.wait(5)
+        expected_cmd = childproc.command_line(dec._proc)
+
+        upstream_in[0].close()
+        stages[0].wait(timeout=5)
+        assert stages[0].poll() == 1
+        assert stages[1].poll() is None
+
+        real_thread = dec._thread
+        down_poll_at_join = []
+
+        class _CheckAtJoin:
+            def join(self, timeout=None):
+                down_poll_at_join.append(stages[1].poll())
+                go_on.set()
+                return real_thread.join(timeout)
+
+        dec._thread = _CheckAtJoin()
+        with pytest.raises(aprs.AprsUnavailable, match="status 1"):
+            dec.start()
+
+        assert down_poll_at_join and down_poll_at_join[0] is not None
+        assert not real_thread.is_alive()
+        assert {s["source"] for s in dec.stations()} == {"KD2ABC-9", "N0CALL"}
+        assert heard.log == [
+            ("KD2ABC-9", aprs.DEFAULT_APRS_HZ, expected_cmd),
+            ("N0CALL", aprs.DEFAULT_APRS_HZ, expected_cmd),
+        ]
+    finally:
+        go_on.set()
+        dec.stop()
+        for stage in stages:
+            _reap_stage(stage)
 
 
 def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
     # Pause the ADS-B reader on its first accepted item, queue a second complete SBS line in the
-    # TCP socket, mark dump1090 exited, and let the reader resume only once _settle() reaches its
-    # join. _settle() must not close the socket before the bounded drain finishes.
+    # TCP socket while leaving the peer open and idle, mark dump1090 exited, and give the drain a
+    # budget shorter than FEED_POLL_S. Only non-blocking draining finishes before the join budget.
     pairs = []
     procs = []
 
@@ -1344,7 +1545,8 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
         return adsb._Feed(proc, client_sock)
 
     dec = adsb.AdsbDecoder(spawn=spawn, **_common())
-    dec.STOP_WAIT_S = 2.0
+    dec.STOP_WAIT_S = 0.15
+    assert dec.STOP_WAIT_S < adsb.FEED_POLL_S
     clock = _Clock()
     dec.watch = ChildWatch(dec.watch.tool, clock=clock)
     heard = _Heard(dec, lambda d: d["hex_ident"], default_freq=adsb.DEFAULT_ADSB_HZ)
@@ -1364,24 +1566,28 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
         pairs[0][1].sendall((ADSB_1 + "\n").encode())
         assert paused.wait(5)
 
-        # Queue the second SBS line in the socket buffer and end the child naturally.
+        # Queue the second SBS line in the socket buffer and end the child naturally; keep the
+        # peer socket open and idle so a blocking recv() would wait out FEED_POLL_S.
         pairs[0][1].sendall((ADSB_2 + "\n").encode())
         procs[0].returncode = 1
 
         real_thread = dec._thread
         joined = threading.Event()
+        alive_after_join = []
 
         class _ReleaseOnJoin:
             def join(self, timeout=None):
                 joined.set()
                 go_on.set()
-                return real_thread.join(timeout)
+                real_thread.join(timeout)
+                alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _ReleaseOnJoin()
 
         with pytest.raises(adsb.AdsbUnavailable, match="status 1"):
             dec.start()
         assert joined.is_set()
+        assert alive_after_join == [False]
         assert not real_thread.is_alive()
         assert len(procs) == 1
         assert {a["hex_ident"] for a in dec.aircraft()} == {"A1B2C3", "DDEEFF"}
@@ -1400,10 +1606,90 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
                     pass
 
 
+def test_adsb_live_read_timeout_as_last_sbs_line_arrives_still_drains():
+    # If a live blocking recv() times out right as dump1090 exits and the final SBS line arrives,
+    # the feed must loop once more in non-blocking mode and drain that line rather than exiting
+    # on the TimeoutError.
+    pairs = []
+    procs = []
+    boundary = []
+    timed_out = threading.Event()
+
+    def spawn(device):
+        client_sock, server_sock = socket.socketpair()
+        client_sock.settimeout(adsb.FEED_POLL_S)
+        pairs.append((client_sock, server_sock))
+        proc = _AliveProc(
+            ["dump1090-fa", "--device-index", str(device), "--run", str(len(procs) + 1)])
+        procs.append(proc)
+
+        def on_timeout():
+            server_sock.sendall((ADSB_2 + "\n").encode())
+            proc.returncode = 1
+            timed_out.set()
+
+        wrapped = _BoundarySocket(client_sock, on_timeout)
+        boundary.append(wrapped)
+        return adsb._Feed(proc, wrapped)
+
+    dec = adsb.AdsbDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 0.15
+    assert dec.STOP_WAIT_S < adsb.FEED_POLL_S
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    heard = _Heard(dec, lambda d: d["hex_ident"], default_freq=adsb.DEFAULT_ADSB_HZ)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        pairs[0][1].sendall((ADSB_1 + "\n").encode())
+        assert paused.wait(5)
+
+        boundary[0].armed.set()
+        go_on.set()
+        assert timed_out.wait(5)
+
+        real_thread = dec._thread
+        alive_after_join = []
+
+        class _CheckJoin:
+            def join(self, timeout=None):
+                real_thread.join(timeout)
+                alive_after_join.append(real_thread.is_alive())
+
+        dec._thread = _CheckJoin()
+        with pytest.raises(adsb.AdsbUnavailable, match="status 1"):
+            dec.start()
+        assert alive_after_join == [False]
+        assert {a["hex_ident"] for a in dec.aircraft()} == {"A1B2C3", "DDEEFF"}
+        assert heard.log == [
+            ("A1B2C3", adsb.DEFAULT_ADSB_HZ, _line(procs[0])),
+            ("DDEEFF", adsb.DEFAULT_ADSB_HZ, _line(procs[0])),
+        ]
+    finally:
+        go_on.set()
+        dec.stop()
+        for a, b in pairs:
+            for s in (a, b):
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+
 def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
     # Pause the AIS reader on its first accepted vessel, queue a second complete UDP datagram in
-    # the socket, mark rtl_ais exited, and let the reader resume only once _settle() reaches its
-    # join. _settle() must not close the UDP socket before the bounded drain finishes.
+    # the socket, mark rtl_ais exited, and give the drain a budget shorter than FEED_POLL_S. Only
+    # non-blocking draining finishes before the join budget on an idle UDP socket.
     socks = []
     procs = []
 
@@ -1416,7 +1702,8 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
         return ais._Feed(proc, sock)
 
     dec = ais.AisDecoder(spawn=spawn, **_common())
-    dec.STOP_WAIT_S = 2.0
+    dec.STOP_WAIT_S = 0.15
+    assert dec.STOP_WAIT_S < ais.FEED_POLL_S
     clock = _Clock()
     dec.watch = ChildWatch(dec.watch.tool, clock=clock)
     ais_hz = [ais.AIS_CHANNEL_A_HZ, ais.AIS_CHANNEL_B_HZ]
@@ -1443,20 +1730,104 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
 
         real_thread = dec._thread
         joined = threading.Event()
+        alive_after_join = []
 
         class _ReleaseOnJoin:
             def join(self, timeout=None):
                 joined.set()
                 go_on.set()
-                return real_thread.join(timeout)
+                real_thread.join(timeout)
+                alive_after_join.append(real_thread.is_alive())
 
         dec._thread = _ReleaseOnJoin()
 
         with pytest.raises(ais.AisUnavailable, match="status 1"):
             dec.start()
         assert joined.is_set()
+        assert alive_after_join == [False]
         assert not real_thread.is_alive()
         assert len(procs) == 1
+        assert {v["mmsi"] for v in dec.vessels()} == {477553000, 265547250}
+        assert heard.log == [
+            (477553000, ais_hz, _line(procs[0])),
+            (265547250, ais_hz, _line(procs[0])),
+        ]
+    finally:
+        go_on.set()
+        dec.stop()
+        for s in socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+def test_ais_live_read_timeout_as_last_datagram_arrives_still_drains():
+    # If a live blocking recv() times out right as rtl_ais exits and the final UDP datagram
+    # arrives, the feed must loop once more in non-blocking mode and drain it rather than exiting
+    # on the TimeoutError.
+    socks = []
+    procs = []
+    boundary = []
+    timed_out = threading.Event()
+
+    def spawn(device, host, port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        socks.append(sock)
+        proc = _AliveProc(["rtl_ais", "-d", str(device), "--run", str(len(procs) + 1)])
+        procs.append(proc)
+
+        def on_timeout():
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                sender.sendto((AIS_2 + "\n").encode(), sock.getsockname())
+            proc.returncode = 1
+            timed_out.set()
+
+        wrapped = _BoundarySocket(sock, on_timeout)
+        boundary.append(wrapped)
+        return ais._Feed(proc, wrapped)
+
+    dec = ais.AisDecoder(spawn=spawn, **_common())
+    dec.STOP_WAIT_S = 0.15
+    assert dec.STOP_WAIT_S < ais.FEED_POLL_S
+    clock = _Clock()
+    dec.watch = ChildWatch(dec.watch.tool, clock=clock)
+    ais_hz = [ais.AIS_CHANNEL_A_HZ, ais.AIS_CHANNEL_B_HZ]
+    heard = _Heard(dec, lambda d: d["mmsi"], default_freq=ais_hz)
+    paused, go_on = threading.Event(), threading.Event()
+    first = [True]
+
+    def gated(item, **kw):
+        heard(item, **kw)
+        if first[0]:
+            first[0] = False
+            paused.set()
+            go_on.wait(5)
+
+    dec.on_reception = gated
+    try:
+        dec.start()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            sender.sendto((AIS_1 + "\n").encode(), socks[0].getsockname())
+        assert paused.wait(5)
+
+        boundary[0].armed.set()
+        go_on.set()
+        assert timed_out.wait(5)
+
+        real_thread = dec._thread
+        alive_after_join = []
+
+        class _CheckJoin:
+            def join(self, timeout=None):
+                real_thread.join(timeout)
+                alive_after_join.append(real_thread.is_alive())
+
+        dec._thread = _CheckJoin()
+        with pytest.raises(ais.AisUnavailable, match="status 1"):
+            dec.start()
+        assert alive_after_join == [False]
         assert {v["mmsi"] for v in dec.vessels()} == {477553000, 265547250}
         assert heard.log == [
             (477553000, ais_hz, _line(procs[0])),
