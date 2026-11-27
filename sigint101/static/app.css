@@ -196,8 +196,8 @@ body {
   box-shadow: 0 0 26px var(--bloom);
   --touch: 76px;
   --gutter: 18px;
-  --bar-h: 66px;
-  --rail-h: 40px;
+  --bar-h: 75px;
+  --rail-h: 37px;
 }
 
 /* Keep mono digits razor-sharp under the glow; emphasis is size/spacing/inverse. */
@@ -337,17 +337,6 @@ body {
   align-self: stretch;       /* the bar's full height, like Back, not the glyph's */
   justify-content: center;
   border-left: 3px double var(--border);
-  position: relative;
-}
-/* The 66px bar leaves the toggle's own box 63px tall, so its tap area runs on into the right end
-   of the rail below, where nothing else is tappable, to make a full touch-sized target. */
-.btn-theme::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: var(--touch);
 }
 
 .btn-back__label {
@@ -367,19 +356,7 @@ body {
 .btn-exit__label {
   line-height: 1.2;
   text-align: left;
-}
-/* Like the theme toggle, the 63px box's tap area runs on into the grid's top padding below it,
-   where nothing else is tappable, to make a full touch-sized target. */
-.btn-exit {
-  position: relative;
-}
-.btn-exit::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: var(--touch);
+  min-width: calc(10ch + 1em);   /* keep the key steady while the confirmation is armed */
 }
 
 .statusbar__title {
@@ -618,7 +595,7 @@ button.rail-pip:disabled {
   padding: 4px 9px;
 }
 /* Seven pips (an intro lesson with a check) leave the gate label room only to wrap onto two lines;
-   tighten them so both sit inside the 40px rail instead of clipping at its edges. */
+   tighten them so both sit inside the rail instead of clipping at its edges. */
 .rail--long .rail__gate {
   line-height: 1.1;
   padding-top: 1px;
@@ -638,7 +615,7 @@ button.rail-pip:disabled {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px var(--gutter);
+  padding: 7px var(--gutter);
   overflow: hidden;
 }
 
@@ -682,8 +659,8 @@ button.rail-pip:disabled {
    4px and 6px it lands a pixel past 480. */
 .stage-panel[data-stage="predict"] {
   gap: 2px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 .stage-panel[data-stage="predict"] .stage-panel__title {
   font-size: 18px;
@@ -699,20 +676,52 @@ button.rail-pip:disabled {
   color: var(--fg-dim);
   max-width: 62ch;
   margin: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 16px;
 }
 
 /* A text stage (frame, explain) scrolls its own body so a long reveal never shoves the footer
    button off the fixed 800x480 screen — the footer is flex:none, so the body takes the space
    between the title and it and scrolls within that. Keeps the Complete button always reachable. */
-.stage-panel > .stage-panel__body {
+.stage-panel > .scroll-frame,
+.instrument > .scroll-frame,
+.home-grid {
   flex: 1 1 auto;
+}
+.scroll-frame {
   min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding-right: 16px;          /* room beside the scrollbar so text never hides under it */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.scroll-frame[data-scrollable] > :first-child {
+  scrollbar-color: var(--fg-dim) var(--surface-3);
+}
+/* Keep the continuation arrow in the scrollbar gutter, clear of the last whole line. */
+.scroll-frame[data-more-below]::after {
+  content: "\2193";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 15px;
+  text-align: center;
+  font-size: 16px;
+  line-height: 1.2;
+  color: var(--fg);
+  background: var(--surface-3);
+  pointer-events: none;
+  z-index: 2;
+}
+.scroll-copy {
+  display: flow-root;
+  margin: 0;
 }
 /* The explain body holds the explanation and then the concept, as paragraphs. */
-.stage-panel__body > p {
+.scroll-copy > p {
   margin: 0 0 14px;
 }
 /* The lesson's takeaway, closing the reveal: set off by a rule and a label, at body size. */
@@ -738,7 +747,7 @@ button.rail-pip:disabled {
   grid-template-rows: auto minmax(0, 1fr);
   align-items: center;
   column-gap: 12px;
-  row-gap: 10px;
+  row-gap: 9px;
 }
 .stage-panel--instrument > .stage-panel__eyebrow {
   grid-row: 1;
@@ -975,8 +984,8 @@ button.rail-pip:disabled {
    with no scroll. The result sits in the form's flow, so it carries no bottom margin of its own. */
 .stage-panel[data-stage="check"] {
   gap: 2px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 .stage-panel[data-stage="check"] .stage-panel__title {
   font-size: 18px;
@@ -1083,15 +1092,6 @@ button.rail-pip:disabled {
 .instrument__row .waterfall-wrap {
   flex: 1 1 auto;
 }
-/* On an instrument stage the waterfall band and tune stay fixed, and the "I-do / you-do"
-   narration scrolls beneath them, so a long body never pushes the radio off the fixed 800x480
-   screen (MC's call). Only the instrument body scrolls; the plain text stages are untouched. */
-.instrument > .stage-panel__body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-}
-
 /* ===== Decode panel (M10) =============================================== */
 /* The rtl_433 instrument: FSK's two tones don't resolve on a 125 kHz-bin waterfall, so M10 reads
    the band with a decoder instead of the eye. A bordered list of what each sensor said, filled
@@ -1272,7 +1272,7 @@ button.rail-pip:disabled {
   height: auto;
   min-height: 0;
 }
-.instrument--decode:has(> .radar) > .stage-panel__body {
+.instrument--decode:has(> .radar) > .scroll-frame {
   grid-row: 1;
   grid-column: 2;
 }
@@ -1289,10 +1289,15 @@ button.rail-pip:disabled {
   justify-content: center;
   padding: 4px;
 }
-.radar__svg {
+.radar__plot {
+  position: relative;
   height: 100%;
-  width: auto;
   aspect-ratio: 1 / 1;
+}
+.radar__svg {
+  display: block;
+  height: 100%;
+  width: 100%;
   overflow: visible;
 }
 .radar__grid circle, .radar__grid line {
@@ -1303,16 +1308,33 @@ button.rail-pip:disabled {
 .radar__me { fill: var(--accent); }
 .radar__plane { fill: var(--ok); }
 .radar__plane-label {
+  position: absolute;
   font-family: var(--font-mono);
   font-size: 13px;
-  fill: var(--fg);
+  line-height: 1;
+  color: var(--fg);
+  white-space: nowrap;
+  transform: translate(4px, -50%);
+}
+.radar__plane-label--left {
+  transform: translate(calc(-100% - 4px), -50%);
+}
+.radar__labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 .radar__compass {
+  position: absolute;
   font-family: var(--font-mono);
   font-size: 13px;
-  fill: var(--fg-mute);
-  text-anchor: middle;
+  line-height: 1;
+  color: var(--fg-mute);
 }
+.radar__compass--n { top: 0; left: 50%; transform: translateX(-50%); }
+.radar__compass--s { bottom: 0; left: 50%; transform: translateX(-50%); }
+.radar__compass--e { right: 0; top: 50%; transform: translateY(-50%); }
+.radar__compass--w { left: 0; top: 50%; transform: translateY(-50%); }
 .radar__ring-label {
   position: absolute;
   left: 8px;
@@ -1339,6 +1361,18 @@ button.rail-pip:disabled {
   color: var(--fg-dim);
   font-family: var(--font-mono);
   font-size: 18px;
+}
+.decoder:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) > :not(.decoder__head, .decoder__empty) {
+  display: none;
+}
+.decoder:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) > .decoder__empty {
+  flex: 0 1 auto;
+  margin-block: auto;
+  overflow-y: auto;
+}
+.refusal-command {
+  font: inherit;
+  white-space: nowrap;
 }
 /* A refusal says why the Flock panel is empty and what to do, and its end (the cause, the
    remedy, the countdown) is the part a learner acts on. A long port name runs it past the two
@@ -2001,9 +2035,21 @@ button.rail-pip:disabled {
   z-index: 1;
 }
 
-/* Unit grids end the page. Trim their bottom inset to fit Unit 4's two rows. */
+/* Unit grids keep the same row heights with the taller header. */
 .content > .tiles:last-child {
+  padding-top: 5px;
   padding-bottom: 11px;
+}
+
+/* Home can use tighter tiles: there are no per-lesson hardware tags in this grid. */
+.home-grid .tiles {
+  gap: 10px;
+  padding-block: 8px;
+}
+.home-grid .tile {
+  min-height: 112px;
+  padding-block: 6px;
+  gap: 4px;
 }
 
 /* Honest empty state for a unit whose lessons are not built yet (no lock, D16). */
@@ -2539,9 +2585,13 @@ button.rail-pip:disabled {
   gap: 10px;
   padding: 10px var(--gutter) 10px 10px;
 }
-.rack__picker {
+.rack__chooser {
   flex: none;
   width: 142px;
+}
+.rack__picker {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;

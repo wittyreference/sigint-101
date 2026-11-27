@@ -458,10 +458,11 @@
   }
 
   // The reason the band is empty, as page text over the canvas (null hides it).
-  function showReason(p, message) {
+  function showReason(p, down) {
     if (!p.reason) return;
-    p.reason.firstElementChild.textContent = message || "";
-    p.reason.hidden = !message;
+    p.reason.hidden = !down;
+    if (down) window.DecoderPanel.renderRefusal(p.reason.firstElementChild, down);
+    else p.reason.firstElementChild.textContent = "";
   }
 
   // A stage that declares the gain panel (M2) carries a vertical level meter beside its waterfall.
@@ -879,7 +880,7 @@
       resetView();
       panels.forEach(function (p) { clearGainMeter(p, "offline"); });
     }
-    panels.forEach(function (p) { showReason(p, reason); });
+    panels.forEach(function (p) { showReason(p, down); });
     say(down.badge, "na", reason);
     showCommand(null);
   }

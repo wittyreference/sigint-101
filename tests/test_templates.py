@@ -455,7 +455,8 @@ def test_explain_header_sets_your_call_beside_what_the_radio_does():
     assert "VERDICT_marker" in block
     # The header rides at the top of the explain's scrolling body, so a long eyebrow can never
     # squeeze the reading itself to nothing on the fixed 800x480 panel.
-    assert re.search(r'<div class="stage-panel__body">\s*<div class="verdict', html)
+    assert re.search(r'<div class="stage-panel__body">\s*<div class="scroll-copy">\s*'
+                     r'<div class="verdict', html)
     assert "EXPLAIN_SCORED_marker" in html
 
 
@@ -1033,7 +1034,8 @@ def _live_instrument(html):
     """The live (operate) instrument's markup: its waterfall wrap and tune strip."""
     return re.search(r'<section class="stage-panel[^"]*" data-stage="operate".*?'
                      r'<div class="instrument(?: instrument--gain)?">(.*?)'
-                     r'<p class="stage-panel__body">', html, re.S).group(1)
+                     r'<div class="scroll-frame">\s*<div class="stage-panel__body">', html,
+                     re.S).group(1)
 
 
 def test_a_tuned_lesson_names_its_bin_size_and_step_for_the_live_tune():
@@ -1570,12 +1572,13 @@ def test_active_tile_cursor_stays_with_the_left_aligned_code():
 
 
 def test_unit_grid_has_no_three_pixel_padding_overflow_without_shrinking_tiles():
-    # Unit 4 was measured at 417px in a 414px region. Only the 14px bottom inset
-    # needs to give up the excess. Home has a footer after the grid and keeps its inset.
-    assert _css_decl(".tiles", "padding") == "14px var(--gutter)"
-    bottom = _css_decl(".content > .tiles:last-child", "padding-bottom")
-    assert bottom == "11px"
-    assert 417 - (14 - _px(bottom)) == 414
+    # Unit 4 originally measured 417px in a 414px region with 14px insets and a 66px bar.
+    # Take the taller bar out of those insets so the tiles themselves keep their size.
+    initial_inset = _px(_css_decl(".tiles", "padding"))
+    top = _px(_css_decl(".content > .tiles:last-child", "padding-top"))
+    bottom = _px(_css_decl(".content > .tiles:last-child", "padding-bottom"))
+    view = 480 - _px(_css_decl(".app", "--bar-h"))
+    assert 417 - 2 * initial_inset + top + bottom <= view
     assert _css_decl(".tiles", "overflow-y") == "auto"
     assert _css_decl(".tiles", "grid-auto-rows") == "max-content"
     assert _decls(_css_rule(".tile"))["min-height"] == "124px"
@@ -1616,3 +1619,59 @@ def test_shared_refusal_badge_reads_on_every_theme_including_the_waterfall():
     for theme in THEMES:
         tokens = _theme_tokens(theme)
         assert _contrast(tokens[ink], tokens[paper]) >= 4.5, theme
+
+
+def test_status_bar_controls_get_the_full_touch_height_inside_the_bar():
+    bar = _css_rule(".statusbar")
+    assert _decls(bar)["align-items"] == "stretch"
+    assert _px(_css_decl(".app", "--bar-h")) - _px(_decls(bar)["border-bottom"]) >= 72
+    for control in (".btn-back", ".btn-theme", ".btn-exit"):
+        assert not re.search(rf"{control}::(?:after|before)\s*\{{", APP_CSS.read_text())
+    header = _render("base.html", **_status(exit_to_desktop=True))
+    assert re.search(r'<button class="btn-back btn-exit" type="button"', header)
+    assert re.search(r'data-exit-armed hidden>Tap again<br>to exit<', header)
+
+
+@pytest.mark.parametrize("stage", ["predict", "check"])
+def test_lesson_gates_recover_the_header_height_without_shrinking_touch_targets(stage):
+    header_and_rail = sum(_px(_css_decl(".app", token)) for token in ("--bar-h", "--rail-h"))
+    stage_rule = _decls(_css_rule(f'.stage-panel[data-stage="{stage}"]'))
+    assert header_and_rail > 66 + 40
+    assert header_and_rail + _px(stage_rule["padding-top"]) + _px(stage_rule["padding-bottom"]) <= (
+        66 + 40 + 2 * 6
+    )
+    assert _px(_css_decl(".app", "--touch")) >= 72
+
+
+def test_scroll_cue_frames_wrap_home_lesson_text_and_operator_picker():
+    home = _render("home.html", **_status(), tiles=UNITS)
+    home = re.sub(r"<!--.*?-->", "", home, flags=re.S)
+    assert re.search(r'class="scroll-frame home-grid">\s*<[^>]*class="tiles"', home)
+    lesson = _console(lesson=_intro_lesson(), current_stage="demo")
+    for stage in ("frame", "demo"):
+        assert re.search(r'class="scroll-frame">\s*<div class="stage-panel__body">\s*'
+                         r'<p class="scroll-copy">', _section(lesson, stage))
+    rack = _render("operate.html", **_status(), inst=instrument("adsb"), instruments=INSTRUMENTS)
+    assert re.search(r'class="scroll-frame rack__chooser">\s*<nav class="rack__picker"', rack)
+    assert _px(_css_decl(".home-grid .tile", "min-height")) < _px(
+        _decls(_css_rule(".tile"))["min-height"])
+
+
+def test_adsb_labels_live_outside_the_scaled_svg_with_a_css_pixel_floor():
+    html = _render("operate.html", **_status(), inst=instrument("adsb"), instruments=INSTRUMENTS)
+    plot = re.search(r'<div class="radar__plot">\s*(<svg.*?</svg>)(.*?)</div>', html, re.S)
+    assert plot
+    assert "<text " not in plot[1]
+    assert all(f">{point}<" in plot[2] for point in "NESW")
+    assert "data-adsb-labels" in html
+    for label in (".radar__compass", ".radar__plane-label", ".radar__ring-label"):
+        assert _px(_css_decl(label, "font-size")) >= 13
+
+
+def test_refusals_centre_the_message_and_keep_a_command_whole():
+    condition = (".decoder:has(> .decoder__head > "
+                 ":is(.decoder__status--empty, .decoder__status--stopped))")
+    assert _css_decl(condition + " > :not(.decoder__head, .decoder__empty)", "display") == "none"
+    assert _css_decl(condition + " > .decoder__empty", "margin-block") == "auto"
+    assert _css_decl(condition + " > .decoder__empty", "overflow-y") == "auto"
+    assert _css_decl(".refusal-command", "white-space") == "nowrap"

@@ -25,6 +25,18 @@
     return down.nextStep ? text + " · " + down.nextStep : text;
   }
 
+  function renderRefusal(el, down) {
+    if (!down.nextStep || !down.nextStep.startsWith("Run ")) {
+      el.textContent = refusalText(down);
+      return;
+    }
+    el.textContent = (down.message || down.reason) + " · Run ";
+    var command = el.ownerDocument.createElement("code");
+    command.className = "refusal-command";
+    command.textContent = down.nextStep.slice(4);
+    el.appendChild(command);
+  }
+
   function quietText(body, detail) {
     return body.state === "starting" ? "Checking receiver…" : "Listening · " + detail;
   }
@@ -47,7 +59,7 @@
   // Under node's test runner the file is loaded for its pure helpers and there is no document.
   if (typeof module !== "undefined" && module.exports) {
     module.exports = { downState: downState, liveBadge: liveBadge, commandText: commandText,
-                       refusalText: refusalText, quietText: quietText };
+                       refusalText: refusalText, renderRefusal: renderRefusal, quietText: quietText };
     return;
   }
 
@@ -85,7 +97,7 @@
   function showDown(panel, badge, empty, body) {
     var down = downState(body);
     if (badge) { badge.textContent = down.badge; badge.className = down.cls; }
-    if (empty) { empty.hidden = false; empty.textContent = refusalText(down); }
+    if (empty) { empty.hidden = false; renderRefusal(empty, down); }
     showCommand(panel, null);
   }
 
@@ -104,5 +116,6 @@
   Array.prototype.forEach.call(document.querySelectorAll("button[data-command]"), wire);
 
   root.DecoderPanel = { showCommand: showCommand, showDown: showDown, showLive: showLive,
-                        downState: downState, refusalText: refusalText, quietText: quietText };
+                        downState: downState, refusalText: refusalText, renderRefusal: renderRefusal,
+                        quietText: quietText };
 })(this);

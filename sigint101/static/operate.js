@@ -118,8 +118,9 @@
   var LOG_POLL_MS = 3000;
 
   // The picker scrolls on its own; keep the instrument on the bench in view when the page opens.
-  var current = document.querySelector(".rack__pick[aria-current]");
-  if (current && current.scrollIntoView) current.scrollIntoView({ block: "nearest" });
+  var picker = document.querySelector(".rack__picker");
+  var current = picker && picker.querySelector(".rack__pick--on");
+  if (current) current.scrollIntoView({ block: "center", inline: "nearest" });
 
   // ---- The step key: rewrites the strip's data-step-hz, which the +/- keys read at each tap ----
   var stepKey = bench.querySelector("[data-step-cycle]");

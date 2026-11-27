@@ -5,9 +5,11 @@
 {% block title %}{{ title|default('SIGINT 101') }}{% endblock %}
 
 {% block content %}
-  {% include "_tilegrid.html" %}
+  <div class="scroll-frame home-grid">
+    {% include "_tilegrid.html" %}
+  </div>
   {# The two cross-cutting tracks share one row under the grid (MC's call, 2026-11-02), so the
-     unit tiles keep two full rows on the 800x480 screen. Neither is one of the curriculum units,
+     unit tiles keep two full rows and a peek of the next. Neither is one of the curriculum units,
      so they read apart from the tiles rather than sitting in the grid. #}
   <div class="home-tracks">
     {# The licence exam trainer: the on-ramp to a ticket, beside the lessons. While the pool
