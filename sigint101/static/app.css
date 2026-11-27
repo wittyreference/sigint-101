@@ -625,20 +625,20 @@ body {
 }
 
 /* The predict prompt doubles as its stage title, so it runs much longer than the other
-   one-line titles. Shrink it to the 18px body floor (still Russo One) and tighten this
-   screen's own spacing so the question, the frozen context frame, the tap chips and the
-   Commit button all fit the fixed 800x480. Spacing overrides are scoped to predict so the
+   one-line titles. Set it in the mono body face at the body size (matching the exam prompt) and
+   tighten this screen's own spacing so the question, the frozen context frame, the tap chips and
+   the Commit button all fit the fixed 800x480. Spacing overrides are scoped to predict so the
    other, roomier stages keep their larger display titles and padding. */
-/* The 2px gaps (4px between chips and Commit) keep Commit on screen under a five-line prompt; at
-   4px and 6px it lands a pixel past 480. */
 .stage-panel[data-stage="predict"] {
   gap: 2px;
   padding-top: 3px;
   padding-bottom: 3px;
 }
 .stage-panel[data-stage="predict"] .stage-panel__title {
-  font-size: 18px;
-  line-height: 1.2;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  line-height: 1.25;
+  text-wrap: normal;
   text-shadow: none;
 }
 .stage-panel[data-stage="predict"] .predict {
@@ -804,9 +804,9 @@ body {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 10px;
   min-height: var(--touch);
-  padding: 10px 18px;
+  padding: 8px 12px;
   border: 3px double var(--border-strong);
   background: var(--surface-2);
   color: var(--fg);
@@ -869,6 +869,34 @@ body {
   outline-offset: 2px;
 }
 
+/* On a missed check, mark the right chip with a solid --ok border and a word+glyph tag so
+   red-night distinguishes chosen-wrong (inverted fill) from right-answer without hue alone. */
+.predict-chip--answer {
+  border-color: var(--ok);
+  border-style: solid;
+  padding: 4px 12px;
+}
+.predict-chip--answer .predict-chip__key {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.predict-chip--answer .predict-chip__label {
+  line-height: 1.12;
+}
+.predict-chip__mark {
+  display: block;
+  width: fit-content;
+  margin-top: 2px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.15;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-ink);
+  background: var(--ok);
+}
+
 .predict__actions {
   margin-top: auto;
   display: flex;
@@ -916,10 +944,10 @@ body {
 }
 
 /* ===== Explain verdict (the predict reveal) and the check result ========== */
-/* The learner's call beside what the radio does, then the one-line verdict, at the top of the
-   explain's scrolling body (so it is the first thing read, and never squeezes the reading). The
-   predict reveal is unscored, so its box is neutral. Only the scored check adds hit/miss: there the
-   tag WORD carries it, so red-night (one hue) still reads it, with brightness (--ok vs --warn) as
+/* The learner's call beside what the radio does (or "In fact"), at the top of the explain's
+   scrolling body (so it is the first thing read, and never squeezes the reading). The predict
+   reveal is unscored, so its box is neutral. Only the scored check adds hit/miss: there the tag
+   WORD carries it, so red-night (one hue) still reads it, with brightness (--ok vs --warn) as
    the second cue. */
 .verdict {
   display: flex;
@@ -939,13 +967,12 @@ body {
 .verdict__line {
   font-family: var(--font-mono);
   font-size: 18px;
-  color: var(--fg);
+  color: var(--fg-dim);
 }
 .verdict__line b {
   color: var(--fg);
   font-weight: 400;
-  text-decoration: underline;
-  text-underline-offset: 3px;
+  text-decoration: none;
 }
 .verdict__tag {
   display: inline-block;
@@ -965,17 +992,19 @@ body {
 }
 
 /* ===== Post-lesson check ================================================= */
-/* Interactive like the predict, so it takes the predict's tight spacing: the prompt doubles as the
-   title at the 18px floor, and the chips, the result and Commit/Complete all fit the fixed 800x480
-   with no scroll. The result sits in the form's flow, so it carries no bottom margin of its own. */
+/* Interactive like the predict, so it takes the predict's tight spacing and mono body prompt:
+   the chips, the result and Commit/Complete all fit the fixed 800x480 with no scroll. The result
+   sits in the form's flow, so it carries no bottom margin of its own. */
 .stage-panel[data-stage="check"] {
   gap: 2px;
   padding-top: 3px;
   padding-bottom: 3px;
 }
 .stage-panel[data-stage="check"] .stage-panel__title {
-  font-size: 18px;
-  line-height: 1.2;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  line-height: 1.25;
+  text-wrap: normal;
   text-shadow: none;
 }
 .stage-panel[data-stage="check"] .predict {
@@ -983,12 +1012,16 @@ body {
 }
 .check__result {
   margin-bottom: 0;
-  padding: 6px 12px;
+  padding: 4px 10px;
+  gap: 2px;
+}
+.check__result .verdict__why {
+  line-height: 1.2;
 }
 .check__result b {
   color: var(--fg);
 }
-/* Red-night's dim --warn fill under dark ink measured 3.3:1, so there "Not yet" is an outline:
+/* Red-night's dim --warn fill under dark ink measured 3.3:1, so there "Missed" is an outline:
    the bright red ink on the darkest red fill (about 6:1), told from "Right"'s filled tag by its
    fill as well as its word, and still red alone. */
 .app[data-theme="red-night"] .verdict--miss .verdict__tag {
@@ -1085,7 +1118,8 @@ body {
 .decoder {
   flex: 0 0 auto;
   /* Leaves the narration under it a band of three lines at 800x480; any taller and it gets one.
-     A refusal grows the lesson's Flock panel (.decoder--fits-refusal), leaving one line at most. */
+     A refusal grows a lesson's decoder panel that opts in (.decoder--fits-refusal), leaving one
+     line of narration at most. */
   height: 124px;
   display: flex;
   flex-direction: column;
@@ -1380,12 +1414,14 @@ body {
   font: inherit;
   white-space: nowrap;
 }
-/* A refusal says why the Flock panel is empty and what to do, and its end (the cause, the
-   remedy, the countdown) is the part a learner acts on. A long port name runs it past the two
-   lines the fixed panel holds, so in a lesson the panel grows for a refusal: the NO RADIO and
-   STOPPED badges decoder-panel.js sets. Listening or live, it keeps its 124 px. Up to four lines
-   of message: the narration under it keeps one line and the keys drop at most 47 px, still on
-   screen; anything longer scrolls inside those four lines. */
+/* A refusal says why a decoder panel is empty and what to do, and its end (the cause, the remedy,
+   the countdown) is the part a learner acts on. Long refusals (multi-radio serial lists, deaths
+   at the stderr tail cap, long port names) run past the two lines the fixed 124 px panel holds,
+   so in a lesson a decoder panel that opts in (.decoder--fits-refusal) grows for a refusal: the
+   NO RADIO, TOOL MISSING, UNAVAILABLE and STOPPED badges decoder-panel.js sets. Listening or live,
+   it keeps its 124 px. Up to four lines of message: the narration under it keeps one line and the
+   keys drop at most 48.22 px (416.22 of 480, still on screen); anything longer scrolls inside
+   those four lines. */
 .stage-panel--instrument .instrument > .decoder--fits-refusal:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) {
   height: auto;
   min-height: 124px;
@@ -1489,14 +1525,15 @@ body {
   color: var(--fg);
 }
 /* The frozen predict frame on a decode lesson seals the decoder, mirroring the waterfall's seal.
-   Compact (not the live panel's height) so the predict prompt, chips and Commit all stay on the
-   fixed 800x480 screen — predict is the tightest stage. */
+   Matches the frozen waterfall's compact height (~70px) so the 20px mono predict prompt, chips
+   and Commit all stay inside the fixed 800x480 screen — predict is the tightest stage. */
 .decoder--frozen {
   height: auto;
-  min-height: 104px;
+  min-height: 70px;
+  padding: 4px 8px;
   justify-content: center;
   align-items: center;
-  gap: 8px;
+  gap: 2px;
   border-color: color-mix(in srgb, var(--border-strong) 80%, transparent);
 }
 .decoder__sealed {
@@ -1506,7 +1543,7 @@ body {
   color: var(--fg-mute);
 }
 .decoder__sealed span { display: block; font-size: 15px; }
-.decoder__sealed small { display: block; margin-top: 4px; font-size: 13px; }
+.decoder__sealed small { display: block; margin-top: 2px; font-size: 13px; }
 .decoder__axis {
   font-family: var(--font-mono);
   font-size: 13px;

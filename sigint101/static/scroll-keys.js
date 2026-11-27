@@ -49,6 +49,11 @@
     copy.style.clipPath = clip;
   }
 
+  // A tile grid scrolls on its own; bring the current unit or lesson into view when the page opens.
+  var tileGrid = document.querySelector && document.querySelector(".tiles");
+  var activeTile = tileGrid && tileGrid.querySelector(".tile--active");
+  if (activeTile) activeTile.scrollIntoView({ block: "center", inline: "nearest" });
+
   document.querySelectorAll(".scroll-frame").forEach(function (frame) {
     var band = frame.firstElementChild;
     var copy = band.querySelector(".scroll-copy");

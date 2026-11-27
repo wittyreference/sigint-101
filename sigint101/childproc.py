@@ -35,8 +35,10 @@ STABLE_AFTER_S = 30.0
 SETTLE_S = 2.0
 
 # How much of a tool's stderr goes into the reason the panel shows: its last two lines, and no
-# more than this many characters, so a chatty tool cannot bury the line that says why or push the
-# retry countdown out of the 124 px panel. rtl_fm's busy-dongle failure fits whole.
+# more than this many characters, so a chatty tool cannot bury the line that says why. The cap
+# does not keep the countdown inside the 124 px panel — at 160 chars, a death plus its countdown
+# runs to 4 lines. Lesson panels that opt into .decoder--fits-refusal grow to show it whole; the
+# radar and the rack scroll.
 TAIL_LINES = 2
 TAIL_CHARS = 160
 TAIL_READ_BYTES = 4096

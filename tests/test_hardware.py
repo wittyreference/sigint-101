@@ -142,6 +142,20 @@ def test_the_refusal_names_the_serials_it_found():
         assert serial in message
 
 
+def test_two_radio_refusal_fits_the_four_line_panel_budget():
+    # Measured at 800x480 on a generic decoder panel: 229 chars with three 8-digit serials fits
+    # whole inside the four-line refusal cap while naming every serial, the env var and plug order.
+    devices = list_rtlsdr_devices(which=_which_for("rtl_power"), run=_enumerator(MULTIPLE_DEVICES))
+    with pytest.raises(DeviceSelectionError) as caught:
+        select_rtlsdr_index(None, devices=devices)
+    message = str(caught.value)
+    assert len(message) <= 229, (len(message), message)
+    for serial in ("00000001", "00000100", "00000007"):
+        assert serial in message
+    assert "SIGINT101_RTLSDR_SERIAL" in message
+    assert "plug order" in message
+
+
 def test_a_numeric_serial_resolves_to_its_own_index_not_that_number():
     # The whole reason this code exists: librtlsdr reads "-d 00000100" as index 100, and
     # "-d 00000001" as index 1 — neither the radio whose serial that string actually is.

@@ -135,3 +135,26 @@ test("scroll cues follow real overflow, scroll position and a stage becoming vis
   assert.equal(attrs.get("data-scrollable"), false);
   assert.equal(attrs.get("data-more-below"), false);
 });
+
+test("opening a tile grid centres the active tile within view before refreshing cues", () => {
+  const events = [];
+  const active = { scrollIntoView: options => events.push(["scroll", options.block, options.inline]) };
+  const tiles = {
+    clientHeight: 400, clientTop: 0, scrollHeight: 600, scrollTop: 0,
+    querySelector: sel => sel === ".tile--active" ? active : null,
+    addEventListener() {},
+  };
+  const frame = {
+    firstElementChild: tiles,
+    toggleAttribute: (name, on) => { events.push(["attr", name, on]); },
+  };
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/scroll-keys.js"), "utf8"), {
+    document: {
+      querySelector: sel => sel === ".tiles" ? tiles : null,
+      querySelectorAll: sel => sel === ".scroll-frame" ? [frame] : [],
+      addEventListener() {},
+    },
+  });
+  assert.deepEqual(events[0], ["scroll", "center", "nearest"]);
+  assert.ok(events.some(e => e[0] === "attr"), "scroll-frame cues still refreshed");
+});
