@@ -9,17 +9,19 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from google.protobuf.json_format import MessageToDict
+from meshtastic import tcp_interface
 from meshtastic.protobuf import config_pb2, localonly_pb2, mesh_pb2
 from pubsub import pub
 
-from sigint101 import safety
+from sigint101 import lora, safety
 from sigint101.app import create_app
 from sigint101.events import read_events
-from sigint101.lora import LoRaListener
+from sigint101.lora import LoRaListener, LoRaUnavailable
 
 NODE = 123
 SEND = "/api/lora/send"
 LoRaConfig = config_pb2.Config.LoRaConfig
+TCPInterface = tcp_interface.TCPInterface
 
 
 class Radio:
@@ -140,7 +142,8 @@ def test_wire_outcome_matches_connection_request_and_local_node(tmp_path, reason
         radio.routing(1, "NO_ROUTE")
         assert client.get("/api/lora").json()["sends"][0]["status"] == status
     logged = events(tmp_path)
-    assert [event["kind"] for event in logged] == ["transmission", "transmission_outcome"]
+    assert [event["kind"] for event in logged] == [
+        "transmission", "reception", "reception", "reception", "transmission_outcome"]
     assert logged[-1]["payload"] == {"packet_id": 1, "reason": reason, "status": status,
                                      "sender_node_num": NODE, "text": logged[0]["payload"]["text"]}
 
@@ -241,3 +244,173 @@ def test_safety_validates_utf8_payload_size_before_accessing_radio(text):
     with pytest.raises(ValueError):
         safety.send_lora_text(radio, text)
     assert radio.calls == []
+
+
+def test_full_radio_queue_refuses_before_the_sdk_can_wait_on_a_lost_link(tmp_path):
+    release = threading.Event()
+
+    class FullQueueRadio(Radio):
+        queueStatus = mesh_pb2.QueueStatus(free=0)
+
+        def sendText(self, text, **kwargs):
+            self.isConnected.clear()
+            assert release.wait(5)
+            return super().sendText(text, **kwargs)
+
+    radio = FullQueueRadio()
+    with console(tmp_path, lambda *_: radio) as client, ThreadPoolExecutor(1) as workers:
+        sent = workers.submit(client.post, SEND, headers=rack_headers(client))
+        try:
+            response = sent.result(timeout=1)
+            assert response.status_code == 503
+            assert "queue is full" in response.json()["reason"]
+        finally:
+            release.set()
+    assert not radio.calls and not events(tmp_path)
+
+
+def test_send_does_not_hold_the_lifecycle_mutex_during_sdk_io(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+
+    class HeldRadio(Radio):
+        def sendText(self, text, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return super().sendText(text, **kwargs)
+
+    with console(tmp_path, lambda *_: HeldRadio()) as client, ThreadPoolExecutor(1) as workers:
+        sent = workers.submit(client.post, SEND, headers=rack_headers(client))
+        try:
+            assert entered.wait(5)
+            lock = client.app.state.lora._life
+            assert lock.acquire(blocking=False)
+            lock.release()
+        finally:
+            release.set()
+        assert sent.result(timeout=5).status_code == 200
+
+
+def test_sdk_reconnect_without_a_socket_cannot_report_a_handoff(tmp_path, monkeypatch):
+    class Reconnecting(TCPInterface):
+        def __init__(self, **kwargs):
+            super().__init__(connectNow=False, **kwargs)
+            self.isConnected.set()
+            self.currentPacketId = 1
+            self.myInfo = mesh_pb2.MyNodeInfo(my_node_num=NODE)
+
+    monkeypatch.setattr(tcp_interface, "TCPInterface", Reconnecting)
+    with TestClient(create_app(data_dir=tmp_path)) as client:
+        response = client.post(SEND, headers=rack_headers(client))
+        assert response.status_code == 503
+        assert response.json()["send"]["status"] == "lost"
+        assert response.json()["send"]["packet_id"] is None
+    assert [event["payload"]["status"] for event in events(tmp_path)] == ["lost"]
+
+
+def test_only_matched_routing_is_excluded_from_receptions(tmp_path):
+    class RoutingRadio(Radio):
+        def sendText(self, text, **kwargs):
+            self.routing(99, "NO_CHANNEL")
+            return super().sendText(text, **kwargs)
+
+    radio = RoutingRadio(fast="NO_CHANNEL")
+    with console(tmp_path, lambda *_: radio) as client:
+        assert client.post(SEND, headers=rack_headers(client)).status_code == 200
+        radio.routing(1, "NO_ROUTE")
+        radio.routing(98)
+        radio.routing(1, source=NODE + 1)
+        assert len(client.get("/api/lora").json()["packets"]) == 3
+    assert [event["kind"] for event in events(tmp_path)].count("reception") == 3
+
+
+@pytest.mark.parametrize("failure", [None, "partial", "backpressure", "without protocol"])
+def test_sdk_handoff_requires_one_complete_frame(tmp_path, monkeypatch, failure):
+    frames = []
+
+    class Wire:
+        def send(self, frame, _flags):
+            if failure == "backpressure":
+                raise BlockingIOError("the socket would block")
+            frames.append(frame)
+            return 1 if failure == "partial" else len(frame)
+
+        def shutdown(self, _how):
+            pass
+
+        def close(self):
+            pass
+
+    class Connected(TCPInterface):
+        def __init__(self, **kwargs):
+            super().__init__(connectNow=False, noProto=failure == "without protocol", **kwargs)
+            self.isConnected.set()
+            self.currentPacketId = 1
+            self.myInfo = mesh_pb2.MyNodeInfo(my_node_num=NODE)
+            self.socket = Wire()
+
+        def myConnect(self):
+            pytest.fail("a radio test cannot dial the network")
+
+    monkeypatch.setattr(tcp_interface, "TCPInterface", Connected)
+    with TestClient(create_app(data_dir=tmp_path)) as client:
+        result = client.post(SEND, headers=rack_headers(client))
+        assert result.status_code == (503 if failure else 200)
+        record = result.json()["send"]
+    assert len(frames) == (0 if failure in ("backpressure", "without protocol") else 1)
+    assert record["status"] == ("lost" if failure else "handed")
+    if failure == "backpressure":
+        assert record["reason"] == "the socket would block"
+    if not failure:
+        frame = frames[0]
+        assert int.from_bytes(frame[2:4], "big") == len(frame) - 4
+        packet = mesh_pb2.ToRadio.FromString(frame[4:]).packet
+        assert packet.id == record["packet_id"] and packet.want_ack
+        assert packet.decoded.payload.decode() == record["text"]
+
+
+def test_start_and_stop_have_a_bounded_admission_wait(tmp_path, monkeypatch):
+    monkeypatch.setattr(lora, "OPERATION_WAIT_S", 0.01, raising=False)
+    entered, release = threading.Event(), threading.Event()
+
+    class HeldRadio(Radio):
+        def sendText(self, text, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return super().sendText(text, **kwargs)
+
+    with console(tmp_path, lambda *_: HeldRadio()) as client, ThreadPoolExecutor(3) as workers:
+        send = workers.submit(client.post, SEND, headers=rack_headers(client))
+        try:
+            assert entered.wait(5)
+            listener = client.app.state.lora
+            attempts = [workers.submit(method) for method in (listener.start, listener.stop)]
+            for attempt in attempts:
+                with pytest.raises(LoRaUnavailable, match="busy"):
+                    attempt.result(timeout=1)
+        finally:
+            release.set()
+        assert send.result(timeout=5).status_code == 200
+
+
+def test_queue_filling_during_sdk_call_cannot_defer_a_write(tmp_path, monkeypatch):
+    class FilledBeforeWrite(TCPInterface):
+        def __init__(self, **kwargs):
+            super().__init__(connectNow=False, **kwargs)
+            self.isConnected.set()
+            self.currentPacketId = 1
+            self.myInfo = mesh_pb2.MyNodeInfo(my_node_num=NODE)
+            self.queueStatus = mesh_pb2.QueueStatus(free=1)
+
+        def sendText(self, *args, **kwargs):
+            self.queueStatus.free = 0
+            return super().sendText(*args, **kwargs)
+
+        def _queueHasFreeSpace(self):
+            pytest.fail("the SDK must never poll for queue capacity")
+
+    monkeypatch.setattr(tcp_interface, "TCPInterface", FilledBeforeWrite)
+    with TestClient(create_app(data_dir=tmp_path)) as client:
+        response = client.post(SEND, headers=rack_headers(client))
+        assert response.status_code == 503
+        assert "queue is full" in response.json()["reason"]
+    assert not events(tmp_path)

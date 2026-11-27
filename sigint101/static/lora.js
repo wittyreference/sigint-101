@@ -51,9 +51,9 @@
   var sendNumber = 0;
   var currentSend = null;
 
-  function showOutcome(send) {
+  function showOutcome(send, previous) {
     var outcome = sendStrip.querySelector("[data-lora-outcome]");
-    outcome.textContent = sendOutcome(send);
+    outcome.textContent = (previous ? "Previous send · " : "") + sendOutcome(send);
     outcome.dataset.state = send.status;
     outcome.hidden = false;
     sendStrip.querySelector("[data-lora-no-repeat]").hidden = send.status !== "no-repeat";
@@ -68,7 +68,7 @@
         return currentSend && row.packet_id === currentSend.packet_id &&
           row.text === currentSend.text;
       });
-    if (send) showOutcome(send);
+    if (send) showOutcome(send, sendNumber === 0);
   }
 
   if (sendStrip) {
@@ -78,8 +78,14 @@
       showOutcome({ status: "pending", reason: "Sending…" });
       fetch("/api/lora/send", {
         method: "POST", headers: { "X-LoRa-Send": sendStrip.dataset.loraSendPermit }
-      }).then(function (response) { return response.json(); }).then(function (body) {
-        if (tap !== sendNumber) return;
+      }).then(function (response) {
+        if (response.status === 403) {
+          if (tap === sendNumber) window.location.reload();
+          return null;
+        }
+        return response.json();
+      }).then(function (body) {
+        if (!body || tap !== sendNumber) return;
         currentSend = body.send || null;
         showOutcome(currentSend || { status: "error", reason: body.reason });
       }).catch(function () {

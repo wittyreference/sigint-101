@@ -6,9 +6,10 @@ from __future__ import annotations
 import math
 import threading
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 
-from .safety import ANTENNA_NOTICE, require_rack_send, send_lora_text
+from .safety import ANTENNA_NOTICE, LoRaQueueFull, connect_lora, require_rack_send, send_lora_text
 
 # meshtasticd's default TCP API. The Nomad's own LoRa radio (a MeshAdv sx1262) is driven by the
 # meshtasticd service; the console uses its API and does not claim an SDR device.
@@ -16,6 +17,7 @@ DEFAULT_LORA_HOST = "localhost"
 DEFAULT_LORA_PORT = 4403
 DEFAULT_HISTORY = 40
 SEND_HISTORY = 20
+OPERATION_WAIT_S = 6
 
 
 class LoRaUnavailable(RuntimeError):
@@ -150,13 +152,6 @@ def parse_lora_packet(packet) -> LoRaPacket | None:
     )
 
 
-def _default_connect(host: str, port: int):
-    """Open the meshtastic TCP interface to the local daemon. Imported lazily so the module (and its
-    pure parser) load without the meshtastic library, and only a real connection pulls it in."""
-    from meshtastic.tcp_interface import TCPInterface
-    return TCPInterface(hostname=host, portNumber=port, timeout=5)
-
-
 class LoRaListener:
     """Subscribes to meshtasticd and keeps a bounded buffer of recently received packets.
 
@@ -166,7 +161,7 @@ class LoRaListener:
     """
 
     def __init__(self, *, hostname=DEFAULT_LORA_HOST, port=DEFAULT_LORA_PORT,
-                 history=DEFAULT_HISTORY, connect=_default_connect):
+                 history=DEFAULT_HISTORY, connect=connect_lora):
         self.hostname = hostname
         self.port = int(port)
         self._connect = connect
@@ -176,8 +171,9 @@ class LoRaListener:
         # reception and never raises, so the call is made directly.
         self.on_reception = None
         self.on_transmission = None
-        # Callbacks never take _life: the SDK can publish before a send or close returns.
-        self._life = threading.RLock()
+        # Reserve one operation at a time, but release the mutex before SDK calls or callbacks.
+        self._life = threading.Condition()
+        self._operating = False
         self._lock = threading.Lock()
         self._interface = None
         self._subscribed = False
@@ -189,13 +185,24 @@ class LoRaListener:
     def running(self) -> bool:
         """True while connected to meshtasticd — the connection itself, re-checked every time.
 
-        Holding an interface is not the same as being connected. When meshtasticd restarts, the
-        library reconnects once after a second; if the daemon is not back by then its reader dies,
-        clears isConnected and publishes connection.lost, and the old handle stays behind. The
-        panel must not keep calling that live.
+        After EOF or a failed write, the next request opens a separate interface. The old handle
+        can remain until then, so the panel checks the SDK's connection flag and loss callback.
         """
         iface = self._interface
         return iface is not None and not self._lost and iface.isConnected.is_set()
+
+    @contextmanager
+    def _operation(self):
+        with self._life:
+            if not self._life.wait_for(lambda: not self._operating, timeout=OPERATION_WAIT_S):
+                raise LoRaUnavailable("The radio is busy with another request.")
+            self._operating = True
+        try:
+            yield
+        finally:
+            with self._life:
+                self._operating = False
+                self._life.notify_all()
 
     def start(self) -> None:
         """Connect to meshtasticd and start buffering received packets.
@@ -203,14 +210,14 @@ class LoRaListener:
         A daemon that is not there is an honest LoRaUnavailable, not a quiet empty panel — exactly
         like the SDR routes refuse rather than fake a sweep.
         """
-        with self._life:
-            self._start_locked()
+        with self._operation():
+            self._start()
 
-    def _start_locked(self):
+    def _start(self):
         if self.running:
             return
         if self._interface is not None:
-            self.stop()
+            self._stop()
         try:
             iface = self._connect(self.hostname, self.port)
         except Exception as exc:  # connection refused, timeout, or the lib missing
@@ -237,31 +244,36 @@ class LoRaListener:
             if interface is None or interface is not self._interface:
                 return
             decoded = packet.get("decoded") if isinstance(packet, dict) else None
+            handled, outcome = False, None
             if isinstance(decoded, dict) and decoded.get("portnum") == "ROUTING_APP":
-                parsed = None
-                outcome = self._route_outcome(interface, packet, decoded)
-            else:
-                outcome = None
-                parsed = parse_lora_packet(packet)
-                if parsed is not None:
-                    self._packets.append(parsed)
+                handled, outcome = self._route_outcome(interface, packet, decoded)
+            parsed = None if handled else self._buffer_reception(packet)
         if outcome is not None:
             self._report("transmission_outcome", outcome)
+        self._heard(parsed)
+
+    def _buffer_reception(self, packet):
+        parsed = parse_lora_packet(packet)
+        if parsed is not None:
+            self._packets.append(parsed)
+        return parsed
+
+    def _heard(self, parsed):
         if parsed is not None and self.on_reception is not None:
             self.on_reception(parsed.as_dict())
 
     def _route_outcome(self, interface, packet, decoded):
-        """Resolve routing under the buffer lock, or hold a reply until its ID is registered."""
+        """Resolve a matched reply, or defer classification until the current send has an ID."""
         routing, packet_id = decoded.get("routing"), decoded.get("requestId")
         sender = packet.get("from")
         if (not isinstance(routing, dict) or not isinstance(packet_id, int)
                 or not isinstance(sender, int) or not sender):
-            return None
+            return False, None
         reason = routing.get("errorReason", "NONE")
         local = local_node_num(interface)
         if reason == "NONE":
             if local is None or sender != local:
-                return None
+                return False, None
             status = "repeated"
         elif reason == "MAX_RETRANSMIT" and sender == local:
             status = "no-repeat"
@@ -271,10 +283,11 @@ class LoRaListener:
                   "status": status, "reason": reason}
         for owner, record in reversed(self._sends):
             if owner is interface and record["packet_id"] == packet_id:
-                return self._settle(record, notice)
+                return True, self._settle(record, notice)
         if self._early is not None:
-            self._early.append(notice)
-        return None
+            self._early.append((notice, packet))
+            return True, None
+        return False, None
 
     @staticmethod
     def _settle(record, outcome):
@@ -297,50 +310,62 @@ class LoRaListener:
         require_rack_send()
         from meshtastic.mesh_interface import MeshInterface
 
-        with self._life:
-            self._start_locked()
+        with self._operation():
+            self._start()
             iface = self._interface
             settings = radio_settings(iface)
             if settings["tx_enabled"] is False:
                 raise LoRaTxDisabled("The radio reports that transmit is disabled.")
             with self._lock:
-                self._early = deque(maxlen=SEND_HISTORY)
+                self._early = []
             record = {"packet_id": None, "text": text, "status": "handed", "reason": None,
                       "channel": 0, "destination": "^all", "want_ack": True,
                       "notice": ANTENNA_NOTICE, "radio": settings}
             try:
                 record.update(send_lora_text(iface, text))
+            except LoRaQueueFull as exc:
+                raise LoRaUnavailable(str(exc)) from exc
             except (OSError, RuntimeError, MeshInterface.MeshInterfaceError) as exc:
                 record.update(status="lost", reason=str(exc) or "The radio connection was lost.")
-                self._report("transmission", dict(record))
-                with self._lock:
-                    self._sends.append((iface, record))
-                    self._early = None
-                    self._lost = True
-                self.stop()
+                self._finish_send(iface, record)
+                self._stop()
                 raise LoRaSendLost(record) from exc
+            else:
+                return self._finish_send(iface, record)
             finally:
-                if record["packet_id"] is None:
-                    with self._lock:
-                        self._early = None
-            self._report("transmission", dict(record))
-            with self._lock:
-                self._sends.append((iface, record))
-                early, self._early = self._early, None
-                notice = next((item for item in early if item["packet_id"] == record["packet_id"]),
-                              None)
-                outcome = self._settle(record, notice) if notice is not None else None
-                result = dict(record)
-            if outcome is not None:
-                self._report("transmission_outcome", outcome)
-            return result
+                self._resolve_early()
+
+    def _finish_send(self, interface, record):
+        # A racing reply stays buffered until the transmission is logged and its ID registered.
+        self._report("transmission", dict(record))
+        return self._resolve_early(interface, record)
+
+    def _resolve_early(self, interface=None, record=None):
+        with self._lock:
+            early, self._early = self._early, None
+            if record is not None:
+                self._sends.append((interface, record))
+            receptions = []
+            outcome = None
+            for notice, packet in early or ():
+                if record is not None and notice["packet_id"] == record["packet_id"]:
+                    settled = self._settle(record, notice)
+                    outcome = settled or outcome
+                else:
+                    receptions.append(self._buffer_reception(packet))
+            result = dict(record) if record is not None else None
+        if outcome is not None:
+            self._report("transmission_outcome", outcome)
+        for parsed in receptions:
+            self._heard(parsed)
+        return result
 
     def stop(self) -> None:
         """Disconnect from meshtasticd and stop buffering."""
-        with self._life:
-            self._stop_locked()
+        with self._operation():
+            self._stop()
 
-    def _stop_locked(self):
+    def _stop(self):
         with self._lock:
             iface, self._interface = self._interface, None
         if self._subscribed:

@@ -34,6 +34,18 @@ TRANSMIT_VERB_PATTERNS = (
     ("meshtastic sendData", re.compile(r"\bsendData\b")),
     # Meshtastic Python API position broadcast call — keys the LoRa PA.
     ("meshtastic sendPosition", re.compile(r"\bsendPosition\b")),
+    # Meshtastic traceroute and telemetry APIs send request packets over the mesh.
+    ("meshtastic sendTraceRoute", re.compile(r"\bsendTraceRoute\b")),
+    ("meshtastic sendTelemetry", re.compile(r"\bsendTelemetry\b")),
+    # Waypoint create/delete and alert APIs send updates over the mesh.
+    ("meshtastic sendWaypoint", re.compile(r"\bsendWaypoint\b")),
+    ("meshtastic deleteWaypoint", re.compile(r"\bdeleteWaypoint\b")),
+    ("meshtastic sendAlert", re.compile(r"\bsendAlert\b")),
+    # MQTT proxy and the SDK's packet/frame primitives can bypass the public TX APIs.
+    ("meshtastic sendMqttClientProxyMessage", re.compile(r"\bsendMqttClientProxyMessage\b")),
+    ("meshtastic _sendPacket", re.compile(r"\b_sendPacket\b")),
+    ("meshtastic _sendToRadio", re.compile(r"\b_sendToRadio\b")),
+    ("meshtastic _sendToRadioImpl", re.compile(r"\b_sendToRadioImpl\b")),
     # Meshtastic CLI flag that transmits a text message over LoRa.
     ("meshtastic --sendtext", re.compile(r"--sendtext\b")),
     # Flipper Zero CLI sub-GHz transmit command (including subghz tx_from_file) — keys CC1101 TX.
@@ -250,6 +262,15 @@ def test_safety_notice_meets_wcag_aa_in_all_three_themes(theme):
     'iface.sendText("hello")',
     'iface.sendData(b"x")',
     'iface.sendPosition(0, 0)',
+    'iface.sendTraceRoute(node)',
+    'iface.sendTelemetry(node)',
+    'iface.sendWaypoint(waypoint)',
+    'iface.deleteWaypoint(waypoint)',
+    'iface.sendAlert("hello")',
+    'iface._sendPacket(packet)',
+    'iface.sendMqttClientProxyMessage(topic, data)',
+    'iface._sendToRadio(frame)',
+    'iface._sendToRadioImpl(frame)',
     '["meshtastic", "--sendtext", "hi"]',
     'cli.send("subghz tx 0x00F7F7F7 433920000 350 60 0")',
     'cli.send("subghz tx_from_file /ext/subghz/demo.sub")',

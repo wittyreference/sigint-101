@@ -7,7 +7,8 @@ from meshtastic import tcp_interface
 
 @pytest.fixture(autouse=True)
 def no_real_meshtastic(monkeypatch):
-    def refuse(*args, **kwargs):
-        raise OSError("meshtasticd is unavailable in tests")
+    class NoRadioTCP(tcp_interface.TCPInterface):
+        def __init__(self, *args, **kwargs):
+            raise OSError("meshtasticd is unavailable in tests")
 
-    monkeypatch.setattr(tcp_interface, "TCPInterface", refuse)
+    monkeypatch.setattr(tcp_interface, "TCPInterface", NoRadioTCP)

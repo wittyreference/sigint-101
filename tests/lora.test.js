@@ -1,5 +1,5 @@
 // ABOUTME: Tests the LoRa panel's pure formatters — the SNR readout and the below-floor label.
-// ABOUTME: Uses node's built-in runner; the polling and DOM wiring are deliberately not exercised.
+// ABOUTME: Covers formatters, rack permit refresh, and the previous-send label in Node.
 
 const test = require("node:test");
 const assert = require("node:assert");
@@ -30,4 +30,55 @@ test("unreported radio values stay unreported and default power is named", () =>
   assert.equal(panel.radioLine({}), "Radio settings not reported");
   assert.equal(panel.radioLine({ settings_read: true, region: "US", preset: null, tx_power: 0 }),
     "US · custom · frequency not reported · radio default");
+});
+
+async function rack({ sends = [], postStatus = 403 } = {}) {
+  const fs = require("node:fs");
+  const vm = require("node:vm");
+  const radio = {}, outcome = { dataset: {} }, note = {};
+  let click, reloads = 0, posts = 0;
+  const strip = {
+    dataset: { loraSendPermit: "expired" },
+    querySelector(selector) {
+      return {
+        "[data-lora-send]": { addEventListener: (_name, fn) => { click = fn; } },
+        "[data-lora-radio]": radio, "[data-lora-outcome]": outcome,
+        "[data-lora-no-repeat]": note,
+      }[selector];
+    },
+  };
+  const path = require.resolve("../sigint101/static/lora.js");
+  vm.runInNewContext(fs.readFileSync(path, "utf8"), {
+    document: { querySelectorAll: () => [{ querySelector: () => ({}) }],
+                querySelector: () => strip },
+    DecoderPanel: { showLive() {}, quietText() {}, showDown() {} },
+    window: { location: { reload: () => { reloads++; } } },
+    fetch: async (url) => {
+      if (url === "/api/lora/send") {
+        posts++;
+        return { status: postStatus, json: async () => ({ reason: "Use Send in the LoRa rack." }) };
+      }
+      return { ok: true, json: async () => ({ sends }) };
+    },
+    setTimeout() {},
+  });
+  const settled = () => new Promise((resolve) => setImmediate(resolve));
+  await settled();
+  return {
+    outcome,
+    async tap() { click(); await settled(); },
+    counts: () => [reloads, posts],
+  };
+}
+
+test("a stale permit reloads the rack once without repeating the send", async () => {
+  const view = await rack();
+  await view.tap();
+  assert.deepEqual(view.counts(), [1, 1]);
+});
+
+test("a fresh rack labels the latest outcome as a previous send", async () => {
+  const view = await rack({ sends: [{ status: "repeated" }] });
+  assert.equal(view.outcome.textContent, "Previous send · a node repeated it");
+  assert.deepEqual(view.counts(), [0, 0]);
 });

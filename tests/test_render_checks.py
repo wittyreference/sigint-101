@@ -507,17 +507,18 @@ RACK_FITS = {"doc": [800, 480], "visible": True, "stripVisible": True, "target":
 THEMES = ("dark", "sunlight", "red-night")
 
 
-@pytest.mark.parametrize("defect", [False, True], ids=["fits", "notice-clipped"])
+@pytest.mark.parametrize("defect", [None, "notice", "refusal"])
 def test_lora_render_checks_send_and_notice_in_all_themes(devtools, defect):
     answers = {
-        f"measureLoRa({json.dumps(theme)})": {
+        f"measureLoRa({json.dumps(theme)}": {
             "theme": theme, "doc": [800, 480], "send": [76, 72],
-            "visible": not (defect and theme == "red-night"), "shapes": True,
+            "visible": not (defect == "notice" and theme == "red-night"), "shapes": True,
+            "refusalVisible": not (defect == "refusal" and theme == "red-night"),
         }
         for theme in THEMES
     }
     proc = run(LORA, "http://127.0.0.1:9", port=devtools(answers))
-    assert proc.returncode == int(defect), (proc.stdout, proc.stderr)
+    assert proc.returncode == int(defect is not None), (proc.stdout, proc.stderr)
     assert _verdicts(proc) == [
         f"VERDICT: {'FAIL' if defect and theme == 'red-night' else 'PASS'} - LoRa send {theme}"
         for theme in THEMES
