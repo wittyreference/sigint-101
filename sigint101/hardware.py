@@ -189,10 +189,10 @@ def _select_rtlsdr_device(serial, devices) -> RtlSdrDevice:
     if len(devices) == 1:
         return devices[0]
     raise DeviceSelectionError(
-        "more than one RTL-SDR is on the bus and none is pinned, so SIGINT 101 cannot tell "
-        f"which one this lesson means. Found: {describe_devices(devices)}. "
-        "Set SIGINT101_RTLSDR_SERIAL to the serial of the radio you want — the serial, not "
-        "the index, because the index changes with plug order.")
+        "more than one RTL-SDR is on the bus and none is pinned. "
+        f"Found: {describe_devices(devices)}. "
+        "Set SIGINT101_RTLSDR_SERIAL to one of those serials "
+        "(not the index: it follows plug order).")
 
 
 def rtlsdr_radio_for_run(index, serial, list_devices) -> dict:
