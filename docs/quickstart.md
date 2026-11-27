@@ -55,7 +55,7 @@ transmitting on most bands takes a licence, and this is the on-ramp to one.
 | Flipper Zero (use a **data** USB cable) | M9 on-off keying |
 | USB Wi-Fi adapter (RTL8821CU) + a **self-powered USB hub** | M18 Flock detector. Plug the adapter into the powered hub, never straight into the Recon: the Recon's own ports can't feed it in monitor mode and brown out, which resets the touch panel too. Then run `provision.sh --with-flock-adapter` once, and it switches to listen-only monitor mode by itself |
 | Orbic hotspot running Rayhunter | M19 IMSI-catcher detection. Power it on and join the box's Wi-Fi to the Orbic's network; the lesson reads its report from there |
-| A second Meshtastic node | M11 LoRa and M28 Meshtastic need someone to hear. Set it up like the box: antenna on before it is powered, and left on; the same region, the LongFast preset and the default primary channel |
+| A second Meshtastic node | M11 LoRa and M28 Meshtastic need someone to hear. Attach the antenna before powering it and leave it on. Match the box's region, Long Turbo preset and default primary channel |
 | An antenna for the band | ADS-B (1090 MHz), APRS (2 m), ISS SSTV (437.550 MHz), NOAA APT (137 MHz), AIS (marine VHF), pager framing (929 MHz). A lesson says when it needs one |
 
 ## Set it up for your site
@@ -109,6 +109,9 @@ sudo reboot
 
 The script can be re-run safely, and it skips anything already in place. Your progress lives in
 `~/sigint-101/data` and survives updates.
+
+Provisioning sets the US and Long Turbo defaults the first time it can configure the local
+Meshtastic service. You can change them afterward. The `--check` report shows the current settings.
 
 Three decoders are not installed by default: digital voice (M27), NOAA APT (M24) and SSTV
 (M25). Until they are, those lessons say so. To build them, run
