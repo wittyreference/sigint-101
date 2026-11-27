@@ -79,7 +79,13 @@ test("the panel includes the API's next step and preserves the stopped countdown
 
 test("the waterfall follows each refusal and redraws the last measured pass on recovery", async () => {
   const badge = {};
-  const reason = { firstElementChild: {} };
+  const content = {
+    ownerDocument: { createElement: tag => ({ tag }) },
+    get textContent() { return this.text + this.children.map(child => child.textContent).join(""); },
+    set textContent(value) { this.text = value; this.children = []; },
+    appendChild(child) { this.children.push(child); },
+  };
+  const reason = { firstElementChild: content };
   const live = {
     freq_low: 88e6, freq_high: 108e6,
     rows: [{ ts: 1, freq_low: 88e6, freq_high: 108e6, dbm: [-80, -40] }],
@@ -125,6 +131,9 @@ test("the waterfall follows each refusal and redraws the last measured pass on r
   await poll();
   assert.equal(badge.textContent, "TOOL MISSING");
   assert.equal(reason.firstElementChild.textContent, "rtl_power missing · Run deploy/provision.sh");
+  assert.deepEqual(content.children, [
+    { tag: "code", className: "refusal-command", textContent: "deploy/provision.sh" },
+  ]);
   await poll();
   assert.equal(badge.textContent, "STOPPED");
   assert.equal(reason.firstElementChild.textContent, "sweep stopped · retrying in 2 s");

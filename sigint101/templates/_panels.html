@@ -180,21 +180,24 @@
                   <span class="decoder__status" data-adsb-badge>CHECKING</span>
                 </div>
                 <div class="radar__scope">
-                  <svg class="radar__svg" viewBox="0 0 200 200" aria-hidden="true">
-                    <g class="radar__grid">
-                      <circle cx="100" cy="100" r="90"/>
-                      <circle cx="100" cy="100" r="60"/>
-                      <circle cx="100" cy="100" r="30"/>
-                      <line x1="100" y1="10" x2="100" y2="190"/>
-                      <line x1="10" y1="100" x2="190" y2="100"/>
-                    </g>
-                    <circle class="radar__me" cx="100" cy="100" r="2.5"/>
-                    <g class="radar__dots" data-adsb-dots></g>
-                    <text class="radar__compass" x="100" y="8">N</text>
-                    <text class="radar__compass" x="196" y="103">E</text>
-                    <text class="radar__compass" x="100" y="199">S</text>
-                    <text class="radar__compass" x="4" y="103">W</text>
-                  </svg>
+                  <div class="radar__plot">
+                    <svg class="radar__svg" viewBox="0 0 200 200" aria-hidden="true">
+                      <g class="radar__grid">
+                        <circle cx="100" cy="100" r="90"/>
+                        <circle cx="100" cy="100" r="60"/>
+                        <circle cx="100" cy="100" r="30"/>
+                        <line x1="100" y1="10" x2="100" y2="190"/>
+                        <line x1="10" y1="100" x2="190" y2="100"/>
+                      </g>
+                      <circle class="radar__me" cx="100" cy="100" r="2.5"/>
+                      <g class="radar__dots" data-adsb-dots></g>
+                    </svg>
+                    <span class="radar__compass radar__compass--n">N</span>
+                    <span class="radar__compass radar__compass--e">E</span>
+                    <span class="radar__compass radar__compass--s">S</span>
+                    <span class="radar__compass radar__compass--w">W</span>
+                    <div class="radar__labels" data-adsb-labels></div>
+                  </div>
                   <div class="radar__ring-label" data-adsb-ring>&mdash;</div>
                 </div>
                 <div class="radar__count" hidden><b data-adsb-count>0</b> contacts</div>

@@ -3,7 +3,22 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
+const { readFileSync } = require("node:fs");
+const { runInNewContext } = require("node:vm");
 const rack = require("../sigint101/static/operate.js");
+
+test("opening the rack centres the current instrument within its picker", () => {
+  const calls = [];
+  const current = { scrollIntoView: options => calls.push(options.block) };
+  const picker = { querySelector: name => name === ".rack__pick--on" ? current : null };
+  const bench = { querySelector: () => null };
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/operate.js"), "utf8"), {
+    document: { querySelector: name => ({
+      ".rack__bench": bench, ".rack__picker": picker, ".rack__pick[aria-current]": current,
+    })[name] },
+  });
+  assert.deepEqual(calls, ["center"]);
+});
 
 // --- the step key -------------------------------------------------------------------------------
 

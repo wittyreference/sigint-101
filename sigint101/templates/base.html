@@ -14,12 +14,14 @@
     {# ---- Persistent status bar: Back is always here, on every screen but home (Exit there) ---- #}
     <header class="statusbar">
       {% if exit_to_desktop %}
-      {# Home has nowhere to go back to, so its Back slot closes the course window instead and
-         leaves the learner on the Pi desktop. A plain form: no script needed to leave. #}
+      {# Home's Back slot closes the course window after a second tap. #}
       <form class="statusbar__exit" method="post" action="/api/kiosk/exit">
-        <button class="btn-back btn-exit" type="submit" aria-label="Exit SIGINT 101 to the desktop">
+        <button class="btn-back btn-exit" type="button" aria-label="Exit SIGINT 101 to the desktop">
           <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H4v16h6M14 8l4 4-4 4M18 12H8"/></svg>
-          <span class="btn-back__label btn-exit__label">Exit<br>SIGINT 101</span>
+          <span class="btn-back__label btn-exit__label">
+            <span data-exit-idle>Exit<br>SIGINT 101</span>
+            <span data-exit-armed hidden>Tap again<br>to exit</span>
+          </span>
         </button>
       </form>
       {% else %}
@@ -95,6 +97,35 @@
           try { localStorage.setItem("sigint101.theme", next); } catch (e) { /* ignore */ }
         });
       }
+    })();
+
+    // Back and Exit occupy the same corner. Give a stray extra tap time to expire.
+    (function () {
+      var form = document.querySelector(".statusbar__exit");
+      if (!form) return;
+      var idle = form.querySelector("[data-exit-idle]");
+      var armed = form.querySelector("[data-exit-armed]");
+      var deadline = 0;
+      var timer;
+
+      function disarm() {
+        deadline = 0;
+        idle.hidden = false;
+        armed.hidden = true;
+      }
+
+      form.querySelector(".btn-exit").addEventListener("click", function () {
+        clearTimeout(timer);
+        if (performance.now() < deadline) {
+          disarm();
+          form.requestSubmit();
+          return;
+        }
+        deadline = performance.now() + 3000;
+        idle.hidden = true;
+        armed.hidden = false;
+        timer = setTimeout(disarm, 3000);
+      });
     })();
   </script>
   <!-- Keyboard scrolling on every screen (the Nomad's keys), home grid and lesson bodies alike. -->

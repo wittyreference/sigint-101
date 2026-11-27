@@ -47,6 +47,7 @@ test("operator keys scroll the instrument picker when it overflows", () => {
   };
   runInNewContext(readFileSync(require.resolve("../sigint101/static/scroll-keys.js"), "utf8"), {
     document: {
+      querySelectorAll: () => [],
       querySelector: s => s === ".rack__picker" ? picker : null,
       addEventListener: (event, handler) => { if (event === "keydown") onKey = handler; },
     },
@@ -67,4 +68,70 @@ test("operator keys scroll the instrument picker when it overflows", () => {
   key("ArrowDown");
   assert.equal(moves.length, 6);
   assert.equal(prevented, 6);
+});
+
+test("scroll cues follow real overflow, scroll position and a stage becoming visible", () => {
+  const attrs = new Map();
+  const clips = {};
+  const lines = [{ top: 68, bottom: 86 }, { top: 94, bottom: 112 }];
+  const copy = { style: clips, getBoundingClientRect: () => ({ bottom: 190 }) };
+  const handlers = {};
+  const band = {
+    clientHeight: 100, clientTop: 0, scrollHeight: 190, scrollTop: 0,
+    getBoundingClientRect: () => ({ top: 0 }),
+    querySelector: () => copy,
+    addEventListener: (event, handler) => { handlers[event] = handler; },
+  };
+  const frame = {
+    firstElementChild: band,
+    toggleAttribute: (name, on) => { attrs.set(name, on); },
+  };
+  let resize;
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/scroll-keys.js"), "utf8"), {
+    document: {
+      querySelectorAll: () => [frame],
+      addEventListener() {},
+      createTreeWalker: () => {
+        let remaining = 1;
+        return { nextNode: () => remaining-- > 0 ? {} : null };
+      },
+      createRange: () => ({
+        selectNodeContents() {},
+        getClientRects: () => lines.map(({ top, bottom }) => ({
+          top: top - band.scrollTop, bottom: bottom - band.scrollTop,
+        })),
+      }),
+    },
+    NodeFilter: { SHOW_TEXT: 4 },
+    ResizeObserver: class {
+      constructor(fn) { resize = fn; }
+      observe() {}
+    },
+  });
+
+  assert.equal(attrs.get("data-more-below"), true);
+  assert.equal(clips.clipPath, "inset(0 0 96px 0)");
+  band.scrollTop = 90;
+  handlers.scroll();
+  assert.equal(attrs.get("data-more-below"), false);
+  assert.equal(clips.clipPath, "");
+  band.clientHeight = 0;
+  resize();
+  assert.equal(attrs.get("data-scrollable"), false);
+  band.clientHeight = 100;
+  band.scrollTop = 0;
+  lines[1] = { top: 79, bottom: 97 };
+  resize();
+  assert.equal(attrs.get("data-more-below"), true);
+  assert.equal(clips.clipPath, "", "a whole line at the edge stays visible");
+  band.scrollHeight = 101;
+  lines[1] = { top: 83, bottom: 101 };
+  resize();
+  assert.equal(attrs.get("data-more-below"), true);
+  assert.equal(clips.clipPath, "inset(0 0 107px 0)", "even one clipped pixel hides the line");
+  band.scrollHeight = 100;
+  lines[1].bottom = 98;
+  resize();
+  assert.equal(attrs.get("data-scrollable"), false);
+  assert.equal(attrs.get("data-more-below"), false);
 });

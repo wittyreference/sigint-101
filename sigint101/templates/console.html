@@ -24,6 +24,14 @@
    predict actions or footer), so stepping back costs no screen height. #}
 {% macro prev_step(is_first) %}{% if not is_first %}<button class="btn btn--prev" type="button" data-nav="prev" aria-label="Previous step">&lsaquo; Prev</button>{% endif %}{% endmacro %}
 
+{% macro scroll_text(text) %}
+  <div class="scroll-frame">
+    <div class="stage-panel__body">
+      <p class="scroll-copy">{{ text }}</p>
+    </div>
+  </div>
+{% endmacro %}
+
 {% macro complete_lesson() %}
   <span class="predict__hint" role="status" data-complete-status></span>
   <button class="btn btn--primary" type="button" data-complete data-lesson="{{ lesson.id }}"
@@ -340,7 +348,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_lora %}
             {# LoRa instrument (M11): the meshtastic packet panel (panels.lora) over a fixed dial. #}
@@ -354,7 +362,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_rds %}
             {# RDS instrument (M12): the redsea station card (panels.rds) over a fixed dial. #}
@@ -368,7 +376,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_adsb %}
             {# ADS-B radar (M13): the dump1090 scope (panels.adsb) over a fixed dial. #}
@@ -382,7 +390,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_aprs %}
             {# APRS roster (M14): the multimon-ng station roster (panels.aprs) over a fixed dial. #}
@@ -396,7 +404,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_pocsag %}
             {# POCSAG page log (M15): the framing-only page log (panels.pocsag) over a fixed dial. #}
@@ -410,7 +418,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_acars %}
             {# ACARS log (M16): the acarsdec message log (panels.acars) over a fixed dial. #}
@@ -424,7 +432,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_ais %}
             {# AIS roster (M26): the rtl_ais vessel roster (panels.ais) over a fixed dial. #}
@@ -438,7 +446,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_dmr %}
             {# DMR/P25 call log (M27): the dsd-fme call log (panels.dmr) over a fixed dial. #}
@@ -452,7 +460,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_apt %}
             {# NOAA APT image (M24): the satdump picture frame (panels.apt) over a fixed dial. #}
@@ -466,7 +474,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_sstv %}
             {# SSTV image (M25): the sstv picture frame (panels.sstv) over a fixed dial. #}
@@ -480,7 +488,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_flock %}
             {# Flock detector (M18): the monitor radio's detections list (panels.flock), titled with
@@ -495,7 +503,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_rayhunter %}
             {# Rayhunter monitor (M19): the Orbic findings panel (panels.rayhunter) over a fixed dial. #}
@@ -509,7 +517,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_flipper %}
             {# Flipper (M29): the attached device's own account of itself (panels.flipper), read
@@ -524,7 +532,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% else %}
             {# Instrument: the waterfall (panels.waterfall), with the pack's declared side panels
@@ -558,7 +566,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
-              <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+              {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% endif %}
 
@@ -577,18 +585,22 @@
                learner feedback). Explain only renders after a commit, so the answer never reaches
                the page early; a pack with no answer shows no header. #}
             {% set scored = lesson.score(committed_choice) if prediction_committed else none %}
-            <div class="stage-panel__body">
-              {% if scored %}
-              <div class="verdict">
-                <div class="verdict__line">Your call: <b>{{ scored.said }}</b> &middot; {{ lesson.reveal_label }}: <b>{{ scored.answer|join(' or ') }}</b></div>
-                <div class="verdict__why">{{ scored.verdict }}</div>
+            <div class="scroll-frame">
+              <div class="stage-panel__body">
+                <div class="scroll-copy">
+                  {% if scored %}
+                  <div class="verdict">
+                    <div class="verdict__line">Your call: <b>{{ scored.said }}</b> &middot; {{ lesson.reveal_label }}: <b>{{ scored.answer|join(' or ') }}</b></div>
+                    <div class="verdict__why">{{ scored.verdict }}</div>
+                  </div>
+                  {% endif %}
+                  <p>{{ lesson.stages[stage] }}</p>
+                  <p class="stage-panel__concept">{{ lesson.concept }}</p>
+                </div>
               </div>
-              {% endif %}
-              <p>{{ lesson.stages[stage] }}</p>
-              <p class="stage-panel__concept">{{ lesson.concept }}</p>
             </div>
             {% else %}
-            <p class="stage-panel__body">{{ lesson.stages[stage] }}</p>
+            {{ scroll_text(lesson.stages[stage]) }}
             {% endif %}
           {% endif %}
 
