@@ -2,13 +2,17 @@
 # ABOUTME: Uses process and logging gates instead of requiring a radio.
 
 import asyncio
+import io
 import select
 import signal
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 
-from sigint101 import app, aprs, childproc, receiver_lifecycle
+import pytest
+
+from sigint101 import app, aprs, childproc, radio_control, receiver_lifecycle
 from sigint101.events import read_events
 from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _StubSweeper
@@ -294,6 +298,164 @@ print('lifespan exited', flush=True)
         finally:
             if proc.poll() is None:
                 proc.kill()
+
+
+def test_receiver_shutdown_times_out_waiting_for_a_reaped_run_to_report(monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "SHUTDOWN_REPORT_WAIT_S", 0.05, raising=False)
+    proc = Child(["aprs"])
+    decoder = _aprs(proc)
+    entered, resume, stopped = (threading.Event() for _ in range(3))
+    errors = []
+
+    def hold_report(_run):
+        entered.set()
+        resume.wait(5)
+
+    def shutdown():
+        try:
+            decoder.shutdown()
+        except aprs.AprsUnavailable as exc:
+            errors.append(str(exc))
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(decoder, "_report", hold_report)
+    decoder.start()
+    ticket = decoder._run
+    worker = threading.Thread(target=shutdown, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        assert ticket.reaped and proc.poll() is not None
+        assert stopped.wait(1), "shutdown still waited for a stalled report"
+        assert errors == ["rtl_fm shutdown reports still pending"]
+        assert not ticket.complete.is_set()
+    finally:
+        resume.set()
+        worker.join(2)
+        assert ticket.complete.wait(2)
+
+
+def test_retirement_bounds_diagnostic_wait_and_closes_stderr_when_safe(monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "DIAGNOSTIC_WAIT_S", 0.05, raising=False)
+    entered, resume, closed = (threading.Event() for _ in range(3))
+
+    class StalledStderr(io.StringIO):
+        def read(self, *args):
+            entered.set()
+            resume.wait(5)
+            return super().read(*args)
+
+        def close(self):
+            super().close()
+            closed.set()
+
+    proc = Child(["aprs"], code=1)
+    proc.stderr.close()
+    proc.stderr = StalledStderr("exit detail")
+    decoder = _aprs(proc)
+    decoder.start()
+    ticket = decoder._run
+    try:
+        assert entered.wait(2)
+        assert ticket.complete.wait(1), "retirement still waited for stalled stderr"
+        assert ticket.reaped and not proc.stderr.closed
+    finally:
+        resume.set()
+        assert closed.wait(2)
+    assert ticket.diagnosed.is_set()
+    assert "exit detail" in decoder.watch.reason
+
+
+@pytest.mark.parametrize("transport", [False, True], ids=["pipe", "feed"])
+@pytest.mark.parametrize("failure", ["stop", "join"])
+def test_cleanup_fault_still_fences_the_run_and_closes_its_transport(
+        monkeypatch, transport, failure):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.02)
+    events = []
+    fault = threading.Event()
+    thread_errors = []
+
+    def record(action):
+        with decoder._runs:
+            events.append((action, decoder._runs.is_current(ticket.number)))
+
+    class Proc(Child):
+        def terminate(self):
+            record("terminate")
+            super().terminate()
+
+        def wait(self, timeout=None):
+            if failure == "stop":
+                raise OSError("child wait failed")
+            return super().wait(timeout)
+
+    class Feed(Proc):
+        def stop_child(self):
+            return childproc.stop_process(self)
+
+        def close_transport(self):
+            record("close")
+
+    class Reader:
+        def join(self, timeout=None):
+            record("join")
+            raise RuntimeError("reader join failed")
+
+    def capture_thread_error(args):
+        thread_errors.append(args.exc_value)
+        fault.set()
+
+    monkeypatch.setattr(threading, "excepthook", capture_thread_error)
+    proc = (Feed if transport else Proc)(["aprs"])
+    decoder = _aprs(proc)
+    decoder.start()
+    ticket = decoder._run
+    decoder._thread = Reader()
+    proc.code = 1
+    ticket.wake.set()
+    assert ticket.complete.wait(2)
+    with decoder._runs:
+        assert not decoder._runs.is_current(ticket.number)
+    assert proc.poll() == 1 and ticket.reaped
+    assert events[0] == ("terminate", True)
+    assert proc.sent == ["TERM"]
+    if failure == "stop":
+        assert ticket.reap_failed and "child wait failed" in ticket.failure
+        assert all(action != "join" for action, _ in events)
+    else:
+        assert not ticket.reap_failed
+        assert fault.wait(2)
+        assert [str(exc) for exc in thread_errors] == ["reader join failed"]
+        assert events[1] == ("join", True)
+    close_states = [current for action, current in events if action == "close"]
+    assert bool(close_states) == transport
+    assert not any(close_states)
+
+
+@pytest.mark.parametrize("switched_at, ordinary_wait", [(0.5, [1.5]), (5, [])])
+def test_queued_claim_uses_the_current_holder_bound_after_ppm(
+        monkeypatch, switched_at, ordinary_wait):
+    arbiter = radio_control.RadioArbiter()
+    now = 0
+    waits = []
+    monkeypatch.setattr(radio_control, "time", SimpleNamespace(monotonic=lambda: now))
+
+    def wait(left):
+        nonlocal now
+        waits.append(left)
+        if len(waits) == 1:
+            now = switched_at
+            arbiter._claim = ("aprs", now)
+        else:
+            now += left
+
+    monkeypatch.setattr(arbiter._lock, "wait", wait)
+    with arbiter.reserve("ppm", AssertionError, float("inf")):
+        with pytest.raises(RuntimeError, match="radio is busy"):
+            with arbiter.reserve("spectrum", RuntimeError, radio_control.CLAIM_QUEUE_WAIT_S):
+                pytest.fail("a second caller acquired the radio")
+    assert waits == [radio_control.PPM_HOLD_S, *ordinary_wait]
 
 
 def test_ppm_retains_its_long_capture_window_without_losing_typed_queue_refusals(
