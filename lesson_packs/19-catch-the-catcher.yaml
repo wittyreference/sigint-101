@@ -15,31 +15,27 @@ panels: [rayhunter]
 
 stages:
   frame: >-
-    Third night on the counter-surveillance track, comrade. In the first you met the one law — a quiet
-    detector never proves you are safe. In the second you turned your own radio into a camera-catcher.
-    Tonight the quarry is the fake tower: the cell-site simulator, the Stingray, the IMSI-catcher. And
-    here is the twist — your SDR cannot catch this one. To hear a Stingray you must sit inside the
-    private conversation your phone has with the tower, and that conversation is on the air, but
-    packed inside an LTE carrier wider than your dongle and addressed to one phone; only a modem in
-    the conversation can read it. So tonight you borrow a different radio.
+    Third night on the counter-surveillance track, comrade. In the first you met the one law — a
+    quiet detector never proves you are safe. In the second you turned your own radio into a
+    camera-catcher. Tonight the quarry is the fake tower: the cell-site simulator, the Stingray,
+    the IMSI-catcher. And here is the twist — your SDR cannot catch this one. To hear a Stingray
+    you must sit inside the private conversation your phone has with the tower, and that
+    conversation is on the air, but packed inside an LTE carrier wider than your dongle and
+    addressed to one phone; only a modem in the conversation can read it. So tonight you borrow a
+    different radio. Its screen's line: green while recording cleanly; yellow, orange, then solid
+    red as a warning grows; white when paused. Warnings come tagged low, medium or high.
   demo: >-
-    Watch — hands off. You borrow a cheap Orbic hotspot running Rayhunter, the EFF's open-source
-    catcher-catcher. It taps its modem's diagnostic feed to read the control-plane handshake with
-    the tower, before any data rides, and flags what a normal tower has no reason to do: shove you
-    down to easily intercepted 2G, or demand your permanent IMSI out of turn.
+    Watch — hands off. An Orbic hotspot running EFF's Rayhunter reads its modem's tower handshake
+    and flags forced 2G downgrades or out-of-turn IMSI requests.
   try: >-
-    Your watch, comrade. Over the Orbic's WiFi, off the tailnet, the console only reads its page at
-    192.168.1.1:8080; towers hear the Orbic itself, never those reads. Its
-    screen's line: green while recording cleanly; yellow, orange, then solid red as a warning grows;
-    white when paused. Warnings come tagged low, medium or high. Red: what have you been handed?
+    Over the Orbic's own WiFi, the console only reads 192.168.1.1:8080; towers hear the Orbic,
+    never those reads. Watch its line. Red: what have you been handed?
   predict: >-
     Rayhunter's status line snaps to solid red while you ride the bus. Does red prove a cell-site
     simulator is operating nearby? Lock it in.
   observe: >-
-    Weigh your guess against what the heuristic does. It never sees a Stingray; it matches
-    signaling against rules for behavior a tower should not show. The hard part: is a cell-site
-    simulator the only thing that could produce that pattern — or could a tower you've never
-    camped on, freshly installed or plain misconfigured, trip the very same rule?
+    Rayhunter matches signaling rules; it never sees a Stingray. Could only a simulator produce
+    that pattern, or could a new or misconfigured tower trip the same rule?
   explain: >-
     No, comrade, red doesn't prove a catcher. Rayhunter's flags are heuristics: EFF's own docs warn
     its IMSI-request rule false-positives on landing aircraft, older downgrade rules were

@@ -17,14 +17,11 @@ stages:
     Tonight, comrade, you learn the most unsettling way a radio can fail — quietly — and the one
     plain habit that catches it.
   demo: >-
-    Watch — hands off for now. The boring move is the whole job: record the instrument itself.
-    The provenance panel shows the radio, not a signal: its gain, chip temperature, whether its
-    power is clean, and the level of a known reference — a steady FM station the console watches,
-    set for your area. Capture it: that's tonight's baseline.
+    Watch — hands off. The provenance panel shows the radio: gain, chip temperature, whether power
+    is clean, and a local FM reference. Capture it: tonight's baseline.
   try: >-
-    Now you capture yours, comrade. Tap Capture baseline — that stamps tonight's record: the
-    radio, its settings, its temperature, the reference level. The lesson is in the repeat: do
-    it again tomorrow, and the night after.
+    Tap Capture baseline, comrade — that stamps tonight's radio, settings, temperature and
+    reference level. The lesson is in the repeat: do it again tomorrow.
   predict: >-
     Two pictures of the same empty stretch of band, comrade: one from a healthy radio, one from a
     radio whose antenna cable has corroded through. From the pictures alone, could you tell which

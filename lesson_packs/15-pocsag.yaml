@@ -25,21 +25,17 @@ stages:
     of text or digits. On the waterfall it is a half-second buzz. Tonight you read its envelope, and
     learn what keeps the letter inside out of your hands.
   demo: >-
-    Watch — hands off. rtl_fm listens on a 929 MHz paging channel and multimon-ng decodes each
-    POCSAG burst. Each row is one page: the cap code it was sent to, its kind — text, digits or a
-    bare tone — its length, and its speed: 512, 1200 or 2400 baud. Where the words would go, the row
-    says withheld.
+    Watch — hands off. rtl_fm and multimon-ng decode 929 MHz POCSAG: cap code, kind (text, digits
+    or tone), length, speed (512, 1200 or 2400 baud) — and words withheld.
   try: >-
-    Your log now, comrade. Pages come in bursts, so give it time. Read a row: which cap code, text or
-    digits, how long, how fast? If the log stays empty, that's honest too: this channel may be quiet
-    here, and many US carriers send FLEX, which this panel doesn't decode.
+    Give it time, comrade: pages come in bursts. Read a row — cap code, kind, length, speed.
+    Empty? Quiet channel, or a US carrier on FLEX (not decoded here).
   predict: >-
     Each row shows a length where the words would be. What really stands between you and those
     words? Lock it in.
   observe: >-
-    Look at a row against what the waterfall showed. The waterfall said "a burst near 929.6"; the
-    decoder says "pager such-and-such was sent twenty characters." Was anything cryptographic in the
-    way? If not, what is?
+    The waterfall showed a burst near 929.6; the decoder names the cap code and twenty characters.
+    Was anything cryptographic in the way? If not, what is?
   explain: >-
     What keeps the words from you is federal law. POCSAG, from the 1980s, has no cipher:
     multimon-ng recovers the cap code, function code and every payload character, which is how

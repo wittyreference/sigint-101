@@ -27,22 +27,17 @@ stages:
     where it sits, which way it is steaming, several times a minute, in the clear, to anyone listening.
     No permit, no key, no secret. Tonight you build the radar again, this time for the sea.
   demo: >-
-    Watch — hands off. No waterfall; the meaning is in the data. rtl_ais hears both channels,
-    161.975 and 162.025 MHz — ships split traffic across the pair; a 2 MHz dongle spans both — and
-    turns GMSK bursts into AIVDM sentences. The catch: position rides one message, the name a
-    longer one, yet both land on one row.
+    Watch — hands off. rtl_ais hears 161.975 and 162.025 MHz, turning GMSK into AIVDM sentences.
+    Position and name ride separate messages, yet both land on one row.
   try: >-
-    Your roster now, comrade. AIS broadcasts on a schedule: a vessel appears only when it checks
-    in. Read a row — the nine-digit MMSI naming the ship, its position, its course; the name fills
-    in when the slower static message arrives. Inland, an empty roster is the honest answer, not a
-    fault. What matches the sky, and what is new?
+    Read a row, comrade: the nine-digit MMSI, position, course; the name fills in with the slower
+    static message. Empty? Inland, an empty roster is the honest answer.
   predict: >-
     A ship's position and its name ride in two different AIS messages. What stitches them into one
     vessel? Lock it in.
   observe: >-
-    Hold your guess against what the roster does. The position arrived in one burst, the name in
-    another, maybe seconds apart — yet they land on a single line. Ask what the console had to match to
-    know they are the same ship, and whether the sky's radar did anything different.
+    Position arrived in one burst, name in another, yet both land on one row. What did the console
+    match to link them — and did the sky's radar do anything different?
   explain: >-
     The MMSI, comrade. AIS — the Automatic Identification System, ITU recommendation M.1371 —
     splits a ship's story across message types. A position report (types 1, 2 and 3) carries the

@@ -24,21 +24,16 @@ stages:
     hand short encrypted messages down a chain until they reach someone no single node could hear
     alone. The chirp was the wire. This is what talks over it.
   demo: >-
-    Watch — hands off. Not the SDR: the Nomad's LoRa radio runs meshtasticd, and the lora panel
-    lists what it heard, as in Lesson 11. Each row: sender's node id, the SNR (often below the
-    noise floor), and its text — or an honest "(encrypted — not on our channel)". Empty? A mesh of
-    one hears nothing.
+    Watch — hands off. The Nomad's LoRa radio runs meshtasticd: node id, SNR, and text — or
+    "(encrypted — not on our channel)". Empty? A mesh of one hears nothing.
   try: >-
-    Your turn, comrade — reading, not keying. Walk the list: text means the node shares LongFast,
-    our default channel with a public key; "(encrypted — not on our channel)" is a real reception
-    from another channel. Empty until a second node sends on LongFast. Adding one? Antenna always
-    on, same region. How would a far node's text reach here?
+    Read, not key, comrade: text means the node shares LongFast; encrypted, another channel. Empty
+    until a second node sends on LongFast (antenna always on, same region).
   predict: >-
     A node too far to hear you directly, one node between. What happens to your text? Lock it in.
   observe: >-
-    Hold your guess against the word "mesh." A mesh is not two radios shouting across a gap; it is
-    many, each willing to repeat what it hears. If the node between you repeats your packet, where
-    does it land — and what stops that repeat from echoing around the network forever?
+    A mesh is many nodes repeating what they hear. If a node between you repeats your packet,
+    where does it land — and what stops that repeat from echoing forever?
   explain: >-
     Hop by hop: a node in between repeats it, and the far node hears that — the point of a mesh.
     Every relay knocks the hop limit (three by default) down by one; at zero, repeating stops, so

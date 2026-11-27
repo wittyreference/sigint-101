@@ -19,21 +19,18 @@ stages:
     cheap clock that times its samples — and you measure it against a landmark the broadcaster
     keeps honest for you, though by rule only to within 2 Hz, about 105 ppm.
   demo: >-
-    Watch — hands off for now. Every stereo FM station hides a steady 19 kHz tone, the pilot,
-    inside its audio, held to within 2 Hz by FCC rule. The ppm panel times that tone against this
-    radio's sampling clock. The radio this course was built on read about +164 ppm: that clock's
-    error, not the dial's.
+    Watch — hands off. The ppm panel times the pilot, a steady 19 kHz tone in every stereo FM
+    station, against this radio's sampling clock. Ours read about +164 ppm.
   try: >-
-    Your turn. Step the dial to your strongest station with − and +, then tap Measure ppm. Read the
-    number your panel shows, not ours. "No pilot" means mono or too weak: pick a stronger station.
+    Step to your strongest station with − and +, tap Measure ppm, and read the number your panel
+    shows, not ours. "No pilot" means mono or too weak: pick a stronger one.
   predict: >-
     Say your dial sits about 10 kHz high at 100 MHz. Up at 1090 MHz — where aircraft report their
     positions — will its error in kHz be SMALLER, about the SAME, or BIGGER? Lock it in — the rest
     stays hidden until you do.
   observe: >-
-    Reason from the predict's supposition, then say what you expect: at 1090 MHz — about eleven
-    times higher than 100 MHz — how far off would the built-in radio land, and would that error
-    still tuck inside a channel or throw you clean off the signal?
+    At 1090 MHz — about eleven times higher than 100 MHz — how far off would the built-in radio
+    land, and would that error tuck inside a channel or throw you off the signal?
   explain: >-
     Bigger, about elevenfold: the dial's ppm (parts per million) holds everywhere and the kHz grow
     with it. Width decides if it hurts. ADS-B, 2 MHz wide, shrugs it off — its transmitters may sit

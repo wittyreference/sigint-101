@@ -30,22 +30,17 @@ stages:
     the screen. Hams trade them on the HF nets; the Space Station itself drops them to Earth during
     ARISS events. A signal, and inside it, an image.
   demo: >-
-    Watch — hands off. The picture comes line by line: a tone's pitch is a pixel's brightness, low
-    dark to high bright, its moment is the pixel's place across the line, and a sync tone starts
-    each line. A VIS header first names the mode, setting timing and colour order. rtl_fm pulls
-    the audio; the decoder lays down pixels.
+    Watch — hands off. A VIS header names the mode; sync starts each line; pitch is pixel
+    brightness. rtl_fm pulls audio and the decoder paints pixels line by line.
   try: >-
-    Your turn, comrade — wait for a picture. A frame is slow by design: give it a minute or two
-    and watch it build from the top down. 437.550 is the one to dream about: ARISS events have
-    used it since 2026 (145.800 before; ariss.org lists each event's frequency and mode). What
-    comes out of all that warbling?
+    Give it a minute or two, comrade, and watch it build. ARISS events have used 437.550 since
+    2026 (ariss.org lists each event's frequency and mode). What comes out?
   predict: >-
     A minute of warbling tones — no words, no station name. Feed it to the decoder: what comes out?
     Lock it in.
   observe: >-
-    Hold your guess against what the decoder is really doing. It is not translating a language or
-    cracking a code; it is reading pitch as brightness and time as position, exactly as the sender
-    laid them down. Ask yourself whether anything in that chain was ever hidden from you.
+    The decoder isn't cracking a code — it reads pitch as brightness and time as position, just as
+    sent. Was anything in that chain ever hidden from you?
   explain: >-
     A real photo, comrade. SSTV hides nothing — no encryption, no key, just a format sender and
     receiver agree on. Each line is a sweep of tones, frequency as brightness, opened by a

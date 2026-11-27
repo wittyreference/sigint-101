@@ -22,23 +22,18 @@ stages:
     chirp can be dug out of noise so deep your SDR could not even see it. No waterfall tonight: the
     Nomad's own mesh radio listens, and you will watch it read a packet from below the noise floor.
   demo: >-
-    Watch — hands off for now. When a node transmits, the Nomad's LoRa radio (meshtastic) prints a
-    line: sender, message, and the SNR it decoded at. Watch that number: often NEGATIVE, weaker
-    than the noise, yet the packet decoded whole. Ten dB under the noise a plain data signal is
-    gone; a LoRa chirp is a packet.
+    Watch — hands off. The Nomad's LoRa radio logs sender, message and SNR — often NEGATIVE,
+    weaker than the noise, yet decoded whole where plain data is gone.
   try: >-
-    Your turn, comrade. With a second Meshtastic node (antenna always on, same region, LongFast
-    preset), send from it, at least 50 cm from the Nomad, and read the line's SNR. Send a few: how
-    far below zero can it go yet arrive whole? No second node? Neighbours' nodes may land here too,
-    and an empty list is the honest answer.
+    Send a few from a second Meshtastic node at least 50 cm from the Nomad (antenna always on,
+    same region, LongFast); read each SNR. Alone, an empty list is the honest answer.
   predict: >-
     A LoRa packet on this radio's LongFast preset arrives twelve dB below the noise floor — weaker
     than the very noise around it. Does it decode cleanly, arrive garbled, or fail outright?
     Lock it in.
   observe: >-
-    Go back to the list and find a reception, eye on its SNR. Is that number above zero or below it?
-    And sit with the puzzle: if the signal is genuinely weaker than the noise, how can the radio read
-    it at all — what is the chirp doing that a steady carrier never could?
+    Check a reception's SNR: above zero or below? If the signal is weaker than the noise, how can
+    the radio read it — what does the chirp do a steady carrier can't?
   explain: >-
     Clean, from below zero. LoRa — Long Range — is chirp spread spectrum: each symbol a chirp
     sweeping linearly across the band, multiplied at the receiver by a reference down-chirp.

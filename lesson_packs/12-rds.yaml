@@ -27,23 +27,17 @@ stages:
     quiet subcarrier, a second signal tucked inside the station's own. Tonight you read the words
     that were there all along.
   demo: >-
-    Watch — hands off for now. No waterfall tonight: redsea pulls a hidden stream out of the
-    station on the dial. The card fills: the station's name — the PS, eight characters — a
-    couple at a time, its programme type, and the RadioText scrolling beneath. That's PSK: a
-    57 kHz subcarrier's phase carrying nearly twelve hundred bits a second.
+    Watch — hands off. redsea pulls a hidden 57 kHz PSK subcarrier from the FM station: station
+    name (the PS, eight characters), programme type, and RadioText.
   try: >-
-    Your turn, comrade — watch the card assemble. RDS is slow, so give it a few seconds. Read the
-    programme type and the RadioText. An empty card means this station sends no RDS or arrives too
-    weak here; your strongest local station, the brightest stripe from Lesson 1, is the one to set
-    (the quick-start shows how).
+    Give the card a few seconds to assemble, comrade: RDS is slow. Read the programme type and the
+    RadioText. Empty? Set your strongest station (the quick-start shows how).
   predict: >-
     RDS hides its data in the phase of a quiet subcarrier inside the station's signal. So does it
     turn up on the waterfall at all? Lock it in.
   observe: >-
-    Look at the card against what a waterfall would have shown. On the waterfall this station is just a
-    plain FM block — did any of this text ever appear there, in any lesson? And ask yourself the real
-    question: if a waterfall shows energy but never phase, what instrument could ever have
-    shown it to you?
+    On a waterfall this station is a plain FM block — did this text ever appear there? If a
+    waterfall shows energy but never phase, what instrument could show it?
   explain: >-
     A waterfall draws amplitude across frequency, moment to moment; it shows a PSK signal's energy,
     never which phase each bit took. Two signals

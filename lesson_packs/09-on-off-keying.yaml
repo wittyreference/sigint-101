@@ -24,26 +24,22 @@ tune:
 stages:
   frame: >-
     Tonight, comrade, you meet the simplest code on the air. Last lesson both carriers stayed lit
-    through the quiet; this one does the opposite — it blinks all the way out and back, a flashlight
-    signalling in the dark. Doorbells, cheap sensors, some remotes: much of 433 MHz speaks it.
+    through the quiet; this one does the opposite — it blinks all the way out and back, a
+    flashlight signalling in the dark. Doorbells, cheap sensors, some remotes: much of 433 MHz
+    speaks it (Flipper: Sub-GHz → Frequency Analyzer finds a remote's frequency).
   demo: >-
-    Watch — hands off for now. We're on 433.92 MHz, where cheap sensors and some remotes chatter
-    (most US car and garage remotes sit at 315 or 390 MHz). Keyed, a bright column stabs out of
-    the noise, drops flat to the floor, then returns. Not dimming like AM: switching clean off.
-    That rhythm is the whole message, like Morse.
+    Watch — hands off. Keyed on 433.92, a bright column stabs out of the noise, drops clean to the
+    floor, then returns — not dimming like AM, switching off like Morse.
   try: >-
-    Your turn, comrade. Key a 433 MHz remote you own, a metre from the antenna, or wait for a
-    neighbour's sensor (Flipper: Sub-GHz → Frequency Analyzer finds its frequency). Each press:
-    does the line drop to the noise floor in the gaps, or does a ghost linger? Match the blinks to
-    the bars and spaces in Sub-GHz → Read RAW.
+    Key a 433 MHz remote you own, a metre off, or wait for a neighbour's sensor. In the gaps, does
+    the line drop to the floor? Match blinks in Flipper's Sub-GHz → Read RAW.
   predict: >-
     The call is about the quiet between presses. When nothing is keyed at 433.92, what sits where the
     column was — a carrier still lit like AM's, the signal dropped to the noise floor, or a dim
     half-carrier? Lock it in.
   observe: >-
-    Go back to 433.92 and watch one full press and release, eye on the column through the release. In
-    the gap, is anything holding that spot, or is it just bare noise floor again? And ask yourself why
-    that has to be so: if the carrier itself comes and goes, what is left to carry the message?
+    Go back to 433.92 and watch one press and release. In the gap, is anything holding that spot,
+    or bare noise floor? If the carrier comes and goes, what carries the message?
   explain: >-
     All the way down, as the last lesson promised. With no carrier half the time, the message
     can't ride height or pitch: it *is* the pattern of burst and gap lengths, Morse with a

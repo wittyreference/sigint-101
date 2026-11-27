@@ -17,21 +17,18 @@ stages:
     gap between it and the noise — and why the knob everyone reaches for first, gain, is not
     that number.
   demo: >-
-    Watch — hands off the gain for now. Decibels first: a dB is a ratio, and every 10 dB is ten
-    times the power. The grassy band along the bottom is the noise floor; the station pokes up
-    above it. The meter reads both. Peak minus floor is the SNR — the one number worth chasing.
+    Watch — hands off. Every 10 dB is ten times the power. Grass is the noise floor; the station
+    pokes above it. The meter reads both — peak minus floor is SNR.
   try: >-
-    Now you drive, comrade. Step the gain with its − and + from the bottom up, and stop at two
-    settings — low, then middle. At each, read the floor, the peak and the gap off the meter
-    and note them. Don't chase the tallest peak — just record what you see.
+    Step gain with − and + from the bottom, comrade: stop at low, then middle. At each, read and
+    note floor, peak and gap off the meter — don't chase the tallest peak.
   predict: >-
     You've read the meter at low and middle gain. Next you'll push to maximum and the station's
     peak will climb. Watch the grassy noise floor: will it RISE with the peak, STAY PUT, or SINK?
     Lock it in.
   observe: >-
-    Take the gain to maximum and hold it against your middle setting. Tell me what actually
-    happened: did the floor and the peak move together or apart — and did the gap grow, hold, or
-    close as you reached the top?
+    Take gain to maximum and compare it to your middle setting. Did the floor and peak move
+    together or apart — and did the gap grow, hold, or close at the top?
   explain: >-
     The floor rose with the peak. Gain is an amplifier — a hearing aid in a loud restaurant that
     lifts your friend and the room alike — and it can't tell signal from noise. Read your own
