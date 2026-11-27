@@ -17,7 +17,7 @@ BASH = shutil.which("bash")
 # never enters the test PATH.
 CORE_UTILS = (
     "awk", "basename", "cat", "cmp", "cut", "dirname", "grep", "mkdir", "paste", "readlink", "rm",
-    "sort",
+    "sort", "timeout",
 )
 
 
@@ -106,6 +106,34 @@ class ProvisionBox:
 
     def set_node_script(self, body: str) -> None:
         _stub(self.bin / "node", body)
+
+    def set_mesh(self, region, preset, use_preset=True, *, active=True, writable=True):
+        """Stub the local meshtasticd service and its CLI's LoRa preference read/write."""
+        state = self.home / "mesh-state"
+        state.write_text(f"{region} {preset} {use_preset}\n", encoding="utf-8")
+        _stub(self.bin / "systemctl",
+              f'echo "systemctl $*" >> "{self.log}"\n'
+              'if [ "$1" = "get-default" ]; then echo graphical.target; fi\n'
+              f'if [[ "$*" == "--quiet is-active meshtasticd" ]]; then exit {int(not active)}; fi\n'
+              'exit 0')
+        cli = self.home / "sigint-101" / ".venv" / "bin" / "meshtastic"
+        _stub(cli,
+              f'echo "meshtastic $*" >> "{self.log}"\n'
+              '[[ "$1 $2" == "--host 127.0.0.1" ]] || exit 1\n'
+              'shift 2\n'
+              'if [[ "$1" == "--timeout" ]]; then shift 2; fi\n'
+              'case "$*" in\n'
+              '  "--get lora.region --get lora.modem_preset --get lora.use_preset")\n'
+              f'    read -r region preset use < "{state}"\n'
+              '    printf "Connected to radio\\nlora.region: %s\\nlora.modem_preset: %s\\n'
+              'lora.use_preset: %s\\nCompleted getting preferences\\n" '
+              '"$region" "$preset" "$use" ;;\n'
+              '  "--set lora.region US --set lora.modem_preset LONG_TURBO '
+              '--set lora.use_preset true")\n'
+              f'    if [ "{int(writable)}" = 1 ]; then echo "1 9 True" > "{state}"; fi ;;\n'
+              '  *) exit 1 ;;\n'
+              'esac')
+        return state
 
     def run(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run([BASH, str(PROVISION), *args], env=self.env,
@@ -242,3 +270,63 @@ def test_provision_node_check_is_idempotent_across_two_runs(box, version):
     assert first.returncode == 0, first.stdout + first.stderr
     assert second.returncode == 0, second.stdout + second.stderr
     assert _node_section(first.stdout) == _node_section(second.stdout)
+
+
+@pytest.mark.parametrize("region,preset,use_preset", [(0, 0, False), (1, 0, True)])
+def test_provision_sets_us_long_turbo_once(box, region, preset, use_preset):
+    state = box.set_mesh(region, preset, use_preset)
+    first = box.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert state.read_text() == "1 9 True\n"
+    second = box.run()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert box.calls().count("--set lora.region US --set lora.modem_preset LONG_TURBO") == 1
+
+
+def test_provision_check_reports_current_mesh_preset_without_writing(box):
+    state = box.set_mesh(1, 0)
+    result = box.run("--check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "region US, modem preset LONG_FAST" in result.stdout
+    assert re.search(r"^  would  .*LONG_TURBO", result.stdout, re.MULTILINE)
+    assert state.read_text() == "1 0 True\n"
+    assert "--set lora." not in box.calls()
+    applied = box.run()
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert state.read_text() == "1 9 True\n"
+
+
+def test_provision_preserves_learner_changes_after_setting_the_default(box):
+    state = box.set_mesh(1, 0)
+    first = box.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert state.read_text() == "1 9 True\n"
+    state.write_text("1 0 True\n", encoding="utf-8")
+    second = box.run()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert state.read_text() == "1 0 True\n"
+    assert "region US, modem preset LONG_FAST" in second.stdout
+    assert box.calls().count("--set lora.region") == 1
+
+
+def test_provision_leaves_inactive_meshtasticd_alone(box):
+    box.set_mesh(1, 0, active=False)
+    result = box.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "meshtasticd is not running" in result.stdout
+    assert not any(line.startswith("meshtastic ") for line in box.calls().splitlines())
+    assert not any("meshtasticd" in line and re.search(r"\b(start|restart|enable)\b", line)
+                   for line in box.calls().splitlines())
+
+
+def test_provision_retries_an_unconfirmed_mesh_default(box):
+    state = box.set_mesh(1, 0, writable=False)
+    first = box.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "could not confirm US / LONG_TURBO" in first.stdout
+    assert state.read_text() == "1 0 True\n"
+    box.set_mesh(1, 0)
+    second = box.run()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert state.read_text() == "1 9 True\n"
+    assert box.calls().count("--set lora.region") == 2
