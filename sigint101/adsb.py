@@ -25,7 +25,7 @@ from .hardware import (
     DUMP1090,
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # Where the ADS-B lesson listens. Mode S transponders answer on 1090 MHz worldwide; dump1090 is
@@ -363,11 +363,9 @@ class AdsbDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise AdsbUnavailable(str(exc)) from exc
 
@@ -408,7 +406,8 @@ class AdsbDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise AdsbUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
         # End any retiring reader from an earlier natural death before starting its replacement.
         self._runs.end(self.watch)
         try:
@@ -421,11 +420,12 @@ class AdsbDecoder:
             raise AdsbUnavailable(f"cannot run dump1090: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc, self._runs.current),
+        self._thread = threading.Thread(target=self._read,
+                                        args=(self._proc, self._runs.current, radio),
                                         name="sigint101-adsb", daemon=True)
         self._thread.start()
 
-    def _read(self, proc, run: int) -> None:
+    def _read(self, proc, run: int, radio: dict) -> None:
         """Consume dump1090's SBS lines on a background thread, assembling the sky until it ends."""
         contacts = set()   # the ICAO addresses this feed has already reported as new contacts
         try:
@@ -443,7 +443,8 @@ class AdsbDecoder:
                 if contact is not None:
                     contacts.add(msg.hex_ident)
                     if hook is not None:
-                        emit_reception(hook, contact, command=cmd, freq_hz=DEFAULT_ADSB_HZ)
+                        emit_reception(hook, contact, command=cmd, freq_hz=DEFAULT_ADSB_HZ,
+                                       radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):

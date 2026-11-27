@@ -23,7 +23,7 @@ from .childproc import (
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # rtl_ais (github.com/dgiardini/rtl-ais) opens the dongle, demodulates BOTH AIS channels at once,
@@ -519,11 +519,9 @@ class AisDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> int:
-        if self._list_devices is None:
-            return self.device
+    def _choose_radio(self) -> dict:
         try:
-            return select_rtlsdr_index(self.serial, devices=self._list_devices())
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise AisUnavailable(str(exc)) from exc
 
@@ -564,7 +562,8 @@ class AisDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise AisUnavailable(blocked)
-        self.device = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
         # End any retiring reader from an earlier natural death before starting its replacement.
         self._runs.end(self.watch)
         try:
@@ -577,11 +576,12 @@ class AisDecoder:
             raise AisUnavailable(f"cannot run rtl_ais: {exc}") from exc
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc, self._runs.current),
+        self._thread = threading.Thread(target=self._read,
+                                        args=(self._proc, self._runs.current, radio),
                                         name="sigint101-ais", daemon=True)
         self._thread.start()
 
-    def _read(self, proc, run: int) -> None:
+    def _read(self, proc, run: int, radio: dict) -> None:
         """Consume rtl_ais's NMEA sentences on a thread, building the roster until it ends."""
         # Each reader owns its own multi-part assembler so a half message left by a retiring
         # reader can never combine with the new run's second half.
@@ -604,7 +604,7 @@ class AisDecoder:
                     if hook is not None:
                         emit_reception(
                             hook, contact, command=cmd,
-                            freq_hz=[AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ])
+                            freq_hz=[AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ], radio=radio)
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):

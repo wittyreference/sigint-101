@@ -20,7 +20,7 @@ from .childproc import (
 from .hardware import (
     DeviceSelectionError,
     probe_rtlsdr,
-    select_rtlsdr_index,
+    rtlsdr_radio_for_run,
 )
 
 # satdump's binary. It opens the RTL-SDR directly, runs the NOAA APT pipeline on a live pass, and
@@ -110,9 +110,9 @@ class AptDecoder:
         # satdump writes files rather than lines, so the pass's end is where its images are read.
         # The console's hook logs each as a reception and never raises, so it is called directly.
         # Through emit_reception, the console's hook gets each image with the command read from
-        # its satdump process after the pass ends and the frequency saved at launch.
+        # its satdump process after the pass ends and the frequency and radio saved at launch.
         self.on_reception = None
-        self._pass_start: tuple[int, set[Path]] | None = None
+        self._pass_start: tuple[int, set[Path], dict] | None = None
         # Who ended the child, and when the console may launch it again after it died on its own.
         # A pass ends by design when satdump's timeout runs out, so a clean exit is not a death.
         self.watch = ChildWatch(SATDUMP, finite=True)
@@ -130,17 +130,11 @@ class AptDecoder:
     def released(self) -> bool:
         return self._released
 
-    def _choose_device(self) -> tuple[int, str | None]:
-        """Resolve the index for reception metadata and the USB serial for SatDump."""
-        if self._list_devices is None:
-            return self.device, self.serial
+    def _choose_radio(self) -> dict:
         try:
-            devices = self._list_devices()
-            index = select_rtlsdr_index(self.serial, devices=devices)
+            return rtlsdr_radio_for_run(self.device, self.serial, self._list_devices)
         except DeviceSelectionError as exc:
             raise AptUnavailable(str(exc)) from exc
-        # Without a pinned serial, selection succeeds only for a single radio.
-        return index, self.serial or devices[0].serial or None
 
     def release(self) -> None:
         """Hand the dongle to another program (the sweeper) and stay off it until resumed.
@@ -181,7 +175,10 @@ class AptDecoder:
         blocked = self.watch.blocked()
         if blocked:
             raise AptUnavailable(blocked)
-        self.device, source_id = self._choose_device()
+        radio = self._choose_radio()
+        self.device = radio["index"]
+        # SatDump takes the enumerated serial or an explicit serial when no survey is wired in.
+        source_id = radio["serial"] if self._list_devices is not None else self.serial
         self.output_dir.mkdir(parents=True, exist_ok=True)
         freq_hz = self.freq_hz
         before = set(self._pngs())
@@ -190,7 +187,7 @@ class AptDecoder:
         except (OSError, ValueError) as exc:
             self._proc = None
             raise AptUnavailable(f"cannot run satdump: {exc}") from exc
-        self._pass_start = (freq_hz, before)
+        self._pass_start = (freq_hz, before, radio)
         self.watch.spawned(self._proc)
         self.error = None
 
@@ -225,12 +222,13 @@ class AptDecoder:
         report = self.on_reception
         if pass_start is None or report is None:
             return
-        freq_hz, before = pass_start
+        freq_hz, before, radio = pass_start
         command = command_line(proc)
         written = [png for png in self._pngs() if png not in before]
         written.sort(key=lambda png: png.stat().st_mtime)
         for png in written:
-            emit_reception(report, self._row(png, freq_hz), command=command, freq_hz=freq_hz)
+            emit_reception(report, self._row(png, freq_hz), command=command, freq_hz=freq_hz,
+                           radio=radio)
 
     def drain(self, timeout: float = APT_PASS_TIMEOUT_S) -> None:
         """Wait for the current pass to finish. Unlike a live feed, a satdump capture is finite."""

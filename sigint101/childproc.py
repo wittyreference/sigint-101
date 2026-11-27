@@ -371,32 +371,36 @@ def running_command(proc) -> str | None:
     return command_line(proc)
 
 
-def _accepts_provenance(hook) -> bool:
-    """True when `hook` accepts keyword `command` and `freq_hz` arguments (or **kwargs)."""
+def _provenance_keywords(hook) -> set[str]:
+    """Provenance arguments this hook accepts by keyword."""
     try:
         params = inspect.signature(hook).parameters
     except (TypeError, ValueError):
-        return False
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
+        return set()
+    names = {"command", "freq_hz", "radio"}
     kw_kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-    return (
-        "command" in params and params["command"].kind in kw_kinds
-        and "freq_hz" in params and params["freq_hz"].kind in kw_kinds
-    )
+    accepted = {name for name in names if name in params and params[name].kind in kw_kinds}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        # Existing wrappers can forward **kwargs to hooks that only take command and freq_hz.
+        accepted.update(("command", "freq_hz"))
+    return accepted
 
 
-def emit_reception(hook, item: dict, *, command: str | None = None, freq_hz=None) -> None:
-    """Call `hook` with `item` and, when it accepts them, its run's `command` and `freq_hz`.
+def emit_reception(hook, item: dict, *, command: str | None = None, freq_hz=None,
+                   radio: dict | None = None) -> None:
+    """Call `hook` with `item` and the run provenance its signature supports.
 
-    The console's reception hook takes `command` and `freq_hz` so a reader that stalls after
-    releasing its buffer lock still logs the item under its own run's provenance rather than a
-    replacement run's. Plain one-argument hooks (such as test helpers) still receive `item`.
+    The console can log the command, frequency and radio even if the reader stalls after
+    admitting an item and a replacement run starts. Hooks that accept command and frequency
+    still receive them together. A named radio keyword opts in to the radio snapshot.
     """
-    if _accepts_provenance(hook):
-        hook(item, command=command, freq_hz=freq_hz)
-    else:
-        hook(item)
+    accepted = _provenance_keywords(hook)
+    kwargs = {}
+    if {"command", "freq_hz"} <= accepted:
+        kwargs.update(command=command, freq_hz=freq_hz)
+    if radio is not None and "radio" in accepted:
+        kwargs["radio"] = radio.copy()
+    hook(item, **kwargs)
 
 
 class ChildWatch:

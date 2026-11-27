@@ -594,10 +594,12 @@ class FlockDetector:
             raise FlockUnavailable(blocked)
         # End any retiring reader from an earlier natural death before starting its replacement.
         self._runs.end(self.watch)
+        radio = {"kind": "wifi", "interface": self.interface}
         self._proc = self._open_capture()
         self.watch.spawned(self._proc)
         self.error = None
-        self._thread = threading.Thread(target=self._read, args=(self._proc, self._runs.current),
+        self._thread = threading.Thread(target=self._read,
+                                        args=(self._proc, self._runs.current, radio),
                                         name="sigint101-flock", daemon=True)
         self._thread.start()
 
@@ -621,7 +623,7 @@ class FlockDetector:
         """The running capture's frames, each with whether radiotap says it ends in its FCS."""
         return iter_pcap_captures(proc.stdout)
 
-    def _read(self, proc, run: int) -> None:
+    def _read(self, proc, run: int, radio: dict) -> None:
         """Consume the pcap stream on a background thread, feeding matched frames to the roster."""
         detected = set()   # the MACs this capture has already reported as new detections
         try:
@@ -642,7 +644,7 @@ class FlockDetector:
                 if first is not None:
                     detected.add(hit.mac)
                     if hook is not None:
-                        emit_reception(hook, first, command=cmd, freq_hz=None)
+                        emit_reception(hook, first, command=cmd, freq_hz=None, radio=radio)
         except (OSError, ValueError, struct.error) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):
