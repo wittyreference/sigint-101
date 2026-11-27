@@ -48,21 +48,23 @@
   --border: #1a7e3f;
   --border-strong: #2ee66a;
   --fg: #2ee66a;
-  --fg-dim: #1f9e4e;
-  --fg-mute: #15713a;
+  --fg-dim: #24b558;
+  --fg-mute: #1d9449;
   --accent: #2ee66a;
   --accent-dim: #1a7e3f;
   --accent-ink: #03140a;
   --ok: #2ee66a;
   --warn: #ffcf4d;
-  --crit: #ff5b5b;
+  --crit: #ff6666;
   --wf-bg: #040806;
   --wf-grid: #0f3a20;
   --wf-ink: #2ee66a;
   /* The waterfall's quieter labels (the frequency axis): ink that reads on the dark band. */
-  --wf-axis: #1f9e4e;
-  --glow: 0 0 6px rgba(46, 230, 106, 0.5);
-  --glow-strong: 0 0 11px rgba(46, 230, 106, 0.6);
+  --wf-axis: #24b558;
+  --wf-ok: #2ee66a;
+  --wf-warn: #ffcf4d;
+  --glow: 0 0 4px rgba(46, 230, 106, 0.35);
+  --glow-strong: 0 0 8px rgba(46, 230, 106, 0.45);
   --sel-bg: #2ee66a;
   --sel-ink: #03140a;
   --scan: rgba(0, 0, 0, 0.26);
@@ -89,14 +91,16 @@
   --accent: #0b3d1f;
   --accent-dim: #0b3d1f;
   --accent-ink: #eef3e6;
-  --ok: #0a6b34;
+  --ok: #08572a;
   --warn: #4a3400;
-  --crit: #b3261e;
+  --crit: #941d17;
   --wf-bg: #0a1016;
   --wf-grid: #223742;
   /* The waterfall stays dark in sunlight, so text over it is light, not the page's dark ink. */
   --wf-ink: #e5ebd7;
   --wf-axis: #c3ceb5;
+  --wf-ok: #7be8a2;
+  --wf-warn: #ffd666;
   --glow: none;
   --glow-strong: none;
   --sel-bg: #0b3d1f;
@@ -119,25 +123,27 @@
   --border: #8f2a2a;
   --border-strong: #ff4b4b;
   --fg: #ff4b4b;
-  /* The dimmest red that still reads at 4.5:1 on every red-night surface. */
-  --fg-dim: #de4242;
-  --fg-mute: #7e2525;
+  /* Every red-night text tier reads at 4.5:1 or better on every red-night surface. */
+  --fg-dim: #e84545;
+  --fg-mute: #de4242;
   --accent: #ff4b4b;
   --accent-dim: #8f2a2a;
   --accent-ink: #0a0303;
-  --ok: #ff7d7d;
-  --warn: #b33232;
-  --crit: #ff2020;
+  --ok: #ff8585;
+  --warn: #f44e4e;
+  --crit: #ff4b4b;
   --wf-bg: #050000;
   --wf-grid: #2a0707;
   --wf-ink: #ff4b4b;
-  --wf-axis: #de4242;
+  --wf-axis: #e84545;
+  --wf-ok: #ff8585;
+  --wf-warn: #f44e4e;
   /* The waterfall's level ramp, floor to peak, in red alone (waterfall.js reads it); the other
      themes define none and keep the conventional blue-to-red map. The floor stop sits above
      --wf-bg so a measured quiet bin still reads apart from an unmeasured one. */
   --wf-ramp: #1a0000 #5c0000 #a01010 #e02020 #ff5050;
-  --glow: 0 0 6px rgba(255, 75, 75, 0.5);
-  --glow-strong: 0 0 11px rgba(255, 75, 75, 0.6);
+  --glow: 0 0 4px rgba(255, 75, 75, 0.35);
+  --glow-strong: 0 0 8px rgba(255, 75, 75, 0.45);
   --sel-bg: #ff4b4b;
   --sel-ink: #0a0303;
   --scan: rgba(0, 0, 0, 0.3);
@@ -200,14 +206,14 @@ body {
   font-weight: 400;
 }
 
-/* CRT overlay: scanlines + vignette, lit only in the phosphor themes. Never
-   intercepts a tap, and sits above content but below nothing interactive. */
+/* CRT overlay: scanlines + vignette, lit only in the phosphor themes. Sits behind
+   foreground content so scanlines never cross letter strokes or lower text contrast. */
 .app::after {
   content: "";
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 50;
+  z-index: 0;
   background: repeating-linear-gradient(0deg, var(--scan) 0 1px, transparent 1px 3px);
   box-shadow: inset 0 0 90px rgba(0, 0, 0, calc(0.6 * var(--vig)));
 }
@@ -240,7 +246,6 @@ body {
   justify-content: center;
   gap: 10px;
   letter-spacing: 0.08em;
-  text-shadow: var(--glow);
   cursor: pointer;
 }
 
@@ -320,7 +325,6 @@ body {
   gap: 10px;
   flex: none;          /* never shrink — Back stays whole, no "HO..." clip */
   padding: 0 14px;
-  text-shadow: var(--glow);
   cursor: pointer;
 }
 
@@ -415,7 +419,6 @@ body {
   font-size: 13px;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  text-shadow: var(--glow);
   white-space: nowrap;
 }
 
@@ -456,15 +459,15 @@ body {
 }
 
 .readout__label {
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--fg-mute);
 }
 
 .readout__value {
+  font-size: 18px;
   color: var(--fg);
-  text-shadow: var(--glow);
 }
 
 .batt {
@@ -544,7 +547,7 @@ body {
   background: var(--surface-2);
   color: var(--fg-mute);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.07em;
   text-transform: uppercase;
 }
@@ -563,7 +566,7 @@ button.rail-pip {
 }
 button.rail-pip:disabled {
   cursor: default;
-  opacity: 0.55;
+  border-style: dotted;
 }
 
 .rail-pip__dot {
@@ -576,7 +579,6 @@ button.rail-pip:disabled {
 .rail-pip--active {
   color: var(--accent);
   border: 2px solid var(--accent);
-  text-shadow: var(--glow);
 }
 .rail-pip--active .rail-pip__dot {
   background: var(--accent);
@@ -608,7 +610,7 @@ button.rail-pip:disabled {
   align-items: center;
   gap: 6px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--warn);
@@ -686,6 +688,7 @@ button.rail-pip:disabled {
 .stage-panel[data-stage="predict"] .stage-panel__title {
   font-size: 18px;
   line-height: 1.2;
+  text-shadow: none;
 }
 .stage-panel[data-stage="predict"] .predict {
   gap: 4px;
@@ -894,10 +897,9 @@ button.rail-pip:disabled {
 
 .predict__committed-note {
   font-family: var(--font-mono);
-  font-size: 15px;
+  font-size: 18px;
   color: var(--ok);
   letter-spacing: 0.06em;
-  text-shadow: var(--glow);
 }
 
 /* ===== Explain verdict (the predict reveal) and the check result ========== */
@@ -961,6 +963,7 @@ button.rail-pip:disabled {
 .stage-panel[data-stage="check"] .stage-panel__title {
   font-size: 18px;
   line-height: 1.2;
+  text-shadow: none;
 }
 .stage-panel[data-stage="check"] .predict {
   gap: 4px;
@@ -1105,7 +1108,7 @@ button.rail-pip:disabled {
 }
 .decoder__status {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   padding: 3px 9px;
@@ -1287,6 +1290,7 @@ button.rail-pip:disabled {
   height: 100%;
   width: auto;
   aspect-ratio: 1 / 1;
+  overflow: visible;
 }
 .radar__grid circle, .radar__grid line {
   fill: none;
@@ -1297,12 +1301,12 @@ button.rail-pip:disabled {
 .radar__plane { fill: var(--ok); }
 .radar__plane-label {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 13px;
   fill: var(--fg);
 }
 .radar__compass {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 13px;
   fill: var(--fg-mute);
   text-anchor: middle;
 }
@@ -1311,7 +1315,7 @@ button.rail-pip:disabled {
   left: 8px;
   bottom: 6px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 13px;
   color: var(--fg-mute);
 }
 .radar__count {
@@ -1322,7 +1326,7 @@ button.rail-pip:disabled {
   font-size: 13px;
   color: var(--fg-mute);
 }
-.radar__count b { color: var(--accent); font-size: 15px; }
+.radar__count b { color: var(--accent); font-size: 18px; }
 .decoder__read { grid-area: read; color: var(--fg); }
 .decoder__tone { grid-area: tone; font-family: var(--font-mono); font-size: 13px; color: var(--fg-mute); }
 .decoder__empty {
@@ -1378,7 +1382,7 @@ button.rail-pip:disabled {
 .gallery__cap {
   flex: none;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.06em;
   color: var(--accent);
 }
@@ -1391,7 +1395,7 @@ button.rail-pip:disabled {
   padding: 7px 10px;
   text-align: center;
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 18px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   border-bottom: 1px solid var(--border);
@@ -1450,7 +1454,7 @@ button.rail-pip:disabled {
   justify-content: center;
   align-items: center;
   gap: 8px;
-  opacity: 0.6;
+  border-color: color-mix(in srgb, var(--border-strong) 80%, transparent);
 }
 .decoder__sealed {
   text-align: center;
@@ -1459,10 +1463,10 @@ button.rail-pip:disabled {
   color: var(--fg-mute);
 }
 .decoder__sealed span { display: block; font-size: 15px; }
-.decoder__sealed small { display: block; margin-top: 4px; font-size: 11px; }
+.decoder__sealed small { display: block; margin-top: 4px; font-size: 13px; }
 .decoder__axis {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--fg-mute);
 }
 
@@ -1512,7 +1516,6 @@ button.rail-pip:disabled {
   text-align: center;
   white-space: nowrap;
   color: var(--fg);
-  text-shadow: var(--glow);
 }
 .gain-meter__value.gain-meter__value--pending {
   color: var(--fg-mute);
@@ -1555,7 +1558,7 @@ button.rail-pip:disabled {
   border-top: 2px solid currentColor;
   opacity: 0.85;
 }
-.gain-meter__mark--peak { color: var(--fg); text-shadow: var(--glow); }
+.gain-meter__mark--peak { color: var(--fg); }
 .gain-meter__mark--floor { color: var(--fg-dim); }
 /* Each label sits outside the band it bounds — PEAK above its line, FLOOR below — clear of the SNR
    reading inside the band; a band too narrow for the reading moves them further out (below). */
@@ -1570,7 +1573,7 @@ button.rail-pip:disabled {
 .gain-meter__gap > * {
   transform: translateY(var(--label-shift, 0px));
 }
-.gain-meter__tag { font-size: 11px; letter-spacing: 0.1em; }
+.gain-meter__tag { font-size: 13px; letter-spacing: 0.1em; }
 .gain-meter__gap {
   position: absolute;
   left: 4px;
@@ -1599,8 +1602,8 @@ button.rail-pip:disabled {
 .gain-meter__empty[hidden] {
   display: none;
 }
-.gain-meter__gap-label { font-size: 12px; letter-spacing: 0.16em; }
-.gain-meter__gap b { font-size: 15px; text-shadow: var(--glow); }
+.gain-meter__gap-label { font-size: 13px; letter-spacing: 0.16em; }
+.gain-meter__gap b { font-size: 18px; }
 /* Over a band thinner than the text, the reading paints over the band's dashed edges. */
 .gain-meter__gap-label,
 .gain-meter__gap b {
@@ -1641,29 +1644,28 @@ button.rail-pip:disabled {
   overflow: hidden;
 }
 .prov__title {
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 0.14em;
   color: var(--fg-dim);
   text-align: center;
 }
 /* The verdict is the lesson — read by word + glyph + brightness, never colour alone. */
 .prov__verdict {
-  font-size: 15px;
+  font-size: 18px;
   line-height: 1.05;
   text-align: center;
   color: var(--fg);
-  text-shadow: var(--glow);
 }
 .prov__verdict--ok { color: var(--ok); }
 .prov__verdict--bad { color: var(--sel-bg); }
 .prov__verdict--na { color: var(--fg-mute); }
-.prov__ref { font-size: 12px; color: var(--fg-dim); text-align: center; }
+.prov__ref { font-size: 13px; color: var(--fg-dim); text-align: center; }
 .prov__ref b { color: var(--fg); }
 .prov__meta {
   display: flex;
   justify-content: space-between;
   gap: 4px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--fg-dim);
   white-space: nowrap;
 }
@@ -1701,25 +1703,24 @@ button.rail-pip:disabled {
   overflow: hidden;
 }
 .ppm__title {
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 0.14em;
   color: var(--fg-dim);
   text-align: center;
 }
-.ppm__status { font-size: 12px; color: var(--fg-dim); text-align: center; }
+.ppm__status { font-size: 13px; color: var(--fg-dim); text-align: center; }
 .ppm__status b { color: var(--fg); }
 /* The measurement is the lesson — read large. */
 .ppm__result {
-  font-size: 16px;
+  font-size: 18px;
   line-height: 1.05;
   text-align: center;
   color: var(--fg);
-  text-shadow: var(--glow);
 }
 .ppm__result--ok { color: var(--accent); }
 .ppm__result--na { color: var(--fg-mute); }
 .ppm__detail {
-  font-size: 10px;
+  font-size: 13px;
   line-height: 1.1;
   color: var(--fg-dim);
   text-align: center;
@@ -1754,10 +1755,13 @@ button.rail-pip:disabled {
   flex: none;
   height: 40px;
   position: relative;
-  opacity: 0.8;
   background:
     linear-gradient(0deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.18)),
-    repeating-linear-gradient(90deg, var(--wf-grid) 0 1px, transparent 1px 64px);
+    repeating-linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--wf-grid) 80%, transparent) 0 1px,
+      transparent 1px 64px
+    );
 }
 .waterfall-wrap--frozen .waterfall__empty::after {
   content: "";
@@ -1776,7 +1780,7 @@ button.rail-pip:disabled {
   align-items: center;
   justify-content: center;
   gap: 5px;
-  color: var(--fg-mute);
+  color: var(--wf-axis);
   letter-spacing: 0.22em;
   text-transform: uppercase;
   text-align: center;
@@ -1785,7 +1789,7 @@ button.rail-pip:disabled {
   font-size: 15px;
 }
 .waterfall__sealed small {
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.16em;
 }
 
@@ -1798,23 +1802,23 @@ button.rail-pip:disabled {
   gap: 6px;
   padding: 4px 10px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
 /* A placeholder render must never pass for real signal (RF honesty invariant). */
 .badge--sample {
-  background: color-mix(in srgb, var(--warn) 22%, var(--wf-bg));
-  color: var(--warn);
-  border: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--wf-warn) 22%, var(--wf-bg));
+  color: var(--wf-warn);
+  border: 2px solid var(--wf-warn);
 }
 
 /* Live sweep — the waterfall above is real rtl_power data. */
 .badge--live {
-  background: color-mix(in srgb, var(--ok) 22%, var(--wf-bg));
-  color: var(--ok);
-  border: 2px solid var(--ok);
+  background: color-mix(in srgb, var(--wf-ok) 22%, var(--wf-bg));
+  color: var(--wf-ok);
+  border: 2px solid var(--wf-ok);
 }
 
 /* No radio (or no console) — the panel is honestly empty, not a sample pretending to be live. */
@@ -1843,7 +1847,6 @@ button.rail-pip:disabled {
 }
 .waterfall__axis b {
   color: var(--wf-ink);
-  text-shadow: var(--glow);
 }
 
 /* In the frozen frame the axis sits in normal flow, not over a canvas. */
@@ -1872,7 +1875,6 @@ button.rail-pip:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  text-shadow: var(--glow);
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
@@ -1902,7 +1904,6 @@ button.rail-pip:disabled {
   letter-spacing: 0.03em;
   line-height: 1;
   color: var(--accent);
-  text-shadow: var(--glow);
 }
 
 .tune__freq span {
@@ -2008,7 +2009,6 @@ button.rail-pip:disabled {
   padding: 28px var(--gutter);
   font-size: 20px;
   color: var(--fg-dim);
-  text-shadow: var(--glow);
 }
 
 .tile {
@@ -2040,7 +2040,6 @@ button.rail-pip:disabled {
   font-size: 15px;
   letter-spacing: 0.12em;
   color: var(--fg-dim);
-  text-shadow: var(--glow);
 }
 
 .tile__glyph {
@@ -2246,7 +2245,6 @@ button.rail-pip:disabled {
   line-height: 1.3;
   margin: 0;
   color: var(--fg);
-  text-shadow: var(--glow);
 }
 /* The question and (when it cites one) its diagram button share a row, so a figure question
    spends no extra height on the button. */
@@ -2434,7 +2432,6 @@ button.rail-pip:disabled {
   flex: none;
   font-size: 26px;
   color: var(--accent);
-  text-shadow: var(--glow);
 }
 /* The exam and operator bars share one row under the grid, half the width each, so the grid
    keeps the height for two full rows of unit tiles. Each bar keeps its 76px touch height. */
@@ -2455,7 +2452,7 @@ button.rail-pip:disabled {
 }
 /* The running score above the question — state by number, dim so the question leads. */
 .exam-sim__score {
-  font-size: 15px;
+  font-size: 18px;
   color: var(--fg-dim);
   letter-spacing: 0.02em;
 }
@@ -2576,15 +2573,14 @@ button.rail-pip:disabled {
   line-height: 1.15;
 }
 .rack__pick-tool {
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.06em;
   color: var(--fg-dim);
 }
-/* The instrument on the bench: the accent border and glow, the same "you are here" as a rail pip. */
+/* The instrument on the bench: the accent border, the same "you are here" as a rail pip. */
 .rack__pick--on {
   border: 2px solid var(--accent);
   color: var(--accent);
-  text-shadow: var(--glow);
 }
 .rack__bench {
   flex: 1 1 auto;
@@ -2641,7 +2637,7 @@ button.rail-pip:disabled {
   text-shadow: none;
 }
 .rack__step-tag {
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 0.1em;
   color: var(--fg-dim);
 }
@@ -2664,12 +2660,12 @@ button.rail-pip:disabled {
   gap: 2px;
 }
 .rack__gain-tag {
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 0.1em;
   color: var(--fg-dim);
 }
 .rack__gain-value {
-  font-size: 15px;
+  font-size: 18px;
   color: var(--accent);
 }
 /* The rack's strip is its own row across the bench: the whole line, wrapped, never truncated, and
@@ -2694,7 +2690,7 @@ button.rail-pip:disabled {
 }
 .rack__log-tag {
   flex: none;
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.1em;
   color: var(--accent);
 }
