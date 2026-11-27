@@ -240,3 +240,13 @@ def test_a_blank_serial_can_never_be_selected():
     devices = list_rtlsdr_devices(which=_which_for("rtl_power"), run=_enumerator(blank))
     with pytest.raises(DeviceSelectionError):
         select_rtlsdr_index("", devices=devices)
+
+
+@pytest.mark.parametrize("available", [(), ("rtl_test",), ("lsusb",)])
+def test_unconfirmed_presence_is_not_a_confirmed_absence(available):
+    def fail(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ["lsusb"])
+
+    probe = probe_rtlsdr(which=_which_for(*available), run=fail)
+    assert not probe.present  # Existing gates still require a positively detected device.
+    assert not probe.known

@@ -108,6 +108,33 @@ def test_every_instrument_view_renders_with_the_picker_and_back_goes_home(tmp_pa
             assert "data-rack-log" in html
 
 
+def test_rack_picker_groups_every_instrument_with_a_short_description(tmp_path):
+    with _client(tmp_path) as client:
+        html = client.get("/operate/ais").text
+    picker = re.search(r'<nav class="rack__picker"[^>]*>(.*?)</nav>', html, re.S)[1]
+    groups = re.findall(r'<section class="rack__group"[^>]*>\s*<h2[^>]*>([^<]+)</h2>'
+                        r'(.*?)</section>', picker, re.S)
+    expected = {
+        "Spectrum": {"waterfall", "rds", "apt"},
+        "Aircraft and ships": {"adsb", "acars", "ais"},
+        "Pagers and packets": {"ism", "aprs", "pager", "dmr", "sstv", "lora"},
+        "Counter-surveillance": {"flock", "rayhunter"},
+        "Devices": {"flipper", "clock", "health"},
+    }
+    assert [name for name, _ in groups] == list(expected)
+    keys = []
+    for name, group in groups:
+        links = re.findall(r'<a class="rack__pick[^"]*" href="/operate/([^"]+)"[^>]*>'
+                           r'(.*?)</a>', group, re.S)
+        assert {key for key, _ in links} == expected[name]
+        for key, link in links:
+            keys.append(key)
+            detail = re.search(r'class="rack__pick-detail">([^<]+)</span>', link)
+            assert detail is not None, key
+            assert 2 <= len(unescape(detail[1]).split()) <= 3, key
+    assert sorted(keys) == sorted(inst.key for inst in INSTRUMENTS)
+
+
 @pytest.mark.parametrize("key, hook", [
     ("waterfall", "canvas class=\"waterfall\""), ("ism", "data-decode-panel"),
     ("adsb", "data-adsb-panel"), ("aprs", "data-aprs-panel"), ("pager", "data-pocsag-panel"),

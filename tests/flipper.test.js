@@ -80,7 +80,7 @@ test("no answer at all shows that the console was not reached", async () => {
   assertNoReading(shown, expected);
 });
 
-test("the route's refusals keep their exact reason or shared next-step message", async () => {
+test("a port refusal keeps the route's exact reason", async () => {
   const reason = "cannot open the Flipper: [Errno 13] Permission denied "
     + "(usb-Flipper_Devices_Inc._Flipper_Abcdefgh_flip_Abcdefgh-if00)";
   const shown = await showPoll(503, JSON.stringify(
@@ -89,14 +89,6 @@ test("the route's refusals keep their exact reason or shared next-step message",
   assert.equal(shown.empty, reason);
   assert.equal(shown.cardHidden, true);
   assert.deepEqual(shown.nextPollMs, [RETRY_MS]);
-
-  const absent = await showPoll(503, JSON.stringify({ available: false, cause: "no_radio",
-    reason: "no Flipper attached", message: "No Flipper on USB.",
-    next_step: "Connect the Flipper over USB." }));
-  assert.equal(absent.badge, "NO RADIO");
-  assert.equal(absent.empty, "No Flipper on USB. · Connect the Flipper over USB.");
-  assert.equal(absent.cardHidden, true);
-  assert.deepEqual(absent.nextPollMs, [RETRY_MS]);
 });
 
 test("a device read shows the card and polls gently", async () => {
@@ -108,4 +100,31 @@ test("a device read shows the card and polls gently", async () => {
   assert.equal(shown.cardHidden, false);
   assert.equal(shown.emptyHidden, true);
   assert.deepEqual(shown.nextPollMs, [POLL_MS]);
+});
+
+test("a drawing fault replaces the last reading with a display error and retries", async () => {
+  const live = JSON.stringify({ available: true, device: { name: "Ex4mple", model: "Flipper Zero" } });
+  // String conversion fails during drawing, after the poll has accepted the device object.
+  const bad = JSON.stringify({ available: true, device: { model: { toString: null } } });
+  const shown = await showPoll(200, live, [200, bad]);
+  assert.equal(shown.badge, "UNAVAILABLE");
+  assert.equal(shown.empty, "Could not display the Flipper reading.");
+  assert.equal(shown.emptyHidden, false);
+  assert.equal(shown.cardHidden, true);
+  assert.equal(shown.name, "");
+  assert.equal(shown.line, "");
+  assert.deepEqual(shown.nextPollMs, [POLL_MS, RETRY_MS]);
+});
+
+test("a fault in the shared refusal renderer still draws a display error", async () => {
+  const live = JSON.stringify({ available: true, device: { model: "Flipper Zero" } });
+  const absent = JSON.stringify({ available: false, reason: "receiver unavailable" });
+  const shown = await showPoll(200, live, [503, absent], (decoderPanel) => {
+    decoderPanel.showDown = () => { throw new Error("refusal renderer failed"); };
+  });
+  assert.equal(shown.badge, "UNAVAILABLE");
+  assert.equal(shown.empty, "Could not display the Flipper reading.");
+  assert.equal(shown.emptyHidden, false);
+  assert.equal(shown.cardHidden, true);
+  assert.deepEqual(shown.nextPollMs, [POLL_MS, RETRY_MS]);
 });

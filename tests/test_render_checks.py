@@ -20,6 +20,7 @@ SCROLL = REPO / "tools" / "render" / "render_scroll.py"
 FIGURE = REPO / "tools" / "render" / "render_figure.py"
 FIT = REPO / "tools" / "render" / "render_fit.py"
 LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
+LORA = REPO / "tools" / "render" / "render_lora.py"
 CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
@@ -421,7 +422,7 @@ def render_make(tmp_path, console_url, devtools):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, CARD_SORT):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -460,10 +461,13 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
 
 
-@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name,
-                                     CARD_SORT.name],
-                         ids=["all-pass", "fit-fails", "scroll-fails", "figure-fails",
-                              "logbook-fails", "card-sort-fails"])
+@pytest.mark.parametrize(
+    "failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name],
+    ids=[
+        "all-pass", "fit-fails", "scroll-fails", "figure-fails",
+        "logbook-fails", "lora-fails", "card-sort-fails",
+    ],
+)
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
     proc = render_make(FAILING_CHECK=failing)
     assert proc.stdout.splitlines() == [
@@ -471,6 +475,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {SCROLL.name} {console_url}/",
         f"ran {FIGURE.name} {console_url}/exam/review/T6C02",
         f"ran {LOGBOOK.name} {console_url}",
+        f"ran {LORA.name} {console_url}",
         f"ran {CARD_SORT.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
@@ -505,6 +510,24 @@ LOGBOOK_FITS = {"back": True, "doc": [800, 480], "scrolls": True, "lastVisible":
                 "contrast": [8, 9], "differentMarks": True}
 RACK_FITS = {"doc": [800, 480], "visible": True, "stripVisible": True, "target": [76, 72]}
 THEMES = ("dark", "sunlight", "red-night")
+
+
+@pytest.mark.parametrize("defect", [None, "notice", "refusal"])
+def test_lora_render_checks_send_and_notice_in_all_themes(devtools, defect):
+    answers = {
+        f"measureLoRa({json.dumps(theme)}": {
+            "theme": theme, "doc": [800, 480], "send": [76, 72],
+            "visible": not (defect == "notice" and theme == "red-night"), "shapes": True,
+            "refusalVisible": not (defect == "refusal" and theme == "red-night"),
+        }
+        for theme in THEMES
+    }
+    proc = run(LORA, "http://127.0.0.1:9", port=devtools(answers))
+    assert proc.returncode == int(defect is not None), (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        f"VERDICT: {'FAIL' if defect and theme == 'red-night' else 'PASS'} - LoRa send {theme}"
+        for theme in THEMES
+    ]
 
 
 def _logbook_pages(*, rack_defect=None, logbook_defect=None):

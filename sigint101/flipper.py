@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import glob as _glob
 import os
 import select
@@ -251,15 +252,17 @@ class FlipperCli:
     def close(self) -> None:
         """Release the port if this session ever opened one.
 
-        A close that fails still releases it: on Linux close(2) frees the descriptor whatever it
-        returns. A gone device's EIO here would otherwise replace the reason a read failed, or a
-        good reading, with a bare OSError.
+        On Linux close(2) releases the descriptor even if a gone device reports EIO. EBADF means
+        the session tried to close an invalid descriptor, so let that fault surface.
         """
         channel, self._channel = self._channel, None
         if channel is not None:
             try:
                 channel.close()
-            except (OSError, termios.error):
+            except OSError as exc:
+                if exc.errno == errno.EBADF:
+                    raise
+            except termios.error:
                 pass
 
     def _drain(self) -> None:

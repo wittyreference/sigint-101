@@ -27,7 +27,7 @@ from sigint101.dmr import DmrDecoder
 from sigint101.events import log_event, read_events
 from sigint101.flock import FlockDetector
 from sigint101.hardware import RadioProbe, RtlSdrDevice
-from sigint101.lora import LoRaListener, parse_lora_packet
+from sigint101.lora import LoRaListener, parse_lora_packet, radio_settings
 from sigint101.pocsag import PocsagDecoder
 from sigint101.provenance import BIAS_STATE, REFERENCE_HZ, read_baseline
 from sigint101.rayhunter import RayhunterMonitor
@@ -210,6 +210,9 @@ class _StubLora:
 
     def recent(self, limit=None):
         return self._packets if limit is None else self._packets[-limit:]
+
+    def send_state(self):
+        return {"radio": radio_settings(None), "sends": []}
 
     def stop(self):
         self._started = False
@@ -2216,6 +2219,42 @@ def test_hardware_reports_an_absent_radio(tmp_path):
     with _client(tmp_path, probe=_absent) as client:
         resp = client.get("/api/hardware")
     assert resp.json()["present"] is False
+
+
+def test_hardware_bar_follows_the_probe_and_real_sdr_ownership(tmp_path):
+    probe_reply = _present()
+
+    def probe():
+        return probe_reply
+
+    with _client(tmp_path, probe=probe, sweeper_factory=lambda: _StubSweeper([])) as client:
+        def radio():
+            return client.get("/api/hardware").json()["state"]
+
+        assert radio() == "present"
+        with client.app.state.radio_arbiter.reserve("ppm", AssertionError, float("inf")):
+            assert radio() == "busy"
+        assert radio() == "present"
+        assert client.get("/api/spectrum").status_code == 200
+        assert radio() == "busy"
+        probe_reply = _absent()
+        assert radio() == "absent"
+        probe_reply = RadioProbe(False, "lsusb", "probe failed", known=False)
+        assert radio() == "unknown"
+        probe_reply = _present()
+        client.app.state.sweeper.release()
+        assert radio() == "present"
+
+
+def test_status_bar_uses_last_measured_ppm(tmp_path):
+    def measure(**_kwargs):
+        return {"ppm": -12.5, "reason": ""}
+
+    with _client(tmp_path, probe=_present, ppm_measure=measure) as client:
+        assert client.get("/api/hardware").json()["ppm"] is None
+        assert client.post("/api/ppm/measure").json()["ppm"] == -12.5
+        assert client.get("/api/hardware").json()["ppm"] == -12.5
+        assert "PPM -12.5</span>" in client.get("/").text
 
 
 # --- per-lesson tune band (the instrument starts on the lesson's band) --------

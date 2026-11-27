@@ -363,12 +363,10 @@ body {
   font-family: var(--font-display);
   font-size: 20px;
   font-weight: 400;
+  line-height: 1.15;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   text-shadow: var(--glow);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .statusbar__status {
@@ -378,49 +376,15 @@ body {
   flex: none;
 }
 
-/* Chip (ppm corrected / RAW) — word + dot; the word is the signal, not the hue */
-.chip {
-  display: inline-flex;
+/* Status and charge on top, with quiet measurements below. The touch keys keep the full bar. */
+.statusbar__readouts {
+  display: grid;
+  grid-template-areas: "radio battery" "ppm snr";
   align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 12px;
-  border-radius: 0;
-  border: 2px solid var(--border-strong);
-  background: var(--surface-2);
-  color: var(--fg);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  white-space: nowrap;
+  gap: 4px 10px;
 }
 
-.chip::before {
-  content: "";
-  width: 10px;
-  height: 10px;
-  background: var(--fg-mute);
-  flex: none;
-}
-
-.chip--ok {
-  border-color: var(--ok);
-  color: var(--ok);
-}
-.chip--ok::before {
-  background: var(--ok);
-}
-
-.chip--warn {
-  border-color: var(--warn);
-  color: var(--warn);
-}
-.chip--warn::before {
-  background: var(--warn);
-}
-
-/* Readouts (SNR, battery) */
+/* Radio and measured readouts */
 .readout {
   display: inline-flex;
   align-items: center;
@@ -431,6 +395,19 @@ body {
   color: var(--fg-dim);
   white-space: nowrap;
 }
+
+.readout--radio {
+  grid-area: radio;
+  font-size: 14px;
+}
+
+.readout--ppm {
+  grid-area: ppm;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+
+.readout--snr { grid-area: snr; }
 
 .readout__label {
   font-size: 13px;
@@ -445,6 +422,7 @@ body {
 }
 
 .batt {
+  grid-area: battery;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2680,7 +2658,7 @@ body {
 }
 .rack__chooser {
   flex: none;
-  width: 142px;
+  width: 164px;
 }
 .rack__picker {
   flex: 1 1 auto;
@@ -2701,6 +2679,21 @@ body {
   background: color-mix(in srgb, var(--fg) 45%, transparent);
   border-radius: 5px;
 }
+.rack__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rack__group + .rack__group {
+  margin-top: 4px;
+}
+.rack__group-title {
+  margin: 0;
+  padding: 4px 6px 0;
+  font-size: 16px;
+  line-height: 1.15;
+  color: var(--fg-dim);
+}
 .rack__pick {
   flex: none;
   min-height: 72px;
@@ -2708,25 +2701,42 @@ body {
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  padding: 6px 10px;
+  padding: 4px 6px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--fg);
   text-decoration: none;
 }
+.rack__pick-label,
+.rack__pick-detail {
+  font-size: 18px;
+  line-height: 1.1;
+  letter-spacing: normal;
+}
 .rack__pick-label {
-  font-size: 17px;
-  line-height: 1.15;
+  font-weight: 700;
 }
 .rack__pick-tool {
   font-size: 13px;
+  line-height: 1.1;
   letter-spacing: 0.06em;
   color: var(--fg-dim);
 }
-/* The instrument on the bench: the accent border, the same "you are here" as a rail pip. */
+/* The instrument on the bench uses the same filled selection as the home tile. */
 .rack__pick--on {
-  border: 2px solid var(--accent);
-  color: var(--accent);
+  background: var(--sel-bg);
+  border-color: var(--sel-bg);
+  color: var(--sel-ink);
+  text-shadow: none;
+}
+.rack__pick--on .rack__pick-tool {
+  color: inherit;
+}
+.rack__pick:focus-visible {
+  outline-offset: -4px;
+}
+.rack__pick--on:focus-visible {
+  outline-color: var(--sel-ink);
 }
 .rack__bench {
   flex: 1 1 auto;
@@ -2753,6 +2763,39 @@ body {
 }
 .rack__tune {
   gap: 8px;
+}
+.rack-lora {
+  flex: none;
+  min-width: 0;
+}
+.rack-lora__action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.rack-lora__action > button {
+  flex: 0 0 76px;
+  height: 72px;
+  font-size: 20px;
+}
+.rack-lora__readout {
+  min-width: 0;
+  font-size: 18px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.rack-lora__outcome {
+  border-left: 3px dashed var(--fg);
+  padding-left: 6px;
+}
+.rack-lora__outcome[data-state="repeated"] {
+  border-left-style: solid;
+}
+.rack-lora__outcome[data-state="no-repeat"],
+.rack-lora__outcome[data-state="error"],
+.rack-lora__outcome[data-state="lost"] {
+  border-left: 4px double var(--fg);
 }
 .rack__tune .tune-btn {
   width: 72px;
