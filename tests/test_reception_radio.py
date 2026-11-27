@@ -164,7 +164,7 @@ def test_delayed_ism_read_logs_its_launch_radio_command_and_frequency(tmp_path, 
     bus = [RtlSdrDevice(0, "radio-first")]
     app = _console(tmp_path, lambda: tuple(bus))
     procs = []
-    paused, resume = threading.Event(), threading.Event()
+    paused, resume, logged = threading.Event(), threading.Event(), threading.Event()
 
     def spawn(cmd):
         proc = LateProc([*cmd, "-v"])
@@ -180,9 +180,13 @@ def test_delayed_ism_read_logs_its_launch_radio_command_and_frequency(tmp_path, 
         first_hz = decoder.freq_hz
 
         def hold_after_admission(item, *, radio=None, **provenance):
-            paused.set()
-            assert resume.wait(5)
+            first = item["readings"]["id"] == 12
+            if first:
+                paused.set()
+                assert resume.wait(5)
             heard(item, radio=radio, **provenance)
+            if not first:
+                logged.set()
 
         decoder.on_reception = hold_after_admission
         try:
@@ -196,6 +200,8 @@ def test_delayed_ism_read_logs_its_launch_radio_command_and_frequency(tmp_path, 
             decoder.start()
             assert len(procs) == 2 and decoder.running and decoder.device == 1
             assert decoder.live_command() == command_line(procs[1])
+            procs[1].feed('{"model":"TestSensor","id":34,"freq":915.01}')
+            assert logged.wait(5)
 
             resume.set()
             procs[0].close_pipe()
@@ -211,11 +217,17 @@ def test_delayed_ism_read_logs_its_launch_radio_command_and_frequency(tmp_path, 
                     proc.reader.join(5)
                     assert not proc.reader.is_alive()
 
-    [record] = _receptions(tmp_path)
-    assert record["instrument"] == "ism" and record["item"]["model"] == "TestSensor"
-    assert (record["radio"], record["command"], record["freq_hz"]) == (
+    new, old = _receptions(tmp_path)
+    for record, sensor_id in ((old, 12), (new, 34)):
+        assert record["instrument"] == "ism" and record["item"]["model"] == "TestSensor"
+        assert record["item"]["readings"]["id"] == sensor_id
+    assert (old["radio"], old["command"], old["freq_hz"]) == (
         {"kind": "rtl-sdr", "index": 0, "serial": "radio-first"},
         command_line(procs[0]), first_hz,
+    )
+    assert (new["radio"], new["command"], new["freq_hz"]) == (
+        {"kind": "rtl-sdr", "index": 1, "serial": "radio-second"},
+        command_line(procs[1]), 915_000_000,
     )
 
 
