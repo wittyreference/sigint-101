@@ -61,7 +61,9 @@ DEFAULT_OUTPUT_DIR = "data/sstv"
 _MODE_PREFIX = "Detected SSTV mode "
 
 # The only names a capture stages: _allocate_capture's stem, then the picture or its sidecar.
-_STAGED_NAME = re.compile(r"[0-9]{8}T[0-9]{6}-[0-9]{3}-r[0-9]+(?:-[0-9]+)?\.(?:png|json)")
+# Run numbers start at 1 and collision suffixes at 1, so neither ever has a leading zero.
+_STAGED_NAME = re.compile(
+    r"[0-9]{8}T[0-9]{6}-[0-9]{3}-r[1-9][0-9]*(?:-[1-9][0-9]*)?\.(?:png|json)")
 
 
 class SstvUnavailable(RuntimeError):

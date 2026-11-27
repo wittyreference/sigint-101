@@ -952,12 +952,24 @@ def test_sstv_first_launch_sweeps_only_a_previous_consoles_staged_captures(
     staging.mkdir(parents=True)
     leftovers = [staging / name for name in (
         "20250101T000000-000-r3.png", "20250101T000000-000-r3.json",
-        "20250101T000000-000-r12-1.png")]
+        "20250101T000000-000-r12-1.png", "20250101T000000-000-r10-10.json")]
     for path in leftovers:
         path.write_bytes(PNG_BYTES)
+    # Each name is one edge of the generated form, off by one part; widening that part sweeps it.
     unrelated = [staging / name for name in (
         "notes.txt", "another-capture.png", "20250101T000000-000-r3.png.part",
-        "x20250101T000000-000-r5.png", "20250101T000000-000-r5.PNG")]
+        "x20250101T000000-000-r5.png", "20250101T000000-000-r5.PNG",
+        "20250101T000000-000-r5.wav", "20250101T000000-000-r5.pngx",
+        "20250101T000000-000-r5.png.json", "20250101T000000-000-r5",
+        "20250101T000000-00-r5.png", "20250101T000000-0000-r5.png",
+        "2025010T000000-000-r5.png", "202501011T000000-000-r5.png",
+        "20250101T00000-000-r5.png", "20250101T0000000-000-r5.png",
+        "20250101-000000-000-r5.png", "20250101t000000-000-r5.png",
+        "20250101T000000-000-5.png", "20250101T000000-000-r.png",
+        "20250101T000000-000-r0.png", "20250101T000000-000-r007.png",
+        "20250101T000000-000-r5-0.png", "20250101T000000-000-r5-01.png",
+        "20250101T000000-000-r5-.png", "20250101T000000-000-r5-1-1.png",
+        "2025010١T000000-000-r5.png", "20250101T000000-000-r5.png\n")]
     for path in unrelated:
         path.write_bytes(b"keep")
     elsewhere = tmp_path / "elsewhere"
