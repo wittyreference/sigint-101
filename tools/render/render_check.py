@@ -32,6 +32,7 @@ def run_checks(console, port, output):
         ("render_scroll.py", f"{console}/", "home"),
         ("render_figure.py", f"{console}/exam/review/T6C02", "dark", str(output / "figure")),
         ("render_logbook.py", console),
+        ("render_lora.py", console),
     )
     no_proxy = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))
     no_proxy = f"{no_proxy},127.0.0.1" if no_proxy else "127.0.0.1"

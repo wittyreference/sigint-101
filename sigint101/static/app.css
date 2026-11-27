@@ -2732,6 +2732,39 @@ body {
 .rack__tune {
   gap: 8px;
 }
+.rack-lora {
+  flex: none;
+  min-width: 0;
+}
+.rack-lora__action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.rack-lora__action > button {
+  flex: 0 0 76px;
+  height: 72px;
+  font-size: 20px;
+}
+.rack-lora__readout {
+  min-width: 0;
+  font-size: 18px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.rack-lora__outcome {
+  border-left: 3px dashed var(--fg);
+  padding-left: 6px;
+}
+.rack-lora__outcome[data-state="repeated"] {
+  border-left-style: solid;
+}
+.rack-lora__outcome[data-state="no-repeat"],
+.rack-lora__outcome[data-state="error"],
+.rack-lora__outcome[data-state="lost"] {
+  border-left: 4px double var(--fg);
+}
 .rack__tune .tune-btn {
   width: 72px;
   height: 72px;
