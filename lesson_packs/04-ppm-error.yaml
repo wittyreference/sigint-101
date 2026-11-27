@@ -30,7 +30,7 @@ stages:
     stays hidden until you do.
   observe: >-
     At 1090 MHz — about eleven times higher than 100 MHz — how far off would the built-in radio
-    land, and would that error tuck inside a channel or throw you off?
+    land, and would that error tuck inside a channel or throw you off the signal?
   explain: >-
     Bigger, about elevenfold: the dial's ppm (parts per million) holds everywhere and the kHz grow
     with it. Width decides if it hurts. ADS-B, 2 MHz wide, shrugs it off — its transmitters may sit

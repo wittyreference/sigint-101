@@ -26,8 +26,8 @@ stages:
     it happen under your own thumbs at 1090 MHz, where aircraft report positions in microsecond
     bursts.
   demo: >-
-    Watch — hands off. The FM whip hears worse at 1090 MHz. Wavelength is 300 over MHz: three at
-    100, about 0.28 at 1090. A quarter-length leg, just under 7 cm.
+    Watch — hands off. The FM whip hears worse at 1090 MHz. Wavelength in metres is 300 over MHz:
+    three at 100, about 0.28 at 1090. A quarter-length leg, just under 7 cm.
   try: >-
     Swap in the kit's dipole, comrade: legs long, then just under 7 cm, watching 1090's floor:
     aircraft lift a faint hump. Still flat? A quiet sky looks like poor hearing.
