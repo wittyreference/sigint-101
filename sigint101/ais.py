@@ -16,6 +16,7 @@ from .childproc import (
     command_line,
     emit_reception,
     running_command,
+    settle_ended,
     spawn,
     stop_process,
 )
@@ -387,14 +388,24 @@ class _Feed:
         self.stdout = self._lines()
 
     def _lines(self):
+        draining = False
         with self._sock:
             while not self._closed.is_set():
+                if not draining and self._proc.poll() is not None:
+                    # Once rtl_ais has exited, switch to non-blocking so datagrams already queued
+                    # in the UDP socket drain at once without waiting out FEED_POLL_S.
+                    try:
+                        self._sock.settimeout(0.0)
+                    except OSError:
+                        return
+                    draining = True
                 try:
                     data = self._sock.recv(4096)
                 except TimeoutError:
-                    # A quiet channel, or rtl_ais gone: only the second ends the feed.
-                    if self._proc.poll() is not None:
+                    if draining:
                         return
+                    # A quiet channel, or rtl_ais gone: loop once more in non-blocking mode if it
+                    # just exited, to drain anything queued at the boundary before ending.
                     continue
                 except OSError:
                     return
@@ -421,6 +432,14 @@ class _Feed:
             self._sock.close()
         except OSError:
             pass
+
+    def stop_child(self) -> bool:
+        """Stop and reap rtl_ais while leaving the UDP socket open to drain queued datagrams."""
+        return stop_process(self._proc)
+
+    def close_transport(self) -> None:
+        """Close the UDP socket once any natural-exit drain has finished or timed out."""
+        self._close_socket()
 
     def terminate(self):
         self._close_socket()
@@ -603,18 +622,15 @@ class AisDecoder:
 
     def _settle(self) -> None:
         """Account for a child that ended since the last poll, letting its reader drain before
-        clearing away what it left.
+        ending the run and clearing away what it left.
         """
         proc, self._proc = self._proc, None
         if proc is None:
             return
-        self._note_end(proc, self._runs.current)
-        self.watch.stopping()
-        if not stop_process(proc):
+        thread, self._thread = self._thread, None
+        if not settle_ended(proc, thread, self._runs, self.watch,
+                            note_end=self._note_end, wait_s=self.STOP_WAIT_S):
             self.error = "rtl_ais survived kill; the dongle may still be held"
-        if self._thread is not None:
-            self._thread.join(timeout=self.STOP_WAIT_S)
-            self._thread = None
 
     #: How long stop() waits, in seconds, for the reader to end once rtl_ais is stopped.
     STOP_WAIT_S = 3.0

@@ -17,6 +17,7 @@ from .childproc import (
     command_line,
     emit_reception,
     running_command,
+    settle_ended,
     spawn,
     stop_process,
 )
@@ -217,16 +218,25 @@ class _Feed:
 
     def _lines(self):
         buffer = ""
+        draining = False
         with self._sock:
             while not self._closed.is_set():
+                if not draining and self._proc.poll() is not None:
+                    # Once dump1090 has exited, switch to non-blocking so complete lines already
+                    # queued in the socket drain at once without waiting out FEED_POLL_S.
+                    try:
+                        self._sock.settimeout(0.0)
+                    except OSError:
+                        return
+                    draining = True
                 try:
                     chunk = self._sock.recv(4096)
                 except TimeoutError:
-                    # No aircraft for a moment is an empty sky, not an ended feed: keep listening
-                    # while dump1090 lives. Taking the timeout as the end once left a running
-                    # dump1090 behind a reader that had quietly stopped.
-                    if self._proc.poll() is not None:
+                    if draining:
                         return
+                    # No aircraft for a moment is an empty sky, not an ended feed: keep listening
+                    # while dump1090 lives. If it just exited, loop once more in non-blocking mode
+                    # to drain anything queued at the boundary, then return.
                     continue
                 except OSError:
                     return
@@ -251,6 +261,14 @@ class _Feed:
             self._sock.close()
         except OSError:
             pass
+
+    def stop_child(self) -> bool:
+        """Stop and reap dump1090 while leaving the SBS socket open to drain queued lines."""
+        return stop_process(self._proc)
+
+    def close_transport(self) -> None:
+        """Close the SBS socket once any natural-exit drain has finished or timed out."""
+        self._close_socket()
 
     def terminate(self):
         self._close_socket()
@@ -443,18 +461,15 @@ class AdsbDecoder:
 
     def _settle(self) -> None:
         """Account for a child that ended since the last poll, letting its reader drain before
-        clearing away what it left.
+        ending the run and clearing away what it left.
         """
         proc, self._proc = self._proc, None
         if proc is None:
             return
-        self._note_end(proc, self._runs.current)
-        self.watch.stopping()
-        if not stop_process(proc):
+        thread, self._thread = self._thread, None
+        if not settle_ended(proc, thread, self._runs, self.watch,
+                            note_end=self._note_end, wait_s=self.STOP_WAIT_S):
             self.error = "dump1090 survived kill; the dongle may still be held"
-        if self._thread is not None:
-            self._thread.join(timeout=self.STOP_WAIT_S)
-            self._thread = None
 
     #: How long stop() waits, in seconds, for the reader to end once dump1090 is stopped.
     STOP_WAIT_S = 3.0

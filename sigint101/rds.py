@@ -15,6 +15,7 @@ from .childproc import (
     command_line,
     emit_reception,
     running_command,
+    settle_ended,
     spawn,
     stop_process,
 )
@@ -314,18 +315,15 @@ class RDSDecoder:
 
     def _settle(self) -> None:
         """Account for a child that ended since the last poll, letting its reader drain before
-        clearing away what it left.
+        ending the run and clearing away what it left.
         """
         proc, self._proc = self._proc, None
         if proc is None:
             return
-        self._note_end(proc, self._runs.current)
-        self.watch.stopping()
-        if not stop_process(proc):
+        thread, self._thread = self._thread, None
+        if not settle_ended(proc, thread, self._runs, self.watch,
+                            note_end=self._note_end, wait_s=self.STOP_WAIT_S):
             self.error = "the RDS pipeline survived kill; the dongle may still be held"
-        if self._thread is not None:
-            self._thread.join(timeout=self.STOP_WAIT_S)
-            self._thread = None
 
     #: How long stop() waits, in seconds, for the reader to end once the pipeline is stopped.
     STOP_WAIT_S = 3.0
