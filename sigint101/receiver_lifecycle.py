@@ -467,6 +467,7 @@ class SupervisedReceiver:
                 run.diagnosed.set()
         except Exception as exc:
             run.failure = f"{run.watch.tool} exit could not be observed: {exc}"
+            run.diagnosed.set()
         if run.cancel.is_set():
             try:
                 self._close_transport(run.proc)
@@ -506,6 +507,26 @@ class SupervisedReceiver:
             run.complete.set()
             with self._reports_lock:
                 self._reports.discard(run)
+            if run.reaped:
+                self._close_diagnostics(run)
+
+    @staticmethod
+    def _close_diagnostics(run):
+        # DMR exposes its stderr as the reader's stdout. That reader still owns its stream.
+        reader_stream = getattr(run.proc, "stdout", None)
+        streams = []
+        for stage in childproc._stages(run.proc):
+            stderr = getattr(stage, "stderr", None)
+            if stderr is not None and stderr is not reader_stream:
+                streams.append(stderr)
+        if not streams:
+            return
+        run.diagnosed.wait()
+        for stream in streams:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
 
     def _retry(self, run):
         while not self._closing:

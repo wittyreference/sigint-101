@@ -325,8 +325,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
                                 context_processors=[status_bar, flock_tool])
 
-    # SSTV leaves radio identity to the hook, which uses the latest bus survey for serial lookup.
-    # The other RTL-SDR receivers send the radio they selected at launch.
+    # A hook called without launch metadata can use the latest bus survey for serial lookup.
     radio_census = []
 
     def enumerate_radios():

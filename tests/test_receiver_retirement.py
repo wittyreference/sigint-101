@@ -61,6 +61,18 @@ def test_child_exit_retires_reader_without_a_follow_up_request():
         decoder.stop()
 
 
+def test_idle_retirement_closes_the_captured_diagnostic_file():
+    proc = Child(["aprs"], said="the decoder could not read the radio")
+    decoder = _decoder(proc)
+    decoder.start()
+    try:
+        proc.code = 7
+        assert until(lambda: proc.stderr.closed, seconds=2), "the retired run kept stderr open"
+        assert "the decoder could not read the radio" in decoder.watch.reason
+    finally:
+        decoder.stop()
+
+
 @pytest.mark.parametrize("name", ["pocsag", "rds", "acars", "dmr", "flock"])
 def test_other_pipe_readers_retire_after_an_idle_exit(late_factory, name):  # noqa: F811
     spec = SPEC_BY_NAME[name]
