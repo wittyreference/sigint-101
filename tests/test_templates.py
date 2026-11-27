@@ -1281,25 +1281,36 @@ def test_exam_results_not_passed_reads_not_yet():
     assert "NOT YET" in html
 
 
-# --- lesson 18's Flock panel in a refusal ---------------------------------------
-# A refusal's end (the cause, the remedy, the countdown) is what a learner acts on, and a long port
-# name ran it past the two lines the fixed 124 px panel holds. In a lesson the panel grows for a
-# refusal, up to a cap of lines, and scrolls past them. These read the stylesheet; the render at
-# 800x480 is what proves the layout.
+# --- opted-in lesson decoder panels in a refusal --------------------------------
+# A refusal's end (the cause, the remedy, the countdown) is what a learner acts on, and a long
+# refusal runs past the two lines the fixed 124 px panel holds. In a lesson, panels that opt into
+# .decoder--fits-refusal grow for a refusal up to a cap of lines and scroll past them. These read
+# the stylesheet and templates; the render at 800x480 is what proves the layout.
 
 DECODER_PANEL_JS = TEMPLATES_DIR.parent / "static" / "decoder-panel.js"
 PANELS_HTML = TEMPLATES_DIR / "_panels.html"
 FITS_REFUSAL = "decoder--fits-refusal"
 REFUSAL_RULE_PREFIX = ".stage-panel--instrument .instrument > .decoder--fits-refusal:has("
+REFUSAL_HIDE_SELECTOR = (
+    ".decoder:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) "
+    "> :not(.decoder__head, .decoder__empty)"
+)
+OPTED_IN_PANEL_MACROS = frozenset({
+    "flock", "decode", "rds", "aprs", "pocsag", "acars", "ais", "dmr", "apt", "sstv", "flipper",
+})
+OPTED_OUT_PANEL_MACROS = frozenset({"adsb", "lora", "rayhunter"})
 # The lines of message the fixed panel shows when no rule lets it grow (measured at 800x480).
 FIXED_PANEL_MESSAGE_LINES = 2
-# The panel head's height at 800x480 (title, badge, padding, rule), measured in the render: not one
-# CSS value, so it is held here. 124 px less the 6 px border, this head, the message's 20 px
-# padding and two 26.1 px lines leaves the 5.43 px a third line does not need.
-DECODER_HEAD_PX = 40.37
-# The lowest the lesson's Prev and Next keys may sit while a refusal grows the panel (measured at
-# 800x480 with a four-line refusal).
-KEYS_BOTTOM_LIMIT_PX = 414.77
+# The panel head's height at 800x480 (title, 13 px badge, padding, rule), measured in the render
+# (41.84375 px in Chromium): not one CSS value, so it is held here and pinned to the badge size
+# below. 124 px less the 6 px border, this head, the message's 20 px padding and two 26.1 px lines
+# leaves 3.96 px a third line does not fit.
+DECODER_HEAD_PX = 41.84
+DECODER_BADGE_FONT_SIZE = "13px"
+# The lowest the lesson's Prev and Next keys may sit while a four-line refusal grows the panel:
+# 416.24 px by exact CSS arithmetic (416.22 px rendered in Chromium due to Blink 1/64 px line-height
+# rounding on 18 * 1.45).
+KEYS_BOTTOM_LIMIT_PX = 416.24
 SCREEN_HEIGHT_PX = 480
 CONSOLE_HTML = TEMPLATES_DIR / "console.html"
 
@@ -1418,15 +1429,22 @@ def test_only_a_refusal_grows_the_lesson_flock_panel():
     decls = _decls(panel[1])
     assert decls.get("height") == "auto", panel[1]
     assert decls.get("min-height") == _css_decl(".decoder", "height"), panel[1]
-    # Only the Flock panel opts in.
+    # Exactly the approved macros opt in; adsb (radar), lora and rayhunter stay out.
     html = PANELS_HTML.read_text()
-    in_class = r'class="[^"]*\b' + re.escape(FITS_REFUSAL) + r'\b'
-    flock_macro = re.search(r"\{% macro flock\(.*?\{% endmacro %\}", html, re.S).group(0)
-    assert re.search(in_class, flock_macro)
-    assert len(re.findall(in_class, html)) == 1
+    macros = dict(re.findall(r"\{% macro (\w+)\([^)]*\) %\}(.*?)\{% endmacro %\}", html, re.S))
+    opted_in = set()
+    for name, body in macros.items():
+        root = re.search(r"<div\b[^>]*>", body)
+        if root and re.search(r'class="[^"]*\b' + re.escape(FITS_REFUSAL) + r'\b', root.group(0)):
+            opted_in.add(name)
+    assert opted_in == OPTED_IN_PANEL_MACROS
+    assert not (opted_in & OPTED_OUT_PANEL_MACROS)
+    assert OPTED_OUT_PANEL_MACROS <= set(macros)
 
 
 def test_a_grown_refusal_keeps_the_lesson_keys_and_complete_on_screen():
+    # Pin the badge size DECODER_HEAD_PX was measured at so a badge change cannot silently pass.
+    assert _css_decl(".decoder__status", "font-size") == DECODER_BADGE_FONT_SIZE
     lines = refusal_lines_shown()
     assert lines != math.inf, "the refusal rule lets the panel grow without a cap"
     bar = _px(_css_decl(".app", "--bar-h"))
@@ -1458,6 +1476,40 @@ def test_a_grown_refusal_keeps_the_lesson_keys_and_complete_on_screen():
                                     "min-height": _css_decl(".decoder", "height")}, panel[1]
     if message is not None:
         assert set(_decls(message[1])) == {"max-height", "overflow-y"}, message[1]
+
+
+def test_radar_and_gallery_panels_match_the_refusal_hide_rule():
+    # app.css hides every direct child of .decoder except head and empty during a refusal. That is
+    # what collapses the gallery frame on apt/sstv and gives the radar its full height on adsb.
+    assert _css_decl(REFUSAL_HIDE_SELECTOR, "display") == "none"
+    html = PANELS_HTML.read_text()
+    macros = dict(re.findall(r"\{% macro (\w+)\([^)]*\) %\}(.*?)\{% endmacro %\}", html, re.S))
+    for name, expected_children in (
+        ("adsb", ("radar__scope", "radar__count")),
+        ("apt", ("gallery__frame",)),
+        ("sstv", ("gallery__frame",)),
+    ):
+        body = macros[name]
+        # The root element is a .decoder, and each target child sits at depth 1 inside it.
+        root_match = re.search(r'<div class="([^"]*)"', body)
+        assert root_match and "decoder" in root_match.group(1).split(), (name, body)
+        inner = body[root_match.end():]
+        depth = 0
+        direct_classes = []
+        for tag in re.finditer(r"<(/?)(div|figure|ul|aside|p|section)\b([^>]*)>", inner):
+            closing, _elem, attrs = tag.groups()
+            if closing:
+                depth -= 1
+                if depth < 0:
+                    break
+            else:
+                if depth == 0:
+                    cls = re.search(r'class="([^"]*)"', attrs)
+                    if cls:
+                        direct_classes.extend(cls.group(1).split())
+                depth += 1
+        for child_cls in expected_children:
+            assert child_cls in direct_classes, (name, child_cls, direct_classes)
     # Explain holds Complete lesson (468 px, measured in the render, not computed here). What keeps
     # the rules off it is their .stage-panel--instrument prefix (test above) and that console.html
     # gives that class only to the stages in its INSTRUMENT list, which explain is not in.

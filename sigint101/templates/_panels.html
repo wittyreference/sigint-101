@@ -7,7 +7,11 @@
    anywhere on the panel opens the whole line over the panel, so the touch target is the panel,
    not the one-line strip. Sitting in the head row, it costs the fixed-height panel no height. The
    rack draws one strip under the whole panel instead (head_command=false), which decoder-panel.js
-   finds through the rack's [data-command-scope]. #}
+   finds through the rack's [data-command-scope].
+
+   Decoder panels whose worst refusal runs past two lines carry .decoder--fits-refusal so they
+   grow up to four lines in a lesson. operate.html uses the same macros, but app.css scopes the
+   growth rule with `.stage-panel--instrument .instrument >`, keeping the rack out of it. #}
 {% macro command_strip() %}<button class="cmdstrip" type="button" data-command hidden aria-expanded="false"
                           aria-label="The command this panel is running; tap the panel to show it whole"><code data-command-text></code></button>{% endmacro %}
 
@@ -118,9 +122,9 @@
 {# ---- Decode instrument (M10): rtl_433 reads the ISM band and lists what each sensor said. FSK's
    two tones do not resolve on a 125 kHz-bin waterfall, so the honest instrument here is the
    decoder, not the eye. decode.js polls /api/decode and fills the list; no radio / no rtl_433 shows
-   an honest empty state, never a fabricated read. ---- #}
+   an honest empty state, never a fabricated read. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro decode(mhz, head_command=true) %}
-              <div class="decoder" data-decode-panel
+              <div class="decoder decoder--fits-refusal" data-decode-panel
                    aria-label="Live rtl_433 sensor decodes on the ISM band">
                 <div class="decoder__head">
                   <span class="decoder__title">rtl_433 &middot; DECODE</span>
@@ -152,9 +156,9 @@
 {# ---- RDS instrument (M12): the data riding the FM station's 57 kHz subcarrier, which the
    waterfall never showed. rtl_fm|redsea decodes it; rds.js polls /api/rds and fills the station
    card as the groups assemble. No radio / no redsea shows an honest empty state, never a fabricated
-   station. ---- #}
+   station. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro rds(head_command=true) %}
-              <div class="decoder" data-rds-panel aria-label="Live RDS station data">
+              <div class="decoder decoder--fits-refusal" data-rds-panel aria-label="Live RDS station data">
                 <div class="decoder__head">
                   <span class="decoder__title">redsea &middot; RDS</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
@@ -214,9 +218,9 @@
 {# ---- APRS roster (M14): amateur packet on the 2m channel, which a waterfall only shows as a brief
    FM blip. rtl_fm|multimon-ng decodes the AX.25 frames; aprs.js polls /api/aprs and lists each
    station with its latest packet (position, message or status). No radio / no multimon-ng / a quiet
-   channel shows an honest empty roster. ---- #}
+   channel shows an honest empty roster. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro aprs(mhz=144.39, head_command=true) %}
-              <div class="decoder" data-aprs-panel aria-label="Live APRS station roster">
+              <div class="decoder decoder--fits-refusal" data-aprs-panel aria-label="Live APRS station roster">
                 <div class="decoder__head">
                   <span class="decoder__title">multimon-ng &middot; APRS</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
@@ -231,9 +235,9 @@
    burst of FSK. rtl_fm|multimon-ng decodes the pages; pocsag.js polls /api/pocsag and lists each
    page's cap code, kind, length and baud. The words are dropped server-side wherever the decoder
    is tuned (framing live, text hidden: MC's call). No radio / no multimon-ng / a silent channel
-   shows an honest empty log. ---- #}
+   shows an honest empty log. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro pocsag(mhz, head_command=true) %}
-              <div class="decoder" data-pocsag-panel aria-label="Live POCSAG page framing">
+              <div class="decoder decoder--fits-refusal" data-pocsag-panel aria-label="Live POCSAG page framing">
                 <div class="decoder__head">
                   <span class="decoder__title">multimon-ng &middot; POCSAG</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
@@ -247,9 +251,9 @@
 {# ---- ACARS log (M16): the typed messages aircraft send on VHF, which a waterfall shows only as a
    brief AM burst. acarsdec decodes them; acars.js polls /api/acars and lists each message with its
    aircraft and text. No radio / no acarsdec / a quiet channel shows an honest empty log, never a
-   fabricated message. ---- #}
+   fabricated message. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro acars(mhz=131.55, head_command=true) %}
-              <div class="decoder" data-acars-panel aria-label="Live ACARS message log">
+              <div class="decoder decoder--fits-refusal" data-acars-panel aria-label="Live ACARS message log">
                 <div class="decoder__head">
                   <span class="decoder__title">acarsdec &middot; ACARS</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
@@ -263,9 +267,9 @@
 {# ---- AIS roster (M26): the identity + position big ships broadcast in the clear on marine VHF,
    which a waterfall shows only as a GMSK burst. rtl_ais decodes the AIVDM sentences; ais.js polls
    /api/ais and lists each vessel by MMSI. No radio / no rtl_ais / an inland empty sea shows an
-   honest empty roster, never a fabricated vessel. ---- #}
+   honest empty roster, never a fabricated vessel. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro ais(head_command=true) %}
-              <div class="decoder" data-ais-panel aria-label="Live AIS vessel roster">
+              <div class="decoder decoder--fits-refusal" data-ais-panel aria-label="Live AIS vessel roster">
                 <div class="decoder__head">
                   <span class="decoder__title">rtl_ais &middot; AIS</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
@@ -279,9 +283,9 @@
 {# ---- DMR/P25 call log (M27): digital voice carried as a four-level FSK bitstream, which a
    waterfall shows only as a channel lighting up. dsd-fme reads the clear signaling; dmr.js polls
    /api/dmr and lists each call by talkgroup + source. No radio / no dsd-fme / a quiet channel shows
-   an honest empty log, never a fabricated call. ---- #}
+   an honest empty log, never a fabricated call. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro dmr(mhz=450.0, head_command=true) %}
-              <div class="decoder" data-dmr-panel aria-label="Live DMR/P25 call log">
+              <div class="decoder decoder--fits-refusal" data-dmr-panel aria-label="Live DMR/P25 call log">
                 <div class="decoder__head">
                   <span class="decoder__title">dsd-fme &middot; DMR / P25</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
@@ -295,9 +299,9 @@
 {# ---- NOAA APT image (M24): a weather picture from a ~137 MHz satellite pass, which a waterfall
    shows only as a wandering FM carrier. satdump decodes the pass to a PNG; apt.js polls /api/apt
    and shows the newest image (served from /media). No radio / no satdump / no pass decoded shows an
-   honest empty frame, never a placeholder picture. ---- #}
+   honest empty frame, never a placeholder picture. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro apt(head_command=true) %}
-              <div class="decoder gallery" data-apt-panel aria-label="Live NOAA APT weather image">
+              <div class="decoder decoder--fits-refusal gallery" data-apt-panel aria-label="Live NOAA APT weather image">
                 <div class="decoder__head">
                   <span class="decoder__title">satdump &middot; NOAA APT</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
@@ -314,9 +318,9 @@
 {# ---- SSTV image (M25): a picture sent as audio tones (the ISS downlink), which a waterfall shows
    only as a warbling FM signal. rtl_fm|sox|sstv decodes it to a PNG; sstv.js polls /api/sstv and
    shows the newest image (served from /media). No radio / no tools / nothing decoded shows an
-   honest empty frame, never a placeholder picture. ---- #}
+   honest empty frame, never a placeholder picture. Opts into .decoder--fits-refusal in a lesson. ---- #}
 {% macro sstv(mhz, head_command=true) %}
-              <div class="decoder gallery" data-sstv-panel aria-label="Live SSTV picture">
+              <div class="decoder decoder--fits-refusal gallery" data-sstv-panel aria-label="Live SSTV picture">
                 <div class="decoder__head">
                   <span class="decoder__title">sstv &middot; SSTV</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
@@ -381,9 +385,10 @@
    a time. flipper.js polls /api/flipper and fills the device card with the device's own account
    of itself: its name, model, firmware and region, and its Bluetooth radio state in words. No
    Flipper on USB, two on the bus, or an app open on it hides the card and shows the reason, never
-   a fabricated device. It is its own USB device, so reading it never touches the SDR. ---- #}
+   a fabricated device. It is its own USB device, so reading it never touches the SDR. Opts into
+   .decoder--fits-refusal in a lesson so a two-Flipper refusal fits whole. ---- #}
 {% macro flipper() %}
-              <div class="decoder" data-flipper-panel aria-label="The attached Flipper Zero, read over USB">
+              <div class="decoder decoder--fits-refusal" data-flipper-panel aria-label="The attached Flipper Zero, read over USB">
                 <div class="decoder__head">
                   <span class="decoder__title">Flipper &middot; USB CLI</span>
                   <span class="decoder__status" data-flipper-badge>CHECKING</span>
