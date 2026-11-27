@@ -2377,7 +2377,7 @@ def test_exam_serves_a_study_card_with_tap_choices_and_no_answer(tmp_path):
         resp = client.get("/exam")
     assert resp.status_code == 200
     # It surfaces a real pool question (its id is in the eyebrow) with four tap choices.
-    served = re.search(r"EXAM &middot; (T\w+)", resp.text).group(1)
+    served = re.search(r"EXAM TRAINER &middot; (T\w+)", resp.text).group(1)
     assert exam.load_pool().get(served) is not None
     assert resp.text.count('name="choice"') == 4
     # Commit-before-reveal: the correct answer is not marked until the learner has answered.
