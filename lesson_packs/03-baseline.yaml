@@ -17,8 +17,8 @@ stages:
     Tonight, comrade, you learn the most unsettling way a radio can fail — quietly — and the one
     plain habit that catches it.
   demo: >-
-    Watch — hands off. The provenance panel records the radio: gain, chip temperature, clean
-    power, and a local FM reference station. Capture it: tonight's baseline.
+    Watch — hands off. The provenance panel shows the radio: gain, chip temperature, whether power
+    is clean, and a local FM reference. Capture it: tonight's baseline.
   try: >-
     Tap Capture baseline, comrade — that stamps tonight's radio, settings, temperature and
     reference level. The lesson is in the repeat: do it again tomorrow.

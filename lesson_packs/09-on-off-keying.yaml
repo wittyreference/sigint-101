@@ -38,8 +38,8 @@ stages:
     column was — a carrier still lit like AM's, the signal dropped to the noise floor, or a dim
     half-carrier? Lock it in.
   observe: >-
-    Watch one press and release on 433.92. In the gap, is anything holding that spot, or bare
-    noise floor? If the carrier comes and goes, what carries the message?
+    Go back to 433.92 and watch one press and release. In the gap, is anything holding that spot,
+    or bare noise floor? If the carrier comes and goes, what carries the message?
   explain: >-
     All the way down, as the last lesson promised. With no carrier half the time, the message
     can't ride height or pitch: it *is* the pattern of burst and gap lengths, Morse with a

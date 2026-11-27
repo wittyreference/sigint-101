@@ -30,8 +30,8 @@ stages:
   predict: >-
     Plugged into the nomad like this, what does the Flipper gain? Lock it in.
   observe: >-
-    Compare them: the Flipper has a tiny screen and microSD; the nomad has an 800-by-480 panel,
-    disk and lessons, carrying its command line and files over USB.
+    The Flipper: a tiny screen, a microSD you can't read at a glance. The nomad: an 800-by-480
+    panel, disk, lessons. USB carries the Flipper's command line and files both ways.
   explain: >-
     A bench, not radios: the Flipper has the same antennas plugged in as in your pocket, so no
     range or speed is gained. On its own it is the field tool: you carry it, capture with it, and

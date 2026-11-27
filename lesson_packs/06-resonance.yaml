@@ -21,15 +21,16 @@ tune:
 
 stages:
   frame: >-
-    Tonight, comrade, you learn why the right antenna is not the biggest one: an antenna rings like a tuning
-    fork — loud at one length, quieter everywhere else — and you are going to feel it happen under
-    your own thumbs.
+    Tonight, comrade, you learn why the right antenna is not the biggest one: an antenna rings
+    like a tuning fork — loud at one length, quieter everywhere else — and you are going to feel
+    it happen under your own thumbs at 1090 MHz, where aircraft report positions in microsecond
+    bursts.
   demo: >-
-    Watch — hands off. The FM whip hears worse at 1090 MHz. Wavelength is 300 over MHz: 3 m at
-    100, 0.28 m at 1090 — 1090 wants a quarter-wave leg just under 7 cm.
+    Watch — hands off. The FM whip hears worse at 1090 MHz. Wavelength is 300 over MHz: three at
+    100, about 0.28 at 1090. A quarter-length leg, just under 7 cm.
   try: >-
-    Swap in the kit's dipole, comrade: legs long, then just under 7 cm, watching 1090's floor for
-    a faint hump. Still flat? A quiet sky looks like poor hearing.
+    Swap in the kit's dipole, comrade: legs long, then just under 7 cm, watching 1090's floor:
+    aircraft lift a faint hump. Still flat? A quiet sky looks like poor hearing.
   predict: >-
     You set the legs for 1090 MHz with 300 over the frequency. Now picture 915 MHz, where small
     wireless gadgets chatter — lower than 1090. To ring there, do the legs get LONGER, SHORTER, or

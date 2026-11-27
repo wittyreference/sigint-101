@@ -27,8 +27,8 @@ stages:
     Watch — hands off. The Nomad's LoRa radio runs meshtasticd: node id, SNR, and text — or
     "(encrypted — not on our channel)". Empty? A mesh of one hears nothing.
   try: >-
-    Read the list, comrade: text shares LongFast; encrypted is another channel. Empty until a
-    second node sends on LongFast (antenna always on, same region).
+    Read, not key, comrade: text means the node shares LongFast; encrypted, another channel. Empty
+    until a second node sends on LongFast (antenna always on, same region).
   predict: >-
     A node too far to hear you directly, one node between. What happens to your text? Lock it in.
   observe: >-

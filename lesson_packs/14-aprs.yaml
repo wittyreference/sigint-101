@@ -37,8 +37,8 @@ stages:
   predict: >-
     A 2m APRS burst is a half-second blip on the waterfall. Decoded, what is inside it? Lock it in.
   observe: >-
-    Look at a row: station, digipeaters, place and words — all in the air waiting for a decoder
-    that knew the frame. Empty roster: failing decoder, or no one in range?
+    Station, digipeaters, place and words: how much was in the air all along, waiting for
+    something that knew the frame? Empty roster: failing decoder, or no one in range?
   explain: >-
     A structured packet. APRS speaks AX.25, amateur radio's packet link protocol; every frame has
     one skeleton: source callsign and SSID, destination, digipeater path and an information field

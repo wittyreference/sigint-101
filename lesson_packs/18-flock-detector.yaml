@@ -27,8 +27,8 @@ stages:
     touch the camera. You will not transmit a thing. You will only listen to what it is already
     saying to the air.
   demo: >-
-    Watch — hands off. A WiFi radio in monitor mode hears 802.11 probes: OUI (maker prefix),
-    Information Element order and hunted network, matched to a Flock camera.
+    Watch — hands off. A WiFi radio in monitor mode hears 802.11 probes: OUI, Information Element
+    order and hunted network, all matched against a Flock camera's shape.
   try: >-
     Let it listen, comrade: probes come in bursts. On a flagged row, check the OUI maker and
     whether the whole fingerprint or only the prefix matched.

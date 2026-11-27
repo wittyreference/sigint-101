@@ -33,8 +33,8 @@ stages:
     Watch — hands off. A VIS header names the mode; sync starts each line; pitch is pixel
     brightness. rtl_fm pulls audio and the decoder paints pixels line by line.
   try: >-
-    Give it a minute or two, comrade: a frame paints slowly top to bottom. ARISS uses 437.550 MHz
-    (ariss.org lists events). What comes out of all that warbling?
+    Give it a minute or two, comrade, and watch it build. ARISS events have used 437.550 since
+    2026 (ariss.org lists each event's frequency and mode). What comes out?
   predict: >-
     A minute of warbling tones — no words, no station name. Feed it to the decoder: what comes out?
     Lock it in.

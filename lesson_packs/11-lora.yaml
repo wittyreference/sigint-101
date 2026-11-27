@@ -25,8 +25,8 @@ stages:
     Watch — hands off. The Nomad's LoRa radio logs sender, message and SNR — often NEGATIVE,
     weaker than the noise, yet decoded whole where plain data is gone.
   try: >-
-    Send from a second node (antenna always on, same region, LongFast), 50 cm from the Nomad; read
-    its SNR. Empty? Alone, an empty list is the honest answer.
+    Send a few from a second Meshtastic node at least 50 cm from the Nomad (antenna always on,
+    same region, LongFast); read each SNR. Alone, an empty list is the honest answer.
   predict: >-
     A LoRa packet on this radio's LongFast preset arrives twelve dB below the noise floor — weaker
     than the very noise around it. Does it decode cleanly, arrive garbled, or fail outright?

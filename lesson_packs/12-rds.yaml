@@ -27,8 +27,8 @@ stages:
     quiet subcarrier, a second signal tucked inside the station's own. Tonight you read the words
     that were there all along.
   demo: >-
-    Watch — hands off. redsea pulls a hidden 57 kHz PSK subcarrier from the FM station, filling
-    the card: station name (PS, 8 chars), programme type, and RadioText.
+    Watch — hands off. redsea pulls a hidden 57 kHz PSK subcarrier from the FM station: station
+    name (the PS, eight characters), programme type, and RadioText.
   try: >-
     Give the card a few seconds to assemble, comrade: RDS is slow. Read the programme type and the
     RadioText. Empty? Set your strongest station (the quick-start shows how).

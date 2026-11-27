@@ -31,16 +31,16 @@ stages:
     megahertz. A wire antenna and your dongle could catch it until 2025, and when the lines stacked
     up you held a picture of your own sky, taken from space. That is the prize.
   demo: >-
-    Watch — hands off. APT on 137 MHz is a 2400 Hz FM tone: loudness is brightness, two lines a
-    second, visible and infrared. Empty? Honestly so — the end says why.
+    Watch — hands off. APT on 137 megahertz is a 2400-hertz tone on an FM carrier: loudness is
+    brightness, two lines a second. Empty? Honestly so — the end says why.
   try: >-
     Digital frames pass a checksum or vanish, comrade; APT has neither — just a tone whose
     loudness is a pixel. Buried in hiss, what does that picture do?
   predict: >-
     A weak, noisy pass, the tone buried in hiss. What does that leave you? Lock it in.
   observe: >-
-    A packet past error correction is thrown away whole; APT has no checksum, each tone moment a
-    brightness. What does hiss do to it — is a half-spoiled line lost?
+    Past its error correction, a packet fails its checksum and is thrown away whole; APT has none.
+    What does hiss do to a brightness — is a half-spoiled line lost?
   explain: >-
     A grainy but real image, comrade. APT is analog, so it fails gracefully: noise rides along as
     false brightness, and a weak pass comes down faded and speckled, banded with static where the
