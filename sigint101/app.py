@@ -321,7 +321,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 context_processors=[status_bar, flock_tool])
 
     # The latest bus survey supplies serials to reception hooks whose receiver sends no radio.
-    # Each guarded receiver carries its own selection from launch.
+    # Guarded RTL-SDR decoders and APT send the radio they selected at launch.
     radio_census = []
 
     def enumerate_radios():
