@@ -1818,9 +1818,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def _recent_receptions() -> list:
         """The newest receptions, oldest first, read in from the log the first time asked.
 
-        The log is a file and can hold a pager reception that carries a page's words. Each one
-        is read in through without_page_words, so whatever is stored, none of it reaches a
-        response or the rack's LOG line; the file itself is never rewritten.
+        The log can hold a pager reception with the page's text and the line built from it.
+        On readback, without_page_words withholds the item's text and replaces the stored summary
+        with a line built from the framing for the response and the rack's LOG. Other item fields
+        and receptions from other instruments pass through as stored, and the file is left alone.
         """
         with reception_lock:
             if app.state.receptions is None:

@@ -255,12 +255,13 @@ def reception_record(inst: Instrument, item: dict, *, freq_hz, command, ppm, rad
 
 
 def without_page_words(event: dict) -> dict:
-    """Return a pager reception with its item text cleared and its summary rebuilt.
+    """A logged reception as the console reads it back for the rack and the API.
 
-    Copy the stored item dict or use an empty dict for other item types. Set `item.text` to None
-    and set `item.text_withheld` to True if the stored text was truthy. Rebuild the summary from
-    the item's address, kind, length and withholding flag. Other fields pass through, leaving
-    the input event and log file untouched. Return non-pager events as supplied.
+    The event log is a file, and a pager reception in it can carry the page's text and a summary
+    that includes it. On readback, the console withholds `item.text` and sets `text_withheld`
+    when there was text. The stored summary is replaced with a line built from the item's
+    framing, and the other item fields pass through as stored. The pager event is copied in
+    memory and the file is left as it is. Receptions from other instruments pass through as logged.
     """
     payload = event.get("payload")
     if not isinstance(payload, dict) or payload.get("instrument") != "pager":
