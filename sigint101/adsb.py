@@ -205,7 +205,7 @@ class _Feed:
     subprocess's stdout.
     """
 
-    def __init__(self, proc: subprocess.Popen, sock: socket.socket):
+    def __init__(self, proc: subprocess.Popen, sock: socket.socket | None = None):
         self._proc = proc
         self._sock = sock
         self._closed = threading.Event()
@@ -255,7 +255,7 @@ class _Feed:
     def _close_socket(self):
         """Let go of the SBS connection and wake a reader blocked in recv."""
         with self._transport_lock:
-            if self._transport_closed:
+            if self._transport_closed or self._sock is None:
                 return
             self._closed.set()
             try:
@@ -296,25 +296,29 @@ def _popen(device: int) -> _Feed:
         [DUMP1090, "--device-index", str(device), "--net",
          "--net-sbs-port", str(SBS_PORT), "--quiet"],
         stdout=subprocess.DEVNULL)
-    # dump1090 needs a moment to grab the dongle and open its listener.
-    deadline = time.time() + 5.0
-    while True:
-        try:
-            sock = socket.create_connection(("127.0.0.1", SBS_PORT), timeout=1.0)
-            break
-        except OSError:
-            if time.time() > deadline or proc.poll() is not None:
-                reason = "dump1090 did not open its SBS port — cannot read the ADS-B feed"
-                if not stop_process(proc):
-                    raise PartialLaunch(proc, reason)
-                raise AdsbUnavailable(reason)
-            time.sleep(0.2)
+    # Keep the actual child and any candidate socket under one owner from spawn onward.
+    feed = _Feed(proc)
+    deadline = time.monotonic() + 5.0
     try:
-        sock.settimeout(FEED_POLL_S)
-    except OSError as exc:
-        sock.close()
-        raise PartialLaunch(proc, exc) from exc
-    return _Feed(proc, sock)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AdsbUnavailable(
+                    "dump1090 did not open its SBS port — cannot read the ADS-B feed")
+            try:
+                feed._sock = socket.create_connection(("127.0.0.1", SBS_PORT),
+                                                      timeout=min(1.0, remaining))
+                break
+            except (ConnectionRefusedError, TimeoutError):
+                if proc.poll() is not None:
+                    raise AdsbUnavailable(
+                        "dump1090 did not open its SBS port — cannot read the ADS-B feed")
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        feed._sock.settimeout(FEED_POLL_S)
+    except Exception as exc:
+        # C40 fences the reader and retains the process even if teardown also fails.
+        raise PartialLaunch(feed, exc) from exc
+    return feed
 
 
 @dataclass
