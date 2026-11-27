@@ -212,7 +212,8 @@ class SstvDecoder(SupervisedReceiver):
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self._staging_dir.mkdir(parents=True, exist_ok=True)
             with self._life:
-                # Held across the sweep, so no launch of this console can start under it.
+                # The once-only flag is the guard: every launch needs an earlier _prepare_launch,
+                # and the first one sets the flag, so no launch of this console precedes the sweep.
                 if not self._staging_swept and self._run is None:
                     self._staging_swept = True
                     self._sweep_previous_staging()
