@@ -1,6 +1,7 @@
 # ABOUTME: Tests deploy/provision.sh in a throwaway HOME with stubs on PATH, so nothing changes
 # ABOUTME: on the host: missing or old Node warns and continues (or reports pending under --check).
 
+import os
 import re
 import shutil
 import subprocess
@@ -62,7 +63,12 @@ class ProvisionBox:
               '  *) echo learner ;;\n'
               'esac')
         _stub(self.bin / "uname", 'echo aarch64')
-        _stub(self.bin / "sudo", f'echo "sudo $*" >> "{self.log}"\nexit 0')
+        # write_root_file pipes configuration into sudo tee. Drain it like tee would,
+        # so the producer can finish even if the stub starts first.
+        _stub(self.bin / "sudo",
+              f'echo "sudo $*" >> "{self.log}"\n'
+              'if [ "$1" = tee ]; then exec cat >/dev/null; fi\n'
+              'exit 0')
         _stub(self.bin / "systemctl",
               f'echo "systemctl $*" >> "{self.log}"\n'
               'if [ "$1" = "get-default" ]; then echo graphical.target; fi\n'
@@ -126,6 +132,21 @@ def _pending_count(stdout: str) -> int:
     match = re.search(r"^check: (\d+) change\(s\) pending,", stdout, re.MULTILINE)
     assert match, f"no check summary line in output:\n{stdout}"
     return int(match.group(1))
+
+
+def test_sudo_tee_stub_drains_its_input_without_writing_a_file(box):
+    # Keep a copy of the read end to check what tee left behind. Put the bytes in the
+    # pipe before launching it so this check needs no scheduling or timeout assumptions.
+    read_fd, write_fd = os.pipe()
+    target = box.home / "root.conf"
+    with os.fdopen(read_fd, "rb") as source:
+        with os.fdopen(write_fd, "wb") as sink:
+            sink.write(b"provision config\n")
+        result = subprocess.run([str(box.bin / "sudo"), "tee", str(target)], stdin=source,
+                                env=box.env, capture_output=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert source.read() == b"", "the tee stub exited without draining the provision pipe"
+    assert not target.exists()
 
 
 def test_missing_node_warns_and_provisioning_continues(box):
