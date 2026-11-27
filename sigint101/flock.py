@@ -804,6 +804,7 @@ class MarauderLink:
         self._answer_timeout = answer_timeout
         self._answer_by = clock() + answer_timeout
         self._seen = b""
+        self._restart_pending = False
 
     def send(self, line: str) -> None:
         """Type one command into Marauder's console."""
@@ -819,6 +820,10 @@ class MarauderLink:
         while True:
             fd = self._fd
             if fd is None:
+                return b""
+            if self._restart_pending:
+                self.end("Marauder restarted on the devboard (its boot text arrived), so its "
+                         "sniff stopped")
                 return b""
             if not self.answered and self._clock() >= self._answer_by:
                 self.end(f"no answer from Marauder on {self.path} within "
@@ -846,15 +851,25 @@ class MarauderLink:
             if not data:
                 self.end(f"the serial link to Marauder on {self.path} closed ({why})")
                 return b""
-            seen = self._seen + data
+            tail = self._seen
+            seen = tail + data
             self._seen = seen[-(MARAUDER_MARKER_TAIL):]
+            search_from = 0
             if not self.answered:
-                self.answered = MARAUDER_BEGIN in seen
-            elif MARAUDER_BOOT in seen:
-                self.end("Marauder restarted on the devboard (its boot text arrived), so its "
-                         "sniff stopped")
-                return b""
-            return data
+                begin = seen.find(MARAUDER_BEGIN)
+                if begin < 0:
+                    return data
+                self.answered = True
+                search_from = begin + len(MARAUDER_BEGIN)
+            boot = seen.find(MARAUDER_BOOT, search_from)
+            if boot < 0:
+                return data
+            # A split marker can start in the tail. Return only the capture prefix in this
+            # read, keeping the link live until the frame reader asks for more.
+            self._restart_pending = True
+            before_boot = data[:max(0, boot - len(tail))]
+            if before_boot:
+                return before_boot
 
     def end(self, reason: str | None = None) -> None:
         """Stop the sniff and release the port, with why if it was not asked for."""
