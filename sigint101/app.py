@@ -310,8 +310,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     reports "no radio" — which is how the suite honours the no-mock-hardware invariant with no
     dongle attached. The module-level `app` below uses the real ones.
     """
-    # The status bar's battery, on every page: the UPS's INA219 as its daemon reports it, or
-    # unknown. A box with no gauge shows a dash, never a number. Tests hand in their own gauge.
+    # The status bar reads the UPS's INA219. A box without a measurement shows a dash.
+    # Tests can supply a gauge at the app boundary.
     battery = BatteryGauge() if battery_gauge is None else battery_gauge
 
     def status_bar(request: Request) -> dict:
@@ -1794,7 +1794,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.get("/api/battery")
     def battery_reading():
         """The pack as the status bar shows it, for the bar's own refresh: a reading, or absent
-        with the reason (no daemon, an I2C error, a stale poll)."""
+        with the reason (missing adapter, I2C error, or incomplete conversion)."""
         reading = battery.read()
         if reading is None:
             return {"present": False, "reason": battery.reason}

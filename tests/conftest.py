@@ -1,7 +1,9 @@
-# ABOUTME: Isolates console tests from Meshtastic hardware and the live ADS-B port.
-# ABOUTME: Tests can inject a radio interface and use a temporary SBS port.
+# ABOUTME: Keeps console tests off real Meshtastic and UPS I2C interfaces.
+# ABOUTME: ADS-B tests use temporary SBS ports away from the live console.
 
 import socket
+import sys
+from types import SimpleNamespace
 
 import pytest
 from meshtastic import tcp_interface
@@ -14,6 +16,14 @@ def no_real_meshtastic(monkeypatch):
             raise OSError("meshtasticd is unavailable in tests")
 
     monkeypatch.setattr(tcp_interface, "TCPInterface", NoRadioTCP)
+
+
+@pytest.fixture(autouse=True)
+def no_real_i2c(monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise FileNotFoundError("the I2C bus is unavailable in tests")
+
+    monkeypatch.setitem(sys.modules, "smbus2", SimpleNamespace(SMBus=refuse))
 
 
 @pytest.fixture(autouse=True)
