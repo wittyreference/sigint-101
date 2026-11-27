@@ -884,6 +884,65 @@ def test_marauder_source_whose_devboard_restarts_is_stopped_not_left_live(bridge
     assert dec.watch.reason.startswith("Marauder restarted on the devboard")
 
 
+@pytest.mark.parametrize("ending", ["coalesced", "split", "marker-alone", "first-chunk"])
+def test_marauder_reboot_delivers_only_capture_before_the_marker(monkeypatch, ending):
+    # A pipe fixes the read boundaries. Detection and exit reporting still use the real link
+    # and detector, and a valid frame after the marker would be visible if it leaked through.
+    first, last, after = (
+        mgmt_frame(4, BROADCAST, FLOCK_OUI + bytes((0, 0, index)), BROADCAST, FLOCK_IES)
+        for index in (1, 2, 3)
+    )
+    boot = flock_module.MARAUDER_BOOT
+    initial = marauder_stream([first], startup=boot + b"v4.4.4\r\n")
+    final = marauder_chunk(marauder_record(last, 2_000_000))
+    trailer = b"v4.4.4\r\n" + marauder_chunk(marauder_record(after, 3_000_000))
+    reader, writer = os.pipe()
+    link = MarauderLink(reader, "bridge")
+    dec = MarauderFlockDetector(glob=lambda _pattern: [link.path])
+    monkeypatch.setattr(dec, "_open_capture", lambda: link)
+    reported = []
+    delivered = []
+    read = link.read
+
+    def record_read(size):
+        data = read(size)
+        delivered.append(data)
+        return data
+
+    monkeypatch.setattr(link, "read", record_read)
+    dec.on_reception = lambda item: reported.append((item["mac"], link.poll()))
+    expected_macs = ["b4:1e:52:00:00:01"]
+    before_boot = final if ending in ("coalesced", "split") else b""
+    if before_boot:
+        expected_macs.append("b4:1e:52:00:00:02")
+    expected_data = initial + before_boot
+    split_at = len(boot) // 2 if ending == "split" else 0
+    with os.fdopen(writer, "wb", buffering=0) as serial:
+        try:
+            dec.start()
+            if ending == "first-chunk":
+                before_boot = initial
+            else:
+                serial.write(initial)
+                wait_for(lambda: len(reported) == 1)
+            if split_at:
+                serial.write(before_boot + boot[:split_at])
+                wait_for(lambda: len(reported) == 2)
+                before_boot = b""
+            serial.write(before_boot + boot[split_at:] + trailer)
+            dec.drain(timeout=1.0)
+            assert reported == [(mac, None) for mac in expected_macs]
+            assert {row["mac"] for row in dec.detections()} == set(expected_macs)
+            assert b"".join(delivered) in (expected_data, expected_data + boot[:split_at])
+            reason = ("Marauder restarted on the devboard (its boot text arrived), "
+                      "so its sniff stopped")
+            assert not dec.running and link.wait(timeout=0) == 1
+            assert link.end_reason == dec.watch.reason == reason
+        finally:
+            dec.stop()
+            link.kill()
+
+
 def test_marauder_stream_it_cannot_read_stops_the_sniff_and_says_why(bridge):
     dec = MarauderFlockDetector(tty=bridge.path)
     dec.start()
