@@ -160,6 +160,8 @@ def test_startup_backfill_is_idempotent_and_recovers_an_orphan_even_after_clock_
 
 @pytest.mark.parametrize("failure", ["log", "sqlite"])
 def test_write_failures_keep_the_reader_alive_and_errors_clear(tmp_path, monkeypatch, failure):
+    now = [100.0]
+    monkeypatch.setattr(console, "monotonic", lambda: now[0])
     with _client(tmp_path) as client:
         assert _stamps(client)["error"] is None
         if failure == "sqlite":
@@ -184,6 +186,7 @@ def test_write_failures_keep_the_reader_alive_and_errors_clear(tmp_path, monkeyp
         if failure == "sqlite":
             with closing(sqlite3.connect(tmp_path / "progress.db")) as db, db:
                 db.execute("DROP TRIGGER cannot_stamp")
+            now[0] += console.STAMP_RETRY_S
         _hear(client, command="rtl_433 -d 1")
         row = _ism(client)
         assert row["count"] == (2 if failure == "sqlite" else 1)
@@ -368,3 +371,82 @@ def test_api_reports_a_write_error_even_when_badges_cannot_be_read(tmp_path, mon
         assert _stamps(client) == {
             "stamps": [], "error": "a reception badge could not be saved: badge database is locked",
         }
+
+
+def test_failed_badge_recovery_is_rate_limited(tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(console, "monotonic", lambda: now[0], raising=False)
+    log = tmp_path / "events.jsonl"
+    events.log_event(log, "tick", {})
+    with _client(tmp_path) as client:
+        calls = []
+
+        def read(path):
+            calls.append(path)
+            return events.read_events(path)
+
+        def unavailable(*args, **kwargs):
+            raise sqlite3.OperationalError("badge store unavailable")
+
+        monkeypatch.setattr(console, "read_events", read)
+        monkeypatch.setattr(client.app.state.progress, "record_stamps", unavailable)
+        _hear(client)
+        _hear(client)
+        now[0] += 29
+        _hear(client)
+        assert calls == []
+
+        now[0] += 1
+        _hear(client)
+        _hear(client)
+        assert calls == [log]
+        assert "badge store unavailable" in _stamps(client)["error"]
+        assert sum(event["kind"] == "reception" for event in events.read_events(log)) == 5
+
+
+def test_badge_recovery_on_an_existing_log_preserves_first_reception(tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(console, "monotonic", lambda: now[0], raising=False)
+    log = tmp_path / "events.jsonl"
+    events.log_event(log, "tick", {})
+    with _client(tmp_path) as client, closing(sqlite3.connect(tmp_path / "progress.db")) as db:
+        inode = log.stat().st_ino
+        db.execute("CREATE TRIGGER cannot_stamp BEFORE INSERT ON stamps "
+                   "BEGIN SELECT RAISE(ABORT, 'badge store unavailable'); END")
+        _hear(client)
+        assert "badge store unavailable" in _stamps(client)["error"]
+
+        db.execute("DROP TRIGGER cannot_stamp")
+        _hear(client, command="rtl_433 -d 1")
+        assert _ism(client)["count"] == 0
+        assert "badge store unavailable" in _stamps(client)["error"]
+
+        now[0] += 30
+        _hear(client, command="rtl_433 -d 2")
+        assert log.stat().st_ino == inode
+        row = _ism(client)
+        assert row["count"] == 3 and row["provenance"]["command"] == "rtl_433 -d 0"
+        assert _stamps(client)["error"] is None
+
+
+def test_badge_digest_matches_log_readback_for_integer_keys(tmp_path):
+    log = tmp_path / "events.jsonl"
+    events.log_event(log, "tick", {})
+    with _client(tmp_path) as client:
+        client.app.state.decoder.on_reception(
+            {"model": "Test sensor", "readings": {9: 1, 10: 2}},
+            command="rtl_433 -d 0", freq_hz=433_920_000, radio=RADIO)
+        first = _ism(client)
+        expected = _mint(events.read_events(log)[-1])
+        assert first["count"] == 1
+    with _client(tmp_path) as client:
+        assert _ism(client) == first
+        assert first["digest"] == expected["digest"]
+
+
+def test_the_rack_reception_strip_links_to_the_logbook(tmp_path):
+    with _client(tmp_path) as client:
+        html = client.get("/operate/ism").text
+        assert '<a class="rack__log" href="/logbook" data-rack-log' in html
+        assert 'data-rack-log-line' in html
+        assert client.get("/logbook").status_code == 200

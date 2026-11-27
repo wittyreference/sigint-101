@@ -50,7 +50,7 @@ def _rotate_if_full(path: Path, max_bytes: int, keep: int) -> None:
 
 def log_event(path, kind: str, payload: dict, *, clock=time.time,
               max_bytes=None, keep=None, event_id=None) -> dict:
-    """Append one event to the JSONL log and return it. Creates the file if needed."""
+    """Append one event and return it in the same form a JSONL reader sees."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     event = {"ts": round(clock(), 3), "kind": str(kind), "payload": payload}
@@ -62,7 +62,7 @@ def log_event(path, kind: str, payload: dict, *, clock=time.time,
                         KEEP_ROTATED if keep is None else keep)
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(line)
-    return event
+    return json.loads(line)
 
 
 def _parse_lines(text: str, kind=None) -> list:

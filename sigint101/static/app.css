@@ -2807,6 +2807,7 @@ body {
   border-top: 1px dashed var(--border);
   font-family: var(--font-mono);
   font-size: 15px;
+  text-decoration: none;
   white-space: nowrap;
 }
 .rack__log-tag {

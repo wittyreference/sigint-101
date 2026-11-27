@@ -10,15 +10,26 @@ from render_scroll import connect
 THEMES = ("dark", "sunlight", "red-night")
 
 RACK = """
-(() => {
+function measureRack(expectedTheme) {
   const key = document.querySelector('.rack__log-link[href="/logbook"]');
+  const strip = document.querySelector('.rack__log[href="/logbook"][data-rack-log]');
   const title = document.querySelector('.statusbar__title');
   const rect = key?.getBoundingClientRect();
   if (!rect || !title) return null;
-  return {target: [rect.width, rect.height], visible:
-    rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight &&
-    title.scrollWidth <= title.clientWidth};
-})()
+  function inViewport(r) {
+    return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 &&
+           r.right <= innerWidth && r.bottom <= innerHeight;
+  }
+  const log = strip?.getBoundingClientRect();
+  const hit = log && document.elementFromPoint(log.left + log.width / 2, log.top + log.height / 2);
+  return {
+    theme: document.querySelector('.app').dataset.theme,
+    doc: [document.documentElement.scrollWidth, document.documentElement.scrollHeight],
+    target: [rect.width, rect.height],
+    visible: inViewport(rect) && title.scrollWidth <= title.clientWidth,
+    stripVisible: !!log && inViewport(log) && strip.contains(hit),
+  };
+}
 """
 
 LOGBOOK = """
@@ -99,15 +110,19 @@ def main(console):
         browser.call("Page.enable")
         browser.call("Emulation.setDeviceMetricsOverride",
                      {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False})
-        load_page(browser, f"{console}/operate/ism")
-        rack = browser.ev(RACK) or {}
-        target_fits = rack.get("visible") and all(72 <= size <= 80 for size in rack["target"])
-        failed = verdict(target_fits, "rack LOG key", rack)
-
-        url = f"{console}/logbook"
+        rack_url = f"{console}/operate/ism"
+        load_page(browser, rack_url)
+        failed = False
         for theme in THEMES:
             browser.ev(f"localStorage.setItem('sigint101.theme', {json.dumps(theme)})")
-            load_page(browser, url)
+            load_page(browser, rack_url)
+            rack = browser.ev(f"{RACK}\nmeasureRack({json.dumps(theme)})") or {}
+            target_fits = (rack.get("theme") == theme and rack.get("doc") == [800, 480]
+                           and rack["visible"] and rack["stripVisible"]
+                           and all(72 <= size <= 80 for size in rack["target"]))
+            failed |= verdict(target_fits, f"rack {theme}", rack)
+
+            load_page(browser, f"{console}/logbook")
             measures = browser.ev(f"{LOGBOOK}\nmeasureLogbook({json.dumps(theme)})") or {}
             ok = (measures.get("theme") == theme and measures.get("doc") == [800, 480]
                   and measures["back"] and measures["scrolls"] and measures["lastVisible"]

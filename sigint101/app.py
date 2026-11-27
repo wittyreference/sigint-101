@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
+from time import monotonic
 
 # Form bodies are decoded with parse_qs rather than Starlette's request.form(). Starlette pulls
 # in python-multipart for form parsing even when the body is plain urlencoded, and this console
@@ -133,6 +134,8 @@ PPM_SECONDS = 8.0
 # How many recent receptions the console keeps in memory for the rack's log line. The events log
 # keeps every one; this only bounds what a poll looks through.
 RECEPTION_MEMORY = 200
+# Replaying the retained log is expensive. Give the store time to recover after a failure.
+STAMP_RETRY_S = 30.0
 
 # The progress store's place name for the rack's last instrument.
 RACK_PLACE = "rack"
@@ -567,6 +570,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.reception_error = None
         app.state.stamp_error = None
         app.state.stamp_window = None
+        app.state.stamp_retry_at = 0.0
         try:
             _backfill_stamps(app.state.progress, _stamp_window())
         except (OSError, sqlite3.Error) as exc:
@@ -1819,6 +1823,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _stamp_failed(exc):
         app.state.stamp_error = f"a reception badge could not be saved: {exc}"
+        app.state.stamp_retry_at = monotonic() + STAMP_RETRY_S
 
     def _backfill_stamps(progress, window, appended=()):
         # In append order, including rotations. Remembering each credited event tolerates a
@@ -1885,6 +1890,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 app.state.reception_error = None
                 if app.state.receptions is not None:
                     app.state.receptions.append(without_page_words(event))
+                if monotonic() < app.state.stamp_retry_at:
+                    # The log retains this reception for the next recovery pass in append order.
+                    return
                 if (stamp := mint(event)) is None:
                     return
                 try:

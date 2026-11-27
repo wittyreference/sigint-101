@@ -500,17 +500,32 @@ def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make
 
 LOGBOOK_FITS = {"back": True, "doc": [800, 480], "scrolls": True, "lastVisible": True,
                 "contrast": [8, 9], "differentMarks": True}
+RACK_FITS = {"doc": [800, 480], "visible": True, "stripVisible": True, "target": [76, 72]}
+THEMES = ("dark", "sunlight", "red-night")
+
+
+def _logbook_pages(*, rack_defect=None, logbook_defect=None):
+    pages = {}
+    for theme in THEMES:
+        rack = {**RACK_FITS, "theme": theme}
+        logbook = {**LOGBOOK_FITS, "theme": theme}
+        if theme == "red-night":
+            rack.update(rack_defect or {})
+            logbook.update(logbook_defect or {})
+        pages[f"measureRack({json.dumps(theme)})"] = rack
+        pages[f"measureLogbook({json.dumps(theme)})"] = logbook
+    return pages
 
 
 def test_logbook_render_checks_all_three_themes(devtools):
-    port = devtools({"rack__log-link": {"visible": True, "target": [76, 72]},
-                     **{f"measureLogbook({json.dumps(theme)})": {**LOGBOOK_FITS, "theme": theme}
-                        for theme in ("dark", "sunlight", "red-night")}})
+    port = devtools(_logbook_pages())
     proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert _verdicts(proc) == ["VERDICT: PASS - rack LOG key",
+    assert _verdicts(proc) == ["VERDICT: PASS - rack dark",
                                "VERDICT: PASS - logbook dark",
+                               "VERDICT: PASS - rack sunlight",
                                "VERDICT: PASS - logbook sunlight",
+                               "VERDICT: PASS - rack red-night",
                                "VERDICT: PASS - logbook red-night"]
 
 
@@ -520,20 +535,23 @@ def test_logbook_render_checks_all_three_themes(devtools):
     {"theme": "dark"},
 ])
 def test_logbook_verdict_fails_when_a_later_theme_does_not_fit(devtools, defect):
-    port = devtools({"rack__log-link": {"visible": True, "target": [76, 72]},
-                     "measureLogbook(\"dark\")": {**LOGBOOK_FITS, "theme": "dark"},
-                     "measureLogbook(\"sunlight\")": {**LOGBOOK_FITS, "theme": "sunlight"},
-                     "measureLogbook(\"red-night\")": {
-                         **LOGBOOK_FITS, "theme": "red-night", **defect}})
+    port = devtools(_logbook_pages(logbook_defect=defect))
     proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - logbook red-night"
 
 
 def test_logbook_render_refuses_an_undersized_rack_log_key(devtools):
-    port = devtools({"rack__log-link": {"visible": True, "target": [76, 71]},
-                     **{f"measureLogbook({json.dumps(theme)})": {**LOGBOOK_FITS, "theme": theme}
-                        for theme in ("dark", "sunlight", "red-night")}})
+    port = devtools(_logbook_pages(rack_defect={"target": [76, 71]}))
     proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
-    assert "VERDICT: FAIL - rack LOG key" in _verdicts(proc)
+    assert "VERDICT: FAIL - rack red-night" in _verdicts(proc)
+
+
+@pytest.mark.parametrize("defect", [{"stripVisible": False}, {"doc": [800, 481]}])
+def test_rack_render_fails_if_the_later_theme_overflows_or_blocks_the_strip(devtools, defect):
+    port = devtools(_logbook_pages(rack_defect=defect))
+    proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-2:] == ["VERDICT: FAIL - rack red-night",
+                                   "VERDICT: PASS - logbook red-night"]
