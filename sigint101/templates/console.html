@@ -265,6 +265,9 @@
             </div>
             {% endif %}
             {% endif %}
+            {% if safety_notice and lesson.requires_tx %}
+              {{ panels.safety_notice(safety_notice) }}
+            {% endif %}
             <form class="predict{% if prediction_committed %} predict--committed{% endif %}" novalidate data-choice-commit
                   method="post" action="{{ commit_url|default('#') }}">
               <fieldset class="predict-chips">
@@ -353,7 +356,7 @@
             {% elif lesson.uses_lora %}
             {# LoRa instrument (M11): the meshtastic packet panel (panels.lora) over a fixed dial. #}
             <div class="instrument instrument--decode">
-              {{ panels.lora() }}
+              {{ panels.lora(safety_notice) }}
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">915<span>MHz</span></div>
@@ -610,6 +613,9 @@
           {% if stage not in ('predict', 'check') and not (stage in INSTRUMENT and lesson.needs_hardware) %}
             <footer class="stage-foot{% if loop.last %} predict__actions{% endif %}">
               {{ prev_step(loop.first) }}
+              {% if safety_notice and not lesson.uses_lora %}
+              {{ panels.safety_notice(safety_notice) }}
+              {% endif %}
               {% if loop.last %}
               {{ complete_lesson() }}
               {% else %}

@@ -78,6 +78,7 @@ from .provenance import (
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
+from .safety import notice_for
 from .spectrum import (
     DEFAULT_BIN,
     DEFAULT_HIGH,
@@ -728,6 +729,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "predict_choices": lesson.choices,
             "commit_url": f"/api/predict?lesson_id={lesson.id}",
             "revealed": revealed,
+            "safety_notice": notice_for(lesson=lesson),
         }
         # A lesson with a check: where its answer posts, and once answered, the feedback to show.
         # The check is sealed with the rest of the reveal, so none of this is read before a commit.
@@ -1903,7 +1905,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             context={"title": "Operator mode", "back_href": "/", "back_label": "Home",
                      "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
                      # The pager shows framing only wherever it is tuned; its dial says so.
-                     "text_withheld": inst.key == "pager"},
+                     "text_withheld": inst.key == "pager",
+                     "safety_notice": notice_for(instrument=inst)},
         )
 
     @app.post("/api/{api}/tune")

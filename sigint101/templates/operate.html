@@ -87,7 +87,7 @@
       {% elif inst.key == 'dmr' %}{{ panels.dmr(freq_hz / 1000000, head_command=false) }}
       {% elif inst.key == 'apt' %}{{ panels.apt(head_command=false) }}
       {% elif inst.key == 'sstv' %}{{ panels.sstv(freq_hz / 1000000, head_command=false) }}
-      {% elif inst.key == 'lora' %}{{ panels.lora() }}
+      {% elif inst.key == 'lora' %}{{ panels.lora(safety_notice) }}
       {% elif inst.key == 'flock' %}{{ panels.flock(flock_tool, head_command=false) }}
       {% elif inst.key == 'rayhunter' %}{{ panels.rayhunter() }}
       {% elif inst.key == 'flipper' %}{{ panels.flipper() }}
