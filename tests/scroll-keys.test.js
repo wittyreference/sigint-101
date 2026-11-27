@@ -1,8 +1,10 @@
 // ABOUTME: Tests the shared keyboard-scroll helper — which scroll a key means at a given band size.
-// ABOUTME: Pure logic only; the DOM wiring (keydown, region lookup) is exercised by HIL render.
+// ABOUTME: Includes a keydown check for the operator picker and its overflow threshold.
 
 const test = require("node:test");
-const assert = require("node:assert");
+const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { runInNewContext } = require("node:vm");
 const k = require("../sigint101/static/scroll-keys.js");
 
 test("arrows scroll by a fixed step", () => {
@@ -31,4 +33,38 @@ test("keys we do not own are ignored", () => {
   assert.equal(k.scrollAction("Enter", false, 400), null);
   assert.equal(k.scrollAction("a", false, 400), null);
   assert.equal(k.scrollAction("Tab", false, 400), null);
+});
+
+test("operator keys scroll the instrument picker when it overflows", () => {
+  let onKey;
+  let prevented = 0;
+  const moves = [];
+  const picker = {
+    scrollHeight: 1320,
+    clientHeight: 394,
+    scrollBy: (x, y) => moves.push(["by", x, y]),
+    scrollTo: (x, y) => moves.push(["to", x, y]),
+  };
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/scroll-keys.js"), "utf8"), {
+    document: {
+      querySelector: s => s === ".rack__picker" ? picker : null,
+      addEventListener: (event, handler) => { if (event === "keydown") onKey = handler; },
+    },
+  });
+
+  function key(key) {
+    onKey({ key, preventDefault: () => { prevented++; } });
+  }
+
+  for (const name of ["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End"]) key(name);
+  assert.deepEqual(moves, [
+    ["by", 0, 48], ["by", 0, -48], ["by", 0, 346], ["by", 0, -346],
+    ["to", 0, 0], ["to", 0, 1320],
+  ]);
+  assert.equal(prevented, 6);
+
+  picker.scrollHeight = 396;   // The other regions ignore overflow of two pixels or less.
+  key("ArrowDown");
+  assert.equal(moves.length, 6);
+  assert.equal(prevented, 6);
 });

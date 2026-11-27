@@ -1529,3 +1529,53 @@ def test_the_restart_key_stays_hidden_until_waterfall_js_shows_it():
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.parametrize("stage", ["explain", "check"])
+def test_completion_has_a_body_size_status_beside_save_and_keeps_back(stage):
+    lesson = _intro_lesson() if stage == "explain" else load_lessons(REAL_PACKS)[1]
+    html = _console(
+        lesson=lesson, current_stage=stage, prediction_committed=True,
+        check_feedback={"correct": True, "chosen": {"label": "A", "why": "It fits."}},
+    )
+    panel = _section(html, stage)
+    action_class = "stage-foot" if stage == "explain" else "predict__actions"
+    row = re.search(r'class="' + action_class + r'\b[^"]*">(.*?)(?:</footer>|</div>)',
+                    panel, re.S).group(1)
+    status = re.search(r"<span\b([^>]*)>\s*</span>", row)
+    assert status and 'role="status"' in status[1] and "data-complete-status" in status[1]
+    assert 'class="predict__hint"' in status[1]
+    assert _css_decl(".predict__hint", "font-size") == "18px"
+    assert re.search(r"<button[^>]*\bdata-complete\s[^>]*>Complete lesson</button>", row)
+    assert 'class="btn-back"' in html
+
+
+@pytest.mark.parametrize("template", ["exam.html", "exam_sim.html"])
+def test_exam_eyebrow_gets_its_emblem_only_from_css(template):
+    q = exam.load_pool().get("T1A01")
+    html = _render(template, **_exam_ctx(
+        question=q, reviewed=False, position=1, total=35, score=0, answered=0, pass_mark=26,
+    ))
+    eyebrow = re.search(r'class="stage-panel__eyebrow">([^<]+)</div>', html)[1]
+    assert eyebrow.startswith("EXAM" if template == "exam.html" else "PRACTICE EXAM")
+    assert "\u262d" not in eyebrow and "&#9773;" not in eyebrow
+    assert _css_decl(".stage-panel__eyebrow::before", "content") == r'"\262D "'
+
+
+def test_active_tile_cursor_stays_with_the_left_aligned_code():
+    assert _css_decl(".tile--active .tile__head::before", "content") is None
+    marker = ".tile--active .tile__code::before"
+    assert _css_decl(marker, "content") == r'"\25B6"'
+    assert _css_decl(marker, "animation").startswith("blink ")
+
+
+def test_unit_grid_has_no_three_pixel_padding_overflow_without_shrinking_tiles():
+    # Unit 4 was measured at 417px in a 414px region. Only the 14px bottom inset
+    # needs to give up the excess. Home has a footer after the grid and keeps its inset.
+    assert _css_decl(".tiles", "padding") == "14px var(--gutter)"
+    bottom = _css_decl(".content > .tiles:last-child", "padding-bottom")
+    assert bottom == "11px"
+    assert 417 - (14 - _px(bottom)) == 414
+    assert _css_decl(".tiles", "overflow-y") == "auto"
+    assert _css_decl(".tiles", "grid-auto-rows") == "max-content"
+    assert _decls(_css_rule(".tile"))["min-height"] == "124px"

@@ -1,5 +1,5 @@
 // ABOUTME: Keyboard scrolling for the Nomad's keys on every screen — the active lesson stage body,
-// ABOUTME: the exam card or the home grid. Arrows/PageUp-Down/Space/Home/End; arrows yield to chips.
+// ABOUTME: exam card, tile grid or operator picker. Arrows/PageUp-Down/Space/Home/End; arrows yield to chips.
 
 (function () {
   "use strict";
@@ -28,8 +28,7 @@
   }
 
   // The one scroll region in play on this screen: the visible, actually-overflowing stage body on
-  // a lesson; the exam card's body; the tile grid on home. Null when nothing overflows (short
-  // page — keys do nothing).
+  // a lesson, the exam card's body, the tile grid or the operator picker.
   function region() {
     var panel = document.querySelector(".stage-panel:not([hidden])");
     if (panel) {
@@ -44,6 +43,8 @@
     if (exam && exam.scrollHeight - exam.clientHeight > 2) return exam;
     var tiles = document.querySelector(".tiles");
     if (tiles && tiles.scrollHeight - tiles.clientHeight > 2) return tiles;
+    var picker = document.querySelector(".rack__picker");
+    if (picker && picker.scrollHeight - picker.clientHeight > 2) return picker;
     return null;
   }
 

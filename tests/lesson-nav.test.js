@@ -1,8 +1,10 @@
 // ABOUTME: Tests the lesson-stage navigation rules — where a Next/Previous step lands and how each
-// ABOUTME: rail pip reads. Pure logic only; the DOM wiring is exercised by the 800x480 render check.
+// ABOUTME: rail pip reads, and whether the completion button advances or offers a retry.
 
 const test = require("node:test");
-const assert = require("node:assert");
+const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { runInNewContext } = require("node:vm");
 const nav = require("../sigint101/static/lesson-nav.js");
 
 test("Next and Previous step one panel at a time", () => {
@@ -34,3 +36,49 @@ test("a sealed stage stays locked whatever the walk says", () => {
   assert.equal(nav.pipState(4, 3, 5, true), "locked");
   assert.equal(nav.pipState(4, 4, 5, true), "locked");
 });
+
+for (const [failure, failSave] of [
+  ["an HTTP refusal", () => Promise.resolve({ ok: false, status: 400 })],
+  ["a network error", () => Promise.reject(new Error("lost connection"))],
+]) {
+  test("Complete stays and can retry after " + failure, async () => {
+    const status = { textContent: "" };
+    let click;
+    const button = {
+      textContent: "Complete lesson",
+      parentElement: { querySelector: s => s === "[data-complete-status]" ? status : null },
+      getAttribute: name => name === "data-next-href" ? "/lesson/2" : null,
+      addEventListener: (event, handler) => { if (event === "click") click = handler; },
+    };
+    const stage = { getAttribute: name => name === "data-lesson-id" ? "1" : null };
+    const doc = {
+      querySelector: s => ({ ".stage": stage, "[data-complete]": button }[s] || null),
+      querySelectorAll: s => s === "[data-complete]" ? [button] : [],
+    };
+    const page = { location: "/lesson/1" };
+    const requests = [];
+    runInNewContext(readFileSync(require.resolve("../sigint101/static/lesson-nav.js"), "utf8"), {
+      document: doc,
+      window: page,
+      fetch: (url, options) => {
+        requests.push([url, options.method]);
+        return requests.length === 1 ? failSave() : Promise.resolve({ ok: true, status: 200 });
+      },
+    });
+
+    click({ currentTarget: button });
+    await new Promise(setImmediate);
+    assert.equal(page.location, "/lesson/1");
+    assert.equal(status.textContent, "Progress couldn't be saved");
+    assert.equal(button.textContent, "Retry save");
+    assert.equal(button.disabled, false);
+
+    click({ currentTarget: button });
+    await new Promise(setImmediate);
+    assert.equal(page.location, "/lesson/2");
+    assert.deepEqual(requests, [
+      ["/api/complete?lesson_id=1", "POST"],
+      ["/api/complete?lesson_id=1", "POST"],
+    ]);
+  });
+}
