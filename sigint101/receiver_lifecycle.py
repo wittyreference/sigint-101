@@ -504,11 +504,13 @@ class SupervisedReceiver:
                 self._report(run)
         finally:
             run.ready.set()
-            run.complete.set()
-            with self._reports_lock:
-                self._reports.discard(run)
-            if run.reaped:
-                self._close_diagnostics(run)
+            try:
+                if run.reaped:
+                    self._close_diagnostics(run)
+            finally:
+                run.complete.set()
+                with self._reports_lock:
+                    self._reports.discard(run)
 
     @staticmethod
     def _close_diagnostics(run):

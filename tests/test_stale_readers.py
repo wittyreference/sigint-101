@@ -1490,6 +1490,8 @@ def test_natural_exit_settle_with_live_downstream_stage_does_not_delay_stop_or_r
         assert elapsed < dec.STOP_WAIT_S / 2
     finally:
         dec.stop()
+        if dec._run is not None:
+            assert dec._run.complete.wait(5)
         for stage in stages:
             _reap_stage(stage)
 
@@ -1567,6 +1569,8 @@ def test_pipeline_natural_exit_reaps_live_downstream_and_drains_buffered_pipe(mo
     finally:
         go_on.set()
         dec.stop()
+        if dec._run is not None:
+            assert dec._run.complete.wait(5)
         for stage in stages:
             _reap_stage(stage)
 
@@ -2205,7 +2209,6 @@ def test_sstv_finite_pipeline_reaps_live_upstream_before_join_while_draining_mod
         rtl_fm, sox, spawn(*args), finite=True))
     dec.start()
     child = children[0]
-    child.die(0)
     paths[0].write_bytes(PNG_BYTES)
     stages_at_join = []
 
@@ -2216,6 +2219,7 @@ def test_sstv_finite_pipeline_reaps_live_upstream_before_join_while_draining_mod
 
     reader_at_join(after_reap)
     expected = childproc.command_line(dec._proc)
+    child.die(0)
     dec.stop()
     assert stages_at_join and None not in stages_at_join[0]
     [(image, command, freq)] = heard
@@ -2275,9 +2279,9 @@ def test_sstv_clean_cycle_keeps_each_captures_command_freq_and_png(
         start()
         child = children[0]
         paths[0].write_bytes(PNG_BYTES)
-        child.die(0)
         action = None if slow else lambda: _sstv_end(child, mode="Robot 36")
         old_join = reader_at_join(action)
+        child.die(0)
         clock.now += 1
         dec.freq_hz = 145_800_000
         start()

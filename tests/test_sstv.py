@@ -763,7 +763,7 @@ def test_sstv_run_numbered_names_isolate_delayed_writers_and_orphan_sidecars(
         clock = dec._clock
 
         def leave_orphan_at_launch():
-            run = getattr(getattr(dec, "_runs", None), "current", None)
+            run = getattr(getattr(dec, "_intent", None), "number", dec._runs.current)
             suffix = "" if run is None else f"-r{run}"
             (dec.output_dir / f"20250101T000000-000{suffix}.json").write_text(
                 marker, encoding="utf-8")
