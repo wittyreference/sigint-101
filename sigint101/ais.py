@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import socket
 import subprocess
 import threading
 import time
+from collections import Counter
+from contextlib import ExitStack
 from dataclasses import dataclass
 
 from .childproc import (
@@ -23,6 +27,7 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
+from .receiver_socket import PortOccupied, bind_receiver
 
 # rtl_ais (github.com/dgiardini/rtl-ais) opens the dongle, demodulates BOTH AIS channels at once,
 # and sends decoded AIVDM/AIVDO NMEA sentences over UDP. These are the two channels it listens on,
@@ -30,9 +35,8 @@ from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
 AIS_CHANNEL_A_HZ = 161_975_000
 AIS_CHANNEL_B_HZ = 162_025_000
 
-# Where rtl_ais sends its NMEA sentences by default (-h host / -P port). The decoder binds this
-# UDP socket itself and reads the datagrams rtl_ais pushes to it, so it never holds the dongle —
-# rtl_ais does, exactly as dump1090 does for ADS-B.
+# The decoder binds the stock rtl_ais destination, then reads NMEA from the companion's
+# inherited UDP socket. The companion opens the dongle, as dump1090 does for ADS-B.
 DEFAULT_AIS_HOST = "127.0.0.1"
 DEFAULT_AIS_PORT = 10110
 
@@ -44,8 +48,12 @@ FEED_POLL_S = 0.5
 # leave rtl_ais back to back; a part older than this belongs to a message that will never finish.
 FRAGMENT_MAX_AGE_S = 2.0
 
-# rtl_ais's binary. Defined here, not in hardware.py, so parallel decoder builds never collide.
 RTL_AIS = "rtl_ais"
+AIS_COMPANION = "rtl_ais-sigint101"
+AIS_MODE = "--sigint101-udp-stdout"
+AIS_CAPABILITY_QUERY = "--sigint101-capability"
+AIS_CAPABILITY = b"sigint101-ais-udp-v1\n"
+AIS_CAPABILITY_TIMEOUT_S = 1.0
 
 # ITU-R M.1371 navigation-status enumeration (field at bits 38-41 of a type 1/2/3 report). The
 # code is stored as its text so the panel reads it the way a bridge officer would; 15 is the
@@ -65,6 +73,14 @@ _SIXBIT = "".join(chr(v + 64) if v < 32 else chr(v) for v in range(64))
 
 class AisUnavailable(RuntimeError):
     """The AIS feed cannot be read. Never a reason to invent a ship — the roster stays empty."""
+
+
+class AisPortOccupied(AisUnavailable, PortOccupied):
+    """The local AIS UDP port cannot be bound."""
+
+
+class AisFeedError(OSError):
+    """The running companion's UDP feed could not be read or verified."""
 
 
 def _unarmor(payload: str, fill: int = 0) -> str:
@@ -369,91 +385,118 @@ class VesselRoster:
 
 
 class _Feed:
-    """The live rtl_ais process and its UDP socket as one object: lines to read, both to tear down.
+    """Owns the companion and its connected UDP pair through reader retirement."""
 
-    rtl_ais holds the dongle and pushes NMEA sentences over UDP; this binds the socket, so the
-    reader consumes datagrams exactly as the other decoders consume a subprocess's stdout.
-    """
-
-    def __init__(self, proc: subprocess.Popen, sock: socket.socket):
+    def __init__(self, proc: subprocess.Popen, sock: socket.socket, sender: socket.socket):
         self._proc = proc
         self._sock = sock
+        self._sender = sender
         self._closed = threading.Event()
         self._transport_lock = threading.Lock()
-        self._transport_closed = False
-        sock.settimeout(FEED_POLL_S)
-        # The one process, and its argv, for the exit reason and the command strip.
+        self._rejections = Counter()
+        self._foreign_port = None
+        # Preserve the real argv for diagnostics and reception provenance.
         self.procs = (proc,)
         self.argvs = [proc.args]
         self.stdout = self._lines()
 
+    def configure(self):
+        self._peer = self._sender.getsockname()
+        self._sock.settimeout(FEED_POLL_S)
+
+    def rejected(self):
+        with self._transport_lock:
+            return dict(self._rejections), self._foreign_port
+
+    def _reject(self, reason, peer):
+        with self._transport_lock:
+            if self._closed.is_set():
+                return
+            self._rejections[reason] += 1
+            if reason == "foreign":
+                if self._foreign_port is None:
+                    self._foreign_port = peer[1]
+                return
+        raise AisFeedError(
+            f"{AIS_COMPANION} sent an unreadable datagram ({reason}); run deploy/provision.sh")
+
     def _lines(self):
         draining = False
-        try:
-            while not self._closed.is_set():
+        while not self._closed.is_set():
+            try:
                 if not draining and self._proc.poll() is not None:
-                    # Once rtl_ais has exited, switch to non-blocking so datagrams already queued
-                    # in the UDP socket drain at once without waiting out FEED_POLL_S.
-                    try:
-                        self._sock.settimeout(0.0)
-                    except OSError:
-                        return
+                    # Read what the child left queued without waiting out the live poll.
+                    self._sock.settimeout(0.0)
                     draining = True
-                try:
-                    data = self._sock.recv(4096)
-                except TimeoutError:
-                    if draining:
-                        return
-                    # A quiet channel, or rtl_ais gone: loop once more in non-blocking mode if it
-                    # just exited, to drain anything queued at the boundary before ending.
-                    continue
-                except OSError:
+                data, _, flags, peer = self._sock.recvmsg(4096)
+            except TimeoutError:
+                if draining:
                     return
-                for line in data.decode("ascii", "replace").splitlines():
-                    line = line.strip()
-                    if line:
-                        yield line
-        finally:
-            self._close_socket()
+                # If the child exited during this timeout, recheck and drain on the next pass.
+                continue
+            except BlockingIOError:
+                if draining:
+                    return
+                continue
+            except OSError as exc:
+                if self._closed.is_set():
+                    return
+                raise AisFeedError(f"cannot read {AIS_COMPANION} UDP output: {exc}") from exc
+            if self._closed.is_set():
+                return
+            # connect() filters future traffic but may leave earlier datagrams queued.
+            if peer != self._peer:
+                self._reject("foreign", peer)
+                continue
+            if flags & socket.MSG_TRUNC:
+                self._reject("truncated", peer)
+                return
+            try:
+                lines = data.decode("ascii").splitlines()
+            except UnicodeDecodeError:
+                lines = []
+            if (not lines or not data.endswith(b"\n")
+                    or any(parse_ais_sentence(line) is None for line in lines)):
+                self._reject("framing", peer)
+                return
+            yield from lines
 
     def poll(self):
         return self._proc.poll()
 
-    def _close_socket(self):
-        """Let go of the UDP port and wake a reader blocked in recv.
-
-        close() alone leaves a thread parked in recvfrom on the dead descriptor. shutdown() wakes
-        it; on an unconnected UDP socket it also reports ENOTCONN, which changes nothing here.
-        """
+    def close_transport(self) -> None:
+        """Wake and close the receiver, then release the sender's reserved port."""
         with self._transport_lock:
-            if self._transport_closed:
-                return
             self._closed.set()
             try:
-                self._sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                self._sock.close()
-            except OSError:
                 if self._sock.fileno() != -1:
+                    try:
+                        self._sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    self._close(self._sock)
+            finally:
+                self._close(self._sender)
+
+    @staticmethod
+    def _close(sock):
+        if sock.fileno() != -1:
+            try:
+                sock.close()
+            except OSError:
+                if sock.fileno() != -1:
                     raise
-            self._transport_closed = True
 
     def stop_child(self) -> bool:
         """Stop and reap rtl_ais while leaving the UDP socket open to drain queued datagrams."""
         return stop_process(self._proc)
 
-    def close_transport(self) -> None:
-        """Close the UDP socket once any natural-exit drain has finished or timed out."""
-        self._close_socket()
-
     def terminate(self):
-        self._close_socket()
+        self.close_transport()
         self._proc.terminate()
 
     def kill(self):
-        self._close_socket()
+        self.close_transport()
         self._proc.kill()
 
     def wait(self, timeout=None):
@@ -461,27 +504,40 @@ class _Feed:
         return self._proc.wait(timeout=timeout)
 
 
-def _popen(device: int, host: str = DEFAULT_AIS_HOST, port: int = DEFAULT_AIS_PORT) -> _Feed:
-    """Bind the AIS UDP socket, launch rtl_ais pointed at it, and return the two as one feed."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+def _check_host(host):
+    if host != DEFAULT_AIS_HOST:
+        raise AisUnavailable(f"AIS needs the IPv4 loopback address {DEFAULT_AIS_HOST}")
+
+
+def _popen(device: int, host: str = DEFAULT_AIS_HOST, port: int = DEFAULT_AIS_PORT,
+           *, binary=AIS_COMPANION) -> _Feed:
+    """Give the child only its sender and retain both sockets under lifecycle ownership."""
+    _check_host(host)
+    with ExitStack() as sockets:
+        # Reserve the source tuple before there is any receiver queue. Nobody else can
+        # use that source while the console is able to admit or drain its datagrams.
+        sender = sockets.enter_context(bind_receiver((host, 0), socket.SOCK_DGRAM))
+        if sender.getsockname()[1] == port:
+            alternate = sockets.enter_context(bind_receiver((host, 0), socket.SOCK_DGRAM))
+            sender.close()
+            sender = alternate
+        try:
+            sock = sockets.enter_context(
+                bind_receiver((host, port), socket.SOCK_DGRAM, occupied=AisPortOccupied))
+        except OSError as exc:
+            raise AisUnavailable(f"cannot bind UDP port {host}:{port} for AIS: {exc}") from exc
+        sock.connect(sender.getsockname())
+        sender.connect(sock.getsockname())
+        proc = spawn([binary, AIS_MODE, "-d", str(device)],
+                     stdin=subprocess.DEVNULL, stdout=sender)
+        feed = _Feed(proc, sock, sender)
+        sockets.pop_all()
     try:
-        sock.bind((host, port))
-    except OSError as exc:
-        sock.close()
-        raise AisUnavailable(f"cannot bind {host}:{port} to read rtl_ais — {exc}") from exc
-    try:
-        proc = spawn(
-            [RTL_AIS, "-d", str(device), "-h", host, "-P", str(port)],
-            stdout=subprocess.DEVNULL)
-    except (OSError, ValueError) as exc:
-        sock.close()
-        raise AisUnavailable(f"cannot run rtl_ais: {exc}") from exc
-    try:
-        return _Feed(proc, sock)
-    except OSError as exc:
-        sock.close()
-        raise PartialLaunch(proc, exc) from exc
+        feed.configure()
+        feed.shell_command = shlex.join([RTL_AIS, "-d", str(device), "-h", host, "-P", str(port)])
+    except Exception as exc:
+        raise PartialLaunch(feed, exc) from exc
+    return feed
 
 
 class AisDecoder(SupervisedReceiver):
@@ -501,6 +557,7 @@ class AisDecoder(SupervisedReceiver):
         self._list_devices = list_devices
         self._spawn = spawn
         self._which = which
+        self._capability = None
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._roster = VesselRoster()
         # Called with a vessel's dict the first time each MMSI is heard since the feed (re)started
@@ -508,11 +565,12 @@ class AisDecoder(SupervisedReceiver):
         # roster lock. The console's hook logs it as a reception and never raises, so the call is
         # made directly: it cannot end the decode.
         self.on_reception = None
+        self.on_foreign_datagrams = None
         self._runs = RunGuard()
         self._init_lifecycle()
         self.error = None
         # Who ended the child, and when the console may launch it again after it died on its own.
-        self.watch = ChildWatch(RTL_AIS)
+        self.watch = ChildWatch(AIS_COMPANION)
 
     _unavailable = AisUnavailable
     _released_reason = "the radio was released to another program; resume AIS to take it back"
@@ -526,24 +584,82 @@ class AisDecoder(SupervisedReceiver):
         except DeviceSelectionError as exc:
             raise AisUnavailable(str(exc)) from exc
 
-    def _prepare_launch(self, _freq_hz, _number):
-        if not self._which(RTL_AIS):
+    def _companion(self):
+        binary = self._which(AIS_COMPANION)
+        if not binary:
+            raise AisUnavailable(f"{AIS_COMPANION} is not installed; run deploy/provision.sh")
+        try:
+            stat = os.stat(binary)
+        except OSError as exc:
+            reason = f"cannot check {AIS_COMPANION}: {exc}; run deploy/provision.sh"
+            raise AisUnavailable(reason) from exc
+        key = stat.st_dev, stat.st_ino, stat.st_mtime_ns
+        if self._capability is None or self._capability[0] != key:
+            reason = None
+            try:
+                result = subprocess.run([binary, AIS_CAPABILITY_QUERY], stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        timeout=AIS_CAPABILITY_TIMEOUT_S)
+                if result.returncode or result.stdout != AIS_CAPABILITY:
+                    reason = "did not return the required version"
+            except subprocess.TimeoutExpired:
+                # subprocess.run kills the query and reaps it before returning this exception.
+                reason = "timed out"
+            except OSError as exc:
+                reason = str(exc)
+            self._capability = key, reason
+        if reason := self._capability[1]:
             raise AisUnavailable(
-                f"{RTL_AIS} is not installed, so SIGINT 101 cannot decode AIS")
+                f"{AIS_COMPANION} {AIS_CAPABILITY_QUERY} {reason}; run deploy/provision.sh")
+        return binary
+
+    def _prepare_launch(self, _freq_hz, _number):
+        launcher = self._spawn
+        host, port = self.host, self.port
+        if launcher is _popen:
+            _check_host(host)
+            binary = self._companion()
+            kwargs = {"binary": binary}
+        else:
+            if not self._which(RTL_AIS):
+                raise AisUnavailable(f"{RTL_AIS} is not installed, so SIGINT 101 cannot decode AIS")
+            kwargs = {}
         if not self._radio_present():
             raise AisUnavailable("no RTL-SDR on the USB bus — SIGINT 101 will not fake a vessel")
         radio = self._choose_radio()
-        host, port = self.host, self.port
+        if launcher is _popen:
+            try:
+                with bind_receiver((host, port), socket.SOCK_DGRAM, occupied=AisPortOccupied):
+                    pass
+            except OSError as exc:
+                raise AisUnavailable(f"cannot check UDP port {host}:{port}: {exc}") from exc
 
         def launch():
             try:
-                proc = self._spawn(radio["index"], host, port)
+                proc = launcher(radio["index"], host, port, **kwargs)
             except (OSError, ValueError) as exc:
-                raise AisUnavailable(f"cannot run rtl_ais: {exc}") from exc
+                raise AisUnavailable(f"cannot run {AIS_COMPANION}: {exc}") from exc
             self.device = radio["index"]
             return proc
 
         return launch, (radio,)
+
+    def live_command(self):
+        if command := getattr(self._proc, "shell_command", None):
+            return command if self.running else None
+        return super().live_command()
+
+    @property
+    def rejections(self):
+        run = self._run
+        return run.proc.rejected()[0] if run and isinstance(run.proc, _Feed) else {}
+
+    def _report(self, run):
+        if self.on_foreign_datagrams is not None and isinstance(run.proc, _Feed):
+            counts, source_port = run.proc.rejected()
+            if count := counts.get("foreign"):
+                self.on_foreign_datagrams(count, source_port)
+        super()._report(run)
 
     def _read(self, proc, run: int, radio: dict) -> None:
         """Consume rtl_ais's NMEA sentences on a thread, building the roster until it ends."""
@@ -567,6 +683,16 @@ class AisDecoder(SupervisedReceiver):
                     contacts.add(report.mmsi)
                     self._emit(hook, contact, command=cmd,
                                freq_hz=[AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ], radio=radio)
+        except AisFeedError as exc:
+            # Cancel via the supervisor so the reader never waits for its own retirement.
+            with self._life:
+                with self._runs:
+                    if not self._runs.is_current(run):
+                        return
+                    self.error = str(exc)
+                    # A fault in the last queued datagram explains a concurrent child exit.
+                    self._run.unreported_death = False
+                self._cancel()
         except (OSError, ValueError) as exc:  # loud, never silent
             with self._runs:
                 if self._runs.is_current(run):
