@@ -46,6 +46,11 @@ CHECK_STAGE = "check"
 # The allowed bucket keys on an optional `sort:` card deck (M5's 12-card law sort).
 SORT_ANSWERS = ("legal", "illegal", "depends")
 
+# The longest a sort card's why may run. Its feedback ("Missed Depends: <why> <cite>") must stay
+# on two lines at 800x480, because the card has less than one line of slack. Measured on the
+# console, a why past about 94 characters wraps to a third line even beside the shortest cite.
+SORT_WHY_MAX_CHARS = 90
+
 # What a predict asks about, which sets how the explain names its answer. An instrument predict
 # asks what the radio will show or do, so the reveal reads "What the radio does"; a knowledge
 # predict asks what is true (the law, what a detection proves, what you need), so it reads "In
@@ -537,8 +542,10 @@ def _parse_sort(data: dict, ctx: str) -> list | None:
     """Validate an optional `sort:` card deck (key, text, answer, why, cite).
 
     Mirrors `_parse_check`: a malformed card fails at load rather than mid-lesson. Each card's
-    answer must be legal, illegal, or depends, and its why and cite stay single-line so feedback
-    fits on the 800x480 screen. Returns None when a pack declares no sort deck.
+    answer must be legal, illegal, or depends, and its why and cite stay single-line, with the why
+    capped at SORT_WHY_MAX_CHARS, so feedback fits on the 800x480 screen. A long cite still eats
+    into that room; the card render check is the guard for the pair. Returns None when a pack
+    declares no sort deck.
     """
     raw = data.get("sort")
     if raw in (None, []):
@@ -573,6 +580,11 @@ def _parse_sort(data: dict, ctx: str) -> list | None:
                 raise LessonError(
                     f"{ctx}: sort card '{fields['key']}' '{line_field}' must be one line"
                 )
+        if len(fields["why"]) > SORT_WHY_MAX_CHARS:
+            raise LessonError(
+                f"{ctx}: sort card '{fields['key']}' 'why' is {len(fields['why'])} characters; "
+                f"keep it to {SORT_WHY_MAX_CHARS} so its feedback fits two lines at 800x480"
+            )
         cards.append(fields)
     return cards
 
