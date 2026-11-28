@@ -164,6 +164,10 @@ def scratch_console(data_dir, alive=None):
                 if time.monotonic() > deadline:
                     sys.exit(f"The scratch console did not answer at {url}. ({error})")
                 time.sleep(0.2)
+        # The process is named, so whoever is left with a console the run could not stop (a
+        # SIGKILL of this check on a box without parent-death signals) can stop it by PID.
+        print(f"Started a scratch console at {url} (process {server.pid}) with its own data "
+              "folder.", flush=True)
         yield url
     finally:
         _stop(server, CONSOLE_STOP_S, "the scratch console", alive)
@@ -283,8 +287,6 @@ def main():
         with ExitStack() as running:
             if not console:
                 console = running.enter_context(scratch_console(output / "console", alive))
-                print(f"Started a scratch console at {console} with its own data folder.",
-                      flush=True)
             running.callback(_close_all, held)
             port = running.enter_context(headless_chromium(chromium, output / "profile", alive))
             running.enter_context(api_block(port, problems, held))

@@ -5,6 +5,7 @@ import base64
 import errno
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -429,7 +430,7 @@ def console_url():
 
 
 @pytest.fixture
-def render_make(tmp_path, console_url, devtools):
+def render_make(tmp_path, console_url, devtools, strays):
     """Exercise the repo's Makefile and runner with stand-ins for the browser and checks."""
     screen = tmp_path / "tools" / "render"
     screen.mkdir(parents=True)
@@ -635,7 +636,7 @@ def _load_render_check():
     return module
 
 
-def test_the_scratch_console_keeps_its_state_in_its_own_folder_and_stops(tmp_path):
+def test_the_scratch_console_keeps_its_state_in_its_own_folder_and_stops(tmp_path, strays):
     from urllib.request import urlopen
     render_check = _load_render_check()
     data = tmp_path / "console"
@@ -849,22 +850,79 @@ def _running(pid):
     return state != "Z"
 
 
-@pytest.mark.parametrize("sig", ["SIGHUP", "SIGINT", "SIGTERM"])
-def test_a_signal_to_the_check_stops_the_scratch_console_and_the_whole_browser(render_make,
-                                                                              tmp_path, sig):
-    # An ssh drop (SIGHUP), Ctrl-C (SIGINT) or a kill (SIGTERM) reaches only the runner: the
-    # console and Chromium run in sessions of their own. The runner must stop both on the way out.
+def _cmdline(pid):
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+            "utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _strays(root):
+    """Running processes of this test: every one whose command line names its own tmp folder.
+
+    A test's scratch console, browser and wrapper all carry their folder under the test's
+    tmp_path (their data folder, profile or script), which no other process names.
+    """
+    mine = str(root)
+    return [int(entry) for entry in os.listdir("/proc")
+            if entry.isdigit() and int(entry) != os.getpid()
+            and mine in _cmdline(entry) and _running(int(entry))]
+
+
+def _stop_strays(root):
+    """Kill, by PID, every process of this test that is still running; return what it found.
+
+    Each PID is checked against the test's folder again just before the signal, so a number
+    reused by another process in between is never signalled.
+    """
+    found = []
+    for pid in _strays(root):
+        command = _cmdline(pid)
+        if str(root) in command:
+            found.append((pid, command))
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+    for _ in range(200):
+        if not any(_running(pid) for pid, _ in found):
+            break
+        subprocess.run(["sleep", "0.05"])
+    return found
+
+
+@pytest.fixture
+def strays(tmp_path):
+    """Whatever a test leaves running under its tmp folder (a failing run's console) is stopped."""
+    yield
+    _stop_strays(tmp_path)
+
+
+def _signal_scenario(render_make, tmp_path, sig, swept):
+    """Start the runner with a scratch console and a forking browser, signal it, check the rest.
+
+    Whatever the outcome, its `finally` stops every process the run left, by PID, and records
+    them in `swept`.
+    """
     import signal as signals
     pidfile = tmp_path / "browser.pid"
     check = render_make.start(RENDER_URL=None, CHROMIUM_FORKS=str(pidfile),
                               STALL_CHECK=FIT.name)
     try:
-        line = ""
+        line, started = "", ""
         while not line.startswith("ran "):
             line = check.stdout.readline()
             assert line, check.stderr.read()
+            if line.startswith("Started a scratch console"):
+                started = line
         console = line.split()[2].rsplit("/", 2)[0]
         port = int(console.rsplit(":", 1)[1])
+        # The runner names the console's process, so whoever is left with it can stop it.
+        server = re.search(r"\(process (\d+)\)", started)
+        assert server, started
+        server = int(server.group(1))
+        assert "render_console.py" in _cmdline(server) and str(tmp_path) in _cmdline(server)
         check.send_signal(getattr(signals, sig))
         check.wait(timeout=60)
         assert check.returncode != 0
@@ -872,6 +930,7 @@ def test_a_signal_to_the_check_stops_the_scratch_console_and_the_whole_browser(r
         wrapper = int(Path(str(pidfile) + ".wrapper").read_text())
         assert not _running(browser), "the browser outlived the check"
         assert not _running(wrapper), "the chromium wrapper outlived the check"
+        assert not _running(server), "the scratch console outlived the check"
         with pytest.raises(OSError):
             socket.create_connection(("127.0.0.1", port), timeout=2).close()
         assert list(tmp_path.glob("sigint101-render-*")) == []
@@ -879,11 +938,42 @@ def test_a_signal_to_the_check_stops_the_scratch_console_and_the_whole_browser(r
         if check.poll() is None:
             check.kill()
             check.wait()
-        for path in (pidfile, Path(str(pidfile) + ".wrapper")):
-            if path.is_file() and _running(int(path.read_text())):
-                os.kill(int(path.read_text()), 9)
         check.stdout.close()
         check.stderr.close()
+        swept.extend(_stop_strays(tmp_path))
+
+
+@pytest.mark.parametrize("sig", ["SIGHUP", "SIGINT", "SIGTERM"])
+def test_a_signal_to_the_check_stops_the_scratch_console_and_the_whole_browser(render_make,
+                                                                              tmp_path, sig):
+    # An ssh drop (SIGHUP), Ctrl-C (SIGINT) or a kill (SIGTERM) reaches only the runner: the
+    # console and Chromium run in sessions of their own. The runner must stop both on the way out.
+    swept = []
+    _signal_scenario(render_make, tmp_path, sig, swept)
+    assert swept == [], f"the check left these running: {swept}"
+
+
+def test_a_failing_signal_test_still_leaves_no_console_running(render_make, tmp_path):
+    # A fail-first run is the signal test against a check that does not stop its children. Here
+    # that check is this one with its signal handlers and parent-death signals taken out: the
+    # test must fail, and must still leave none of the run's processes, the console above all.
+    real = CHECK.read_text(encoding="utf-8")
+    broken = real
+    for old, new in [
+        ("HERE = Path(__file__).resolve().parent", f"HERE = Path({str(CHECK.parent)!r})"),
+        ("        signal.signal(sig, _stop_on_signal)", "        pass  # no handler"),
+        ("preexec_fn=_die_with_parent()", "preexec_fn=None"),
+    ]:
+        assert old in broken, old
+        broken = broken.replace(old, new)
+    runner = tmp_path / "tools" / "render" / "render_check.py"
+    runner.unlink()
+    runner.write_text(broken, encoding="utf-8")
+    swept = []
+    with pytest.raises(AssertionError):
+        _signal_scenario(render_make, tmp_path, "SIGHUP", swept)
+    assert any("render_console.py" in command for _, command in swept), swept
+    assert _strays(tmp_path) == []
 
 
 def test_stop_group_signals_the_group_only_while_its_leader_is_unreaped(tmp_path, monkeypatch):
@@ -942,7 +1032,7 @@ def _listening_addresses(port):
     return found
 
 
-def test_the_scratch_console_listens_on_loopback_only_and_has_no_radio(tmp_path):
+def test_the_scratch_console_listens_on_loopback_only_and_has_no_radio(tmp_path, strays):
     from urllib.request import urlopen
     render_check = _load_render_check()
     with render_check.scratch_console(tmp_path / "console") as url:
