@@ -4,6 +4,17 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-11-28: A blocked receive can outlive closing its UDP descriptor
+**Finding.** A reader blocked in recvmsg can still hold a kernel reference while another thread
+closes the descriptor. A sender may briefly see the receiver as open.
+**How to apply.** To test the companion's closed-peer send error, wake the reader and wait for it
+to return before telling the child to send. The child can stay alive until the send is observed.
+
+## 2026-11-28: Provision keeps its loaded recipes after pulling the course
+**Finding.** A running provision script pulls the checkout before building decoders, but its
+build functions still come from the script that started the run.
+**How to apply.** A decoder needed on that same run can be provisioned by the updated kiosk
+installer. Update the server unit so the old script sees a difference and invokes that installer.
 ## 2026-11-28: setting the first Meshtastic region can enable transmit
 **Finding.** The firmware enables transmit when a LoRa write moves the region off UNSET.
 The region change schedules a reboot. The local CLI writes the whole LoRa config and can

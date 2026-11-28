@@ -326,11 +326,11 @@ def test_single_tools_launch_through_spawn(monkeypatch, tmp_path, launch, tool):
     assert command_line(proc) == shlex.join(seen[0].args)
 
 
-def test_ais_launches_rtl_ais_through_spawn(monkeypatch):
+def test_ais_launches_its_companion_through_spawn(monkeypatch):
     seen = _record_spawns(monkeypatch, ais)
     feed = ais._popen(0, "127.0.0.1", 0)
     try:
-        assert seen[0].args[0] == "rtl_ais"
+        assert seen[0].args == ["rtl_ais-sigint101", "--sigint101-udp-stdout", "-d", "0"]
         assert command_line(feed) == shlex.join(seen[0].args)
     finally:
         feed.terminate()

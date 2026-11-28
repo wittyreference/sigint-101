@@ -33,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .acars import AcarsDecoder, AcarsUnavailable
-from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbPortOccupied, AdsbUnavailable
+from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
@@ -87,6 +87,7 @@ from .provenance import (
 from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, finish_console
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
+from .receiver_socket import PortOccupied
 from .safety import notice_for, rack_lora_send
 from .spectrum import (
     DEFAULT_BIN,
@@ -609,6 +610,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             receiver = getattr(app.state, attr)
             receiver.on_reception = _heard(inst, receiver)
             receiver.reception_sink = app.state.reception_sink
+        if isinstance(app.state.ais, AisDecoder):
+            app.state.ais.on_foreign_datagrams = _log_foreign_ais
         try:
             yield
         finally:
@@ -1400,8 +1403,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reason.startswith("no RTL-SDR on the USB bus"):
             return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
                     "next_step": "Plug in the RTL-SDR."}
-        if isinstance(exc, AdsbPortOccupied):
-            return {"cause": "unavailable", "next_step": "Free the port, then retry ADS-B."}
+        if isinstance(exc, PortOccupied):
+            label = "ADS-B" if kind == "adsb" else "AIS"
+            return {"cause": "unavailable", "next_step": f"Free the port, then retry {label}."}
         if reason == "no Flipper on USB":
             return {"cause": "no_radio", "message": "No Flipper on USB.",
                     "next_step": "Connect the Flipper over USB."}
@@ -1806,6 +1810,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": decoder.freq_hz,
             "messages": decoder.messages(limit),
         }
+
+    def _log_foreign_ais(count, source_port):
+        try:
+            log_event(app.state.events_path, "ais_foreign_datagrams",
+                      {"count": count, "source_port": source_port})
+        except OSError as exc:
+            logging.getLogger(__name__).warning("could not log rejected AIS datagrams: %s", exc)
 
     @app.get("/api/ais")
     def ais(limit: int | None = None):
