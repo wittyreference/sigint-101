@@ -229,8 +229,8 @@ def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=Fals
 
     stderr defaults to a scratch file rather than a pipe: nothing drains stderr while the tool
     runs, and a full pipe would wedge the tool rather than the diagnostic. The file is attached as
-    `proc.stderr`, so the reason a tool died is in one place to read. Use `pass_fds` to keep
-    an owned staging lock alive while the child is running.
+    `proc.stderr`, so the reason a tool died is in one place to read.
+    SSTV and Meteor use `pass_fds` to keep their staging locks held by the child.
     """
     scratch = None
     if stderr is CAPTURE:
@@ -238,8 +238,8 @@ def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=Fals
         stderr = scratch
     try:
         proc = _SPAWNER.run(lambda: GroupPopen(
-            argv, stdin=stdin, stdout=stdout, stderr=stderr, text=text, env=env, pass_fds=pass_fds,
-            start_new_session=True, preexec_fn=_die_with_parent()))
+            argv, stdin=stdin, stdout=stdout, stderr=stderr, text=text, env=env,
+            pass_fds=pass_fds, start_new_session=True, preexec_fn=_die_with_parent()))
     except BaseException:
         if scratch is not None:
             scratch.close()
