@@ -17,7 +17,7 @@ BASH = shutil.which("bash")
 # never enters the test PATH.
 CORE_UTILS = (
     "awk", "basename", "cat", "cmp", "cut", "dirname", "grep", "mkdir", "paste", "readlink", "rm",
-    "sort", "timeout",
+    "sleep", "sort", "timeout",
 )
 
 
@@ -108,7 +108,8 @@ class ProvisionBox:
         _stub(self.bin / "node", body)
 
     def set_mesh(self, region, preset, use_preset=True, *, tx_power=8, tx_enabled=False,
-                 active=True, writable=True):
+                 active=True, writable=True, tx_writable=True, show_tx_enabled=True,
+                 profile_status=0, read_lag=False):
         """Stub the local meshtasticd service and its CLI's LoRa preference read/write."""
         state = self.home / "mesh-state"
         state.write_text(f"{region} {preset} {use_preset} {tx_power} {tx_enabled}\n",
@@ -128,21 +129,36 @@ class ProvisionBox:
               'shift 2\n'
               'if [[ "$1" == "--timeout" ]]; then shift 2; fi\n'
               f'read -r region preset use power enabled < "{state}"\n'
+              'status=0\n'
+              f'out="{state}"\n'
               'case "$*" in\n'
-              f'  "{get_profile}"|"{get_profile} --get lora.tx_power")\n'
+              f'  "{get_profile}"|"{get_profile} --get lora.tx_power"'
+              f'|"{get_profile} --get lora.tx_power --get lora.tx_enabled")\n'
               '    printf "Connected to radio\\nlora.region: %s\\nlora.modem_preset: %s\\n'
               'lora.use_preset: %s\\n" "$region" "$preset" "$use"\n'
-              '    if [[ "$*" == *" --get lora.tx_power" ]]; then '
+              '    if [[ "$*" == *" --get lora.tx_power"* ]]; then '
               'printf "lora.tx_power: %s\\n" "$power"; fi\n'
+              f'    if [[ "{int(show_tx_enabled)}" == 1 && "$*" == *" --get lora.tx_enabled" ]]; '
+              'then printf "lora.tx_enabled: %s\\n" "$enabled"; fi\n'
+              # The first connection can read the old config while the write is in flight.
+              f'    if [ -f "{state}.pending" ]; then '
+              f'cat "{state}.pending" > "{state}"; rm "{state}.pending"; fi\n'
               '    echo "Completed getting preferences"; exit 0 ;;\n'
               f'  "{set_profile}"|"{set_profile} --set lora.tx_power "*)\n'
+              # Firmware enables TX when a region is set for the first time.
+              '    if [[ "$region" == 0 ]]; then enabled=True; fi\n'
               '    region=1; preset=9; use=True\n'
+              f'    status={profile_status}\n'
               '    if [ "$#" -eq 12 ]; then power="${12}"; fi ;;\n'
               '  "--set lora.tx_power "*) power="$3" ;;\n'
+              '  "--set lora.tx_enabled false")\n'
+              f'    if [[ "{int(tx_writable)}" == 1 ]]; then enabled=False; fi ;;\n'
               '  *) exit 1 ;;\n'
               'esac\n'
+              f'if [ "{int(read_lag)}" = 1 ]; then out="{state}.pending"; fi\n'
               f'if [ "{int(writable)}" = 1 ]; then '
-              f'echo "$region $preset $use $power $enabled" > "{state}"; fi')
+              'echo "$region $preset $use $power $enabled" > "$out"; fi\n'
+              'exit "$status"')
         return state
 
     def run(self, *args: str) -> subprocess.CompletedProcess:
@@ -284,18 +300,81 @@ def test_provision_node_check_is_idempotent_across_two_runs(box, version):
 
 @pytest.mark.parametrize("region,preset,use_preset,tx_enabled", [(0, 0, False, False),
                                                                  (1, 0, True, True)])
-def test_provision_sets_us_long_turbo_and_power_without_touching_tx_enabled(
+def test_provision_sets_us_long_turbo_and_power_and_preserves_tx_enabled(
         box, region, preset, use_preset, tx_enabled):
     state = box.set_mesh(region, preset, use_preset, tx_power=30, tx_enabled=tx_enabled)
+    checked = box.run("--check")
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert state.read_text() == f"{region} {preset} {use_preset} 30 {tx_enabled}\n"
+    assert "--set lora." not in box.calls()
     first = box.run()
     assert first.returncode == 0, first.stdout + first.stderr
-    assert "lora.tx_enabled" not in box.calls()
     assert state.read_text() == f"1 9 True 8 {tx_enabled}\n"
+    mesh_calls = [line for line in box.calls().splitlines() if line.startswith("meshtastic ")]
+    assert "--get lora.tx_enabled" in mesh_calls[1]
+    assert "--set lora.region US" in mesh_calls[2]
+    if region == 0 and not tx_enabled:
+        assert "--get lora.tx_enabled" in mesh_calls[3]
+        assert mesh_calls[4].endswith("--set lora.tx_enabled false")
+        assert "--get lora.tx_enabled" in mesh_calls[5]
+    else:
+        assert "--set lora.tx_enabled" not in box.calls()
     second = box.run()
     assert second.returncode == 0, second.stdout + second.stderr
     assert box.calls().count("--set lora.region US --set lora.modem_preset LONG_TURBO "
                              "--set lora.use_preset true --set lora.tx_power 8") == 1
-    assert "lora.tx_enabled" not in box.calls()
+    assert box.calls().count("--set lora.tx_enabled false") == int(region == 0 and not tx_enabled)
+
+
+def test_provision_requires_tx_enabled_readback_before_changing_region(box):
+    state = box.set_mesh(0, 0, False, show_tx_enabled=False)
+    result = box.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "could not read LoRa settings" in result.stdout
+    assert state.read_text() == "0 0 False 8 False\n"
+    assert "--set lora." not in box.calls()
+
+
+def test_provision_restores_tx_if_the_first_region_write_applied_but_reported_failure(box):
+    state = box.set_mesh(0, 0, False, tx_power=30, profile_status=1)
+    result = box.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert state.read_text() == "1 9 True 8 False\n"
+    assert "--set lora.tx_enabled false" in box.calls()
+
+
+def test_provision_waits_for_region_write_before_restoring_tx(box):
+    state = box.set_mesh(0, 0, False, tx_power=30, read_lag=True)
+    result = box.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert state.read_text() == "1 9 True 8 False\n"
+
+
+def test_provision_retries_unconfirmed_tx_restoration(box):
+    state = box.set_mesh(0, 0, False, tx_writable=False)
+    marker = box.home / ".local/state/sigint101/meshtastic-defaults"
+    first = box.run()
+    assert first.returncode != 0
+    assert "could not confirm lora.tx_enabled False" in first.stderr
+    assert state.read_text() == "1 9 True 8 True\n"
+    assert not marker.exists()
+
+    # Another run must remember that the radio was off before the first region write.
+    box.set_mesh(1, 9, tx_enabled=True, active=False)
+    unavailable = box.run()
+    assert unavailable.returncode != 0
+    assert "TX restoration pending" in unavailable.stderr
+    assert not marker.exists()
+
+    box.set_mesh(1, 9, tx_enabled=True)
+    checked = box.run("--check")
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert re.search(r"^  would  .*restore .*tx_enabled to false", checked.stdout, re.MULTILINE)
+    assert state.read_text() == "1 9 True 8 True\n"
+    second = box.run()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert state.read_text() == "1 9 True 8 False\n"
+    assert marker.is_dir()
 
 
 def test_provision_check_reports_current_mesh_preset_without_writing(box):
@@ -316,7 +395,7 @@ def test_provision_check_reports_mesh_power_drift_without_writing(box, power, de
     state = box.set_mesh(1, 9, tx_power=power)
     result = box.run("--check")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"tx_power {description}" in result.stdout
+    assert f"configured tx_power {description}" in result.stdout
     assert re.search(r"^  would  .*tx_power (?:to )?8 dBm", result.stdout, re.MULTILINE)
     assert state.read_text() == f"1 9 True {power} False\n"
     assert "--set lora." not in box.calls()
@@ -339,7 +418,25 @@ def test_provision_corrects_power_without_overwriting_the_learner_preset(box):
     assert box.calls().count("--set lora.region") == 1
     assert any(line.endswith("--set lora.tx_power 8") and "--set lora.region" not in line
                for line in box.calls().splitlines())
-    assert "lora.tx_enabled" not in box.calls()
+    assert "--set lora.tx_enabled" not in box.calls()
+
+
+@pytest.mark.parametrize("marked", [False, True])
+@pytest.mark.parametrize("power,ceiling", [(2, None), (8, "22"), (8, None)])
+def test_provision_leaves_power_at_or_below_the_ceiling(box, marked, power, ceiling):
+    if marked:
+        (box.home / ".local/state/sigint101/meshtastic-defaults").mkdir(parents=True)
+    state = box.set_mesh(1, 0, tx_power=power)
+    if ceiling:
+        box.env["SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM"] = ceiling
+
+    checked = box.run("--check")
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert not re.search(r"^  would  .*tx_power", checked.stdout, re.MULTILINE)
+    applied = box.run()
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert state.read_text() == f"1 {0 if marked else 9} True {power} False\n"
+    assert "--set lora.tx_power" not in box.calls()
 
 
 @pytest.mark.parametrize("ceiling,requested", [(None, "9"), ("10", "11")],
@@ -356,23 +453,34 @@ def test_provision_refuses_requested_mesh_power_above_the_ceiling(box, ceiling, 
     assert not box.calls()
 
 
-@pytest.mark.parametrize("ceiling,requested,wanted", [("14", "12", 12), ("6", None, 6)])
-def test_provision_uses_an_explicit_module_ceiling(box, ceiling, requested, wanted):
-    state = box.set_mesh(1, 9, tx_power=30)
+@pytest.mark.parametrize("current,ceiling,requested,wanted", [
+    (30, "14", "12", 12), (30, "6", None, 6), (2, "14", "12", 12),
+    (2, "22", "22", 22), (2, "-9", "-9", -9),
+])
+def test_provision_uses_an_explicit_module_ceiling(box, current, ceiling, requested, wanted):
+    state = box.set_mesh(1, 9, tx_power=current)
     box.env["SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM"] = ceiling
     if requested is not None:
         box.env["SIGINT101_MESHTASTIC_TX_POWER_DBM"] = requested
     result = box.run()
     assert result.returncode == 0, result.stdout + result.stderr
     assert state.read_text() == f"1 9 True {wanted} False\n"
-    assert "lora.tx_enabled" not in box.calls()
+    assert "--set lora.tx_enabled" not in box.calls()
 
 
 @pytest.mark.parametrize("variable,value", [
     ("SIGINT101_MESHTASTIC_TX_POWER_DBM", "0"),
     ("SIGINT101_MESHTASTIC_TX_POWER_DBM", "1+8"),
     ("SIGINT101_MESHTASTIC_TX_POWER_DBM", "-226"),
+    ("SIGINT101_MESHTASTIC_TX_POWER_DBM", "-10"),
+    ("SIGINT101_MESHTASTIC_TX_POWER_DBM", "23"),
+    ("SIGINT101_MESHTASTIC_TX_POWER_DBM", "08"),
+    ("SIGINT101_MESHTASTIC_TX_POWER_DBM", " 8"),
+    ("SIGINT101_MESHTASTIC_TX_POWER_DBM", "abc"),
+    ("SIGINT101_MESHTASTIC_TX_POWER_DBM", "a[$(id)]"),
     ("SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM", ""),
+    ("SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM", "-10"),
+    ("SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM", "23"),
     ("SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM", "256"),
     ("SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM", "9223372036854775808"),
 ])
@@ -383,6 +491,15 @@ def test_provision_refuses_invalid_mesh_power_inputs(box, variable, value):
     assert result.returncode != 0
     assert variable in result.stderr and "nonzero" in result.stderr
     assert not box.calls()
+
+
+def test_provision_help_identifies_the_default_power_grant(box):
+    result = box.run("--help")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FCC ID 2ALPH-E22900M22S" in result.stdout
+    assert "0.0076 W conducted" in result.stdout
+    assert "500 kHz Long Turbo" in result.stdout
+    assert "its own FCC grant" in result.stdout
 
 
 def test_provision_leaves_inactive_meshtasticd_alone(box):

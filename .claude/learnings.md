@@ -4,6 +4,14 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-11-28: setting the first Meshtastic region can enable transmit
+**Finding.** The firmware enables transmit when a LoRa write moves the region off UNSET.
+The local CLI writes the whole LoRa config and can return before the change is visible.
+[Firmware region handling](https://github.com/meshtastic/firmware/blob/6d41e279f1f5/src/modules/AdminModule.cpp#L776-L798)
+[CLI acknowledgment handling](https://github.com/meshtastic/python/blob/2.7.11/meshtastic/__main__.py#L1084-L1092)
+**How to apply.** Read the enabled state first. If it was off, wait for the new region before
+restoring it and confirm the restored state. Keep the original state across an interrupted write.
+
 ## 2026-11-27: Meshtastic's radio power value is narrower than its protobuf field
 **Finding.** The LoRa protobuf accepts a signed 32-bit `tx_power`. The firmware stores it in a
 signed byte before interpreting zero as automatic power. For example, a value of -226 can become

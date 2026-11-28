@@ -597,51 +597,68 @@ readonly MESH_TX_POWER_CEILING_DBM=8
 
 validate_mesh_tx_power() {
   local name="$1" value="$2"
-  # Meshtastic narrows the setting to int8_t before checking for automatic power.
-  if [[ "$value" =~ ^-?[1-9][0-9]{0,2}$ ]] &&
-     (( value >= -128 && value <= 127 )); then
+  # Validate decimal syntax before arithmetic, then use the SX1262 range.
+  if [[ "$value" =~ ^-?[1-9][0-9]?$ ]] &&
+     (( value >= -9 && value <= 22 )); then
     return 0
   fi
-  die "$name must be a nonzero whole number from -128 to 127 dBm (0 uses the radio default)"
+  die "$name must be a nonzero whole number from -9 to 22 dBm (SX1262 range, 0 uses the radio default)"
 }
 
 read_mesh_lora() {
   local settings
   settings="$("$@" --get lora.region --get lora.modem_preset --get lora.use_preset \
-                   --get lora.tx_power)" || return 1
+                   --get lora.tx_power --get lora.tx_enabled)" || return 1
   # The CLI prints enum numbers and Python's True/False for individual preferences.
   awk '
     /^lora\.region: [0-9]+$/ { region = $2 }
     /^lora\.modem_preset: [0-9]+$/ { preset = $2 }
     /^lora\.use_preset: (True|False)$/ { use = $2 }
-    /^lora\.tx_power: -?[0-9]+$/ { power = $2 }
+    /^lora\.tx_power: (0|-?[1-9][0-9]*)$/ && length($2) <= 11 { power = $2 }
+    /^lora\.tx_enabled: (True|False)$/ { enabled = $2 }
     END {
-      if (region == "" || preset == "" || use == "" || power == "") exit 1
-      print region, preset, use, power
+      if (region == "" || preset == "" || use == "" || power == "" || enabled == "") exit 1
+      print region, preset, use, power, enabled
     }
   ' <<< "$settings"
 }
 
+wait_for_mesh_lora() {
+  local pattern="$1" delay settings
+  shift
+  # The local CLI can return before the write is visible on the next connection.
+  for delay in 0 1 1; do
+    [ "$delay" = 0 ] || sleep "$delay"
+    settings="$(read_mesh_lora "$@" 2>/dev/null)" || continue
+    if [[ "$settings" == $pattern ]]; then
+      printf '%s\n' "$settings"
+      return 0
+    fi
+  done
+  return 1
+}
+
 step_meshtastic_defaults() {
   step "Meshtastic LoRa defaults (M11 LoRa, M28 Meshtastic)"
-  local target_power="$1"
-  if ! systemctl --quiet is-active meshtasticd 2>/dev/null; then
-    warn "meshtasticd is not running; the LoRa lessons read its API on port 4403"
-    return 0
-  fi
+  local ceiling="$1" requested="$2"
   local mesh="$COURSE_DIR/.venv/bin/meshtastic"
   local marker="$HOME/.local/state/sigint101/meshtastic-defaults"
-  if [ ! -x "$mesh" ]; then
-    warn "the course venv has no meshtastic CLI; LoRa settings not checked"
-    return 0
-  fi
+  local tx_pending="$marker-tx-off-pending"
   local cli=(timeout 15 "$mesh" --host 127.0.0.1 --timeout 5)
-  local settings region preset use power region_name preset_name power_name
-  if ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)"; then
-    warn "could not read LoRa settings from local meshtasticd"
+  local settings region preset use power enabled region_name preset_name power_name read_error=""
+  if ! systemctl --quiet is-active meshtasticd 2>/dev/null; then
+    read_error="meshtasticd is not running; the LoRa lessons read its API on port 4403"
+  elif [ ! -x "$mesh" ]; then
+    read_error="the course venv has no meshtastic CLI; LoRa settings not checked"
+  elif ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)"; then
+    read_error="could not read LoRa settings from local meshtasticd"
+  fi
+  if [ -n "$read_error" ]; then
+    [ ! -d "$tx_pending" ] || die "$read_error (TX restoration pending, rerun provisioning)"
+    warn "$read_error"
     return 0
   fi
-  read -r region preset use power <<< "$settings"
+  read -r region preset use power enabled <<< "$settings"
   # Values from Meshtastic's LoRaConfig.RegionCode and ModemPreset enums.
   region_name="$region"
   case "$region" in 0) region_name=UNSET ;; 1) region_name=US ;; esac
@@ -653,32 +670,74 @@ step_meshtastic_defaults() {
   fi
   power_name="$power dBm"
   [ "$power" != 0 ] || power_name="radio default (0)"
-  ok "meshtasticd LoRa region $region_name, modem preset $preset_name (use preset: $use), tx_power $power_name"
+  ok "meshtasticd LoRa region $region_name, modem preset $preset_name (use preset: $use), configured tx_power $power_name"
 
-  # Region and preset are one-time defaults. Reconcile power on every run, including upgraded kits.
-  local profile=()
-  local expected="$region $preset $use $target_power"
+  # Automatic power can exceed the ceiling. Otherwise preserve power unless explicitly requested.
+  local target_power="$power"
+  if [ -n "$requested" ]; then
+    target_power="$requested"
+  elif [ "$power" = 0 ] || (( power > ceiling )); then
+    target_power="$ceiling"
+  fi
+
+  # Region and preset are one-time defaults.
+  local changes=() target_profile="$region $preset $use"
   local goal="tx_power $target_power dBm" action="tx_power to $target_power dBm"
   if [ ! -d "$marker" ]; then
-    profile=(--set lora.region US --set lora.modem_preset LONG_TURBO --set lora.use_preset true)
-    expected="1 9 True $target_power"
+    if [ "$target_profile" != "1 9 True" ]; then
+      changes=(--set lora.region US --set lora.modem_preset LONG_TURBO --set lora.use_preset true)
+      target_profile="1 9 True"
+    fi
     goal="US / LONG_TURBO with $goal"
-    action="defaults to $goal"
+    action="defaults to US / LONG_TURBO"
+    [ "$power" = "$target_power" ] || action="defaults to $goal"
   fi
-  if [[ "$settings" != "$expected" ]]; then
-    if [ "$CHECK" = 1 ]; then
-      would "set local meshtasticd LoRa $action"
-      return 0
-    fi
-    if ! "${cli[@]}" "${profile[@]}" --set lora.tx_power "$target_power" >/dev/null 2>&1 ||
-       ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)" ||
-       [[ "$settings" != "$expected" ]]; then
-      warn "could not confirm $goal on meshtasticd (retry on the next run)"
-      return 0
-    fi
-    did "set local meshtasticd LoRa $action"
+  [ "$power" = "$target_power" ] || changes+=(--set lora.tx_power "$target_power")
+
+  # On the first region write the firmware enables TX even if it was off. Keep the
+  # original off state across a failed restoration or a restart between the writes.
+  local target_enabled="$enabled" restore_tx=0
+  [ ! -d "$tx_pending" ] || target_enabled=False
+  if [ "$target_enabled" = False ] &&
+     { [ "$enabled" = True ] || { [ "$region" = 0 ] && [ ! -d "$marker" ]; }; }; then
+    restore_tx=1
   fi
-  if [ "$CHECK" = 0 ] && [ ! -d "$marker" ]; then
+  if [ "$CHECK" = 1 ]; then
+    [ "${#changes[@]}" -eq 0 ] || would "set local meshtasticd LoRa $action"
+    [ "$restore_tx" = 0 ] || would "restore local meshtasticd LoRa tx_enabled to false"
+    return 0
+  fi
+
+  if [ "$restore_tx" = 1 ]; then
+    mkdir -p "$tx_pending"
+  fi
+  if [ "${#changes[@]}" -ne 0 ]; then
+    "${cli[@]}" "${changes[@]}" >/dev/null 2>&1 || true
+    if [ "$restore_tx" = 1 ]; then
+      # Wait for the region to take effect. The restoring CLI writes the entire LoRa config.
+      settings="$(wait_for_mesh_lora '[1-9]*' "${cli[@]}")" ||
+        die "could not confirm the Meshtastic region write (TX restoration pending, rerun provisioning)"
+    else
+      settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)" || settings=""
+    fi
+  fi
+  if [ "$restore_tx" = 1 ] && [ "${settings##* }" = True ]; then
+    "${cli[@]}" --set lora.tx_enabled false >/dev/null 2>&1 || true
+    settings="$(wait_for_mesh_lora '[1-9]* False' "${cli[@]}")" ||
+      die "could not confirm lora.tx_enabled False on meshtasticd (check the node before use)"
+    did "restore local meshtasticd LoRa tx_enabled to false"
+  fi
+  if [ -n "$settings" ] && [ "${settings##* }" != "$target_enabled" ]; then
+    die "could not confirm lora.tx_enabled $target_enabled on meshtasticd (check the node before use)"
+  fi
+
+  [ ! -d "$tx_pending" ] || rm -d -- "$tx_pending"
+  if [ "$settings" != "$target_profile $target_power $target_enabled" ]; then
+    warn "could not confirm $goal on meshtasticd (retry on the next run)"
+    return 0
+  fi
+  [ "${#changes[@]}" -eq 0 ] || did "set local meshtasticd LoRa $action"
+  if [ ! -d "$marker" ]; then
     mkdir -p "$marker"
   fi
 }
@@ -742,8 +801,13 @@ usage: provision.sh [--check] [--with-optional] [--with-flock-adapter] [--branch
   --with-flock-adapter  monitor mode at boot for the RTL8821CU adapter (needs a powered USB hub)
   --branch NAME         follow a course branch other than main
 
-  SIGINT101_MESHTASTIC_TX_POWER_DBM      request a power at or below the ceiling (defaults to it)
-  SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM  use another module's documented ceiling in dBm
+  SIGINT101_MESHTASTIC_TX_POWER_DBM      request an exact power at or below the ceiling
+  SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM  use the module's conducted power from its own FCC grant
+
+  The default ceiling is 8 dBm for the 500 kHz Long Turbo setup (Ebyte E22-900M22S,
+  FCC ID 2ALPH-E22900M22S, 0.0076 W conducted). With no exact request, only automatic
+  power (0) and values above the ceiling are changed. Both variables take nonzero
+  whole numbers from -9 to 22 dBm, the SX1262 range.
 U
 }
 
@@ -765,11 +829,13 @@ main() {
   done
 
   local mesh_ceiling="${SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM-$MESH_TX_POWER_CEILING_DBM}"
-  local mesh_target="${SIGINT101_MESHTASTIC_TX_POWER_DBM-$mesh_ceiling}"
+  local mesh_target="${SIGINT101_MESHTASTIC_TX_POWER_DBM-}"
   validate_mesh_tx_power SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM "$mesh_ceiling"
-  validate_mesh_tx_power SIGINT101_MESHTASTIC_TX_POWER_DBM "$mesh_target"
-  if (( mesh_target > mesh_ceiling )); then
-    die "requested Meshtastic tx_power $mesh_target dBm exceeds the $mesh_ceiling dBm ceiling"
+  if [ "${SIGINT101_MESHTASTIC_TX_POWER_DBM+x}" = x ]; then
+    validate_mesh_tx_power SIGINT101_MESHTASTIC_TX_POWER_DBM "$mesh_target"
+    if (( mesh_target > mesh_ceiling )); then
+      die "requested Meshtastic tx_power $mesh_target dBm exceeds the $mesh_ceiling dBm ceiling"
+    fi
   fi
 
   step_preflight
@@ -785,7 +851,7 @@ main() {
   step_monitor_mode
   step_glyph_font
   step_kiosk
-  step_meshtastic_defaults "$mesh_target"
+  step_meshtastic_defaults "$mesh_ceiling" "$mesh_target"
   step_stock_report
   step_handover_report
 
