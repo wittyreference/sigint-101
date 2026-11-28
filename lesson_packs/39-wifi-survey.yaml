@@ -25,18 +25,18 @@ stages:
     which run open? Every row stays on the envelope — never payload.
   explain: >-
     Metadata only, comrade — never payload. This panel reads NetworkManager's cached beacon
-    metadata (band, channel, SSID, BSSID, signal, security) and never connects. On payload, the
-    Ninth Circuit's amended opinion in Joffe v. Google, Inc., 746 F.3d 920 (9th Cir. 2013), is
-    narrow: Wi-Fi payload — emails, passwords, images, documents — is not a "radio communication"
-    (a predominantly auditory broadcast) under 18 USC 2510(16), so the unencrypted-radio rule does
+    metadata (band, channel, SSID, BSSID, signal, security). On payload, the Ninth Circuit's
+    amended opinion in Joffe v. Google, Inc., 746 F.3d 920 (9th Cir. 2013), is narrow: Wi-Fi
+    payload — emails, passwords, images, documents — is not a "radio communication" (a
+    predominantly auditory broadcast) under 18 USC 2510(16), so the unencrypted-radio rule does
     not bring it into the 18 USC 2511(2)(g)(i) exemption. That appeal reviewed the denial of
     Google's motion to dismiss, so the Wiretap Act claim survived at the pleading stage without
-    deciding liability; it binds only the Ninth Circuit (certiorari was denied; among other
-    circuits, none had ruled as of 2026, and the suit settled), and never decided whether beacon
-    metadata is lawful. Elsewhere the question is open, not cleared: the Act's default, 18 USC
-    2511(1)(a), forbids intercepting an electronic communication unless an exemption applies.
-    Carry this out the door: count the envelopes, keep the letters shut — this panel has no
-    payload field by design.
+    deciding liability; it binds only the Ninth Circuit (certiorari was denied and the suit
+    settled; no other circuit had ruled as of 2026), and never decided whether reading beacon
+    metadata is lawful. Outside the Ninth Circuit the payload question is open, not cleared: the
+    Act's default, 18 USC 2511(1)(a), forbids intentionally intercepting an electronic communication
+    unless an exemption applies. Carry this out the door: count the envelopes, keep the letters
+    shut — this panel has no payload field by design.
 
 # Keyboard-free predict chips: {key, label}. Lengths stay within 2x and none are YAML booleans.
 choices:

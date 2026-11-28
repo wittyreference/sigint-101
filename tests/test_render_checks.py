@@ -767,7 +767,7 @@ assert.equal(globalThis.window.fetch, origFetch, "window.fetch should be restore
 SURVEY_FITS = {
     "doc": [800, 480],
     "back": True,
-    "badge": "CACHED · 45s",
+    "badge": "CACHED",
     "rows": 11,
     "listScrolls": True,
     "noRowOverflow": True,
@@ -803,7 +803,7 @@ def test_survey_render_checks_populated_panel_in_all_three_themes(devtools):
     {"doc": [801, 480]},
     {"doc": [800, 481]},
     {"badge": "LIVE"},
-    {"badge": "CACHED"},
+    {"badge": "CACHED · 45s"},
     {"badge": "NO RADIO"},
     {"rows": 0},
     {"listScrolls": False},
@@ -885,7 +885,7 @@ globalThis.window = {{ fetch: origFetch }};
   const data = await survey.json();
   assert.equal(data.available, true);
   assert.equal(data.cached, true);
-  assert.equal(typeof data.age_s, "number");
+  assert.equal("age_s" in data, false);
   assert.equal(origCalls, 0, "fetch_shim let a write or survey request reach the console");
 }})().catch(err => {{ console.error(err); process.exit(1); }});
 """

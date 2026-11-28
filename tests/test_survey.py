@@ -308,21 +308,19 @@ def test_wifi_survey_checks_radio_and_devices_then_runs_rescan_no_census():
         "nmcli -t -f SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan no"
     )
     assert result["cached"] is True
-    assert result["age_s"] == 0
+    assert "age_s" not in result
     assert all(tuple(n.keys()) == ENVELOPE_FIELDS for n in result["networks"])
 
 
-def test_wifi_survey_tracks_cached_age_and_resets_when_cache_changes():
-    # F2: --rescan no reads NetworkManager's cache; age grows while the cached snapshot stays
-    # unchanged and resets to 0 once NetworkManager updates the list or after an outage.
-    now = [100.0]
+def test_wifi_survey_reports_cached_without_invented_console_age():
+    # F2: --rescan no reads NetworkManager's cache; without NetworkManager's real LastScan
+    # timestamp, the survey reports cached=True and never invents a console-observed age_s.
     current_list = [NMCLI_FIXTURE]
-    radio_on = [True]
 
     def dynamic_spawn(argv):
         cmd = tuple(argv)
         if cmd == RADIO_COMMAND:
-            return _FakeScanChild(argv, stdout="enabled\n" if radio_on[0] else "disabled\n")
+            return _FakeScanChild(argv, stdout="enabled\n")
         if cmd == DEVICE_COMMAND:
             return _FakeScanChild(argv, stdout=NMCLI_DEVICES_READY)
         if cmd == SURVEY_COMMAND:
@@ -333,29 +331,14 @@ def test_wifi_survey_tracks_cached_age_and_resets_when_cache_changes():
         spawn=dynamic_spawn,
         which=lambda name: "/usr/bin/nmcli",
         radio_present=lambda: True,
-        clock=lambda: now[0],
     )
     first = scanner.scan()
-    assert first["cached"] is True and first["age_s"] == 0
-
-    now[0] = 145.4
     second = scanner.scan()
-    assert second["cached"] is True and second["age_s"] == 45
-
-    # NetworkManager ran a scan and the AP list changed -> cache age resets to 0, still cached.
-    now[0] = 160.0
     current_list[0] = r"CafeNet:02\:00\:00\:00\:ee\:01:1:2412 MHz:90:WPA2"
     changed = scanner.scan()
-    assert changed["cached"] is True and changed["age_s"] == 0
-
-    # Radio toggled off then back on -> age resets cleanly rather than carrying stale age across.
-    radio_on[0] = False
-    with pytest.raises(SurveyUnavailable):
-        scanner.scan()
-    radio_on[0] = True
-    now[0] = 300.0
-    recovered = scanner.scan()
-    assert recovered["cached"] is True and recovered["age_s"] == 0
+    for snap in (first, second, changed):
+        assert snap["cached"] is True
+        assert "age_s" not in snap
 
 
 def test_nmcli_popen_forces_lc_all_c_locale(monkeypatch):
@@ -474,7 +457,7 @@ def test_api_survey_returns_census_with_envelope_fields_only(tmp_path):
     body = resp.json()
     assert body["available"] is True
     assert body["cached"] is True
-    assert body["age_s"] == 0
+    assert "age_s" not in body
     assert body["total"] == 8
     assert body["command"] == (
         "nmcli -t -f SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan no"
@@ -623,6 +606,16 @@ _NINTH_CIRCUIT = re.compile(r"\bninth\s+circuit\b|\b9th\s+cir\.?\b", re.I)
 _STATUTE_2510 = re.compile(r"\b2510\(16\)")
 _STATUTE_2511 = re.compile(r"\b2511\(2\)\(g\)\(i\)")
 _STATUTE_2511_DEFAULT = re.compile(r"\b2511\(1\)\(a\)")
+_INTENTIONALLY_INTERCEPT = re.compile(
+    r"\b2511\(1\)\(a\)[^.?!]*\bintentionally\s+intercept\w*\b"
+    r"|\bintentionally\s+intercept\w*[^.?!]*\b2511\(1\)\(a\)",
+    re.I,
+)
+_OUTSIDE_PAYLOAD_OPEN = re.compile(
+    r"\b(?:outside\s+(?:the\s+)?(?:ninth|9th)\s+circuit|elsewhere)\b[^.?!]*\bpayload\b"
+    r"[^.?!]*\b(?:open|unsettled|undecided)\b",
+    re.I,
+)
 _RADIO_COMM_HOLDING = re.compile(r"radio\s+communication", re.I)
 _DENIAL_MOTION_TO_DISMISS = re.compile(
     r"\breviewed\s+the\s+denial\s+of\b[^.?!]*\bmotion\s+to\s+dismiss\b"
@@ -684,6 +677,10 @@ def _check_joffe_explain(explain: str) -> list[str]:
         issues.append("missing 18 USC 2511(2)(g)(i) exemption reference")
     if not _STATUTE_2511_DEFAULT.search(explain):
         issues.append("missing 18 USC 2511(1)(a) Wiretap Act default rule")
+    if not _INTENTIONALLY_INTERCEPT.search(explain):
+        issues.append("2511(1)(a) default rule must specify 'intentionally' intercepting")
+    if not _OUTSIDE_PAYLOAD_OPEN.search(explain):
+        issues.append("outside-Ninth-Circuit clause must name the payload question as open")
     if not _DENIAL_MOTION_TO_DISMISS.search(explain):
         issues.append("missing denial-of-motion-to-dismiss posture")
     if not _ONE_CIRCUIT.search(explain):
@@ -733,14 +730,35 @@ def test_joffe_claim_probe_rejects_round1_overstatements_and_accepts_accurate_re
     assert _check_joffe_overstatements(nationwide_everywhere)
     assert _check_joffe_overstatements("Federal law forbids capturing open Wi-Fi payload.")
 
+    # F3 round 3 defects: ambiguous antecedent ("Elsewhere the question") and no "intentionally".
+    ambiguous_elsewhere = (
+        "In Joffe v. Google, 746 F.3d 920 (9th Cir. 2013), the Ninth Circuit reviewed the denial "
+        "of Google's motion to dismiss and held that Wi-Fi payload is not a 'radio communication' "
+        "under 18 USC 2510(16), so the unencrypted-radio rule does not reach 18 USC 2511(2)(g)(i). "
+        "It binds only the Ninth Circuit (no other circuit had ruled as of 2026) and never decided "
+        "whether reading beacon metadata is lawful. Elsewhere the question is open, not cleared: "
+        "the Act's default, 18 USC 2511(1)(a), forbids intercepting an electronic communication "
+        "unless an exemption applies."
+    )
+    ambiguous_issues = _check_joffe_explain(ambiguous_elsewhere)
+    assert any("intentionally" in issue for issue in ambiguous_issues), ambiguous_issues
+    assert any("payload question" in issue for issue in ambiguous_issues), ambiguous_issues
+
+    missing_intentionally = ambiguous_elsewhere.replace(
+        "Elsewhere the question is open",
+        "Outside the Ninth Circuit the payload question is open",
+    )
+    assert any("intentionally" in issue for issue in _check_joffe_explain(missing_intentionally))
+
     accurate_rewording = (
         "In the amended opinion in Joffe v. Google, 746 F.3d 920 (9th Cir. 2013), the Ninth "
         "Circuit reviewed the denial of Google's motion to dismiss and held that Wi-Fi payload "
         "is not a 'radio communication' under 18 USC 2510(16), so the unencrypted-radio rule does "
-        "not reach 18 USC 2511(2)(g)(i). The ruling binds only the Ninth Circuit (none had ruled "
-        "as of 2026 among other circuits), decided no liability, and left beacon metadata "
-        "undecided. Elsewhere the Act's default, 18 USC 2511(1)(a), forbids intercepting an "
-        "electronic communication unless an exemption applies."
+        "not reach 18 USC 2511(2)(g)(i). The ruling binds only the Ninth Circuit (no other circuit "
+        "had ruled as of 2026), decided no liability, and left beacon metadata undecided. Outside "
+        "the Ninth Circuit the payload question is open: the Act's default, 18 USC 2511(1)(a), "
+        "forbids intentionally intercepting an electronic communication unless an exemption "
+        "applies."
     )
     assert _check_joffe_explain(accurate_rewording) == []
     assert _check_joffe_overstatements(accurate_rewording) == []

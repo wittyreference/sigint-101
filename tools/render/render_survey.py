@@ -18,8 +18,7 @@ from sigint101.survey import SURVEY_COMMAND, channel_census, parse_nmcli_wifi  #
 
 THEMES = ("dark", "sunlight", "red-night")
 FIXTURE = REPO / "tests" / "fixtures" / "survey" / "dense_nmcli.txt"
-SAMPLE_AGE_S = 45
-EXPECTED_BADGE = f"CACHED · {SAMPLE_AGE_S}s"
+EXPECTED_BADGE = "CACHED"
 
 
 def populated_payload() -> dict:
@@ -28,7 +27,6 @@ def populated_payload() -> dict:
     return {
         "available": True,
         "cached": True,
-        "age_s": SAMPLE_AGE_S,
         "command": shlex.join(SURVEY_COMMAND),
         "total": len(networks),
         "channels": channel_census(networks),

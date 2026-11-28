@@ -52,19 +52,10 @@
     return parts.length ? parts.join(" · ") : "(no SSID)";
   }
 
-  function formatAge(ageSeconds) {
-    if (typeof ageSeconds !== "number" || !isFinite(ageSeconds) || ageSeconds < 0) return "";
-    var secs = Math.floor(ageSeconds);
-    if (secs < 60) return secs + "s";
-    if (secs < 3600) return Math.floor(secs / 60) + "m";
-    return Math.floor(secs / 3600) + "h";
-  }
-
   function badgeState(body) {
     if (body && body.cached === true) {
-      var age = formatAge(body.age_s);
       return {
-        text: age ? "CACHED · " + age : "CACHED",
+        text: "CACHED",
         cls: "decoder__status decoder__status--cached",
       };
     }
@@ -103,7 +94,6 @@
       countLabel: countLabel,
       signalLabel: signalLabel,
       summary: summary,
-      formatAge: formatAge,
       badgeState: badgeState,
       emptyMessage: emptyMessage,
       pollAnswer: pollAnswer,

@@ -10,7 +10,6 @@ import shlex
 import shutil
 import subprocess
 import threading
-import time
 from dataclasses import dataclass
 
 from .childproc import command_line, spawn, stderr_tail, stop_process
@@ -221,16 +220,12 @@ class WifiSurvey:
     """Runs one bounded, read-only nmcli listing and returns a band+channel metadata census."""
 
     def __init__(self, *, spawn=_popen, which=shutil.which,
-                 radio_present=_wifi_radio_present, timeout: float = SCAN_TIMEOUT_S,
-                 clock=time.monotonic):
+                 radio_present=_wifi_radio_present, timeout: float = SCAN_TIMEOUT_S):
         self._spawn = spawn
         self._which = which
         self._radio_present = radio_present
         self._timeout = timeout
-        self._clock = clock
         self._lock = threading.Lock()
-        self._snapshot_key: tuple | None = None
-        self._snapshot_since: float | None = None
 
     def _run_nmcli(self, argv: tuple[str, ...]) -> tuple[str, str]:
         """Run one bounded nmcli command and return (stdout, command_line), or raise honestly."""
@@ -264,51 +259,33 @@ class WifiSurvey:
             _close_quietly(getattr(proc, "stderr", None))
         return stdout or "", cmd
 
-    def _reset_cache_age(self) -> None:
-        self._snapshot_key = None
-        self._snapshot_since = None
-
     def scan(self) -> dict:
         """Check Wi-Fi radio and device state, then read NetworkManager's cached AP list."""
         with self._lock:
-            try:
-                if not self._which(NMCLI):
-                    raise SurveyUnavailable(
-                        f"{NMCLI} is not installed, so SIGINT 101 cannot scan Wi-Fi"
-                    )
-                if not self._radio_present():
-                    raise SurveyUnavailable(
-                        "no Wi-Fi radio on this host — SIGINT 101 will not fake a scan"
-                    )
+            if not self._which(NMCLI):
+                raise SurveyUnavailable(
+                    f"{NMCLI} is not installed, so SIGINT 101 cannot scan Wi-Fi"
+                )
+            if not self._radio_present():
+                raise SurveyUnavailable(
+                    "no Wi-Fi radio on this host — SIGINT 101 will not fake a scan"
+                )
 
-                # Real nmcli exits 0 with empty output when Wi-Fi is soft-blocked or unmanaged, so
-                # check radio and device state explicitly before trusting an empty list.
-                radio_out, _ = self._run_nmcli(RADIO_COMMAND)
-                if radio_out.strip().lower() in ("disabled", "off"):
-                    raise SurveyUnavailable("Wi-Fi radio is off — enable Wi-Fi to run the survey")
+            # Real nmcli exits 0 with empty output when Wi-Fi is soft-blocked or unmanaged, so
+            # check radio and device state explicitly before trusting an empty list.
+            radio_out, _ = self._run_nmcli(RADIO_COMMAND)
+            if radio_out.strip().lower() in ("disabled", "off"):
+                raise SurveyUnavailable("Wi-Fi radio is off — enable Wi-Fi to run the survey")
 
-                devices_out, _ = self._run_nmcli(DEVICE_COMMAND)
-                _check_wifi_devices(devices_out)
+            devices_out, _ = self._run_nmcli(DEVICE_COMMAND)
+            _check_wifi_devices(devices_out)
 
-                stdout, cmd = self._run_nmcli(SURVEY_COMMAND)
-            except SurveyUnavailable:
-                self._reset_cache_age()
-                raise
+            stdout, cmd = self._run_nmcli(SURVEY_COMMAND)
 
             networks = parse_nmcli_wifi(stdout)
-            key = tuple(
-                (n.bssid, n.band, n.channel, n.signal, n.ssid, n.security)
-                for n in sorted(networks, key=lambda n: (n.bssid, n.band, n.channel))
-            )
-            now = self._clock()
-            if self._snapshot_key != key or self._snapshot_since is None:
-                self._snapshot_key = key
-                self._snapshot_since = now
-            age_s = max(0, int(now - self._snapshot_since))
             return {
                 "command": cmd,
                 "cached": True,
-                "age_s": age_s,
                 "total": len(networks),
                 "channels": channel_census(networks),
                 "networks": [net.as_dict() for net in networks],
