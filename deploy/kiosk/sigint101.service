@@ -1,5 +1,6 @@
 # ABOUTME: systemd user unit that keeps the SIGINT 101 lesson server up on 127.0.0.1:8008.
 # ABOUTME: Lingering lets it start at boot without a login; the kiosk browser only ever connects.
+# deploy/install.sh provisions the private AIS decoder before installing this unit.
 [Unit]
 Description=SIGINT 101 lesson server
 After=network.target

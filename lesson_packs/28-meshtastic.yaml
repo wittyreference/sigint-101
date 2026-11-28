@@ -22,17 +22,15 @@ stages:
     noise and read one packet. Tonight you climb one floor up. That same radio does not just carry
     packets — it runs a network. Meshtastic: small nodes that find each other, join channels, and
     hand short encrypted messages down a chain until they reach someone no single node could hear
-    alone. One US preset note before you read the list: LongFast uses 250 kHz on one channel with
-    no hopping, which qualifies only under 47 CFR 15.249 (50 mV/m at 3 m, about 0.75 mW EIRP — far
-    below Meshtastic's +30 dBm US default), while Long Turbo uses 500 kHz to meet 47 CFR
-    15.247(a)(2) and its 1 W conducted limit, which is why this Recon runs Long Turbo. The chirp
-    was the wire. This is what talks over it.
+    alone. This Recon runs Long Turbo (500 kHz) to satisfy the US Part 15 bandwidth rule in
+    Lesson 05, with provisioning keeping transmit power at 8 dBm, under the module's FCC grant. The
+    chirp was the wire. This is what talks over it.
   demo: >-
     Watch — hands off. The Nomad's LoRa radio runs meshtasticd: node id, SNR, and text — or
     "(encrypted — not on our channel)". Empty? A mesh of one hears nothing.
   try: >-
-    Read, not key, comrade: text means the node shares LongFast; encrypted, another channel. Empty
-    until a second node sends on LongFast (antenna always on, same region).
+    Read, not key, comrade: text means the node shares Long Turbo; encrypted means another. Empty
+    until a second node sends on Long Turbo (antenna always on, region).
   predict: >-
     A node too far to hear you directly, one node between. What happens to your text? Lock it in.
   observe: >-
@@ -41,11 +39,11 @@ stages:
   explain: >-
     Hop by hop: a node in between repeats it, and the far node hears that — the point of a mesh.
     Every relay knocks the hop limit (three by default) down by one; at zero, repeating stops, so
-    the flood stays bounded, never an endless storm. A channel is a name and a key; LongFast's is
-    the public default, so treat it as readable by anyone. Back to Lesson 11: routing needs no
-    key, so a node with your radio settings relays a packet it cannot read. Carry this out the
-    door: hearing, relaying and reading are three separate things. One node can't show a hop; with
-    a third, a packet from beyond direct range is one the mesh relayed.
+    the flood stays bounded, never an endless storm. A channel is a name and key; Long Turbo's is
+    the public default, readable by anyone. Back to Lesson 11: routing needs no key, so a node
+    sharing your radio settings relays a packet it cannot read. Carry this out the door: hearing,
+    relaying and reading are three separate things. One node can't show a hop; with a third, a
+    packet from beyond direct range is one the mesh relayed.
 
 # Keyboard-free predict chips: {key, label}. Keys quoted so a YAML-boolean word stays text.
 choices:

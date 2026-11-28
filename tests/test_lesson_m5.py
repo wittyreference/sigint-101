@@ -98,6 +98,42 @@ def test_m5_sort_carries_over_m15_pager_line_and_joffe_wifi_payload_line():
     assert all("2511(2)(g)(ii)(IV)" in c["cite"] for c in air_marine)
 
 
+_SCENARIO_STOPWORDS = frozenset(
+    "a an the to of on in it is you your with no and or all now that until do for at by from "
+    "without while this its any".split()
+)
+
+
+def _scenario_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9']+", text.lower().replace("’", "'"))
+            if w not in _SCENARIO_STOPWORDS}
+
+
+def test_m5_no_sort_card_restates_the_scored_predict():
+    # F7: the try comes before the predict and every tap shows its verdict at once, so a card that
+    # is the predict's own scenario hands the learner the scored answer one screen early.
+    lesson = load_lesson_file(PACK_M5)
+    predict = lesson.stages["predict"]
+    assert "repeater" in predict.lower(), "the predict's setting moved; update this guard"
+    predict_words = _scenario_words(predict)
+    for card in lesson.sort:
+        words = _scenario_words(card["text"])
+        assert not words & {"repeater", "repeaters"}, (card["key"], card["text"])
+        shared = predict_words & words
+        assert len(shared) <= 3, (card["key"], sorted(shared))
+
+    # The unlicensed amateur transmit case stays in the deck, on its primary authorities.
+    ham = next(c for c in lesson.sort if c["key"] == "ham-tx-unlicensed")
+    assert ham["answer"] == "illegal"
+    assert "47 USC 301" in ham["cite"] and "97.5(a)" in ham["cite"]
+    raw = yaml.safe_load(PACK_M5.read_text(encoding="utf-8"))
+    by_title = {s["title"].split(" — ")[0]: s["url"] for s in raw["sources"]}
+    assert by_title["47 U.S.C. 301"].startswith("https://www.govinfo.gov/content/pkg/USCODE-")
+    assert by_title["47 U.S.C. 301"].endswith("sec301.htm")
+    assert by_title["47 CFR 97.5"].startswith("https://www.ecfr.gov/current/title-47/")
+    assert by_title["47 CFR 97.5"].endswith("section-97.5")
+
+
 def test_m5_stages_agree_with_twelve_card_sort():
     # F3: observe and explain must not refer to "the four" as if the learner only saw four.
     lesson = load_lesson_file(PACK_M5)
@@ -265,6 +301,68 @@ def test_lesson_5_try_stage_renders_card_sort_and_law_link_keyboard_free(tmp_pat
     # Keyboard-free: no text inputs anywhere on the lesson screen.
     assert 'type="text"' not in html
     assert "<textarea" not in html
+
+
+def test_lesson_5_sort_head_carries_a_hidden_not_saved_mark(tmp_path):
+    # F8.1: card-sort.js shows this mark when a save is refused or lost; it starts hidden.
+    with _client(tmp_path) as client:
+        html = client.get("/lesson/5").text
+    mark = re.search(r"<[^>]*\bdata-sort-unsaved\b[^>]*>([^<]*)<", html)
+    assert mark, "expected a [data-sort-unsaved] mark in the sort head"
+    assert re.search(r"\bhidden\b", mark.group(0)), mark.group(0)
+    assert "not saved" in mark.group(1).lower()
+
+
+def test_lesson_5_law_link_is_the_hook_that_keeps_the_card_place(tmp_path):
+    # card-sort.js keeps the current card only when the learner leaves through this link.
+    with _client(tmp_path) as client:
+        html = client.get("/lesson/5").text
+    assert re.search(r'<a\b[^>]*href="/law\?back=/lesson/5"[^>]*\bdata-sort-law\b', html)
+
+
+def _foot_controls(footer_html: str) -> list[tuple[str, str, str]]:
+    """(opening tag, class attribute, visible label) for each button or link in a footer."""
+    controls = []
+    for m in re.finditer(r"<(button|a)\b([^>]*)>(.*?)</\1>", footer_html, re.S):
+        attrs, label = m.group(2), html_lib.unescape(re.sub(r"<[^>]+>", "", m.group(3))).strip()
+        cls = re.search(r'class="([^"]*)"', attrs)
+        controls.append((m.group(0).split(">", 1)[0], cls.group(1) if cls else "", label))
+    return controls
+
+
+def _label_words(label: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", label.lower()))
+
+
+def test_lesson_5_card_stepping_is_distinguishable_from_the_stage_buttons(tmp_path):
+    # F10: the sort footer holds both the lesson's stage steps (Prev, Next step) and the deck's card
+    # steps. They must differ by class and by label, so a mis-tap does not leave the sort.
+    with _client(tmp_path) as client:
+        html = client.get("/lesson/5").text
+    foot = re.search(r'<footer class="[^"]*\bsort-foot\b[^"]*">(.*?)</footer>', html, re.S)
+    assert foot, "expected the sort footer"
+    controls = _foot_controls(foot.group(1))
+    card = [c for c in controls if "data-sort-prev" in c[0] or "data-sort-next" in c[0]]
+    stage = [c for c in controls if "data-nav=" in c[0] or "data-complete" in c[0]]
+    assert len(card) == 2 and stage, controls
+
+    card_classes = [set(c[1].split()) for c in card]
+    stage_classes = [set(c[1].split()) for c in stage]
+    assert all("sort-step__btn" in cls for cls in card_classes), card
+    assert not any("sort-step__btn" in cls for cls in stage_classes), stage
+    for cc in card_classes:
+        for sc in stage_classes:
+            assert not (cc & sc) - {"btn"}, (cc, sc)   # only the base .btn is shared
+
+    for _, _, card_label in card:
+        assert "card" in _label_words(card_label), card_label
+        for _, _, stage_label in stage:
+            shared = _label_words(card_label) & _label_words(stage_label)
+            assert not shared, (card_label, stage_label)
+
+    # The two card steps sit together in their own group, away from the stage buttons.
+    group = re.search(r"<[^>]*\bdata-sort-step\b[^>]*>(.*?)</(?:div|span)>", foot.group(1), re.S)
+    assert group and "data-sort-prev" in group.group(1) and "data-sort-next" in group.group(1)
 
 
 def test_law_page_renders_every_authority_citation_caution_and_safe_back_link(tmp_path):

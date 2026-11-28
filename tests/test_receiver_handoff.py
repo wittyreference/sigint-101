@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sigint101 import app, aprs, childproc, radio_control, receiver_lifecycle
+from sigint101 import app, aprs, childproc, decode, radio_control, receiver_lifecycle
 from sigint101.events import read_events
 from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _StubSweeper
@@ -39,6 +39,153 @@ def test_two_failed_teardown_claims_refuse_without_retrying_under_reservation(tm
         assert not client.app.state.sweeper.running
         proc.unkillable = False
         proc.stubborn = False
+
+
+def test_an_rtl_433_that_survived_kill_holds_the_radio_until_it_is_reaped(tmp_path):
+    # Codex D-091 F7: rtl_433's decoder told one refusal and then let a claim spawn beside the
+    # live child. It now answers the handoff check like the supervised receivers do.
+    rtl_433 = Child(["rtl_433"], unkillable=True)
+    sensors = decode.Decoder(spawn=lambda *_: rtl_433, radio_present=lambda: True,
+                             which=lambda t: t)
+    aprs_children = []
+
+    def spawn_aprs(*_):
+        aprs_children.append(Child(["rtl_fm"]))
+        return aprs_children[-1]
+
+    with _client(tmp_path, probe=_present, decoder_factory=lambda: sensors,
+                 aprs_factory=lambda: aprs.AprsDecoder(spawn=spawn_aprs,
+                                                       radio_present=lambda: True,
+                                                       which=lambda t: t)) as client:
+        assert client.get("/api/decode").status_code == 200
+        refused = [client.get("/api/aprs") for _ in range(3)]   # the stand-down cannot kill it
+        refused += [client.get("/api/decode") for _ in range(2)]
+        assert not aprs_children                               # nothing spawned beside it
+        rtl_433.code = -signal.SIGKILL                         # the kill lands at last
+        back = client.get("/api/aprs")
+        client.app.state.aprs.stop()
+    for resp in refused:
+        assert resp.status_code == 503
+        assert "rtl_433 survived kill; the dongle may still be held" in resp.json()["reason"]
+    assert back.status_code == 200 and len(aprs_children) == 1
+
+
+def _sensors(spawn):
+    return decode.Decoder(spawn=spawn, radio_present=lambda: True, which=lambda t: t)
+
+
+def test_a_legacy_retune_hands_the_radio_on_without_waiting_on_an_exit_diagnostic(
+        tmp_path, monkeypatch):
+    # Codex D-093 F1: the retune read a status-1 exit's stderr under the decoder's life lock,
+    # so a stalled diagnostic held the stand-down that a spectrum claim needs.
+    entered, resume, swept = (threading.Event() for _ in range(3))
+    procs = []
+
+    def spawn(*_):
+        procs.append(LateProc(["rtl_433"]))
+        return procs[-1]
+
+    def stalled_tail(_stage):
+        entered.set()
+        resume.wait(10)
+        return []
+
+    class Sweep(_StubSweeper):
+        def start(self):
+            super().start()
+            swept.set()
+
+    sensors = _sensors(spawn)
+    sensors.STOP_WAIT_S = 0.05
+    monkeypatch.setattr(childproc, "stderr_tail", stalled_tail)
+    with _client(tmp_path, probe=_present, decoder_factory=lambda: sensors,
+                 sweeper_factory=lambda: Sweep([])) as client:
+        assert client.get("/api/decode").status_code == 200
+        procs[0].die(1)                         # status 1; its pipe is still open
+        retune = threading.Thread(target=sensors.retune, args=(315_000_000,), daemon=True)
+        successor = threading.Thread(target=lambda: client.get("/api/spectrum"), daemon=True)
+        try:
+            retune.start()                      # first, so its hold on the decoder is what's tested
+            retune.join(3)
+            assert not retune.is_alive(), "the retune waited on the exit diagnostic"
+            successor.start()
+            assert swept.wait(5), "a stalled exit diagnostic still held the radio"
+            assert not entered.is_set()
+        finally:
+            resume.set()
+            retune.join(6)
+            if successor.ident is not None:
+                successor.join(6)
+            for proc in procs:
+                proc.close_pipe()
+
+
+class _WaitFails(Child):
+    def __init__(self):
+        super().__init__(["rtl_433"], unkillable=True)   # survives the escalated SIGKILL too
+
+    def wait(self, timeout=None):
+        if self.code is None and "TERM" in self.sent:   # the stop's wait, not the reader's
+            raise OSError("wait failed")
+        return super().wait(timeout)
+
+
+def test_an_rtl_433_whose_reap_wait_fails_holds_the_radio_until_its_exit_shows(tmp_path):
+    # Codex D-093 F2: an OSError from the stop's wait dropped the live child, and the next
+    # spectrum claims were granted beside it.
+    rtl_433 = _WaitFails()
+    with _client(tmp_path, probe=_present, decoder_factory=lambda: _sensors(lambda *_: rtl_433),
+                 sweeper_factory=lambda: _StubSweeper([])) as client:
+        assert client.get("/api/decode").status_code == 200
+        refused = [client.get("/api/spectrum") for _ in range(3)]
+        assert not client.app.state.sweeper.running
+        hardware = client.get("/api/hardware").json()["state"]
+        rtl_433.code = -signal.SIGKILL                        # its exit is confirmed at last
+        back = client.get("/api/spectrum")
+    for resp in refused:
+        assert resp.status_code == 503
+        reason = resp.json()["reason"]
+        assert "rtl_433 could not be confirmed stopped (wait failed)" in reason
+        assert "the dongle may still be held" in reason
+    assert hardware == "busy"
+    assert back.status_code == 200
+
+
+class _SlowToStop(Child):
+    def __init__(self):
+        super().__init__(["rtl_433"])
+        self.waiting, self.gate = threading.Event(), threading.Event()
+
+    def terminate(self):
+        self.sent.append("TERM")
+
+    def wait(self, timeout=None):
+        if self.code is None and "TERM" in self.sent:   # the stop's reap, not the reader's
+            self.waiting.set()
+            if not self.gate.wait(5):
+                raise subprocess.TimeoutExpired("rtl_433", timeout)
+            self.code = -signal.SIGTERM
+        return super().wait(timeout)
+
+
+def test_hardware_reads_busy_while_a_legacy_stop_waits_on_its_reap(tmp_path):
+    # Codex D-093 F3: in flight, the child was in neither ownership field, so the status bar
+    # read "present" while rtl_433 still held the dongle.
+    rtl_433 = _SlowToStop()
+    sensors = _sensors(lambda *_: rtl_433)
+    with _client(tmp_path, probe=_present, decoder_factory=lambda: sensors) as client:
+        assert client.get("/api/decode").status_code == 200
+        retune = threading.Thread(target=sensors.retune, args=(315_000_000,), daemon=True)
+        retune.start()
+        try:
+            assert rtl_433.waiting.wait(5)
+            during = client.get("/api/hardware").json()["state"]
+        finally:
+            rtl_433.gate.set()
+            retune.join(5)
+        after = client.get("/api/hardware").json()["state"]
+    assert during == "busy"
+    assert after == "present"
 
 
 def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_path, monkeypatch):
@@ -267,39 +414,124 @@ def test_shutdown_cancels_grace_and_releases_other_radios_while_reporting_is_blo
 
 
 def test_shutdown_interpreter_exits_at_deadline_with_a_stalled_worker(tmp_path):
+    """Two receivers and a store never return; shutdown still keeps its one deadline and exits.
+
+    The deadline is checked against the clock readings finish_console itself makes, which the
+    child records, not against wall time in this process: child start-up, interpreter teardown
+    and coverage writes on a loaded machine can take seconds and are not what this proves. The
+    guard below only catches a hang.
+    """
+    import json
+
     code = """
 import asyncio
-import threading
-from pathlib import Path
+import json
 import sys
-from sigint101 import app
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+from sigint101 import app, exam, radio_control
 from tests.test_app import _client
 
-app.SHUTDOWN_TOTAL_S = 0.4
-class Flock:
-    def stop(self):
-        print('worker parked', flush=True)
+app.SHUTDOWN_TOTAL_S = float(sys.argv[2])
+GUARD_S = float(sys.argv[3])
+parked = {name: threading.Event() for name in ("flock", "rayhunter", "exam")}
+phase, reads, unreached = [None], [], []
+
+
+def stall(name):
+    def park(*_):
+        parked[name].set()
         threading.Event().wait()
+    return park
+
+
+class Flock:
+    stop = stall("flock")
+
+
+class Rayhunter:
+    stop = stall("rayhunter")
+
+
+exam.ExamStore.close = stall("exam")
+
+
+def monotonic():
+    # Each later read waits until the workers of its phase are parked, so every wait is sure to
+    # be on a stalled worker however late a loaded machine runs it; the time is read after that.
+    if reads:
+        names = ("flock", "rayhunter") if phase[0] == "drain" else ("exam",)
+        unreached.extend(name for name in names if not parked[name].wait(GUARD_S))
+    now = time.monotonic()
+    reads.append((phase[0], now))
+    return now
+
+
+radio_control.time = SimpleNamespace(monotonic=monotonic)
+seal = radio_control.ReceptionSink.seal
+
+
+def sealed(sink):
+    seal(sink)
+    phase[0] = "close"
+
+
+radio_control.ReceptionSink.seal = sealed
+finish = app.finish_console
+
+
+async def finish_console(*args):
+    phase[0] = "drain"
+    return await finish(*args)
+
+
+app.finish_console = finish_console
+
 
 async def run():
-    console = _client(Path(sys.argv[1]), flock_factory=Flock).app
+    console = _client(Path(sys.argv[1]), flock_factory=Flock, rayhunter_factory=Rayhunter).app
     async with console.router.lifespan_context(console):
         pass
+    return console.state.shutdown_errors
 
-asyncio.run(run())
-print('lifespan exited', flush=True)
+
+errors = asyncio.run(run())
+print(json.dumps({"reads": reads, "unreached": unreached, "errors": errors}), flush=True)
 """
-    with subprocess.Popen([sys.executable, "-c", code, str(tmp_path)],
+
+    def gave_up_at(reads, phase, until):
+        # Every read before the last came before ``until``; the last, which ended the wait, after.
+        times = [now for name, now in reads if name == phase]
+        return bool(times) and times[-1] >= until and all(now < until for now in times[:-1])
+
+    total, guard = 0.4, 10
+    with subprocess.Popen([sys.executable, "-c", code, str(tmp_path), str(total), str(guard)],
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         try:
-            assert select.select([proc.stdout], [], [], 8)[0], "shutdown never reached the worker"
-            assert proc.stdout.readline() == b"worker parked\n"
-            out, err = proc.communicate(timeout=1.4)
-            assert proc.returncode == 0, err.decode()
-            assert b"lifespan exited" in out
+            assert select.select([proc.stdout], [], [], 6 * guard)[0], "shutdown hung"
+            try:
+                out, err = proc.communicate(timeout=6 * guard)
+            except subprocess.TimeoutExpired:
+                pytest.fail("the interpreter did not exit with stalled workers")
         finally:
             if proc.poll() is None:
                 proc.kill()
+    assert proc.returncode == 0, err.decode()
+    report = json.loads(out.decode().splitlines()[-1])
+    assert report["unreached"] == [], "a stalled worker never started"
+    (first_phase, start), *reads = report["reads"]
+    assert first_phase == "drain"
+    # One deadline from the first read, as finish_console sets it: the receivers get all but a
+    # quarter of it (one second at most), and the stores close by that same deadline.
+    deadline = start + total
+    drain_end = deadline - min(1.0, total / 4)
+    assert gave_up_at(reads, "drain", drain_end), reads
+    assert gave_up_at(reads, "close", deadline), reads
+    assert {"flock: shutdown still pending", "rayhunter: shutdown still pending",
+            "exam: close still pending"} <= set(report["errors"])
 
 
 def test_receiver_shutdown_times_out_waiting_for_a_reaped_run_to_report(monkeypatch):

@@ -30,6 +30,9 @@ EXIT_GRACE_S = 2.0
 FIRST_RETRY_S = 2.0
 MAX_RETRY_S = 30.0
 STABLE_AFTER_S = 30.0
+# The quick death from which the wait has grown past FIRST_RETRY_S (the second in a row). A retune
+# lifts a shorter wait; from this one on, the wait survives the retune (ChildWatch.superseded).
+RETUNE_KEEPS_WAIT_FROM = 2
 
 # How long a fresh child is "starting" rather than live. rtl_fm takes a few hundred ms to fail on
 # a dongle another process holds, so a tool has not shown it works until it has lived this long.
@@ -205,7 +208,8 @@ class GroupPopen(subprocess.Popen):
 CAPTURE = object()
 
 
-def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=False, pass_fds=()):
+def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=False, env=None,
+          pass_fds=()):
     """Start one radio tool in its own session, tied to the console's life.
 
     stderr defaults to a scratch file rather than a pipe: nothing drains stderr while the tool
@@ -219,8 +223,8 @@ def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=Fals
         stderr = scratch
     try:
         proc = _SPAWNER.run(lambda: GroupPopen(
-            argv, stdin=stdin, stdout=stdout, stderr=stderr, text=text, pass_fds=pass_fds,
-            start_new_session=True, preexec_fn=_die_with_parent()))
+            argv, stdin=stdin, stdout=stdout, stderr=stderr, text=text, env=env,
+            pass_fds=pass_fds, start_new_session=True, preexec_fn=_die_with_parent()))
     except BaseException:
         if scratch is not None:
             scratch.close()
@@ -532,6 +536,23 @@ class ChildWatch:
     def observed(self, proc, reason: str | None, observed_at: float):
         """Record an already observed exit without waiting or reading the diagnostics."""
         return self._commit_end(proc, reason, observed_at)
+
+    def superseded(self, freq_hz: int) -> None:
+        """A retune moved on to `freq_hz`: the last death is the old run's, not the next one's.
+
+        A single death's wait is lifted, so one kill and a retune start at once. From the second
+        quick death in a row the wait has grown (each further quick death doubles FIRST_RETRY_S),
+        and while it runs it stands: the tool keeps dying whatever the frequency, and the reason
+        says so and where the next try is, not the old death. The count of quick deaths is kept.
+        A late diagnostic of the old death finds no death to enrich.
+        """
+        with self._lock:
+            self._death = None
+            if (self.reason is not None and self._deaths >= RETUNE_KEEPS_WAIT_FROM
+                    and self._retry_at is not None and self._retry_at > self.clock()):
+                self.reason = f"{self.tool} keeps dying; it tries again at {freq_hz / 1e6:.4f} MHz"
+            else:
+                self.reason = None
 
     def enrich(self, proc, reason: str) -> None:
         """Only the death that is still current can receive its late diagnostic."""

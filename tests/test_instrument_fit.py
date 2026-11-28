@@ -16,7 +16,7 @@ LESSONS = load_lessons(PACK_DIR)
 # characters wide) under the live instrument; Lesson 13's ADS-B radar stands beside the narration
 # at full height (~7 lines of 35 characters). Lessons that need no radio (L5, L17, Unit 7) render
 # their stages as scrollable prose and are outside this rule.
-INSTRUMENT_STAGES = ("demo", "try", "observe")
+INSTRUMENT_STAGES = ("demo", "try", "operate", "observe")
 BAND_WIDTH = 58
 BAND_MAX_LINES = 3
 RADAR_WIDTH = 35
@@ -75,6 +75,7 @@ HARDWARE_STAGES = [
     (lesson_id, stage)
     for lesson_id in sorted(i for i, lesson in LESSONS.items() if lesson.needs_hardware)
     for stage in INSTRUMENT_STAGES
+    if stage in LESSONS[lesson_id].stages
 ]
 
 
@@ -132,7 +133,8 @@ FIDELITY_PINS = [
     ("L26-demo-aivdm-sentences", 26, "demo", [r"AIVDM sentences"], [r"AIVDM lines"]),
     ("L26-try-nine-digit-mmsi", 26, "try", [r"the nine-digit MMSI"], [r"9-digit MMSI"]),
     ("L28-try-read-not-key-node-shares", 28, "try",
-     [r"not key", r"the node shares LongFast"], [r"text shares LongFast"]),
+     [r"not key", r"the node shares Long Turbo"],
+     [r"text shares Long Turbo", r"\blong[\s_-]?fast\b"]),
     ("L29-observe-glance-flipper-both-ways", 29, "observe",
      [r"at a glance", r"Flipper's command line", r"both ways"], []),
 ]

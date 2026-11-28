@@ -11,9 +11,11 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
+from . import childproc
 from .childproc import (
     ChildWatch,
     command_line,
+    describe_exits,
     emit_reception,
     running_command,
     spawn,
@@ -45,6 +47,42 @@ _ENVELOPE_KEYS = frozenset({"time", "model", "mod", "freq", "freq1", "freq2",
 # apart and a sensor's next reading seconds later, so a copy inside this window is the same
 # reception.
 REPEAT_WINDOW_S = 2.0
+
+# The refusal for an rtl_433 that a stop could not end. It is the radio's state, not the run's,
+# so a retune keeps it.
+SURVIVED_KILL = f"{RTL_433} survived kill; the dongle may still be held"
+
+
+def _unconfirmed(exc) -> str:
+    return f"{RTL_433} could not be confirmed stopped ({exc}); the dongle may still be held"
+
+
+def _kill_and_confirm(proc) -> str | None:
+    """SIGKILL a retiring child that is still ours, then wait for its reap.
+
+    Returns None once its exit is confirmed, else why not. The signal goes to the kept process
+    object only after poll() shows it still unreaped, so a reaped child's PID, which may be
+    another process's by now, is never signalled. An error in the poll, the signal or the wait
+    confirms nothing.
+    """
+    try:
+        if proc.poll() is not None:
+            return None
+    except Exception as exc:
+        return _unconfirmed(exc)                # cannot tell it is still ours: no signal
+    try:
+        proc.kill()
+    except OSError:
+        pass                                    # gone already; the wait says
+    except Exception as exc:
+        return _unconfirmed(exc)
+    try:
+        proc.wait(timeout=childproc.STOP_WAIT_S)
+    except subprocess.TimeoutExpired:
+        return SURVIVED_KILL
+    except Exception as exc:
+        return _unconfirmed(exc)
+    return None
 
 
 class DecodeUnavailable(RuntimeError):
@@ -193,6 +231,12 @@ class Decoder:
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
+        # The rtl_433 a stop is retiring, kept from the moment the stop takes it until its exit is
+        # confirmed: while the stop waits, and after a stop that could not confirm it. Until then
+        # it may still hold the dongle, so every start and every handoff is refused
+        # (release_failure). _retire_failure says why once the stop has given up.
+        self._retiring = None
+        self._retire_failure = None
         # The run a reader may list, report and record into. start() hands it to the reader it
         # starts; every stop moves it on, so a reader that outlives its stop is shut out (_read).
         self._run = 0
@@ -249,24 +293,84 @@ class Decoder:
 
         The reads heard on the old frequency are cleared as release() clears them, but the dongle
         is not handed away. Tuning to where the decoder already is changes nothing.
+
+        The stopped run's death or pipe failure is that run's, not the next run's answer, so it
+        is dropped; the stop has moved the run on and marked the watch stopping first, so the old
+        reader can record neither again. An rtl_433 the stop could not confirm stopped may still
+        hold the dongle, and that refusal stands. The watch keeps a grown back-off
+        (ChildWatch.superseded).
         """
         with self._life:
             if int(freq_hz) == self.freq_hz:
                 return
+            if self._proc is not None:
+                self._count_visible_exit(self._proc)
             self._stop_locked()
             self.freq_hz = int(freq_hz)
             with self._lock:
                 self._reads.clear()
+                if self.error != self._retire_failure:
+                    self.error = None
+            self.watch.superseded(self.freq_hz)
+
+    def _count_visible_exit(self, proc) -> None:
+        """Count a child's exit that already shows, before the stop makes its reader's record stale.
+
+        A child that has exited but whose reader has not seen its pipe close would otherwise never
+        advance the back-off. Held under _life, so the death is counted from its exit status and
+        the child's identity only: no stderr is read and nothing is waited on, and a stalled
+        diagnostic cannot hold the stand-down a handoff needs. The tool's own words are not
+        needed here, as the retune replaces the old death's reason anyway. ChildWatch commits one
+        death per child, so the reader recording the same exit cannot count it twice.
+        """
+        try:
+            code = proc.poll()
+        except (OSError, ValueError):
+            return
+        if code is not None:
+            reason = describe_exits([(proc, code)], tail=(), tool=RTL_433)
+            self.watch.observed(proc, reason, self.watch.clock())
 
     def start(self) -> None:
         """Begin decoding, unless the radio is absent, rtl_433 is missing, or we were released."""
         with self._life:
             self._start_locked()
 
+    def release_failure(self, *, pending=False) -> str | None:
+        """Why the radio cannot be handed on: a retiring rtl_433's exit is not confirmed yet.
+
+        The console asks every receiver this before a handoff, and the hardware status asks it
+        with `pending`, as they ask the supervised receivers. A stop that gave up says why. A
+        stop still waiting on the reap says so only when `pending` is asked; a plain check would
+        wait for that stop anyway, as it holds the decoder.
+        """
+        proc = self._retiring
+        if proc is None:
+            return None
+        try:
+            alive = proc.poll() is None
+        except Exception:
+            alive = True                        # an exit that cannot be read is not confirmed
+        if not alive:
+            return None
+        failure = self._retire_failure
+        if failure is not None:
+            return failure
+        return f"{RTL_433} is still releasing the radio" if pending else None
+
     def _start_locked(self) -> None:
         if self.running:
             return
         self._settle()
+        # Every start refuses while the old rtl_433 is alive, not just the first: the child and
+        # its refusal are kept until its exit is confirmed.
+        if self._retiring is not None:
+            if reason := self.release_failure(pending=True):
+                raise DecodeUnavailable(reason)
+            failure, self._retiring, self._retire_failure = self._retire_failure, None, None
+            with self._lock:
+                if failure is not None and self.error == failure:
+                    self.error = None
         if self._released:
             raise DecodeUnavailable(
                 "the radio was released to another program; resume decoding to take it back")
@@ -366,12 +470,36 @@ class Decoder:
         # Marked before the kill, so the reader seeing the output end never reports our stop as a
         # death.
         self.watch.stopping()
-        proc, self._proc = self._proc, None
-        if proc is not None and not stop_process(proc):
-            self.error = "rtl_433 survived kill; the dongle may still be held"
+        proc = self._proc
+        if proc is not None:
+            # Retiring from here: release_failure(pending=True) reports it while the stop waits.
+            self._retire_failure = None
+            self._retiring = proc
+        self._proc = None
+        if proc is not None:
+            try:
+                failure = None if stop_process(proc) else SURVIVED_KILL
+            except Exception:
+                # A wait that errs skipped the SIGKILL that follows it: escalate now, so a tool
+                # that ignores SIGTERM is not left holding the radio.
+                failure = _kill_and_confirm(proc)
+            self._settle_retirement(failure)
+        elif self._retiring is not None:
+            # A child an earlier stop could not confirm: signal it again and retry its reap.
+            self._settle_retirement(_kill_and_confirm(self._retiring))
         if self._thread is not None:
             self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
+
+    def _settle_retirement(self, failure: str | None) -> None:
+        """Drop the retiring child once its exit is confirmed; otherwise keep it, and say why."""
+        if failure is None:
+            prior, self._retiring, self._retire_failure = self._retire_failure, None, None
+            if prior is not None and self.error == prior:
+                self.error = None
+        else:
+            self._retire_failure = failure
+            self.error = failure
 
     def drain(self, timeout: float = 5.0) -> None:
         """Wait for a finite source to be fully consumed. A real decode stream never ends."""

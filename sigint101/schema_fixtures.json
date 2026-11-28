@@ -1,0 +1,2663 @@
+{
+  "exam": {
+    "v0": {
+      "empty": {
+        "tables": {},
+        "triggers": [],
+        "views": []
+      },
+      "v0_02c2095": {
+        "tables": {
+          "sim": {
+            "columns": [
+              [
+                0,
+                "id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "question_ids",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "answers",
+                "TEXT",
+                1,
+                "'{}'",
+                0,
+                0
+              ],
+              [
+                3,
+                "created",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "skipped",
+                "TEXT",
+                1,
+                "'[]'",
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table sim (id integer primary key check (id = 1), question_ids text not null, answers text not null default '{}', created real, skipped text not null default '[]')",
+            "without_rowid": false
+          },
+          "srs": {
+            "columns": [
+              [
+                0,
+                "question_id",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "box",
+                "INTEGER",
+                1,
+                "1",
+                0,
+                0
+              ],
+              [
+                2,
+                "last_seen",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "seen",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "question_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table srs (question_id text primary key, box integer not null default 1, last_seen real, seen integer not null default 0, correct integer not null default 0)",
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_32ec4a0": {
+        "tables": {
+          "sim": {
+            "columns": [
+              [
+                0,
+                "id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "question_ids",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "answers",
+                "TEXT",
+                1,
+                "'{}'",
+                0,
+                0
+              ],
+              [
+                3,
+                "created",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table sim (id integer primary key check (id = 1), question_ids text not null, answers text not null default '{}', created real)",
+            "without_rowid": false
+          },
+          "srs": {
+            "columns": [
+              [
+                0,
+                "question_id",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "box",
+                "INTEGER",
+                1,
+                "1",
+                0,
+                0
+              ],
+              [
+                2,
+                "last_seen",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "seen",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "question_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table srs (question_id text primary key, box integer not null default 1, last_seen real, seen integer not null default 0, correct integer not null default 0)",
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_b90e589": {
+        "tables": {
+          "srs": {
+            "columns": [
+              [
+                0,
+                "question_id",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "box",
+                "INTEGER",
+                1,
+                "1",
+                0,
+                0
+              ],
+              [
+                2,
+                "last_seen",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "seen",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "question_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table srs (question_id text primary key, box integer not null default 1, last_seen real, seen integer not null default 0, correct integer not null default 0)",
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      }
+    },
+    "v1": {
+      "tables": {
+        "sim": {
+          "columns": [
+            [
+              0,
+              "id",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "question_ids",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              2,
+              "answers",
+              "TEXT",
+              1,
+              "'{}'",
+              0,
+              0
+            ],
+            [
+              3,
+              "created",
+              "REAL",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              4,
+              "skipped",
+              "TEXT",
+              1,
+              "'[]'",
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "sql": "create table sim (id integer primary key check (id = 1), question_ids text not null, answers text not null default '{}', created real, skipped text not null default '[]')",
+          "without_rowid": false
+        },
+        "srs": {
+          "columns": [
+            [
+              0,
+              "question_id",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "box",
+              "INTEGER",
+              1,
+              "1",
+              0,
+              0
+            ],
+            [
+              2,
+              "last_seen",
+              "REAL",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              3,
+              "seen",
+              "INTEGER",
+              1,
+              "0",
+              0,
+              0
+            ],
+            [
+              4,
+              "correct",
+              "INTEGER",
+              1,
+              "0",
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "question_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          ],
+          "sql": "create table srs (question_id text primary key, box integer not null default 1, last_seen real, seen integer not null default 0, correct integer not null default 0)",
+          "without_rowid": false
+        }
+      },
+      "triggers": [],
+      "views": []
+    }
+  },
+  "progress": {
+    "v0": {
+      "empty": {
+        "tables": {},
+        "triggers": [],
+        "views": []
+      },
+      "v0_02c2095": {
+        "tables": {
+          "places": {
+            "columns": [
+              [
+                0,
+                "name",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "value",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "name",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table places (name text primary key, value text not null, updated real)",
+            "without_rowid": false
+          },
+          "progress": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
+            "without_rowid": false
+          },
+          "responses": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2,
+                0
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
+            "without_rowid": false
+          },
+          "stages": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "stage",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "furthest",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_1a35a1a": {
+        "tables": {
+          "places": {
+            "columns": [
+              [
+                0,
+                "name",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "value",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "name",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table places (name text primary key, value text not null, updated real)",
+            "without_rowid": false
+          },
+          "progress": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
+            "without_rowid": false
+          },
+          "responses": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2,
+                0
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
+            "without_rowid": false
+          },
+          "sort_answers": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "card_key",
+                "TEXT",
+                1,
+                null,
+                2,
+                0
+              ],
+              [
+                2,
+                "choice",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "correct",
+                "INTEGER",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    1,
+                    "card_key",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table sort_answers (lesson_id integer not null, card_key text not null, choice text not null, correct integer not null, updated real, primary key (lesson_id, card_key))",
+            "without_rowid": false
+          },
+          "stages": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "stage",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "furthest",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
+            "without_rowid": false
+          },
+          "stamp_events": {
+            "columns": [
+              [
+                0,
+                "digest",
+                "BLOB",
+                1,
+                null,
+                1,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "digest",
+                    0,
+                    "BINARY",
+                    1
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table stamp_events (digest blob primary key) without rowid",
+            "without_rowid": true
+          },
+          "stamps": {
+            "columns": [
+              [
+                0,
+                "instrument",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "first_ts",
+                "REAL",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "count",
+                "INTEGER",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "provenance",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "digest",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "instrument",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table stamps (instrument text primary key, first_ts real not null, count integer not null, provenance text not null, digest text not null)",
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_72ddf9c": {
+        "tables": {
+          "progress": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
+            "without_rowid": false
+          },
+          "responses": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2,
+                0
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, primary key (lesson_id, kind))",
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_e72c706": {
+        "tables": {
+          "places": {
+            "columns": [
+              [
+                0,
+                "name",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "value",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "name",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table places (name text primary key, value text not null, updated real)",
+            "without_rowid": false
+          },
+          "progress": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
+            "without_rowid": false
+          },
+          "responses": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2,
+                0
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
+            "without_rowid": false
+          },
+          "stages": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "stage",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "furthest",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
+            "without_rowid": false
+          },
+          "stamp_events": {
+            "columns": [
+              [
+                0,
+                "digest",
+                "BLOB",
+                1,
+                null,
+                1,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "digest",
+                    0,
+                    "BINARY",
+                    1
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table stamp_events (digest blob primary key) without rowid",
+            "without_rowid": true
+          },
+          "stamps": {
+            "columns": [
+              [
+                0,
+                "instrument",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "first_ts",
+                "REAL",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "count",
+                "INTEGER",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "provenance",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "digest",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "instrument",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table stamps (instrument text primary key, first_ts real not null, count integer not null, provenance text not null, digest text not null)",
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_retrieval": {
+        "tables": {
+          "places": {
+            "columns": [
+              [
+                0,
+                "name",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "value",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "name",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table places (name text primary key, value text not null, updated real)",
+            "without_rowid": false
+          },
+          "progress": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
+            "without_rowid": false
+          },
+          "responses": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2,
+                0
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
+            "without_rowid": false
+          },
+          "retrieval": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "box",
+                "INTEGER",
+                1,
+                "1",
+                0,
+                0
+              ],
+              [
+                2,
+                "last_seen",
+                "REAL",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "seen",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                5,
+                "last_choice",
+                "TEXT",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table retrieval (lesson_id integer primary key, box integer not null default 1, last_seen real not null, seen integer not null default 0, correct integer not null default 0, last_choice text)",
+            "without_rowid": false
+          },
+          "sort_answers": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "card_key",
+                "TEXT",
+                1,
+                null,
+                2,
+                0
+              ],
+              [
+                2,
+                "choice",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "correct",
+                "INTEGER",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    1,
+                    "card_key",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table sort_answers (lesson_id integer not null, card_key text not null, choice text not null, correct integer not null, updated real, primary key (lesson_id, card_key))",
+            "without_rowid": false
+          },
+          "stages": {
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "stage",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "furthest",
+                "INTEGER",
+                1,
+                "0",
+                0,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
+            "without_rowid": false
+          },
+          "stamp_events": {
+            "columns": [
+              [
+                0,
+                "digest",
+                "BLOB",
+                1,
+                null,
+                1,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "digest",
+                    0,
+                    "BINARY",
+                    1
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table stamp_events (digest blob primary key) without rowid",
+            "without_rowid": true
+          },
+          "stamps": {
+            "columns": [
+              [
+                0,
+                "instrument",
+                "TEXT",
+                0,
+                null,
+                1,
+                0
+              ],
+              [
+                1,
+                "first_ts",
+                "REAL",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
+                "count",
+                "INTEGER",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
+                "provenance",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                4,
+                "digest",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "instrument",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "sql": "",
+                "unique": 1
+              }
+            ],
+            "sql": "create table stamps (instrument text primary key, first_ts real not null, count integer not null, provenance text not null, digest text not null)",
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      }
+    },
+    "v1": {
+      "tables": {
+        "places": {
+          "columns": [
+            [
+              0,
+              "name",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "value",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              2,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "name",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          ],
+          "sql": "create table places (name text primary key, value text not null, updated real)",
+          "without_rowid": false
+        },
+        "progress": {
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "opened",
+              "INTEGER",
+              1,
+              "0",
+              0,
+              0
+            ],
+            [
+              2,
+              "completed",
+              "INTEGER",
+              1,
+              "0",
+              0,
+              0
+            ],
+            [
+              3,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
+          "without_rowid": false
+        },
+        "responses": {
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              1,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "kind",
+              "TEXT",
+              1,
+              null,
+              2,
+              0
+            ],
+            [
+              2,
+              "body",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              3,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0,
+              0
+            ],
+            [
+              4,
+              "correct",
+              "INTEGER",
+              0,
+              null,
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "lesson_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  1,
+                  "kind",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  2,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          ],
+          "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
+          "without_rowid": false
+        },
+        "retrieval": {
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "box",
+              "INTEGER",
+              1,
+              "1",
+              0,
+              0
+            ],
+            [
+              2,
+              "last_seen",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              3,
+              "seen",
+              "INTEGER",
+              1,
+              "0",
+              0,
+              0
+            ],
+            [
+              4,
+              "correct",
+              "INTEGER",
+              1,
+              "0",
+              0,
+              0
+            ],
+            [
+              5,
+              "last_choice",
+              "TEXT",
+              0,
+              null,
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "sql": "create table retrieval (lesson_id integer primary key, box integer not null default 1, last_seen real not null, seen integer not null default 0, correct integer not null default 0, last_choice text)",
+          "without_rowid": false
+        },
+        "sort_answers": {
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              1,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "card_key",
+              "TEXT",
+              1,
+              null,
+              2,
+              0
+            ],
+            [
+              2,
+              "choice",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              3,
+              "correct",
+              "INTEGER",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              4,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "lesson_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  1,
+                  "card_key",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  2,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          ],
+          "sql": "create table sort_answers (lesson_id integer not null, card_key text not null, choice text not null, correct integer not null, updated real, primary key (lesson_id, card_key))",
+          "without_rowid": false
+        },
+        "stages": {
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "stage",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              2,
+              "furthest",
+              "INTEGER",
+              1,
+              "0",
+              0,
+              0
+            ],
+            [
+              3,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
+          "without_rowid": false
+        },
+        "stamp_events": {
+          "columns": [
+            [
+              0,
+              "digest",
+              "BLOB",
+              1,
+              null,
+              1,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "digest",
+                  0,
+                  "BINARY",
+                  1
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          ],
+          "sql": "create table stamp_events (digest blob primary key) without rowid",
+          "without_rowid": true
+        },
+        "stamps": {
+          "columns": [
+            [
+              0,
+              "instrument",
+              "TEXT",
+              0,
+              null,
+              1,
+              0
+            ],
+            [
+              1,
+              "first_ts",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              2,
+              "count",
+              "INTEGER",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              3,
+              "provenance",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              4,
+              "digest",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "instrument",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "sql": "",
+              "unique": 1
+            }
+          ],
+          "sql": "create table stamps (instrument text primary key, first_ts real not null, count integer not null, provenance text not null, digest text not null)",
+          "without_rowid": false
+        }
+      },
+      "triggers": [],
+      "views": []
+    }
+  }
+}

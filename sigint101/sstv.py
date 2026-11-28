@@ -34,6 +34,7 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
+from .storage import fsync_dir, fsync_file
 
 # The colaclanth/sstv command-line decoder. It turns one WAV of SSTV audio into one PNG, printing
 # the mode it detected to stdout. Its binary name lives here, not in hardware.py, so parallel
@@ -508,7 +509,7 @@ class SstvDecoder(SupervisedReceiver):
     def __init__(self, *, freq_hz=DEFAULT_SSTV_HZ, device=0, spawn=None,
                  output_dir=DEFAULT_OUTPUT_DIR, data_dir=None,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None,
-                 clock=time.time):
+                 clock=time.time, sync_assets: bool = False):
         self.freq_hz = int(freq_hz)
         self.device = device
         self.serial = serial or None
@@ -525,6 +526,7 @@ class SstvDecoder(SupervisedReceiver):
         self._spawn = spawn if spawn is not None else self._spawn_pipeline
         self._which = which
         self._clock = clock
+        self._sync_assets = bool(sync_assets)
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._runs = RunGuard()
         self._init_lifecycle()
@@ -759,7 +761,7 @@ class SstvDecoder(SupervisedReceiver):
                                          freq_hz=capture.freq_hz, radio=radio)
 
     def _publish_capture(self, capture: _Capture) -> bool:
-        """The exclusive PNG link commits publication. Install its metadata afterwards."""
+        """The exclusive PNG link commits legacy publication; managed mode syncs before ack."""
         png = capture.published_path
         sidecar = png.with_suffix(".json")
         staged_sidecar = None
@@ -773,10 +775,20 @@ class SstvDecoder(SupervisedReceiver):
                     staged_sidecar = candidate
                     json.dump({"mode": capture.mode, "freq_hz": capture.freq_hz,
                                "decoded_at": capture.decoded_at}, handle, sort_keys=True)
+            if self._sync_assets:
+                # Sync staged file bytes BEFORE linking into the gallery so a crash or sync
+                # failure never exposes an unsynced or zero-length picture.
+                fsync_file(capture.staged_path)
+                if staged_sidecar is not None:
+                    fsync_file(staged_sidecar)
             os.link(capture.staged_path, png)
-            committed = True
+            if not self._sync_assets:
+                committed = True
             if staged_sidecar is not None:
                 os.link(staged_sidecar, sidecar)
+            if self._sync_assets:
+                fsync_dir(png.parent)
+                committed = True
         except OSError as exc:
             if self.error is None:
                 self.error = str(exc)

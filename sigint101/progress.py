@@ -8,6 +8,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from . import retrieval
+
 # The store lives under data/ by default, which .gitignore keeps out of the repo so a
 # learner's progress is never committed. Tests pass an explicit temp path instead, and so
 # never touch this shared file.
@@ -90,6 +92,19 @@ CREATE TABLE IF NOT EXISTS sort_answers (
 );
 """
 
+# Pre-lesson retrieval card schedule: additive table so existing databases gain it on open.
+# Kept apart from responses so answering a recall card never touches a lesson's own check.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS retrieval (
+    lesson_id   INTEGER PRIMARY KEY,
+    box         INTEGER NOT NULL DEFAULT 1,
+    last_seen   REAL NOT NULL,
+    seen        INTEGER NOT NULL DEFAULT 0,
+    correct     INTEGER NOT NULL DEFAULT 0,
+    last_choice TEXT
+);
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
@@ -113,6 +128,13 @@ class CheckAlreadyAnswered(RuntimeError):
     """
 
 
+class RecallNotDue(RuntimeError):
+    """A recall answer for a card that is not enrolled or not yet due.
+
+    Refused under the store lock so a resubmitted form cannot climb a box twice.
+    """
+
+
 def _add_correct_column(conn) -> None:
     """Give an earlier build's responses table the `correct` column, keeping every row it holds.
 
@@ -132,13 +154,24 @@ class Progress:
     field: a half-written row must not cost the learner their progress.
     """
 
-    def __init__(self, db_path=DEFAULT_DB_PATH):
+    def __init__(self, db_path=DEFAULT_DB_PATH, *, managed: bool = False, read_only: bool = False):
         self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False + a lock: the FastAPI threadpool touches this from
         # a different thread than the one that opened it. The lock serializes access.
         self._lock = threading.Lock()
         self._closed = False
+        if managed:
+            from .migrations import PROGRESS_SCHEMA_VERSION, reviewed_signatures
+            from .storage import open_managed_sqlite
+
+            self._conn = open_managed_sqlite(
+                self.db_path,
+                expected_version=PROGRESS_SCHEMA_VERSION,
+                expected_signature=reviewed_signatures("progress")["v1"],
+                read_only=read_only,
+            )
+            return
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
@@ -402,6 +435,56 @@ class Progress:
                 "SELECT instrument, first_ts, count, provenance, digest FROM stamps"
             ).fetchall()
         return [{**dict(row), "provenance": json.loads(row["provenance"])} for row in rows]
+
+    def enroll_recall(self, lesson_ids, *, now: float) -> None:
+        """Enrol newly eligible completed lessons into box 1 without overwriting existing rows."""
+        ids = [int(lid) for lid in lesson_ids]
+        if not ids:
+            return
+        ts = float(now)
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
+                "VALUES(?, 1, ?, 0, 0, NULL) ON CONFLICT(lesson_id) DO NOTHING",
+                [(lid, ts) for lid in ids],
+            )
+            self._conn.commit()
+
+    def get_retrieval(self, lesson_ids) -> dict[int, dict]:
+        """Current retrieval rows for the given lesson IDs, keyed by lesson_id."""
+        ids = [int(lid) for lid in lesson_ids]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT lesson_id, box, last_seen, seen, correct, last_choice "
+                f"FROM retrieval WHERE lesson_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {row["lesson_id"]: dict(row) for row in rows}
+
+    def record_recall(self, lesson_id: int, choice: str, *, correct: bool, now: float) -> int:
+        """Record one recall answer and return its new box, refusing if missing or not yet due."""
+        choice = (choice or "").strip()
+        if not choice:
+            raise ValueError("a recall answer cannot be blank")
+        ts = float(now)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT box, last_seen FROM retrieval WHERE lesson_id=?",
+                (int(lesson_id),),
+            ).fetchone()
+            if row is None or not retrieval.is_due(row["box"], row["last_seen"], now=ts):
+                raise RecallNotDue(f"lesson {lesson_id} recall card is not due")
+            new_box = retrieval.next_box(row["box"], correct)
+            self._conn.execute(
+                "UPDATE retrieval SET box=?, last_seen=?, seen=seen + 1, "
+                "correct=correct + ?, last_choice=? WHERE lesson_id=?",
+                (new_box, ts, 1 if correct else 0, choice, int(lesson_id)),
+            )
+            self._conn.commit()
+        return new_box
 
     def close(self) -> None:
         """Close the database and fence any late reception writes under the same lock."""

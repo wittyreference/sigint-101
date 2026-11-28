@@ -23,6 +23,8 @@ FIT = REPO / "tools" / "render" / "render_fit.py"
 LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
 LORA = REPO / "tools" / "render" / "render_lora.py"
 CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
+SURVEY = REPO / "tools" / "render" / "render_survey.py"
+RECALL = REPO / "tools" / "render" / "render_recall.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -432,7 +434,7 @@ def render_make(tmp_path, console_url, devtools):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -472,10 +474,12 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
 
 
 @pytest.mark.parametrize(
-    "failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name],
+    "failing",
+    ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name, SURVEY.name,
+     RECALL.name],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
-        "logbook-fails", "lora-fails", "card-sort-fails",
+        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails", "recall-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -487,6 +491,8 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {LOGBOOK.name} {console_url}",
         f"ran {LORA.name} {console_url}",
         f"ran {CARD_SORT.name} {console_url}",
+        f"ran {SURVEY.name} {console_url}",
+        f"ran {RECALL.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -759,3 +765,173 @@ assert.equal(globalThis.window.fetch, origFetch, "window.fetch should be restore
 """
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+SURVEY_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "badge": "CACHED",
+    "rows": 11,
+    "listScrolls": True,
+    "noRowOverflow": True,
+    "controlsFit": True,
+    "explainScrolls": True,
+    "completeVisible": True,
+}
+
+
+def _survey_pages(*, defect=None):
+    pages = {}
+    for theme in THEMES:
+        row = {**SURVEY_FITS, "theme": theme}
+        if theme == "red-night":
+            row.update(defect or {})
+        pages[f"measureSurvey({json.dumps(theme)})"] = row
+    return pages
+
+
+def test_survey_render_checks_populated_panel_in_all_three_themes(devtools):
+    port = devtools(_survey_pages())
+    proc = run(SURVEY, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - survey dark",
+        "VERDICT: PASS - survey sunlight",
+        "VERDICT: PASS - survey red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"back": False},
+    {"doc": [801, 480]},
+    {"doc": [800, 481]},
+    {"badge": "LIVE"},
+    {"badge": "CACHED · 45s"},
+    {"badge": "NO RADIO"},
+    {"rows": 0},
+    {"listScrolls": False},
+    {"noRowOverflow": False},
+    {"controlsFit": False},
+    {"explainScrolls": False},
+    {"completeVisible": False},
+    {"theme": "dark"},
+])
+def test_survey_render_fails_when_populated_panel_overflows_or_stays_empty(devtools, defect):
+    port = devtools(_survey_pages(defect=defect))
+    proc = run(SURVEY, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - survey red-night"
+
+
+def test_survey_render_never_posts_predict_to_console_and_stubs_fetch():
+    # F1: render_survey.py must never POST /api/predict into the console it runs against.
+    # First prove the script blocks /api/predict at the network layer and never calls
+    # fetch('/api/predict') even when L39 is sealed on the target console.
+    import re
+
+    seen_evals = []
+    blocked_urls = []
+
+    class RecordingDevTools(FakeDevTools):
+        def _result(self, msg):
+            method = msg.get("method")
+            if method == "Network.setBlockedURLs":
+                blocked_urls.extend(msg.get("params", {}).get("urls", []))
+            if method == "Runtime.evaluate":
+                expr = msg.get("params", {}).get("expression", "")
+                seen_evals.append(expr)
+                if 'data-stage="operate"' in expr and "measureSurvey" not in expr:
+                    return {"result": {"type": "boolean", "value": False}}
+            return super()._result(msg)
+
+    fake = RecordingDevTools(_survey_pages())
+    try:
+        proc = run(SURVEY, "http://127.0.0.1:9", port=fake.port)
+    finally:
+        fake.close()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert any("/api/predict" in pattern for pattern in blocked_urls), blocked_urls
+    assert not any(
+        re.search(r"\bfetch\s*\(\s*['\"][^'\"]*/api/predict", expr) for expr in seen_evals
+    ), f"render_survey.py posted /api/predict into the console: {seen_evals!r}"
+
+    # Second, run the actual fetch_shim under node and prove both /api/predict POSTs and
+    # /api/survey GETs are stubbed without ever reaching origFetch.
+    node = shutil.which("node")
+    assert node, "node is required to test the SURVEY fetch shim"
+    sys.path.insert(0, str(SURVEY.parent))
+    try:
+        import render_survey  # noqa: PLC0415
+        shim = render_survey.fetch_shim(render_survey.populated_payload())
+    finally:
+        sys.path.remove(str(SURVEY.parent))
+    harness = f"""
+const assert = require("node:assert/strict");
+let origCalls = 0;
+function FakeResponse(body, init) {{
+  this.status = (init && init.status) || 200;
+  this.ok = this.status >= 200 && this.status < 300;
+  this._body = body;
+  this.json = () => Promise.resolve(JSON.parse(body));
+}}
+globalThis.Response = FakeResponse;
+const origFetch = () => {{ origCalls += 1; return Promise.resolve(new FakeResponse("{{}}")); }};
+globalThis.window = {{ fetch: origFetch }};
+{shim}
+(async () => {{
+  const pred = await window.fetch("/api/predict?lesson_id=39", {{
+    method: "POST",
+    body: "prediction=envelope-only",
+  }});
+  assert.equal(pred.status, 200);
+  const survey = await window.fetch("/api/survey");
+  const data = await survey.json();
+  assert.equal(data.available, true);
+  assert.equal(data.cached, true);
+  assert.equal("age_s" in data, false);
+  assert.equal(origCalls, 0, "fetch_shim let a write or survey request reach the console");
+}})().catch(err => {{ console.error(err); process.exit(1); }});
+"""
+    node_proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
+    assert node_proc.returncode == 0, node_proc.stdout + node_proc.stderr
+
+
+def test_recall_render_console_uses_no_radio_probe(tmp_path, monkeypatch):
+    # F5: render_recall.py must pass a no-radio probe so it never touches a live SDR bus.
+    sys.path.insert(0, str(RECALL.parent))
+    try:
+        import render_recall  # noqa: PLC0415
+    finally:
+        sys.path.remove(str(RECALL.parent))
+
+    captured: dict = {}
+
+    def fake_create_app(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    class FakeServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        def run(self):
+            return None
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(render_recall, "create_app", fake_create_app)
+    monkeypatch.setattr(render_recall.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(render_recall, "urlopen", lambda *_a, **_kw: FakeResp())
+
+    server, thread, _base = render_recall._run_server(tmp_path, lambda: 1_700_000_000.0)
+    render_recall._stop_server(server, thread)
+
+    probe_fn = captured["kwargs"].get("probe")
+    assert callable(probe_fn), "render_recall._run_server must pass a no-radio probe"
+    probe = probe_fn()
+    assert probe.present is False

@@ -238,6 +238,17 @@
                 <div class="decoder__axis" aria-hidden="true">Flipper Zero &middot; USB serial CLI</div>
               </div>
             </div>
+            {% elif lesson.uses_survey %}
+            {# A Wi-Fi survey lesson seals the channel census, not a waterfall. #}
+            <div class="instrument instrument--frozen">
+              <div class="decoder decoder--frozen">
+                <div class="decoder__sealed">
+                  <span>&mdash; CENSUS HIDDEN &mdash;</span>
+                  <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
+                </div>
+                <div class="decoder__axis" aria-hidden="true">nmcli &middot; Wi-Fi metadata only</div>
+              </div>
+            </div>
             {% else %}
             <div class="instrument instrument--frozen">
               <div class="waterfall-wrap waterfall-wrap--frozen">
@@ -335,6 +346,7 @@
             <div class="sort-head">
               <span class="sort-head__counter" data-sort-counter>Card 1 of {{ lesson.sort|length }}</span>
               <span class="sort-head__score" data-sort-score>Score 0/0 (0/{{ lesson.sort|length }})</span>
+              <span class="sort-head__unsaved" data-sort-unsaved hidden>not saved</span>
             </div>
             <p class="sort-intro" data-sort-intro>{{ lesson.stages['try'] }}</p>
             <div class="sort-card">
@@ -559,6 +571,20 @@
               </div>
               {{ scroll_text(lesson.stages[stage]) }}
             </div>
+            {% elif lesson.uses_survey %}
+            {# Wi-Fi survey (M39): read-only per-channel metadata census (panels.survey), never payload. #}
+            <div class="instrument instrument--decode">
+              {{ panels.survey() }}
+              <div class="tune tune--fixed">
+                <div class="tune__dial">
+                  <div class="tune__freq">2.4–6<span>GHz</span></div>
+                  <div class="tune__caption">Wi-Fi &middot; metadata only, no payload</div>
+                </div>
+                {{ prev_step(loop.first) }}
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              {{ scroll_text(lesson.stages[stage]) }}
+            </div>
             {% else %}
             {# Instrument: the waterfall (panels.waterfall), with the pack's declared side panels
                (gain, provenance, ppm) beside it and the sweep's command strip under the row. #}
@@ -649,9 +675,14 @@
             <footer class="stage-foot{% if loop.last %} predict__actions{% endif %}{% if stage == 'try' and lesson.sort %} sort-foot{% endif %}">
               {{ prev_step(loop.first) }}
               {% if stage == 'try' and lesson.sort %}
-              <a class="btn btn--secondary sort-law-link" href="/law?back=/lesson/{{ lesson.id }}">Show me the law</a>
-              <button class="btn btn--secondary sort-nav-btn" type="button" data-sort-prev aria-label="Previous card">&lsaquo; Card</button>
-              <button class="btn btn--secondary sort-nav-btn" type="button" data-sort-next>Next card</button>
+              {# The card steps are one joined, dashed pair labelled "Card", kept apart from the
+                 stage steps ("‹ Prev", "Next step") by the law link, so a tap meant for the next
+                 card cannot land on Next step and leave the sort. #}
+              <div class="sort-step" role="group" aria-label="Step through the cards" data-sort-step>
+                <button class="btn sort-step__btn" type="button" data-sort-prev aria-label="Previous card">&lsaquo; Card</button>
+                <button class="btn sort-step__btn" type="button" data-sort-next aria-label="Next card">Card &rsaquo;</button>
+              </div>
+              <a class="btn btn--secondary sort-law-link" href="/law?back=/lesson/{{ lesson.id }}" data-sort-law>Show me the law</a>
               {% endif %}
               {% if safety_notice and not lesson.uses_lora %}
               {{ panels.safety_notice(safety_notice) }}
@@ -723,6 +754,9 @@
 <!-- The attached Flipper (M29+): polls /api/flipper and shows the device identity + radio state
      over the USB serial CLI. No Flipper on USB shows the reason, never a fabricated device. -->
 <script src="/static/flipper.js"></script>
+<!-- The read-only Wi-Fi survey (M39): polls /api/survey and lists the per-channel metadata census
+     (never payload). No Wi-Fi radio / no nmcli shows the reason, never a fabricated network. -->
+<script src="/static/survey.js"></script>
 <!-- Shell behaviour that is NOT the waterfall lives in its own files: stepping between the
      lesson's rendered stage panels in /static/lesson-nav.js (below), and the tune strip (+/- and
      tap-to-tune retune the live sweep) in /static/waterfall.js, which alone paints the canvas — a
