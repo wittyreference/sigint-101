@@ -303,6 +303,16 @@ def test_lesson_5_try_stage_renders_card_sort_and_law_link_keyboard_free(tmp_pat
     assert "<textarea" not in html
 
 
+def test_lesson_5_sort_head_carries_a_hidden_not_saved_mark(tmp_path):
+    # F8.1: card-sort.js shows this mark when a save is refused or lost; it starts hidden.
+    with _client(tmp_path) as client:
+        html = client.get("/lesson/5").text
+    mark = re.search(r"<[^>]*\bdata-sort-unsaved\b[^>]*>([^<]*)<", html)
+    assert mark, "expected a [data-sort-unsaved] mark in the sort head"
+    assert re.search(r"\bhidden\b", mark.group(0)), mark.group(0)
+    assert "not saved" in mark.group(1).lower()
+
+
 def test_law_page_renders_every_authority_citation_caution_and_safe_back_link(tmp_path):
     with _client(tmp_path) as client:
         default_page = client.get("/law")

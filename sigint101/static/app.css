@@ -3017,6 +3017,14 @@ body {
 .sort-head__score {
   color: var(--fg-dim);
 }
+/* Quiet: the tap's feedback still stands; only the server copy of that answer is missing. */
+.sort-head__unsaved {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+.sort-head__unsaved[hidden] {
+  display: none;
+}
 .stage-panel--sort > .sort-card {
   grid-row: 3;
   grid-column: 1 / -1;
