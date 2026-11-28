@@ -786,12 +786,17 @@ def test_install_hands_over_from_the_deployed_launcher_whose_sleep_holds_the_loc
         _kill_all(_pids(pids))
 
 
+@pytest.mark.parametrize("home", ["plain", "with a space"])
 @pytest.mark.parametrize("title", ["separate", "joined"])
-def test_install_leaves_the_watchdog_running_when_the_kiosk_holds_its_lock(box, title):
+def test_install_leaves_the_watchdog_running_when_the_kiosk_holds_its_lock(box, title, home):
     """A kiosk Chromium started by a launcher without `9>&-` holds the lock for as long as it
     runs. Stopping the watchdog then would leave none, since no new one could take the lock, so
     install.sh leaves the working one alone, says so, and does not touch the browser. Chromium
-    may show its arguments one by one, or rewrite its title into one joined string."""
+    may show its arguments one by one, or rewrite its title into one joined string; the profile
+    path may contain a space, so the whole flag is matched, never a word of it."""
+    if home != "plain":
+        box.home = box.log.parent / "learner home"
+        box.home.mkdir()
     _quiet_desktop(box)
     box.start_session()
     hold, pids = _sleep_stub(box, 30)
@@ -929,25 +934,31 @@ def _is_imposter(pid):
 
 
 def _python_hook(box, prelude):
-    """python3 for install.sh's pidfd helper (`python3 -I - SIGNAL ...`): the real interpreter,
-    with `prelude` run first, standing in for the kernel. It logs every pidfd signal it sends as
-    "pidfd-send N". Other python3 calls run the real interpreter untouched."""
+    """python3 for install.sh's helper (`python3 -I .../watchdog_helper.py MODE ...`): the real
+    interpreter running the real helper, with `prelude` run first, standing in for the kernel.
+    The prelude sees the helper's own sys.argv (argv[1] is the mode). It logs every pidfd signal
+    sent as "pidfd-send N". Other python3 calls run the real interpreter untouched."""
     real = shutil.which("python3")
     hook = box.log.parent / "pidfd-hook.py"
     hook.write_text(
-        "import signal as _signal, sys\n"
+        "import sys\n"
+        "_helper = sys.argv[1]\n"
+        "sys.argv = [_helper] + sys.argv[2:]\n"
+        "import signal as _signal\n"
         "_send = _signal.pidfd_send_signal\n"
         "def _logged(fd, sig, *rest):\n"
         f"    open({str(box.log)!r}, 'a').write(f'pidfd-send {{int(sig)}}\\n')\n"
         "    return _send(fd, sig, *rest)\n"
         "_signal.pidfd_send_signal = _logged\n"
         + prelude +
-        "\n_src = sys.stdin.read()\n"
-        "sys.argv = ['-'] + sys.argv[1:]\n"
-        "exec(compile(_src, '<pidfd helper>', 'exec'), {'__name__': '__main__'})\n",
+        "\nwith open(_helper, encoding='utf-8') as _f:\n"
+        "    _code = compile(_f.read(), _helper, 'exec')\n"
+        "exec(_code, {'__name__': '__main__', '__file__': _helper})\n",
         encoding="utf-8")
     _stub(box.bin, "python3",
-          f'if [ "$1" = -I ] && [ "$2" = - ]; then shift 2; exec {real} -I {hook} "$@"; fi\n'
+          'if [ "$1" = -I ] && [ "${2##*/}" = watchdog_helper.py ]; then\n'
+          f'  shift; exec {real} -I {hook} "$@"\n'
+          'fi\n'
           f'exec {real} "$@"')
 
 
@@ -1068,7 +1079,7 @@ def test_install_hands_over_when_the_watchdog_exits_just_before_its_sigkill(box)
                       "    if sig == _signal.SIGKILL:\n"
                       "        raise ProcessLookupError(3, 'No such process')\n"
                       "_signal.pidfd_send_signal = _late\n")
-    old = _stubborn_watchdog(box)
+    old = _stubborn_watchdog(box, usr1=":")  # its launcher never execs
     try:
         assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
         result = box.run(_install(box), timeout=40)
@@ -1077,6 +1088,117 @@ def test_install_hands_over_when_the_watchdog_exits_just_before_its_sigkill(box)
         _hands_over(box, result)
     finally:
         _end(old)
+
+
+def test_install_never_kills_a_watchdog_whose_launcher_could_exec_another_program(box):
+    """SIGKILL could land on whatever program a watchdog exec'd after the last check, so it goes
+    only to one whose launcher never execs. This one's can (its USR1 trap does): it gets the TERM
+    it ignores, then a warning, never the SIGKILL."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "")
+    old = _stubborn_watchdog(box)
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box), timeout=40)
+        assert result.returncode == 0, result.stderr
+        assert _sent(box) == [signal.SIGTERM], box.log.read_text()
+        assert old.poll() is None and not _is_imposter(old.pid)
+        assert box.calls("setsid") == []
+        [warn] = [ln for ln in result.stderr.splitlines() if "WARN" in ln]
+        assert "could exec" in warn and "not killed" in warn, warn
+    finally:
+        _end(old)
+
+
+def test_install_never_signals_a_non_shell_with_the_watchdogs_exact_command_line(box):
+    """argv[0] proves nothing: this is python3 with the command line "bash <checkout launcher>
+    watch", this user's, holding the lock. Its executable is not a shell, so no signal at all."""
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "")
+    signals = box.log.parent / "python-signals"
+    # Read by python3 as its script; to bash the first lines are a no-op and an exit.
+    launcher = _old_install(box,
+                            "#!/bin/bash\n"
+                            "''':'\n"
+                            "exit 0\n"
+                            "'''\n"
+                            "import fcntl, signal, sys, time\n"
+                            f"lock = open({str(_lock(box))!r}, 'w')\n"
+                            "fcntl.flock(lock, fcntl.LOCK_EX)\n"
+                            "for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):\n"
+                            f"    signal.signal(s, lambda n, f: open({str(signals)!r}, 'a')"
+                            ".write(f'{n}\\n'))\n"
+                            "print('locked', flush=True)\n"
+                            "time.sleep(60)\n")
+    proc = subprocess.Popen(["bash", str(launcher), "watch"], executable=shutil.which("python3"),
+                            env=box.env(), stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "locked"
+        assert Path(f"/proc/{proc.pid}/cmdline").read_bytes() == \
+            b"\0".join([b"bash", str(launcher).encode(), b"watch"]) + b"\0"
+        result = box.run(_install(box))
+        assert result.returncode == 0, result.stderr
+        assert proc.poll() is None and not signals.exists() and _sent(box) == []
+        assert box.calls("setsid") == []
+        [warn] = [ln for ln in result.stderr.splitlines() if "WARN" in ln]
+        assert "no watchdog" in warn, warn
+    finally:
+        _end(proc)
+
+
+def _helper_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("watchdog_helper",
+                                                  REPO / "deploy" / "watchdog_helper.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("launcher", [LAUNCHER, DEPLOYED_LAUNCHER], ids=["shipped", "3004a03"])
+def test_the_launchers_watch_path_never_execs_another_program(launcher):
+    """What lets install.sh escalate to SIGKILL: once `watch` runs, the launcher stays in bash
+    until it exits. Its `exec 9>...` only moves file descriptors."""
+    helper = _helper_module()
+    text = launcher.read_text(encoding="utf-8")
+    path = helper.watch_path(text)
+    assert any("exec 9>" in line for line in path), "the scan missed the watch path"
+    assert helper.program_execs(path) == []
+    assert not helper.can_exec(text)
+
+
+@pytest.mark.parametrize("body, execs", [
+    ('  exec 9>"$LOCK"', False),
+    ("  exec 9>&-", False),
+    ('  exec 9> "$LOCK"', False),
+    ("  exec {fd}>/dev/null 2>&1", False),
+    ('  exec "$@"', True),
+    ("  exec -a imposter /bin/bash /x", True),
+    ("  exec 9>&- sleep 1", True),
+    ("  trap 'exec 9>&-; exec sleep 1' USR1", True),
+    ('  eval "$cmd"', True),
+    ('  . "$HOME/extra.sh"', True),
+    ("  [ -e /x ] && exec chromium", True),
+    ("  # close-on-exec, and an exec in a comment: exec chromium", False),
+    ('  echo "the close-on-exec copy"', False),
+], ids=lambda v: str(v)[:24])
+def test_the_exec_scan_tells_a_program_exec_from_a_redirection(body, execs):
+    helper = _helper_module()
+    text = f"#!/bin/bash\nwatch() {{\n{body}\n  helper_fn\n}}\nhelper_fn() {{\n  :\n}}\n"
+    assert helper.can_exec(text) is execs
+
+
+def test_the_exec_scan_follows_the_watch_path_and_skips_here_documents():
+    helper = _helper_module()
+    reached = ("#!/bin/bash\nwatch() {\n  step\n}\nstep() {\n  exec chromium\n}\n")
+    elsewhere = ("#!/bin/bash\nwatch() {\n  :\n}\nopen_course() {\n  exec chromium\n}\n")
+    heredoc = ("#!/bin/bash\nwatch() {\n  python3 - <<'PY'\nexec chromium\nPY\n}\n")
+    assert helper.can_exec(reached)
+    assert not helper.can_exec(elsewhere)
+    assert not helper.can_exec(heredoc)
 
 
 def test_install_never_kills_a_reused_pid_whose_start_time_differs(box):

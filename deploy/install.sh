@@ -29,98 +29,12 @@ lock_holders() {
 # The launchers a watchdog may run: the installed one, or this checkout's own.
 CHECKOUT_LAUNCHER="$HERE/kiosk/start-kiosk.sh"
 
-# watchdog_helper FIND PID... | TERM|KILL PID:START... — the one place that decides what is the
-# watchdog. A watchdog is a process of this user whose command line is exactly "bash|sh
-# <launcher> watch", where the launcher is the same file as one of the two above (a relative
-# path read from the process's own working directory; never a match on names), and which holds
-# the lock (its fdinfo lists the flock). Its start time (stat field 22) tells it from a later
-# process with the same PID.
-#   FIND prints "PID:START" for each PID given that is a watchdog.
-#   TERM|KILL pins every PID with a pidfd first, then checks each pinned process is still that
-#   watchdog with that start time, and signals only those through the pidfd, printing each PID
-#   signalled. Exit 4: no pidfd here (Linux 5.3+ and Python 3.9+), and nothing was signalled.
-#   Never a signal by number.
+# watchdog_helper FIND PID... | TERM|KILL PID:START... — deploy/watchdog_helper.py, the one place
+# that decides what is the watchdog and the only way anything is signalled (through a pidfd,
+# never by number). Its docstring says what it checks and what window is left.
 watchdog_helper() {
-  env -i PATH="$PATH" LANG=C.UTF-8 python3 -I - "$1" "$WATCH_LOCK" "$COURSE_BIN" \
-    "$CHECKOUT_LAUNCHER" "${@:2}" <<'PY'
-import os
-import signal
-import sys
-
-name, lock, installed, checkout, *targets = sys.argv[1:]
-
-
-def same_file(path, other):
-    try:
-        return os.path.samefile(path, other)
-    except OSError:
-        return False
-
-
-def watchdog_start(pid):
-    """The start time of PID if it is the watchdog, else None."""
-    proc = f"/proc/{pid}"
-    try:
-        if os.stat(proc).st_uid != os.getuid():
-            return None
-        with open(f"{proc}/stat", encoding="utf-8", errors="replace") as f:
-            fields = f.read().rpartition(") ")[2].split()
-        if len(fields) < 20:
-            return None
-        with open(f"{proc}/cmdline", "rb") as f:
-            argv = f.read().split(b"\0")[:-1]
-        if len(argv) != 3 or argv[2] != b"watch":
-            return None
-        if os.path.basename(argv[0]) not in (b"bash", b"sh"):
-            return None
-        script = os.fsdecode(argv[1])
-        if not script.startswith("/"):
-            script = f"{proc}/cwd/{script}"
-        if not (same_file(script, installed) or same_file(script, checkout)):
-            return None
-        for fd in os.listdir(f"{proc}/fd"):
-            try:
-                if os.readlink(f"{proc}/fd/{fd}") != lock:
-                    continue
-                with open(f"{proc}/fdinfo/{fd}", encoding="utf-8") as f:
-                    if any(ln.startswith("lock:") and "FLOCK" in ln for ln in f):
-                        return fields[19]
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return None
-
-
-if name == "FIND":
-    for pid in targets:
-        start = watchdog_start(pid)
-        if start is not None:
-            print(f"{pid}:{start}")
-    sys.exit(0)
-
-signum = {"TERM": signal.SIGTERM, "KILL": signal.SIGKILL}[name]
-if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
-    sys.exit(4)
-# Pin all first: without a pidfd nothing at all is signalled.
-pinned = []
-for target in targets:
-    pid, _, start = target.partition(":")
-    try:
-        pinned.append((os.pidfd_open(int(pid)), pid, start))
-    except ProcessLookupError:
-        continue  # already gone
-    except OSError:
-        sys.exit(4)
-for fd, pid, start in pinned:
-    if watchdog_start(pid) != start:
-        continue
-    try:
-        signal.pidfd_send_signal(fd, signum)
-    except OSError:
-        continue  # it exited after the check
-    print(pid)
-PY
+  env -i PATH="$PATH" LANG=C.UTF-8 python3 -I "$HERE/watchdog_helper.py" "$1" "$WATCH_LOCK" \
+    "$COURSE_BIN" "$CHECKOUT_LAUNCHER" "${@:2}"
 }
 
 NO_PIDFD="the course watchdog could not be pinned (no pidfd: Linux 5.3+ and Python 3.9+ are needed)"
@@ -154,17 +68,16 @@ passing_holder() {
   return 1
 }
 
-# Is PID the kiosk browser? Its command line names the kiosk's profile, as an argument of its own
-# or as a word of one joined string (Chromium rewrites its title that way).
+# Is PID the kiosk browser? Its command line names the kiosk's profile: the whole flag as an
+# argument of its own, or the whole flag between spaces (or an end) inside one joined string, as
+# Chromium rewrites its title. Never split on whitespace: the profile path may contain a space.
 is_kiosk() {
-  local a word
-  local -a argv words
+  local a flag="--user-data-dir=$HOME/.config/chromium-kiosk"
+  local -a argv
   mapfile -d '' argv 2>/dev/null < "/proc/$1/cmdline" || return 1
   for a in "${argv[@]}"; do
-    read -r -a words <<< "$a"
-    for word in "${words[@]}"; do
-      [ "$word" = "--user-data-dir=$HOME/.config/chromium-kiosk" ] && return 0
-    done
+    [ "$a" = "$flag" ] && return 0
+    [[ " $a " == *" $flag "* ]] && return 0
   done
   return 1
 }
@@ -210,9 +123,16 @@ restart_watchdog() {
   # The lock frees when the watchdog has exited. An older launcher let its sleep or curl inherit
   # the lock, which then lasts up to that command's end, so allow it some seconds.
   if ! flock -w 15 "$WATCH_LOCK" true; then
-    # Re-checked after a fresh pin: only what is still the same watchdog is killed.
-    if ! watchdog_helper KILL "${found[@]}" >/dev/null; then
+    # Re-checked after a fresh pin: only what is still the same watchdog is killed, and only if
+    # the launcher it runs can never exec another program (the helper prints "kept PID" if not).
+    local killed
+    if ! killed="$(watchdog_helper KILL "${found[@]}")"; then
       echo "install: WARN $NO_PIDFD for its SIGKILL; it restarts at the next login" >&2
+      return 0
+    fi
+    if [[ "$killed" == *kept* ]]; then
+      echo "install: WARN the course watchdog ignored TERM, and the launcher it runs could exec" \
+        "another program, so it was not killed; it restarts at the next login" >&2
       return 0
     fi
     if ! flock -w 5 "$WATCH_LOCK" true; then
