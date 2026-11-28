@@ -1224,6 +1224,31 @@ def test_a_completion_without_a_check_enrols_nothing(tmp_path):
         assert app.state.progress.get_retrieval([plain.id]) == {}
 
 
+def test_the_read_only_trial_starts_without_the_recall_backfill_and_writes_nothing(tmp_path):
+    # The updater's private trial opens a saved generation read-only. Its startup must not run
+    # the public console's startup writes: a completed check lesson with no recall row keeps
+    # none, and neither store changes by a byte.
+    from sigint101.app import PACK_DIR
+    from sigint101.exam import POOL_PATH
+    from sigint101.lessons import load_lessons
+    from sigint101.progress import Progress
+    from sigint101.trial import TRIAL_READY_PATH, create_trial_app
+    from tests.test_updater_validation import _make_managed_generation
+    generation = _make_managed_generation(tmp_path, "gen1")
+    source = next(lid for lid, item in sorted(load_lessons(PACK_DIR).items()) if item.check)
+    seeded = Progress(generation / "progress.db", managed=True)
+    seeded.mark_completed(source)
+    seeded.close()
+    stores = {name: (generation / name).read_bytes() for name in ("progress.db", "exam.db")}
+    trial = create_trial_app(pack_dir=PACK_DIR, data_dir=generation, pool_path=POOL_PATH,
+                             release_root=Path(__file__).resolve().parent.parent,
+                             require_release_manifest=False, probe=_absent)
+    with TestClient(trial) as client:
+        assert client.get(TRIAL_READY_PATH).status_code == 200
+        assert client.app.state.progress.get_retrieval([source]) == {}
+    assert {name: (generation / name).read_bytes() for name in stores} == stores
+
+
 def test_completions_from_before_recall_are_enrolled_when_the_console_starts(tmp_path):
     # A check lesson completed before enrolment moved to the completion post has no row; the
     # console enrols it once, at startup, beside the stamp backfill, never on a page load.
