@@ -327,6 +327,17 @@ def test_instructions_and_status_values_are_at_least_18px():
         ".rack__gain-value",
         ".radar__count b",
         ".exam-sim__score",
+        # Meteor and passive APT replay status, refusal, and provenance
+        ".meteor__phase",
+        ".meteor__note",
+        ".meteor__gallery-head",
+        ".meteor__empty",
+        ".meteor__caption",
+        ".meteor__details",
+        ".meteor__summary",
+        ".meteor__meta",
+        ".meteor__command",
+        ".apt-replay__note",
     )
     failures = []
     for selector in must_be_18:

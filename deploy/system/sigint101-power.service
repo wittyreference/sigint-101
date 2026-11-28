@@ -9,7 +9,6 @@ Type=exec
 User=sigint101-power
 Group=sigint101-power
 SupplementaryGroups=i2c
-EnvironmentFile=-/etc/sigint101/power.conf
 ExecStart=/usr/local/bin/sigint101-power
 Restart=on-failure
 RestartSec=5

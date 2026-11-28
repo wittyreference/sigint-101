@@ -25,6 +25,7 @@ COMMAND_SOURCES: dict[str, tuple[str, str, str | None]] = {
     "dmr": ("dmr", "dmr_start", "dmr"),
     "apt": ("apt", "apt_start", "apt"),
     "sstv": ("sstv", "sstv_start", "sstv"),
+    "meteor": ("meteor", "meteor_start", "meteor"),
     "flock": ("flock", "flock_start", "flock"),
 }
 

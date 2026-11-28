@@ -16,7 +16,6 @@ import pytest
 from sigint101 import battery
 from sigint101.battery import BatteryReading, ConversionNotReadyError, INA219Config
 from sigint101.power import (
-    LOCKED_2A_REASON,
     MAX_GAP_S,
     MINIMAL_ENV,
     NOTICE_S,
@@ -100,29 +99,28 @@ def _make_watcher(
     return watcher, clk, notice_path, poweroffs, sleeps
 
 
-# --- Test 1: disarmed threshold handling (including 2a hard-disarm lock) --------
+# --- Test 1: threshold parsing (slice 2b arms valid (8.0, 12.6), invalid stays disarmed) ---
 
 
-@pytest.mark.parametrize("raw,expected_reason", [
+@pytest.mark.parametrize("raw,expected_fragment", [
     (None, "unset"),
     ("", "unset"),
     ("   ", "unset"),
-    ("abc", LOCKED_2A_REASON),
-    ("nan", LOCKED_2A_REASON),
-    ("inf", LOCKED_2A_REASON),
-    ("-inf", LOCKED_2A_REASON),
-    ("8.0", LOCKED_2A_REASON),
-    ("7.5", LOCKED_2A_REASON),
-    ("12.6", LOCKED_2A_REASON),
-    ("96", LOCKED_2A_REASON),
-    ("9.50", LOCKED_2A_REASON),
+    ("abc", "invalid"),
+    ("nan", "outside"),
+    ("inf", "outside"),
+    ("-inf", "outside"),
+    ("8.0", "outside"),
+    ("7.5", "outside"),
+    ("12.6", "outside"),
+    ("96", "outside"),
 ])
-def test_unset_invalid_or_2a_locked_threshold_stays_disarmed_logs_once_and_makes_zero_bus_calls(
-    tmp_path, caplog, raw, expected_reason
+def test_unset_or_invalid_threshold_stays_disarmed_logs_once_and_makes_zero_bus_calls(
+    tmp_path, caplog, raw, expected_fragment
 ):
     threshold_v, reason = parse_threshold(raw)
     assert threshold_v is None
-    assert reason == expected_reason
+    assert expected_fragment in reason
 
     bus_calls = 0
 
@@ -151,7 +149,14 @@ def test_unset_invalid_or_2a_locked_threshold_stays_disarmed_logs_once_and_makes
     assert poweroffs == []
     disarmed_logs = [r.getMessage() for r in caplog.records if "disarmed" in r.getMessage().lower()]
     assert len(disarmed_logs) == 1
-    assert expected_reason in disarmed_logs[0]
+    assert expected_fragment in disarmed_logs[0]
+
+
+@pytest.mark.parametrize("raw", ["9.50", " 8.01 ", "12.59"])
+def test_valid_threshold_stays_hard_disarmed_in_slice_2b(raw):
+    threshold_v, reason = parse_threshold(raw)
+    assert threshold_v is None
+    assert "slice 2b" in reason and "2c" in reason
 
 
 @pytest.mark.parametrize("bad_threshold", [float("nan"), float("inf"), 8.0, 7.5, 12.6, 96.0])
@@ -817,8 +822,8 @@ def test_poweroff_command_hygiene_timeout_and_startup_can_power_off_check(
             for r in caplog.records
         )
 
-    # --startup-only logs SHA-256 digests of power.py and battery.py + disarmed status, exits 0,
-    # and touches no I2C bus.
+    # --startup-only logs SHA-256 digests of power.py and battery.py + disarmed status when
+    # unset, exits 0, and touches no I2C bus.
     bus_touched = False
 
     def boom(*_a, **_kw):
@@ -826,16 +831,42 @@ def test_poweroff_command_hygiene_timeout_and_startup_can_power_off_check(
         bus_touched = True
         raise AssertionError("disarmed --startup-only must not read I2C")
 
+    import sigint101.power as power_mod
+
     monkeypatch.setattr(battery, "read_battery_once", boom)
-    monkeypatch.setenv("SIGINT101_POWER_THRESHOLD_V", "9.50")
+    monkeypatch.delenv("SIGINT101_POWER_THRESHOLD_V", raising=False)
+    missing_conf = tmp_path / "missing-power.conf"
+    monkeypatch.setattr(power_mod, "DEFAULT_CONFIG_PATH", missing_conf)
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="sigint101.power"):
-        rc = main(["--startup-only", "--notice-path", str(tmp_path / "cli-notice.json")])
+        rc = main([
+            "--startup-only",
+            "--notice-path",
+            str(tmp_path / "cli-notice.json"),
+        ])
     assert rc == 0
     assert bus_touched is False
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "power.py" in msgs and "battery.py" in msgs
-    assert LOCKED_2A_REASON in msgs
+    assert "disarmed (unset)" in msgs
+
+    # Even with a valid single assignment in power.conf, slice 2b's hard-disarm lock keeps the
+    # watcher disarmed with zero I2C reads and zero polkit calls.
+    monkeypatch.setattr(power_mod, "check_can_power_off", lambda: (True, 's "yes"'))
+    valid_conf = tmp_path / "armed-power.conf"
+    valid_conf.write_text("SIGINT101_POWER_THRESHOLD_V=9.50\n", encoding="utf-8")
+    monkeypatch.setattr(power_mod, "DEFAULT_CONFIG_PATH", valid_conf)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sigint101.power"):
+        rc_locked = main([
+            "--startup-only",
+            "--notice-path",
+            str(tmp_path / "cli-notice.json"),
+        ])
+    assert rc_locked == 0
+    assert bus_touched is False
+    locked_msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "disarmed" in locked_msgs and "armed at" not in locked_msgs
 
 
 # --- Test 9: systemd unit file is non-root and hardened -------------------------
@@ -856,7 +887,6 @@ def test_unit_file_is_non_root_and_hardened():
         "User": "sigint101-power",
         "Group": "sigint101-power",
         "SupplementaryGroups": "i2c",
-        "EnvironmentFile": "-/etc/sigint101/power.conf",
         "ExecStart": "/usr/local/bin/sigint101-power",
         "RuntimeDirectory": "sigint101-power",
         "RuntimeDirectoryMode": "0755",
@@ -882,6 +912,7 @@ def test_unit_file_is_non_root_and_hardened():
         "SystemCallFilter": "@system-service",
     }
     assert directives.get("User") != ["root"]
+    assert "EnvironmentFile" not in directives
     for key, val in expected_exact.items():
         assert directives.get(key) == [val], (
             f"{key}: expected [{val!r}], got {directives.get(key)!r}"
@@ -950,3 +981,1427 @@ def test_notice_write_failure_logs_error_and_does_not_block_poweroff(tmp_path, c
     assert w_fail.state == "POWEROFF_FAILED"
     clk.advance(2.0)
     assert w_fail.tick() == "POWEROFF_FAILED"
+
+
+# --- Slice 2b: GET /api/power, base.html banner, and learner-side desktop notice ---
+
+
+def test_api_power_is_strictly_read_only_and_base_html_renders_notice(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+
+    clk = _Clock(1000.0)
+    notice_path = tmp_path / "notice.json"
+    data_dir = tmp_path / "data"
+    gauge_calls = 0
+
+    class _CountingGauge:
+        reason = "test gauge"
+
+        def read(self):
+            nonlocal gauge_calls
+            gauge_calls += 1
+            return None
+
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=data_dir,
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        battery_gauge=_CountingGauge(),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+    with TestClient(app) as client:
+        db_path = data_dir / "progress.db"
+        events_path = data_dir / "events.jsonl"
+        db_before = db_path.read_bytes() if db_path.exists() else None
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        # Absent notice -> inactive, zero I2C/gauge reads, zero DB/event writes.
+        gauge_calls = 0
+        r = client.get("/api/power")
+        assert r.status_code == 200
+        assert r.json() == {"active": False}
+        assert gauge_calls == 0
+
+        # Home HTML renders .power-notice hidden and loads power-notice.js.
+        home = client.get("/")
+        assert home.status_code == 200
+        assert "/static/power-notice.js" in home.text
+        assert 'data-power-notice' in home.text
+        assert 'role="alert"' in home.text
+        assert 'aria-live="assertive"' in home.text
+        assert "LOW BATTERY · POWERING OFF" not in home.text
+
+        # Active countdown notice -> /api/power serves remaining_s and base.html shows banner.
+        notice_path.write_text(json.dumps({
+            "active": True,
+            "failed": False,
+            "voltage": 9.21,
+            "threshold_v": 9.5,
+            "started_mono": 982.0,
+            "deadline_mono": 1042.0,
+            "updated_mono": 999.0,
+        }), encoding="utf-8")
+        gauge_calls = 0
+        r2 = client.get("/api/power")
+        assert r2.status_code == 200
+        assert r2.json() == {
+            "active": True,
+            "failed": False,
+            "remaining_s": 42,
+            "voltage": 9.21,
+            "threshold_v": 9.5,
+        }
+        assert gauge_calls == 0
+        home2 = client.get("/")
+        assert "LOW BATTERY · POWERING OFF IN 42 s" in home2.text
+        assert "Pack 9.21 V (limit 9.50 V)" in home2.text
+        assert "power-notice--failed" not in home2.text
+
+        # Failed power-off notice -> /api/power serves retry_in_s and base.html marks failed.
+        notice_path.write_text(json.dumps({
+            "active": True,
+            "failed": True,
+            "voltage": 9.18,
+            "threshold_v": 9.5,
+            "started_mono": 900.0,
+            "deadline_mono": 960.0,
+            "updated_mono": 999.5,
+            "retry_deadline_mono": 1047.0,
+        }), encoding="utf-8")
+        gauge_calls = 0
+        r3 = client.get("/api/power")
+        assert r3.status_code == 200
+        assert r3.json() == {
+            "active": True,
+            "failed": True,
+            "retry_in_s": 47,
+            "voltage": 9.18,
+            "threshold_v": 9.5,
+        }
+        assert gauge_calls == 0
+        home3 = client.get("/")
+        assert "power-notice--failed" in home3.text
+        assert "AUTOMATIC POWER-OFF FAILED · RETRYING IN 47 s" in home3.text
+
+        # Stale notice -> inactive.
+        clk.advance(NOTICE_STALE_S + 2.0)
+        assert client.get("/api/power").json() == {"active": False}
+
+        # Confirm zero DB or event-log mutation across all /api/power and GET / calls.
+        assert (db_path.read_bytes() if db_path.exists() else None) == db_before
+        assert (events_path.read_bytes() if events_path.exists() else None) == events_before
+
+
+def test_desktop_notice_reads_contract_updates_in_place_and_clears(tmp_path):
+    from sigint101.power_desktop import (
+        BusctlNotifier,
+        DesktopNoticeMonitor,
+        GdbusNotifier,
+        format_desktop_notice,
+    )
+    from sigint101.power_desktop import (
+        main as desktop_main,
+    )
+
+    clk = _Clock(500.0)
+    notice_path = tmp_path / "notice.json"
+    shown: list[tuple[str, str, bool]] = []
+    clears = 0
+
+    class _FakeNotifier:
+        def show(self, summary: str, body: str, *, failed: bool) -> bool:
+            shown.append((summary, body, failed))
+            return True
+
+        def clear(self) -> None:
+            nonlocal clears
+            clears += 1
+
+    mon = DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=_FakeNotifier())
+
+    # Absent notice -> INACTIVE, no show/clear calls.
+    assert mon.tick() == "INACTIVE"
+    assert shown == [] and clears == 0
+
+    # Active countdown -> ACTIVE, shows countdown.
+    notice_path.write_text(json.dumps({
+        "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+        "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.0,
+    }), encoding="utf-8")
+    assert mon.tick() == "ACTIVE"
+    assert len(shown) == 1
+    assert shown[-1][0] == "LOW BATTERY · POWERING OFF IN 40 s"
+    assert "9.21 V" in shown[-1][1] and shown[-1][2] is False
+
+    # Failed state -> FAILED, shows retry countdown.
+    notice_path.write_text(json.dumps({
+        "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+        "started_mono": 400.0, "deadline_mono": 460.0, "updated_mono": 499.5,
+        "retry_deadline_mono": 547.0,
+    }), encoding="utf-8")
+    assert mon.tick() == "FAILED"
+    assert "RETRYING IN 47 s" in shown[-1][0] and shown[-1][2] is True
+
+    # Stale notice -> INACTIVE and clears the desktop notification once.
+    clk.advance(NOTICE_STALE_S + 1.0)
+    assert mon.tick() == "INACTIVE"
+    assert clears == 1
+    assert mon.tick() == "INACTIVE"
+    assert clears == 1
+
+    # Fresh notice then unlink -> shows again, then clears on unlink.
+    notice_path.write_text(json.dumps({
+        "active": True, "failed": False, "voltage": 9.20, "threshold_v": 9.5,
+        "started_mono": clk() - 5.0, "deadline_mono": clk() + 55.0, "updated_mono": clk(),
+    }), encoding="utf-8")
+    assert mon.tick() == "ACTIVE"
+    notice_path.unlink()
+    assert mon.tick() == "INACTIVE"
+    assert clears == 2
+
+    # Active notice cleared on clean shutdown.
+    notice_path.write_text(json.dumps({
+        "active": True, "failed": False, "voltage": 9.20, "threshold_v": 9.5,
+        "started_mono": clk() - 5.0, "deadline_mono": clk() + 55.0, "updated_mono": clk(),
+    }), encoding="utf-8")
+    assert mon.tick() == "ACTIVE"
+    mon.shutdown()
+    assert clears == 3
+
+    # Pure formatter returns None for inactive.
+    assert format_desktop_notice({"active": False}) is None
+
+    # GdbusNotifier uses replaces_id and CloseNotification with bounded timeout + DEVNULL.
+    gdbus_calls: list[tuple] = []
+
+    def fake_gdbus(cmd, **kw):
+        gdbus_calls.append((cmd, kw))
+        return SimpleNamespace(returncode=0, stdout="(uint32 42,)\n", stderr="")
+
+    gn = GdbusNotifier(gdbus_bin="/usr/bin/gdbus", runner=fake_gdbus)
+    assert gn.show("LOW BATTERY · POWERING OFF IN 40 s", "Plug in", failed=False) is True
+    assert gdbus_calls[-1][0][0] == "/usr/bin/gdbus"
+    assert "org.freedesktop.Notifications.Notify" in gdbus_calls[-1][0]
+    assert "0" in gdbus_calls[-1][0]
+    assert gdbus_calls[-1][1]["stdin"] is subprocess.DEVNULL
+    assert gdbus_calls[-1][1]["close_fds"] is True
+    assert gdbus_calls[-1][1]["timeout"] > 0
+
+    assert gn.show("LOW BATTERY · POWERING OFF IN 38 s", "Plug in", failed=False) is True
+    assert "42" in gdbus_calls[-1][0]
+    gn.clear()
+    assert "org.freedesktop.Notifications.CloseNotification" in gdbus_calls[-1][0]
+    assert gdbus_calls[-1][0][-1] == "42"
+
+    # BusctlNotifier fallback invokes busctl --user call Notify and CloseNotification with DEVNULL.
+    bc_calls: list[tuple] = []
+
+    def fake_bc(cmd, **kw):
+        bc_calls.append((cmd, kw))
+        return SimpleNamespace(returncode=0, stdout="u 17\n", stderr="")
+
+    bc = BusctlNotifier(busctl_bin="/usr/bin/busctl", runner=fake_bc)
+    assert bc.show("LOW BATTERY · POWERING OFF IN 40 s", "Plug in", failed=False) is True
+    assert bc_calls[-1][0][0] == "/usr/bin/busctl"
+    assert "Notify" in bc_calls[-1][0]
+    assert bc_calls[-1][1]["stdin"] is subprocess.DEVNULL
+    assert bc_calls[-1][1]["close_fds"] is True
+    bc.clear()
+    assert "CloseNotification" in bc_calls[-1][0]
+    assert bc_calls[-1][0][-1] == "17"
+
+    # --once exits 0 when no notice file exists.
+    assert desktop_main(["--once", "--notice-path", str(tmp_path / "missing.json")]) == 0
+
+
+def test_desktop_notice_unit_and_launcher_run_in_learner_session():
+    unit_file = REPO / "deploy" / "system" / "sigint101-power-notice.service"
+    launcher = REPO / "deploy" / "system" / "sigint101-power-notice"
+    assert unit_file.is_file()
+    assert launcher.is_file()
+    text = unit_file.read_text(encoding="utf-8")
+    assert "ExecStart=/usr/local/bin/sigint101-power-notice" in text
+    assert "WantedBy=default.target" in text
+    assert "User=root" not in text
+    assert "sigint101.power_desktop" in launcher.read_text(encoding="utf-8")
+    assert "python3 -I" in launcher.read_text(encoding="utf-8")
+
+
+# --- Round 3 (F1, F3, F4): config-only arming, notice bounds/overflow, close-capable desktop ---
+
+
+def test_f1_power_conf_is_sole_arming_input_and_rejects_duplicates_through_installed_launcher(
+    tmp_path,
+):
+    """F1: watcher reads power.conf directly (never EnvironmentFile / env vars), refuses duplicate
+    threshold assignments (conflicting or identical) with a diagnostic, and stays disarmed."""
+    # Unit file must no longer load power.conf via EnvironmentFile.
+    unit_text = UNIT_FILE.read_text(encoding="utf-8")
+    assert "EnvironmentFile=" not in unit_text
+
+    # Stage the real installed layout in a temporary sysroot.
+    sysroot = tmp_path / "sysroot"
+    lib_pkg = sysroot / "usr" / "local" / "lib" / "sigint101-power" / "sigint101"
+    lib_pkg.mkdir(parents=True)
+    for py_name in ("__init__.py", "battery.py", "power.py"):
+        (lib_pkg / py_name).write_bytes((REPO / "sigint101" / py_name).read_bytes())
+    bin_dir = sysroot / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True)
+    launcher = bin_dir / "sigint101-power"
+    launcher.write_bytes((REPO / "deploy" / "system" / "sigint101-power").read_bytes())
+    launcher.chmod(0o755)
+    notice_path = tmp_path / "notice.json"
+    base_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+
+    lib_root = sysroot / "usr" / "local" / "lib" / "sigint101-power"
+    snippet = (
+        "import pathlib, sys; sys.path.insert(0, sys.argv[1]); "
+        "import sigint101.power as p; "
+        "p.DEFAULT_CONFIG_PATH = pathlib.Path(sys.argv[2]); "
+        "sys.exit(p.main(['--startup-only', '--notice-path', sys.argv[3]]))"
+    )
+
+    def _run_installed(conf_path: Path, *, extra_env: dict[str, str] | None = None) -> str:
+        env = {**base_env, **(extra_env or {})}
+        proc = subprocess.run(
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                snippet,
+                str(lib_root),
+                str(conf_path),
+                str(notice_path),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        return proc.stdout + proc.stderr
+
+    # 1) Absent file stays disarmed.
+    out_absent = _run_installed(tmp_path / "missing.conf")
+    assert "disarmed" in out_absent and "armed at" not in out_absent
+
+    # 2) Threshold-free file (comments + recover_v only) stays disarmed.
+    no_thresh = tmp_path / "no-thresh.conf"
+    no_thresh.write_text("# comment\nSIGINT101_POWER_RECOVER_V=0.20\n", encoding="utf-8")
+    out_nothresh = _run_installed(no_thresh)
+    assert "disarmed" in out_nothresh and "armed at" not in out_nothresh
+
+    # 3) Conflicting duplicate threshold assignments (bad+valid and two valid) refused + disarmed.
+    for name, body, expect in (
+        (
+            "dup-bad-good.conf",
+            "SIGINT101_POWER_THRESHOLD_V=abc\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            "invalid",
+        ),
+        (
+            "dup-conflict.conf",
+            "SIGINT101_POWER_THRESHOLD_V=9.20\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            "duplicate",
+        ),
+    ):
+        p = tmp_path / name
+        p.write_text(body, encoding="utf-8")
+        out = _run_installed(p)
+        assert "disarmed" in out and "armed at" not in out, out
+        assert expect in out.lower(), out
+
+    # 4) Identical duplicate threshold assignments also refused + disarmed.
+    dup_same = tmp_path / "dup-same.conf"
+    dup_same.write_text(
+        "SIGINT101_POWER_THRESHOLD_V=9.50\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+        encoding="utf-8",
+    )
+    out_same = _run_installed(dup_same)
+    assert "disarmed" in out_same and "armed at" not in out_same, out_same
+    assert "duplicate" in out_same.lower(), out_same
+
+    # 5) Environment variable with no file NEVER arms.
+    out_env = _run_installed(
+        tmp_path / "still-absent.conf",
+        extra_env={"SIGINT101_POWER_THRESHOLD_V": "9.50"},
+    )
+    assert "disarmed" in out_env and "armed at" not in out_env, out_env
+
+    # 6) Under slice 2b's hard-disarm lock, a valid single assignment also stays disarmed.
+    valid_conf = tmp_path / "valid.conf"
+    valid_conf.write_text(
+        "# bench calibrated\nSIGINT101_POWER_THRESHOLD_V=9.50\nSIGINT101_POWER_RECOVER_V=0.20\n",
+        encoding="utf-8",
+    )
+    out_valid = _run_installed(valid_conf)
+    assert "disarmed" in out_valid and "armed at" not in out_valid, out_valid
+    assert "slice 2b" in out_valid, out_valid
+
+
+def test_f3_malformed_notices_never_crash_or_pass_as_active(tmp_path):
+    """F3: unconvertible numbers (351-digit voltage) and out-of-invariant notices (18 V, 30 V
+    threshold, deadline before start, bad retry deadline) return inactive in API and desktop."""
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+    from sigint101.power_desktop import DesktopNoticeMonitor
+
+    clk = _Clock(1000.0)
+    notice_path = tmp_path / "notice.json"
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=tmp_path / "data",
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+
+    class _NoopNotifier:
+        def show(self, *_a, **_kw) -> bool:
+            raise AssertionError("malformed notice must never show a desktop alert")
+
+        def clear(self) -> None:
+            pass
+
+    mon = DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=_NoopNotifier())
+
+    # 1) Codex's 351-digit integer voltage under 4 KiB (previously OverflowError / HTTP 500).
+    huge_int_json = (
+        '{"active": true, "failed": false, "voltage": '
+        + ("9" * 351)
+        + ', "threshold_v": 9.5, "started_mono": 980.0, "deadline_mono": 1040.0, '
+        '"updated_mono": 999.0}'
+    )
+    assert len(huge_int_json.encode("utf-8")) < 4096
+
+    # 2) Codex's out-of-invariant notice (18 V, 30 V threshold, deadline before start).
+    bogus_invariant_json = json.dumps({
+        "active": True,
+        "failed": False,
+        "voltage": 18.0,
+        "threshold_v": 30.0,
+        "started_mono": 990.0,
+        "deadline_mono": 950.0,
+        "updated_mono": 999.0,
+    })
+
+    # 3) Additional writer-invariant violations.
+    cases = [
+        ("huge_voltage_351_digits", huge_int_json),
+        ("codex_18v_30v_deadline_before_start", bogus_invariant_json),
+        ("implausible_low_voltage", json.dumps({
+            "active": True, "failed": False, "voltage": 5.5, "threshold_v": 9.5,
+            "started_mono": 980.0, "deadline_mono": 1040.0, "updated_mono": 999.0,
+        })),
+        ("threshold_at_lower_bound", json.dumps({
+            "active": True, "failed": False, "voltage": 9.2, "threshold_v": 8.0,
+            "started_mono": 980.0, "deadline_mono": 1040.0, "updated_mono": 999.0,
+        })),
+        ("threshold_at_upper_bound", json.dumps({
+            "active": True, "failed": False, "voltage": 9.2, "threshold_v": 12.6,
+            "started_mono": 980.0, "deadline_mono": 1040.0, "updated_mono": 999.0,
+        })),
+        ("updated_before_started", json.dumps({
+            "active": True, "failed": False, "voltage": 9.2, "threshold_v": 9.5,
+            "started_mono": 1000.0, "deadline_mono": 1060.0, "updated_mono": 999.0,
+        })),
+        ("retry_deadline_before_start", json.dumps({
+            "active": True, "failed": True, "voltage": 9.2, "threshold_v": 9.5,
+            "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 999.0,
+            "retry_deadline_mono": 850.0,
+        })),
+        ("retry_deadline_before_notice_deadline", json.dumps({
+            "active": True, "failed": True, "voltage": 9.2, "threshold_v": 9.5,
+            "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 999.0,
+            "retry_deadline_mono": 950.0,
+        })),
+    ]
+
+    with TestClient(app) as client:
+        for label, payload in cases:
+            notice_path.write_text(payload, encoding="utf-8")
+            assert read_power_notice(notice_path, clock=clk) == {"active": False}, label
+            resp = client.get("/api/power")
+            assert resp.status_code == 200, (label, resp.status_code)
+            assert resp.json() == {"active": False}, label
+            assert mon.tick() == "INACTIVE", label
+
+
+def test_f4_desktop_notice_closes_via_close_capable_transport_on_recovery_and_expiry(
+    tmp_path, monkeypatch
+):
+    """F4: desktop warnings use close-capable D-Bus transports (gdbus or busctl), never falling
+    back to non-closing notify-send, and close the displayed ID on both recovery and expiry."""
+    import sigint101.power_desktop as pd
+
+    # build_notifier() must NEVER pick notify-send when gdbus is absent; it picks busctl or Null.
+    monkeypatch.setattr(
+        pd.shutil,
+        "which",
+        lambda name: {
+            "gdbus": None,
+            "busctl": "/usr/bin/busctl",
+            "notify-send": "/usr/bin/notify-send",
+        }.get(name),
+    )
+    picked = pd.build_notifier()
+    assert isinstance(picked, pd.BusctlNotifier)
+
+    monkeypatch.setattr(
+        pd.shutil,
+        "which",
+        lambda name: "/usr/bin/notify-send" if name == "notify-send" else None,
+    )
+    picked_only_ns = pd.build_notifier()
+    assert isinstance(picked_only_ns, pd.NullNotifier)
+
+    # Stateful fake org.freedesktop.Notifications daemon driven through BOTH GdbusNotifier and
+    # BusctlNotifier to prove recovery, expiry, and shutdown all close the displayed ID.
+    for kind in ("gdbus", "busctl"):
+        clk = _Clock(500.0)
+        notice_path = tmp_path / f"notice-{kind}.json"
+        live_notifs: dict[int, tuple[str, str]] = {}
+        next_id = 10
+
+        def _fake_daemon(cmd, **kw):
+            nonlocal next_id
+            assert kw["stdin"] is subprocess.DEVNULL
+            assert kw["close_fds"] is True
+            assert kw["timeout"] > 0
+            if kind == "gdbus":
+                method = cmd[cmd.index("--method") + 1]
+                if method == "org.freedesktop.Notifications.Notify":
+                    replaces = int(cmd[cmd.index(pd.APP_NAME) + 1])
+                    nid = replaces if replaces > 0 else next_id
+                    if replaces == 0:
+                        next_id += 1
+                    app_idx = cmd.index(pd.APP_NAME)
+                    live_notifs[nid] = (cmd[app_idx + 3], cmd[app_idx + 4])
+                    return SimpleNamespace(returncode=0, stdout=f"(uint32 {nid},)\n", stderr="")
+                if method == "org.freedesktop.Notifications.CloseNotification":
+                    nid = int(cmd[-1])
+                    live_notifs.pop(nid, None)
+                    return SimpleNamespace(returncode=0, stdout="()\n", stderr="")
+            else:
+                if "Notify" in cmd:
+                    idx = cmd.index("susssasa{sv}i")
+                    replaces = int(cmd[idx + 2])
+                    nid = replaces if replaces > 0 else next_id
+                    if replaces == 0:
+                        next_id += 1
+                    live_notifs[nid] = (cmd[idx + 4], cmd[idx + 5])
+                    return SimpleNamespace(returncode=0, stdout=f"u {nid}\n", stderr="")
+                if "CloseNotification" in cmd:
+                    nid = int(cmd[-1])
+                    live_notifs.pop(nid, None)
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        notifier = (
+            pd.GdbusNotifier(gdbus_bin="/usr/bin/gdbus", runner=_fake_daemon)
+            if kind == "gdbus"
+            else pd.BusctlNotifier(busctl_bin="/usr/bin/busctl", runner=_fake_daemon)
+        )
+        mon = pd.DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=notifier)
+
+        # 1) Active countdown -> 1 notification live; failed update replaces same ID in place.
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+            "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.0,
+        }), encoding="utf-8")
+        assert mon.tick() == "ACTIVE"
+        assert len(live_notifs) == 1
+        first_id = next(iter(live_notifs))
+
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+            "started_mono": 400.0, "deadline_mono": 460.0, "updated_mono": 499.5,
+            "retry_deadline_mono": 547.0,
+        }), encoding="utf-8")
+        assert mon.tick() == "FAILED"
+        assert list(live_notifs.keys()) == [first_id]
+
+        # 2) Recovery (notice removed) closes the notification in the daemon!
+        notice_path.unlink()
+        assert mon.tick() == "INACTIVE"
+        assert live_notifs == {}, f"{kind} left warning open after recovery: {live_notifs}"
+
+        # 3) Expiry (notice goes stale) also closes the notification in the daemon!
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": True, "voltage": 9.15, "threshold_v": 9.5,
+            "started_mono": 400.0, "deadline_mono": 460.0, "updated_mono": clk(),
+            "retry_deadline_mono": clk() + 50.0,
+        }), encoding="utf-8")
+        assert mon.tick() == "FAILED"
+        assert len(live_notifs) == 1
+        clk.advance(NOTICE_STALE_S + 1.0)
+        assert mon.tick() == "INACTIVE"
+        assert live_notifs == {}, f"{kind} left warning open after expiry: {live_notifs}"
+
+
+# --- Round 4 (LOCK, F1a, F1b, F2 server seed, F3 span/update, F4 close retry) ---
+
+
+_LAUNCHER_TEST_INIT = r'''
+import atexit
+import importlib.abc
+import importlib.machinery
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+
+_CONF_ENV = os.environ.get("TEST_LAUNCHER_CONF")
+if _CONF_ENV:
+    _RESULT_PATH = pathlib.Path(os.environ["TEST_LAUNCHER_RESULT"])
+    _NOTICE_PATH = pathlib.Path(os.environ["TEST_LAUNCHER_NOTICE"])
+    _MAX_TICKS = int(os.environ.get("TEST_LAUNCHER_MAX_TICKS", "90"))
+    _STATE = {
+        "ticks": 0,
+        "gauge_calls": 0,
+        "auth_calls": 0,
+        "shutdown_calls": 0,
+        "unexpected_subprocesses": [],
+        "final_state": None,
+        "injected_verified": False,
+    }
+    _WATCHER_REF = [None]
+
+    def _dump_result():
+        w = _WATCHER_REF[0]
+        payload = {
+            **_STATE,
+            "final_state": w.state if w is not None else _STATE["final_state"],
+            "notice_exists": _NOTICE_PATH.exists(),
+        }
+        _RESULT_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+    atexit.register(_dump_result)
+
+    def _forbid_subprocess(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        _STATE["unexpected_subprocesses"].append(repr(cmd))
+        _dump_result()
+        raise RuntimeError(f"unexpected subprocess in power launcher fixture: {cmd!r}")
+
+    subprocess.run = _forbid_subprocess
+    subprocess.Popen = _forbid_subprocess
+
+    class _PowerPatchLoader(importlib.abc.Loader):
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def create_module(self, spec):
+            return self._wrapped.create_module(spec)
+
+        def exec_module(self, mod):
+            self._wrapped.exec_module(mod)
+            from sigint101.battery import BatteryReading, INA219Config
+
+            mod.DEFAULT_CONFIG_PATH = pathlib.Path(_CONF_ENV)
+            clk = [1000.0]
+
+            def fake_reader():
+                _STATE["gauge_calls"] += 1
+                return INA219Config.from_word(0x399F), BatteryReading(
+                    voltage=9.10, current_a=-0.6, percent=5, charging=False
+                )
+
+            def fake_auth():
+                _STATE["auth_calls"] += 1
+                return True, 's "yes"'
+
+            def fake_poweroff():
+                _STATE["shutdown_calls"] += 1
+
+            def fake_clock():
+                return clk[0]
+
+            def fake_sleep(dt):
+                clk[0] += dt
+
+            def bounded_sleep(dt):
+                _STATE["ticks"] += 1
+                fake_sleep(dt)
+                if _STATE["ticks"] >= _MAX_TICKS:
+                    os.kill(os.getpid(), signal.SIGTERM)
+
+            real_watcher = mod.PowerWatcher
+
+            class _InjectedPowerWatcher(real_watcher):
+                def __init__(self, *args, **kwargs):
+                    kwargs["reader"] = fake_reader
+                    kwargs["clock"] = fake_clock
+                    kwargs["sleep"] = fake_sleep
+                    kwargs["poweroff"] = fake_poweroff
+                    kwargs["can_power_off"] = fake_auth
+                    super().__init__(*args, **kwargs)
+                    assert self._reader is fake_reader
+                    assert self._clock is fake_clock
+                    assert self._sleep is fake_sleep
+                    assert self._poweroff is fake_poweroff
+                    assert self._can_power_off is fake_auth
+                    _STATE["injected_verified"] = True
+                    _WATCHER_REF[0] = self
+
+            mod.PowerWatcher = _InjectedPowerWatcher
+            mod.time.monotonic = fake_clock
+            mod.time.sleep = bounded_sleep
+
+    class _PowerPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != "sigint101.power":
+                return None
+            spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+            if spec is not None and spec.loader is not None:
+                spec.loader = _PowerPatchLoader(spec.loader)
+            return spec
+
+    sys.meta_path.insert(0, _PowerPatchFinder())
+'''
+
+
+def _stage_installed_power_sysroot(
+    sysroot: Path, *, revert_lock: bool = False
+) -> tuple[Path, Path]:
+    """Stage the actual deploy/system/sigint101-power launcher and library files in a temp sysroot.
+
+    When revert_lock=True, lifts ONLY the single slice-2b lock line in the disposable copy of
+    power.py to prove that the fixture reaches only the injected fake shutdown and never a real
+    subprocess when armed.
+    """
+    lib_root = sysroot / "usr" / "local" / "lib" / "sigint101-power"
+    lib_pkg = lib_root / "sigint101"
+    lib_pkg.mkdir(parents=True, exist_ok=True)
+    (lib_pkg / "__init__.py").write_text(_LAUNCHER_TEST_INIT, encoding="utf-8")
+    (lib_pkg / "battery.py").write_bytes((REPO / "sigint101" / "battery.py").read_bytes())
+
+    power_src = (REPO / "sigint101" / "power.py").read_text(encoding="utf-8")
+    if revert_lock:
+        lock_line = "return None, _SLICE_2B_LOCK_REASON"
+        assert power_src.count(lock_line) == 1, "expected exact single slice 2b lock return"
+        power_src = power_src.replace(lock_line, 'return value, ""', 1)
+    (lib_pkg / "power.py").write_text(power_src, encoding="utf-8")
+
+    bin_dir = sysroot / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    launcher = bin_dir / "sigint101-power"
+    launcher.write_bytes((REPO / "deploy" / "system" / "sigint101-power").read_bytes())
+    launcher.chmod(0o755)
+    return launcher, lib_root
+
+
+def _run_installed_power_launcher(
+    launcher: Path,
+    *,
+    conf_path: Path,
+    notice_path: Path,
+    result_path: Path,
+    extra_env: dict[str, str] | None = None,
+    max_ticks: int = 90,
+) -> tuple[int, dict, str]:
+    """Run the actual installed launcher with explicit fake callbacks and subprocess guard."""
+    if result_path.exists():
+        result_path.unlink()
+    if notice_path.exists():
+        notice_path.unlink()
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "TEST_LAUNCHER_CONF": str(conf_path),
+        "TEST_LAUNCHER_NOTICE": str(notice_path),
+        "TEST_LAUNCHER_RESULT": str(result_path),
+        "TEST_LAUNCHER_MAX_TICKS": str(max_ticks),
+        **(extra_env or {}),
+    }
+    proc = subprocess.run(
+        [str(launcher), "--notice-path", str(notice_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    combined = proc.stdout + proc.stderr
+    assert result_path.is_file(), f"launcher exited {proc.returncode} without result:\n{combined}"
+    data = json.loads(result_path.read_text(encoding="utf-8"))
+    return proc.returncode, data, combined
+
+
+def test_r4_lock_f1a_f1b_hard_disarm_canonical_path_and_strict_grammar(tmp_path):
+    """LOCK + F1a + F1b: 2b restores 2a's hard-disarm in parse_threshold; production launcher
+    binds strictly to /etc/sigint101/power.conf (refusing --config-path); power.conf enforces a
+    strict allowlisted grammar (rejecting BOM, unknown keys, quotes, export, key whitespace, and
+    duplicates). Every case stays disarmed through the installed entry point with zero shutdowns."""
+    # LOCK: parse_threshold never returns an armed threshold for any input in slice 2b.
+    for raw in ("9.50", "8.01", "12.59", "10.0"):
+        tv, reason = parse_threshold(raw)
+        assert tv is None, f"slice 2b lock must keep parse_threshold({raw!r}) disarmed"
+        assert reason, f"expected disarmed reason for {raw!r}"
+
+    # Stage the real installed layout in a temporary sysroot.
+    launcher, _ = _stage_installed_power_sysroot(tmp_path / "sysroot", revert_lock=False)
+    notice_path = tmp_path / "notice.json"
+    result_path = tmp_path / "result.json"
+    base_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+
+    # F1a: installed launcher refuses --config-path with a valid alternate file (canonical absent).
+    alt_conf = tmp_path / "alt-power.conf"
+    alt_conf.write_text("SIGINT101_POWER_THRESHOLD_V=9.50\n", encoding="utf-8")
+    proc_alt = subprocess.run(
+        [str(launcher), "--config-path", str(alt_conf), "--notice-path", str(notice_path)],
+        env=base_env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert proc_alt.returncode != 0, (
+        "installed launcher must refuse --config-path, got rc=0: "
+        f"{proc_alt.stdout}{proc_alt.stderr}"
+    )
+
+    def _run_loop(conf_path: Path, *, extra_env: dict[str, str] | None = None) -> tuple[dict, str]:
+        rc, data, combined = _run_installed_power_launcher(
+            launcher,
+            conf_path=conf_path,
+            notice_path=notice_path,
+            result_path=result_path,
+            extra_env=extra_env,
+            max_ticks=90,
+        )
+        assert rc == 0, combined
+        assert data["injected_verified"] is True, (data, combined)
+        assert data["unexpected_subprocesses"] == [], (data, combined)
+        return {"rc": rc, **data}, combined
+
+    cases: list[tuple[str, bytes | None, dict[str, str] | None, str]] = [
+        ("absent_file", None, None, "disarmed"),
+        ("threshold_free", b"# comment\n\nSIGINT101_POWER_RECOVER_V=0.20\n", None, "disarmed"),
+        (
+            "plain_dup_conflict",
+            b"SIGINT101_POWER_THRESHOLD_V=9.20\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "duplicate",
+        ),
+        (
+            "plain_dup_identical",
+            b"SIGINT101_POWER_THRESHOLD_V=9.50\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "duplicate",
+        ),
+        (
+            "bom_dup_conflict",
+            b"\xef\xbb\xbfSIGINT101_POWER_THRESHOLD_V=9.20\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "bom",
+        ),
+        (
+            "bom_dup_identical",
+            b"\xef\xbb\xbfSIGINT101_POWER_THRESHOLD_V=9.50\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "bom",
+        ),
+        ("bom_single", b"\xef\xbb\xbfSIGINT101_POWER_THRESHOLD_V=9.50\n", None, "bom"),
+        (
+            "unknown_key",
+            b"FOO=bar\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "invalid",
+        ),
+        ("quoted_double", b'SIGINT101_POWER_THRESHOLD_V="9.50"\n', None, "invalid"),
+        ("quoted_single", b"SIGINT101_POWER_THRESHOLD_V='9.50'\n", None, "invalid"),
+        ("export_prefix", b"export SIGINT101_POWER_THRESHOLD_V=9.50\n", None, "invalid"),
+        ("key_leading_space", b" SIGINT101_POWER_THRESHOLD_V=9.50\n", None, "invalid"),
+        ("key_trailing_space", b"SIGINT101_POWER_THRESHOLD_V =9.50\n", None, "invalid"),
+        ("semicolon_comment", b"; comment\nSIGINT101_POWER_THRESHOLD_V=9.50\n", None, "invalid"),
+        ("env_only", None, {"SIGINT101_POWER_THRESHOLD_V": "9.50"}, "disarmed"),
+        (
+            "valid_single_assignment_locked_in_2b",
+            (
+                b"# bench calibrated\n"
+                b"SIGINT101_POWER_THRESHOLD_V=9.50\n"
+                b"SIGINT101_POWER_RECOVER_V=0.20\n"
+            ),
+            None,
+            "disarmed",
+        ),
+    ]
+
+    for label, content, extra_env, expected_diag in cases:
+        conf = tmp_path / f"case-{label}.conf"
+        if content is not None:
+            conf.write_bytes(content)
+        res, output = _run_loop(conf, extra_env=extra_env)
+        assert res["rc"] == 0, (label, output)
+        assert res["gauge_calls"] == 0, f"{label}: disarmed watcher read I2C"
+        assert res["auth_calls"] == 0, f"{label}: disarmed watcher checked auth"
+        assert res["shutdown_calls"] == 0, f"{label}: disarmed watcher invoked shutdown"
+        assert res["unexpected_subprocesses"] == [], f"{label}: unexpected subprocess"
+        assert res["notice_exists"] is False, f"{label}: disarmed watcher wrote notice.json"
+        assert "armed at" not in output, (label, output)
+        assert "disarmed" in output.lower(), (label, output)
+        assert expected_diag in output.lower(), f"{label}: missing {expected_diag!r} in:\n{output}"
+
+
+def test_r4_f2_base_html_seeds_structured_power_notice_state(tmp_path):
+    """F2: base.html embeds structured JSON initial notice state on [data-power-notice] so the
+    client controller can retain a server-rendered warning if the first /api/power poll fails."""
+    import html as html_mod
+    import re
+
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+
+    clk = _Clock(1000.0)
+    notice_path = tmp_path / "notice.json"
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=tmp_path / "data",
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+
+    def _extract_initial(body: str) -> dict:
+        m = re.search(r'data-power-initial="([^"]*)"', body)
+        assert m, "base.html must emit data-power-initial structured notice state"
+        return json.loads(html_mod.unescape(m.group(1)))
+
+    with TestClient(app) as client:
+        assert _extract_initial(client.get("/").text) == {"active": False}
+
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+            "started_mono": 982.0, "deadline_mono": 1042.0, "updated_mono": 999.0,
+        }), encoding="utf-8")
+        assert _extract_initial(client.get("/").text) == {
+            "active": True, "failed": False, "remaining_s": 42,
+            "voltage": 9.21, "threshold_v": 9.5,
+        }
+
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+            "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 999.5,
+            "retry_deadline_mono": 1047.0,
+        }), encoding="utf-8")
+        assert _extract_initial(client.get("/").text) == {
+            "active": True, "failed": True, "retry_in_s": 47,
+            "voltage": 9.18, "threshold_v": 9.5,
+        }
+
+
+def test_r4_f3_rejects_impossible_countdown_span_and_premature_failed_update(tmp_path):
+    """F3: read_power_notice rejects notices whose countdown span does not match NOTICE_S (~60 s)
+    and failed notices whose updated_mono precedes the original deadline_mono, across both API
+    and desktop monitor."""
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+    from sigint101.power_desktop import DesktopNoticeMonitor
+
+    clk = _Clock(1000.0)
+    notice_path = tmp_path / "notice.json"
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=tmp_path / "data",
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+
+    class _NoopNotifier:
+        def show(self, *_a, **_kw) -> bool:
+            raise AssertionError("invalid notice must never show a desktop alert")
+
+        def clear(self) -> bool:
+            return True
+
+    mon = DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=_NoopNotifier())
+
+    invalid_cases = [
+        (
+            "1ms_countdown_span",
+            {
+                "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+                "started_mono": 999.0, "deadline_mono": 999.001, "updated_mono": 999.0,
+            },
+        ),
+        (
+            "short_30s_countdown_span",
+            {
+                "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+                "started_mono": 980.0, "deadline_mono": 1010.0, "updated_mono": 999.0,
+            },
+        ),
+        (
+            "long_120s_countdown_span",
+            {
+                "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+                "started_mono": 900.0, "deadline_mono": 1020.0, "updated_mono": 999.0,
+            },
+        ),
+        (
+            "failed_updated_before_deadline",
+            {
+                "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+                "started_mono": 960.0, "deadline_mono": 1020.0, "updated_mono": 999.0,
+                "retry_deadline_mono": 1040.0,
+            },
+        ),
+    ]
+
+    with TestClient(app) as client:
+        for label, payload in invalid_cases:
+            notice_path.write_text(json.dumps(payload), encoding="utf-8")
+            assert read_power_notice(notice_path, clock=clk) == {"active": False}, label
+            resp = client.get("/api/power")
+            assert resp.status_code == 200 and resp.json() == {"active": False}, label
+            assert mon.tick() == "INACTIVE", label
+
+
+def test_r4_f4_retains_notification_id_and_retries_pending_close_for_each_transport(tmp_path):
+    """F4: a transient nonzero exit or timeout on CloseNotification retains the displayed ID and
+    retries on subsequent inactive ticks until close succeeds or the daemon confirms it gone."""
+    import sigint101.power_desktop as pd
+
+    for kind in ("gdbus", "busctl"):
+        for failure_mode in ("nonzero", "timeout"):
+            clk = _Clock(500.0)
+            notice_path = tmp_path / f"retry-{kind}-{failure_mode}.json"
+            live_notifs: dict[int, tuple[str, str]] = {}
+            close_attempts: list[int] = []
+            fail_first_close = {"armed": True}
+            next_id = 30
+
+            def _fake_daemon(cmd, **kw):
+                nonlocal next_id
+                assert kw["timeout"] > 0
+                is_close = (
+                    "org.freedesktop.Notifications.CloseNotification" in cmd
+                    if kind == "gdbus"
+                    else "CloseNotification" in cmd
+                )
+                if is_close:
+                    nid = int(cmd[-1])
+                    close_attempts.append(nid)
+                    if fail_first_close["armed"]:
+                        fail_first_close["armed"] = False
+                        if failure_mode == "timeout":
+                            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+                        return SimpleNamespace(
+                            returncode=1,
+                            stdout="",
+                            stderr="Error: org.freedesktop.DBus.Error.NoReply",
+                        )
+                    live_notifs.pop(nid, None)
+                    return SimpleNamespace(
+                        returncode=0, stdout="()\n" if kind == "gdbus" else "", stderr=""
+                    )
+                if kind == "gdbus":
+                    replaces = int(cmd[cmd.index(pd.APP_NAME) + 1])
+                    nid = replaces if replaces > 0 else next_id
+                    if replaces == 0:
+                        next_id += 1
+                    live_notifs[nid] = (cmd[cmd.index(pd.APP_NAME) + 3], "")
+                    return SimpleNamespace(returncode=0, stdout=f"(uint32 {nid},)\n", stderr="")
+                idx = cmd.index("susssasa{sv}i")
+                replaces = int(cmd[idx + 2])
+                nid = replaces if replaces > 0 else next_id
+                if replaces == 0:
+                    next_id += 1
+                live_notifs[nid] = (cmd[idx + 4], "")
+                return SimpleNamespace(returncode=0, stdout=f"u {nid}\n", stderr="")
+
+            notifier = (
+                pd.GdbusNotifier(gdbus_bin="/usr/bin/gdbus", runner=_fake_daemon)
+                if kind == "gdbus"
+                else pd.BusctlNotifier(busctl_bin="/usr/bin/busctl", runner=_fake_daemon)
+            )
+            mon = pd.DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=notifier)
+
+            # 1) Show active countdown -> ID 30 live in daemon.
+            notice_path.write_text(json.dumps({
+                "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+                "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.0,
+            }), encoding="utf-8")
+            assert mon.tick() == "ACTIVE"
+            assert list(live_notifs.keys()) == [30]
+
+            # 2) Notice clears; first close fails -> ID 30 still live on daemon and retained.
+            notice_path.unlink()
+            assert mon.tick() == "INACTIVE"
+            assert close_attempts == [30]
+            assert list(live_notifs.keys()) == [30]
+
+            # 3) Next inactive tick retries CloseNotification(30) and closes it cleanly!
+            assert mon.tick() == "INACTIVE"
+            assert close_attempts == [30, 30], (kind, failure_mode, close_attempts)
+            assert live_notifs == {}, f"{kind}/{failure_mode} failed to close on retry"
+
+            # 4) Further inactive ticks stop retrying once closed.
+            assert mon.tick() == "INACTIVE"
+            assert close_attempts == [30, 30]
+
+
+# --- Round 5 (LOCK fixture + revert proof, F1b control chars, F3 retry interval, F4 refusal) ---
+
+
+def test_r5_lock_installed_launcher_explicit_fakes_and_revert_proof(tmp_path):
+    """LOCK TEST: running the actual installed launcher with explicit fake callbacks and a hard
+    subprocess guard stays disarmed under slice 2b's lock, and when the lock is reverted in a
+    disposable temporary copy reaches ONLY the injected fake shutdown (zero real subprocesses)."""
+    conf = tmp_path / "power.conf"
+    conf.write_text(
+        "# bench calibrated\n"
+        "SIGINT101_POWER_THRESHOLD_V=9.50\n"
+        "SIGINT101_POWER_RECOVER_V=0.20\n",
+        encoding="utf-8",
+    )
+
+    # 1) Production power.py (lock engaged): runs actual launcher, stays disarmed for all 90 ticks.
+    locked_launcher, _ = _stage_installed_power_sysroot(tmp_path / "locked", revert_lock=False)
+    rc_locked, data_locked, out_locked = _run_installed_power_launcher(
+        locked_launcher,
+        conf_path=conf,
+        notice_path=tmp_path / "locked-notice.json",
+        result_path=tmp_path / "locked-result.json",
+        max_ticks=90,
+    )
+    assert rc_locked == 0, out_locked
+    assert data_locked["injected_verified"] is True
+    assert data_locked["unexpected_subprocesses"] == [], (data_locked, out_locked)
+    assert data_locked["ticks"] == 90
+    assert data_locked["gauge_calls"] == 0
+    assert data_locked["auth_calls"] == 0
+    assert data_locked["shutdown_calls"] == 0
+    assert data_locked["notice_exists"] is False
+    assert data_locked["final_state"] == "DISARMED"
+    assert "armed at" not in out_locked
+
+    # 2) Lock-revert proof (disposable copy with ONLY the slice-2b lock line reverted): the exact
+    # same actual-launcher fixture arms, checks fake auth once, counts down, calls ONLY the fake
+    # shutdown once, and NEVER invokes any real subprocess!
+    armed_launcher, _ = _stage_installed_power_sysroot(tmp_path / "armed", revert_lock=True)
+    rc_armed, data_armed, out_armed = _run_installed_power_launcher(
+        armed_launcher,
+        conf_path=conf,
+        notice_path=tmp_path / "armed-notice.json",
+        result_path=tmp_path / "armed-result.json",
+        max_ticks=90,
+    )
+    assert rc_armed == 0, out_armed
+    assert data_armed["injected_verified"] is True
+    assert data_armed["unexpected_subprocesses"] == [], (data_armed, out_armed)
+    assert data_armed["gauge_calls"] > 0, (data_armed, out_armed)
+    assert data_armed["auth_calls"] == 1, (data_armed, out_armed)
+    assert data_armed["shutdown_calls"] == 1, (data_armed, out_armed)
+    assert data_armed["final_state"] == "POWERING_OFF", (data_armed, out_armed)
+    assert data_armed["notice_exists"] is True, (data_armed, out_armed)
+    assert "armed at 9.50 V" in out_armed, out_armed
+    assert "invoking systemctl poweroff" in out_armed, out_armed
+
+    # 3) Negative self-check: prove the subprocess guard immediately fails any unexpected call.
+    _, lib_root = _stage_installed_power_sysroot(tmp_path / "guard-check", revert_lock=False)
+    guard_result = tmp_path / "guard-result.json"
+    guard_proc = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import sigint101; import subprocess; "
+                "subprocess.run(['/usr/bin/true'])"
+            ),
+            str(lib_root),
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "TEST_LAUNCHER_CONF": str(conf),
+            "TEST_LAUNCHER_NOTICE": str(tmp_path / "guard-notice.json"),
+            "TEST_LAUNCHER_RESULT": str(guard_result),
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert guard_proc.returncode != 0, "subprocess guard must fail unexpected subprocess at once"
+    assert "unexpected subprocess" in guard_proc.stderr
+    guard_data = json.loads(guard_result.read_text(encoding="utf-8"))
+    assert len(guard_data["unexpected_subprocesses"]) == 1
+
+
+def test_r5_f1b_rejects_control_chars_and_unicode_separators_in_comments(tmp_path):
+    """F1b: control characters and non-LF line separators cannot split a comment into an
+    assignment; any line with a control char other than the LF/CRLF line ending refuses the file."""
+    from sigint101.power import _SLICE_2B_LOCK_REASON, load_power_config
+
+    separators: list[tuple[str, bytes]] = [
+        ("vt_x0b", b"\x0b"),
+        ("ff_x0c", b"\x0c"),
+        ("bare_cr", b"\r"),
+        ("fs_x1c", b"\x1c"),
+        ("gs_x1d", b"\x1d"),
+        ("rs_x1e", b"\x1e"),
+        ("nel_u0085", "\x85".encode("utf-8")),
+        ("ls_u2028", "\u2028".encode("utf-8")),
+        ("ps_u2029", "\u2029".encode("utf-8")),
+        ("nul_x00", b"\x00"),
+        ("bel_x07", b"\x07"),
+        ("tab_x09", b"\t"),
+        ("del_x7f", b"\x7f"),
+    ]
+    for label, sep in separators:
+        conf = tmp_path / f"ctrl-{label}.conf"
+        conf.write_bytes(b"# comment" + sep + b"SIGINT101_POWER_THRESHOLD_V=9.50\n")
+        tv, reason, recover_v, diags = load_power_config(conf)
+        assert tv is None, label
+        assert recover_v == 0.0, label
+        assert reason != _SLICE_2B_LOCK_REASON, (
+            f"{label}: separator smuggled assignment past comment into parse_threshold: {reason}"
+        )
+        assert diags and ("control" in reason.lower() or "invalid" in reason.lower()), (
+            label,
+            reason,
+            diags,
+        )
+
+    # Leading tab on a comment line and trailing NUL on an assignment must also be refused.
+    for label, raw in (
+        ("tab_indented_comment", b"\t# comment\nSIGINT101_POWER_THRESHOLD_V=9.50\n"),
+        ("nul_in_value", b"SIGINT101_POWER_THRESHOLD_V=9.50\x00\n"),
+    ):
+        conf = tmp_path / f"{label}.conf"
+        conf.write_bytes(raw)
+        tv, reason, _, diags = load_power_config(conf)
+        assert tv is None and reason != _SLICE_2B_LOCK_REASON and diags, (label, reason, diags)
+
+    # Positive control: standard CRLF line endings stay valid grammar (and hit the 2b lock).
+    crlf_conf = tmp_path / "valid-crlf.conf"
+    crlf_conf.write_bytes(
+        b"# bench calibrated\r\n"
+        b"SIGINT101_POWER_THRESHOLD_V=9.50\r\n"
+        b"SIGINT101_POWER_RECOVER_V=0.20\r\n"
+    )
+    tv, reason, recover_v, diags = load_power_config(crlf_conf)
+    assert tv is None
+    assert reason == _SLICE_2B_LOCK_REASON
+    assert recover_v == pytest.approx(0.20)
+    assert diags == [_SLICE_2B_LOCK_REASON]
+
+
+def test_r5_f3_rejects_unattainable_retry_deadline_and_allows_hysteresis_update(tmp_path):
+    """F3: read_power_notice rejects failed notices whose retry_deadline_mono precedes
+    deadline_mono + POWEROFF_RETRY_S (impossible for the watcher to write), while still accepting
+    valid retries and later hysteresis updates after the retry deadline has passed."""
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+    from sigint101.power_desktop import DesktopNoticeMonitor
+
+    clk = _Clock(960.0)
+    notice_path = tmp_path / "notice.json"
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=tmp_path / "data",
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+
+    shown: list[tuple[str, str, bool]] = []
+
+    class _RecordingNotifier:
+        def show(self, summary: str, body: str, *, failed: bool) -> bool:
+            shown.append((summary, body, failed))
+            return True
+
+        def clear(self) -> bool:
+            return True
+
+    mon = DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=_RecordingNotifier())
+
+    invalid_cases = [
+        (
+            "retry_250ms_after_deadline",
+            {
+                "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+                "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 960.0,
+                "retry_deadline_mono": 960.25,
+            },
+        ),
+        (
+            "retry_under_interval_after_deadline",
+            {
+                "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+                "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 960.0,
+                "retry_deadline_mono": 1018.5,
+            },
+        ),
+        (
+            "retry_above_upper_bound",
+            {
+                "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+                "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 960.0,
+                "retry_deadline_mono": 1022.0,
+            },
+        ),
+    ]
+
+    with TestClient(app) as client:
+        for label, payload in invalid_cases:
+            notice_path.write_text(json.dumps(payload), encoding="utf-8")
+            assert read_power_notice(notice_path, clock=clk) == {"active": False}, label
+            resp = client.get("/api/power")
+            assert resp.status_code == 200 and resp.json() == {"active": False}, label
+            assert mon.tick() == "INACTIVE", label
+            assert shown == [], f"{label} unexpectedly showed desktop alert: {shown}"
+
+        # Valid control 1: fresh retry deadline at deadline_mono + POWEROFF_RETRY_S.
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+            "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 960.0,
+            "retry_deadline_mono": 1020.0,
+        }), encoding="utf-8")
+        expected_fresh = {
+            "active": True, "failed": True, "retry_in_s": 60,
+            "voltage": 9.18, "threshold_v": 9.5,
+        }
+        assert read_power_notice(notice_path, clock=clk) == expected_fresh
+        assert client.get("/api/power").json() == expected_fresh
+        assert mon.tick() == "FAILED"
+        assert "RETRYING IN 60 s" in shown[-1][0]
+
+        # Valid control 2: later update in hysteresis after retry_deadline_mono has passed.
+        clk.advance(65.0)
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": True, "voltage": 9.55, "threshold_v": 9.5,
+            "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 1025.0,
+            "retry_deadline_mono": 1020.0,
+        }), encoding="utf-8")
+        expected_hyst = {
+            "active": True, "failed": True, "retry_in_s": 0,
+            "voltage": 9.55, "threshold_v": 9.5,
+        }
+        assert read_power_notice(notice_path, clock=clk) == expected_hyst
+        assert client.get("/api/power").json() == expected_hyst
+        assert mon.tick() == "FAILED"
+        assert "RETRYING NOW" in shown[-1][0]
+
+
+def test_r5_f4_access_denied_close_refusal_keeps_id_and_retries_for_both_transports(tmp_path):
+    """F4: an AccessDenied refusal containing 'invalid notification credentials' is a refusal,
+    not proof the notification is gone; keep the ID and retry until closed or confirmed unknown."""
+    import sigint101.power_desktop as pd
+
+    for kind in ("gdbus", "busctl"):
+        clk = _Clock(500.0)
+        notice_path = tmp_path / f"f4-refusal-{kind}.json"
+        live_notifs: dict[int, str] = {}
+        close_attempts: list[int] = []
+        close_mode = {"step": "refuse"}
+        next_id = 40
+
+        def _fake_daemon(cmd, **kw):
+            nonlocal next_id
+            assert kw["timeout"] > 0
+            is_close = (
+                "org.freedesktop.Notifications.CloseNotification" in cmd
+                if kind == "gdbus"
+                else "CloseNotification" in cmd
+            )
+            if is_close:
+                nid = int(cmd[-1])
+                close_attempts.append(nid)
+                if close_mode["step"] == "refuse":
+                    close_mode["step"] = "ok"
+                    return SimpleNamespace(
+                        returncode=1,
+                        stdout="",
+                        stderr=(
+                            "Error: org.freedesktop.DBus.Error.AccessDenied: "
+                            "invalid notification credentials"
+                        ),
+                    )
+                if close_mode["step"] == "unknown_id":
+                    live_notifs.pop(nid, None)
+                    return SimpleNamespace(
+                        returncode=1,
+                        stdout="",
+                        stderr=(
+                            "Error: org.freedesktop.DBus.Error.InvalidArgs: "
+                            "Invalid notification id"
+                        ),
+                    )
+                live_notifs.pop(nid, None)
+                return SimpleNamespace(
+                    returncode=0, stdout="()\n" if kind == "gdbus" else "", stderr=""
+                )
+            if kind == "gdbus":
+                replaces = int(cmd[cmd.index(pd.APP_NAME) + 1])
+                nid = replaces if replaces > 0 else next_id
+                if replaces == 0:
+                    next_id += 1
+                live_notifs[nid] = cmd[cmd.index(pd.APP_NAME) + 3]
+                return SimpleNamespace(returncode=0, stdout=f"(uint32 {nid},)\n", stderr="")
+            idx = cmd.index("susssasa{sv}i")
+            replaces = int(cmd[idx + 2])
+            nid = replaces if replaces > 0 else next_id
+            if replaces == 0:
+                next_id += 1
+            live_notifs[nid] = cmd[idx + 4]
+            return SimpleNamespace(returncode=0, stdout=f"u {nid}\n", stderr="")
+
+        notifier = (
+            pd.GdbusNotifier(gdbus_bin="/usr/bin/gdbus", runner=_fake_daemon)
+            if kind == "gdbus"
+            else pd.BusctlNotifier(busctl_bin="/usr/bin/busctl", runner=_fake_daemon)
+        )
+        mon = pd.DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=notifier)
+
+        # 1) Show active countdown -> ID 40 live.
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+            "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.0,
+        }), encoding="utf-8")
+        assert mon.tick() == "ACTIVE"
+        assert list(live_notifs.keys()) == [40]
+
+        # 2) Notice clears; first close gets AccessDenied ("invalid notification credentials") ->
+        # MUST retain ID 40 and keep notification live for retry.
+        notice_path.unlink()
+        assert mon.tick() == "INACTIVE"
+        assert close_attempts == [40]
+        assert list(live_notifs.keys()) == [40]
+        assert notifier._notify_id == 40, f"{kind} dropped ID on AccessDenied refusal"
+
+        # 3) Next inactive tick retries CloseNotification(40) and succeeds.
+        assert mon.tick() == "INACTIVE"
+        assert close_attempts == [40, 40], (kind, close_attempts)
+        assert live_notifs == {}
+        assert notifier._notify_id == 0
+
+        # 4) Positive control: explicit unknown notification ID clears the ID without retrying.
+        close_mode["step"] = "unknown_id"
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+            "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.5,
+        }), encoding="utf-8")
+        assert mon.tick() == "ACTIVE"
+        assert list(live_notifs.keys()) == [41]
+        notice_path.unlink()
+        assert mon.tick() == "INACTIVE"
+        assert close_attempts == [40, 40, 41]
+        assert notifier._notify_id == 0
+        assert mon.tick() == "INACTIVE"
+        assert close_attempts == [40, 40, 41]
