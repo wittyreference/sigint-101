@@ -9,6 +9,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from .receiver_lifecycle import bind_receiver_run
 from .safety import ANTENNA_NOTICE, LoRaQueueFull, connect_lora, require_rack_send, send_lora_text
 
 # meshtasticd's default TCP API. The Nomad's own LoRa radio (a MeshAdv sx1262) is driven by the
@@ -176,6 +177,7 @@ class LoRaListener:
         self._operating = False
         self._lock = threading.Lock()
         self._interface = None
+        self._run = None
         self._subscribed = False
         self._lost = False
         self._sends = deque(maxlen=SEND_HISTORY)
@@ -213,9 +215,14 @@ class LoRaListener:
         with self._operation():
             self._start()
 
-    def _start(self):
+    def start_run(self, run_ref) -> bool:
+        """Connect to meshtasticd and bind `run_ref` iff this call opened a fresh connection."""
+        with self._operation():
+            return self._start(run_ref=run_ref)
+
+    def _start(self, *, run_ref=None) -> bool:
         if self.running:
-            return
+            return False
         if self._interface is not None:
             self._stop()
         try:
@@ -231,6 +238,8 @@ class LoRaListener:
         with self._lock:
             self._lost = False
             self._interface = iface
+            self._run = run_ref
+        return True
 
     def _on_lost(self, interface=None) -> None:
         """pubsub callback when meshtastic gives up on the daemon; the next poll reconnects."""
@@ -243,6 +252,7 @@ class LoRaListener:
         with self._lock:
             if interface is None or interface is not self._interface:
                 return
+            run_ref = self._run
             decoded = packet.get("decoded") if isinstance(packet, dict) else None
             handled, outcome = False, None
             if isinstance(decoded, dict) and decoded.get("portnum") == "ROUTING_APP":
@@ -250,7 +260,7 @@ class LoRaListener:
             parsed = None if handled else self._buffer_reception(packet)
         if outcome is not None:
             self._report("transmission_outcome", outcome)
-        self._heard(parsed)
+        self._heard(parsed, run_ref)
 
     def _buffer_reception(self, packet):
         parsed = parse_lora_packet(packet)
@@ -258,9 +268,13 @@ class LoRaListener:
             self._packets.append(parsed)
         return parsed
 
-    def _heard(self, parsed):
+    def _heard(self, parsed, run_ref=None):
         if parsed is not None and self.on_reception is not None:
-            self.on_reception(parsed.as_dict())
+            if run_ref is not None:
+                with bind_receiver_run(run_ref):
+                    self.on_reception(parsed.as_dict())
+            else:
+                self.on_reception(parsed.as_dict())
 
     def _route_outcome(self, interface, packet, decoded):
         """Resolve a matched reply, or defer classification until the current send has an ID."""

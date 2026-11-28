@@ -118,7 +118,13 @@ from .radio_control import (
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
-from .receiver_lifecycle import OwnedRun, owned_run_scope, register_owned_run
+from .receiver_lifecycle import (
+    OwnedRun,
+    RunRef,
+    current_receiver_run,
+    owned_run_scope,
+    register_owned_run,
+)
 from .receiver_socket import PortOccupied
 from .replay import (
     RECORDINGS_DIR,
@@ -868,9 +874,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     app.state.attempt_registry = {}
     app.state.solos = active_solos
     app.state.solo_audits = active_solo_audits
+    app.state.boot_id = uuid4().hex
     app.state.rx_order = 0
-    app.state.rx_start_order = {}
-    app.state.attempt_start_order = {}
+    app.state.order_lock = threading.Lock()
     app.add_middleware(_Arrival)
     app.add_middleware(_UncachedPages)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -1953,34 +1959,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "pocsag": PocsagUnavailable, "acars": AcarsUnavailable, "ais": AisUnavailable,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
         "meteor": MeteorUnavailable, "capture": CaptureUnavailable,
-    }
-    claim_api = {
-        "sweeper": "spectrum", "decoder": "decode", "rds": "rds", "adsb": "adsb",
-        "aprs": "aprs", "pocsag": "pocsag", "acars": "acars", "ais": "ais",
-        "dmr": "dmr", "apt": "apt", "sstv": "sstv", "meteor": "meteor",
+        "solo": SoloStandDownError,
     }
 
-    order_lock = threading.Lock()
-
-    def _bump_rx_start_order(api: str | None) -> tuple[bool, int]:
-        """Advance rx_start_order[api] before spawn so a fast reader thread never races _started."""
-        if not api:
-            return False, 0
-        with order_lock:
-            had = api in app.state.rx_start_order
-            prev = app.state.rx_start_order.get(api, 0)
+    def _next_order() -> int:
+        """Allocate one strictly monotonic process-wide run/attempt order (leaf lock)."""
+        with app.state.order_lock:
             app.state.rx_order += 1
-            app.state.rx_start_order[api] = app.state.rx_order
-            return had, prev
-
-    def _revert_rx_start_order(api: str | None, had: bool, prev: int) -> None:
-        if not api:
-            return
-        with order_lock:
-            if had:
-                app.state.rx_start_order[api] = prev
-            else:
-                app.state.rx_start_order.pop(api, None)
+            return app.state.rx_order
 
     claim_receipt_lock = threading.Lock()
     claim_receipts: OrderedDict[str, OwnedRun] = OrderedDict()
@@ -2036,7 +2022,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         ran a synchronous one-shot action.
         """
         refusal = unavailable[target]
-        api = claim_api.get(target)
         consumers = {name: getattr(app.state, name) for name in SDR_CONSUMERS}
         receiver = consumers.get(target)
         prepare = getattr(receiver, "prepare_start", None)
@@ -2085,8 +2070,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     if reason := calibration.release_failure():
                         raise refusal(reason)
                     protect_capture()
-                    # A replay of a recording holds the ISM panel; the live decoder waits for it.
-                    if target == "decoder" and app.state.replay.running:
+                    # A replay of a recording holds the ISM panel; live decoder and solo wait.
+                    if target in ("decoder", "solo") and app.state.replay.running:
                         raise refusal(REPLAY_RUNNING)
                     if not reclaim and getattr(receiver, "released", False):
                         raise refusal("the radio was released to another program")
@@ -2108,12 +2093,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                     if failure and (reason := failure(pending=True)):
                                         raise refusal(reason)
                             if prepare is not None:
-                                had, prev = _bump_rx_start_order(api)
-                                try:
-                                    launched = receiver.launch_start(intent, claimed=True)
-                                except BaseException:
-                                    _revert_rx_start_order(api, had, prev)
-                                    raise
+                                if intent is not None:
+                                    run_order = _next_order()
+                                    intent.order = run_order
+                                    intent.token = f"{app.state.boot_id}:{run_order}"
+                                launched = receiver.launch_start(intent, claimed=True)
                                 if intent is None or intent.run is None:
                                     return launched, None
                                 exact_run = intent.run
@@ -2122,6 +2106,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                     run_id=exact_run,
                                     stop=lambda rx=receiver, r=exact_run: rx.stop_owned_run(r),
                                     result=launched,
+                                    order=exact_run.order,
+                                    token=exact_run.token,
                                 )
                                 _record_owned_claim(handle)
                                 return launched, handle
@@ -2133,12 +2119,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 and start is not None
                                 and start == getattr(receiver, "start", None)
                             ):
-                                had, prev = _bump_rx_start_order(api)
-                                try:
-                                    handle = receiver.start_owned(name=target)
-                                except BaseException:
-                                    _revert_rx_start_order(api, had, prev)
-                                    raise
+                                handle = receiver.start_owned(name=target)
                                 _record_owned_claim(handle)
                                 return (
                                     handle.result if handle is not None else None,
@@ -2146,13 +2127,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 )
                             if start is None:
                                 return None, None
-                            had, prev = _bump_rx_start_order(api)
-                            try:
-                                result = start()
-                            except BaseException:
-                                _revert_rx_start_order(api, had, prev)
-                                raise
-                            return result, None
+                            return start(), None
                         finally:
                             gate.end_claim(target)
             finally:
@@ -2240,9 +2215,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _started(kind: str, payload: dict) -> None:
         last_refusal.pop(kind, None)
-        with order_lock:
-            app.state.rx_order += 1
-            app.state.rx_start_order[kind] = app.state.rx_order
         log_event(app.state.events_path, f"{kind}_start", payload)
 
     def _live_state(watch) -> str:
@@ -2410,16 +2382,21 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         listener = app.state.lora
         if not listener.running:
-            had, prev = _bump_rx_start_order("lora")
+            run_order = _next_order()
+            run_ref = RunRef(order=run_order, token=f"{app.state.boot_id}:{run_order}")
             try:
-                listener.start()
+                if hasattr(listener, "start_run"):
+                    opened = listener.start_run(run_ref)
+                else:
+                    listener._run = run_ref
+                    listener.start()
+                    opened = True
             except LoRaUnavailable as exc:
-                _revert_rx_start_order("lora", had, prev)
                 return _refused("lora", exc, {"packets": [], **listener.send_state()})
-            except BaseException:
-                _revert_rx_start_order("lora", had, prev)
-                raise
-            _started("lora", {"host": listener.hostname, "port": listener.port})
+            if opened:
+                _started("lora", {
+                    "host": listener.hostname, "port": listener.port, "run_id": run_ref.token,
+                })
         return {
             "available": True,
             # meshtasticd is a daemon the console reads, not a tool it runs: no command line.
@@ -2964,6 +2941,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # substrate later badges cite. A replay or sample has no receiver behind it, so it never logs.
 
     reception_lock = threading.Lock()
+    app.state.reception_lock = reception_lock
 
     def _stamp_window():
         try:
@@ -3171,13 +3149,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reason := app.state.progress.quarantined_reason:
             started_at = round(clock(), 3)
             start_error = f"the {label} could not be started: {reason}"
-            with reception_lock:
+            with app.state.reception_lock:
                 _set_attempt_start_error(kind, key, start_error)
             return started_at, start_error
         if app.state.progress.closed:
             started_at = round(clock(), 3)
             start_error = f"the {label} store is closed"
-            with reception_lock:
+            with app.state.reception_lock:
                 _set_attempt_start_error(kind, key, start_error)
             return started_at, start_error
 
@@ -3259,13 +3237,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if launch_failed_msg is not None:
                 start_error = launch_failed_msg
                 started_at = round(clock(), 3)
-                with reception_lock:
+                with app.state.reception_lock:
                     _set_attempt_start_error(kind, key, start_error)
             else:
                 # Hold reception_lock across reading the clock, staging the attempt, and appending
                 # the start event so log order matches what live receptions see, while preserving
                 # lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
-                with reception_lock:
+                with app.state.reception_lock:
                     started_at = round(clock(), 3)
 
                     def _log_start(issued_id: str | None = None) -> None:
@@ -3328,10 +3306,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                         else:
                             if not saved:
                                 start_error = f"the {label} store is closed"
-                    if start_error is None:
-                        with order_lock:
-                            app.state.rx_order += 1
-                            app.state.attempt_start_order[(kind.kind, key)] = app.state.rx_order
                     _set_attempt_start_error(kind, key, start_error)
                     succeeded = start_error is None
         except BaseException as exc:
@@ -3361,10 +3335,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                         )
             elif cleanup_err:
                 start_error = f"{start_error}; {cleanup_err}"
-                with reception_lock:
+                with app.state.reception_lock:
                     _set_attempt_start_error(kind, key, start_error)
         if caught_exc is not None:
-            with reception_lock:
+            with app.state.reception_lock:
                 _set_attempt_start_error(
                     kind, key, f"the {label} start failed: {caught_exc}",
                 )
@@ -3386,7 +3360,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 f"_record_attempt_pass only accepts replay_answer kinds, got {kind.credit!r}"
             )
         label = kind.display_label
-        with reception_lock:
+        with app.state.reception_lock:
             try:
                 inserted = app.state.progress.record_attempt_pass(
                     kind, key, started_at, slot, pass_row, attempt_id=attempt_id,
@@ -3415,52 +3389,25 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 return True, err
             return True, None
 
-    def _stand_down_for_solo() -> None:
-        """Stop every running SDR consumer and LoRa before a solo starts.
+    def _parse_run_token(token) -> tuple[str, int] | None:
+        if not isinstance(token, str) or ":" not in token:
+            return None
+        boot, sep, order_text = token.rpartition(":")
+        if not boot or not sep or not order_text.isdecimal():
+            return None
+        return boot, int(order_text)
 
-        Follows _claim_sdr's check order (refusals, tuning gate wait and launch permit,
-        replay refusal, release_for_claim) outside reception_lock so joining a receiver's
-        reader thread cannot deadlock a thread waiting to log an in-flight reception.
+    def _stand_down_for_solo() -> int:
+        """Stop every running SDR consumer via _claim_sdr, stop LoRa, and mint attempt order.
+
+        Runs outside reception_lock so joining a receiver's reader thread cannot deadlock an
+        in-flight reception callback, and assigns the attempt's order via leaf order_lock.
         """
-        consumers = {name: getattr(app.state, name) for name in SDR_CONSUMERS}
-        calibration = app.state.ppm_calibration
-        gate = app.state.tuning_gate
-        budget = gate.claim_budget()
-        sent_back = False
-        while True:
-            if reason := calibration.release_failure():
-                raise SoloStandDownError(reason)
-            for consumer in consumers.values():
-                failure = getattr(consumer, "release_failure", None)
-                if failure and (reason := failure()):
-                    raise SoloStandDownError(reason)
-            try:
-                gate.wait_idle(until=budget)
-            except TuningBusy as exc:
-                raise SoloStandDownError(str(exc)) from exc
-            if sent_back and gate.past(budget):
-                raise SoloStandDownError(gate.busy_reason())
-            deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
-            with app.state.radio_arbiter.reserve("solo", SoloStandDownError, deadline):
-                if reason := calibration.release_failure():
-                    raise SoloStandDownError(reason)
-                if app.state.replay.running:
-                    raise SoloStandDownError(REPLAY_RUNNING)
-                permitted = gate.admit_claim("solo")
-                sent_back = not permitted
-                if permitted:
-                    try:
-                        for consumer in consumers.values():
-                            getattr(consumer, "release_for_claim", consumer.release)()
-                            failure = getattr(consumer, "release_failure", None)
-                            if failure and (reason := failure(pending=True)):
-                                raise SoloStandDownError(reason)
-                    finally:
-                        gate.end_claim("solo")
-                    break
+        _claim_sdr("solo", start=None, reclaim=False)
         lora_listener = app.state.lora
         if lora_listener.running:
             lora_listener.stop()
+        return _next_order()
 
     def _solo_qualifies(attempt: dict, stamp: dict) -> int | None:
         solo = _audited_solo_by_id(attempt["solo_id"])
@@ -3469,18 +3416,21 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         slot = solo_qualifies_slot(solo, attempt, stamp)
         if slot is None:
             return None
-        # Live path: enforce process-order counter so a receiver started before Start cannot
-        # credit the attempt even after a backward clock step (R2-B2). Backfill enforces the
-        # equivalent log-order check via _solo_backfill_gate.
+        # Match the exact receiver run that heard this reception (never the instrument's latest
+        # order). Both attempt_order and run_id are immutable values assigned at admission, so
+        # no lock is acquired here.
+        prov = stamp.get("provenance") or {}
+        parsed = _parse_run_token(prov.get("run_id"))
+        if parsed is not None:
+            rx_boot, rx_order = parsed
+            attempt_boot = attempt.get("boot_id") or ""
+            attempt_order = int(attempt.get("attempt_order") or 0)
+            if attempt_boot and rx_boot == attempt_boot and not (rx_order > attempt_order):
+                return None
+            return slot
+        # A live reception without an admitted run identity cannot credit a solo.
         if "_log_pos" not in stamp:
-            inst = rack_instrument(stamp.get("instrument", ""))
-            if inst is None:
-                return None
-            with order_lock:
-                rx_ord = app.state.rx_start_order.get(inst.api, 0)
-                att_ord = app.state.attempt_start_order.get((SOLO_KIND.kind, solo.id), 0)
-            if not (rx_ord > att_ord):
-                return None
+            return None
         return slot
 
     def _solo_backfill_gate(
@@ -3489,11 +3439,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         events_list: list[dict],
         start_pos: dict,
     ) -> bool:
+        # When the reception carries its admitted run_id, _solo_qualifies already verified that
+        # exact run's order against this attempt (and _backfill_stamps verified log_pos > start_pos
+        # by attempt_id). Never let an unrelated reopen's <api>_start lend order to an older run.
+        prov = stamp.get("provenance") or {}
+        if _parse_run_token(prov.get("run_id")) is not None:
+            return True
         inst = rack_instrument(stamp.get("instrument", ""))
         if inst is None:
             return False
         s_pos = start_pos.get(
-            (SOLO_KIND.kind, attempt["solo_id"], float(attempt["started_at"]))
+            (SOLO_KIND.kind, attempt["solo_id"], attempt["attempt_id"])
         )
         if s_pos is None:
             return True
@@ -3510,28 +3466,61 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _solo_payload(solo) -> dict:
         read_error = None
-        try:
-            saved = app.state.progress.attempt(SOLO_KIND, solo.id)
-            attempt = saved["attempt"]
-            calls = (
-                app.state.progress.solo_calls(solo.id, float(attempt["started_at"]))
-                if attempt is not None
-                else []
-            )
-            passed_before_ts = app.state.progress.latest_solo_complete_pass_ts(
-                solo.id, len(solo.legs)
-            )
-        except (OSError, sqlite3.Error) as exc:
-            saved = {"attempt": None, "attempt_passes": [], "latest_pass": None, "passes": 0}
-            calls = []
-            passed_before_ts = None
-            read_error = f"the solo state could not be read: {exc}"
-        now = round(clock(), 3)
+        saved = None
+        calls: list[dict] = []
+        passed_before_ts = None
+        if (reason := app.state.progress.quarantined_reason) is not None:
+            read_error = f"the solo state could not be read: {reason}"
+        elif app.state.progress.closed:
+            read_error = "the solo state could not be read: progress store is closed"
+        else:
+            try:
+                saved = app.state.progress.attempt(SOLO_KIND, solo.id)
+                attempt = saved["attempt"]
+                calls = (
+                    app.state.progress.solo_calls(solo.id, attempt["attempt_id"])
+                    if attempt is not None
+                    else []
+                )
+                passed_before_ts = app.state.progress.latest_solo_complete_pass_ts(
+                    solo.id, len(solo.legs)
+                )
+            except (OSError, sqlite3.Error) as exc:
+                saved = None
+                calls = []
+                passed_before_ts = None
+                read_error = f"the solo state could not be read: {exc}"
         error = (
             read_error
             or app.state.attempt_start_errors.get((SOLO_KIND.kind, solo.id))
             or app.state.attempt_errors.get(SOLO_KIND.kind)
         )
+        if saved is None:
+            return {
+                "id": solo.id,
+                "unit_id": solo.unit_id,
+                "title": solo.title,
+                "window_s": solo.window_s,
+                "state": "unreadable",
+                "attempt_id": None,
+                "started_at": None,
+                "remaining_s": 0,
+                "reason": "store_unreadable",
+                "error": error,
+                "passed_before_date": None,
+                "legs": [
+                    {
+                        "slot": leg.slot,
+                        "band_label": leg.band_label,
+                        "clue": leg.clue,
+                        "hardware_note": leg.hardware_note,
+                        "passed": False,
+                        "called": False,
+                    }
+                    for leg in solo.legs
+                ],
+            }
+        now = round(clock(), 3)
         return format_solo_payload(
             solo,
             saved["attempt"],
@@ -3629,7 +3618,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         for entry in live_entries:
             start_events.setdefault(entry.kind.start_event, []).append(entry.kind)
         events_list = read_events(app.state.events_path)
-        start_pos: dict[tuple[str, int | str, float], int] = {}
+        start_pos: dict[tuple[str, int | str, float | str], int] = {}
         legacy: Counter[str] = Counter()
         stamps_list = []
         live_stamps = []
@@ -3642,7 +3631,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                         for kind in start_events[ev_kind]:
                             key_val = pl.get(kind.payload_key)
                             if isinstance(key_val, (int, str)) and type(key_val) is not bool:
-                                start_pos[(kind.kind, key_val, float(pl["started_at"]))] = idx
+                                if kind.identity_column is not None:
+                                    ev_id = pl.get(kind.identity_column)
+                                    if isinstance(ev_id, str) and ev_id:
+                                        start_pos[(kind.kind, key_val, ev_id)] = idx
+                                else:
+                                    start_pos[(kind.kind, key_val, float(pl["started_at"]))] = idx
             if (stamp := mint(event)) is None:
                 continue
             if "event_id" not in event:
@@ -3679,9 +3673,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     # during backfill, so a backward clock step cannot credit a pre-Start
                     # reception. If the start line has rotated out of the retained log, every
                     # retained event arrived after it and stays eligible.
-                    pos = start_pos.get(
-                        (k.kind, attempt[k.key_column], float(attempt["started_at"]))
+                    pos_key = (
+                        (k.kind, attempt[k.key_column], attempt[k.identity_column])
+                        if k.identity_column is not None
+                        else (k.kind, attempt[k.key_column], float(attempt["started_at"]))
                     )
+                    pos = start_pos.get(pos_key)
                     log_pos = stamp.get("_log_pos")
                     if pos is not None and log_pos is not None and not (log_pos > pos):
                         return reject
@@ -3730,6 +3727,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if command is None:
                 live_command = getattr(receiver, "live_command", None)
                 command = live_command() if live_command else None
+            active_run = current_receiver_run()
+            if active_run is None:
+                active_run = getattr(receiver, "_run", None)
+            run_token = getattr(active_run, "token", None)
             record = reception_record(
                 inst, item, freq_hz=freq,
                 command=command,
@@ -3740,9 +3741,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 # the last measurement this run rides along for whoever reads the record.
                 ppm={"correction": "raw", "measured_ppm": app.state.last_ppm},
                 radio=radio if radio is not None else _radio(inst, receiver))
+            if isinstance(run_token, str) and run_token:
+                record["run_id"] = run_token
             # Keep the log order through badge credit. The lock order is reception_lock
             # before Progress's lock. Progress.close() only needs the latter.
-            with reception_lock:
+            with app.state.reception_lock:
                 if app.state.progress is not progress or not sink.allows_log():
                     return
                 try:
@@ -3784,7 +3787,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         with a line built from the framing for the response and the rack's LOG. Other item fields
         and receptions from other instruments pass through as stored, and the file is left alone.
         """
-        with reception_lock:
+        with app.state.reception_lock:
             if app.state.receptions is None:
                 logged = (without_page_words(e) for e in read_events(app.state.events_path)
                           if e.get("kind") == "reception")
@@ -3917,7 +3920,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         solo = _audited_solo_by_id(solo_id)
         if solo is None:
             raise HTTPException(status_code=404, detail=f"solo {solo_id!r} not found")
-        return _solo_payload(solo)
+        payload = _solo_payload(solo)
+        if payload["state"] == "unreadable":
+            return JSONResponse(status_code=503, content=payload)
+        return payload
 
     @app.post("/api/solos/{solo_id}/start")
     def solo_start(solo_id: str):
@@ -3926,18 +3932,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if solo is None:
             raise HTTPException(status_code=404, detail=f"solo {solo_id!r} not found")
         try:
-            _, start_error = _start_attempt(
-                SOLO_KIND,
-                solo.id,
-                solo.window_s,
-                pre_start=_stand_down_for_solo,
-            )
+            attempt_order = _stand_down_for_solo()
         except SoloStandDownError as exc:
             err = f"the solo could not stand down a running receiver: {exc}"
             _set_attempt_start_error(SOLO_KIND, solo.id, err)
             payload = _solo_payload(solo)
             payload["error"] = err
             return JSONResponse(status_code=503, content=payload)
+        _, start_error = _start_attempt(
+            SOLO_KIND,
+            solo.id,
+            solo.window_s,
+            extra={"boot_id": app.state.boot_id, "attempt_order": attempt_order},
+        )
         payload = _solo_payload(solo)
         if start_error is not None:
             payload["error"] = start_error
@@ -3963,10 +3970,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 status_code=400,
                 content={"recorded": False, "reason": f"unknown band_slot {band_slot}"},
             )
-        started_at = body.get("started_at")
-        if type(started_at) not in (int, float):
+        attempt_id = body.get("attempt_id")
+        if not isinstance(attempt_id, str) or not attempt_id.strip():
             return JSONResponse(
-                status_code=400, content={"recorded": False, "reason": "started_at is required"}
+                status_code=400,
+                content={"recorded": False, "reason": "attempt_id is required"},
             )
         call_val = body.get("call")
         why_key = body.get("why_key")
@@ -3975,13 +3983,29 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"recorded": False, "reason": str(exc)})
 
-        with reception_lock:
-            saved = app.state.progress.attempt(SOLO_KIND, solo.id)
+        with app.state.reception_lock:
+            if (reason := app.state.progress.quarantined_reason) is not None:
+                return JSONResponse(
+                    status_code=500,
+                    content={"recorded": False, "reason": f"the solo store is unusable: {reason}"},
+                )
+            if app.state.progress.closed:
+                return JSONResponse(
+                    status_code=500,
+                    content={"recorded": False, "reason": "the solo store is closed"},
+                )
+            try:
+                saved = app.state.progress.attempt(SOLO_KIND, solo.id)
+            except (OSError, sqlite3.Error) as exc:
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "recorded": False,
+                        "reason": f"the solo state could not be read: {exc}",
+                    },
+                )
             attempt = saved["attempt"]
-            if (
-                attempt is None
-                or round(float(attempt["started_at"]), 3) != round(float(started_at), 3)
-            ):
+            if attempt is None or attempt["attempt_id"] != attempt_id:
                 return JSONResponse(
                     status_code=409,
                     content={
@@ -3999,28 +4023,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     },
                 )
             answered_at = round(clock(), 3)
-            inserted = app.state.progress.record_solo_call(
-                solo.id,
-                float(attempt["started_at"]),
-                band_slot,
-                call=scored["call"],
-                why_key=scored["why_key"],
-                call_correct=scored["call_correct"],
-                why_correct=scored["why_correct"],
-                answered_at=answered_at,
-                item_revision=scored["item_revision"],
-            )
-            if not inserted:
-                return JSONResponse(
-                    status_code=409,
-                    content={"recorded": False, "reason": "legal call already submitted"},
-                )
-            try:
+
+            def _log_call() -> None:
                 log_event(
                     app.state.events_path,
                     "solo_call",
                     {
                         "solo_id": solo.id,
+                        "attempt_id": attempt_id,
                         "started_at": float(attempt["started_at"]),
                         "band_slot": band_slot,
                         "answered_at": answered_at,
@@ -4034,19 +4044,41 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     },
                     sync=managed,
                 )
+
+            try:
+                inserted = app.state.progress.stage_solo_call(
+                    solo.id,
+                    attempt_id,
+                    float(attempt["started_at"]),
+                    band_slot,
+                    call=scored["call"],
+                    why_key=scored["why_key"],
+                    call_correct=scored["call_correct"],
+                    why_correct=scored["why_correct"],
+                    answered_at=answered_at,
+                    item_revision=scored["item_revision"],
+                    on_staged=_log_call,
+                )
             except OSError as exc:
-                try:
-                    app.state.progress.delete_solo_call(
-                        solo.id, float(attempt["started_at"]), band_slot
-                    )
-                except (OSError, sqlite3.Error):
-                    pass
                 return JSONResponse(
                     status_code=500,
                     content={
                         "recorded": False,
                         "reason": f"the solo call could not be logged: {exc}",
                     },
+                )
+            except sqlite3.Error as exc:
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "recorded": False,
+                        "reason": f"the solo call could not be saved: {exc}",
+                    },
+                )
+            if not inserted:
+                return JSONResponse(
+                    status_code=409,
+                    content={"recorded": False, "reason": "legal call already submitted"},
                 )
         return _solo_payload(solo)
 
@@ -4061,6 +4093,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return templates.TemplateResponse(
             request=request,
             name="solo.html",
+            status_code=503 if payload["state"] == "unreadable" else 200,
             context={
                 "title": f"Unit {unit.id} · Solo",
                 "back_href": f"/unit/{unit.id}",
@@ -4080,6 +4113,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return templates.TemplateResponse(
             request=request,
             name="solo.html",
+            status_code=503 if payload["state"] == "unreadable" else 200,
             context={
                 "title": "Capstone · Solo",
                 "back_href": "/",

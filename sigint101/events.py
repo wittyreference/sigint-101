@@ -78,17 +78,27 @@ def log_event(path, kind: str, payload: dict, *, clock=time.time,
         )
         if rotated:
             _SYNCED_LOG_IDENTITY.pop(path.resolve() if resolved is None else resolved, None)
+        line_bytes = line.encode("utf-8")
         file_id: tuple[int, int] | None = None
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(line)
-            if sync:
-                fsync_handle(handle)
-                st = os.fstat(handle.fileno())
-                file_id = (st.st_dev, st.st_ino)
-        if sync and (rotated or _SYNCED_LOG_IDENTITY.get(resolved) != file_id):
-            fsync_dir(path.parent)
-            assert resolved is not None and file_id is not None
-            _SYNCED_LOG_IDENTITY[resolved] = file_id
+        with open(path, "a+b", buffering=0) as handle:
+            prev_size = os.fstat(handle.fileno()).st_size
+            try:
+                handle.write(line_bytes)
+                if sync:
+                    fsync_handle(handle)
+                    st = os.fstat(handle.fileno())
+                    file_id = (st.st_dev, st.st_ino)
+                    if rotated or _SYNCED_LOG_IDENTITY.get(resolved) != file_id:
+                        fsync_dir(path.parent)
+                        assert resolved is not None and file_id is not None
+                        _SYNCED_LOG_IDENTITY[resolved] = file_id
+            except OSError:
+                # An unacknowledged or unsynced append must not remain visible as a committed line.
+                try:
+                    os.ftruncate(handle.fileno(), prev_size)
+                except OSError:
+                    pass
+                raise
     return json.loads(line)
 
 

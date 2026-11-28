@@ -118,25 +118,30 @@ _PROGRESS_TABLE_DDL: tuple[tuple[str, str], ...] = (
         "solo_attempts",
         "CREATE TABLE solo_attempts ("
         "solo_id TEXT PRIMARY KEY, "
+        "attempt_id TEXT NOT NULL, "
         "started_at REAL NOT NULL, "
-        "window_s INTEGER NOT NULL)",
+        "window_s INTEGER NOT NULL, "
+        "boot_id TEXT NOT NULL DEFAULT '', "
+        "attempt_order INTEGER NOT NULL DEFAULT 0)",
     ),
     (
         "solo_passes",
         "CREATE TABLE solo_passes ("
         "solo_id TEXT NOT NULL, "
+        "attempt_id TEXT NOT NULL, "
         "started_at REAL NOT NULL, "
         "band_slot INTEGER NOT NULL, "
         "passed_at REAL NOT NULL, "
         "instrument TEXT NOT NULL, "
         "provenance TEXT NOT NULL, "
         "digest TEXT NOT NULL, "
-        "PRIMARY KEY (solo_id, started_at, band_slot))",
+        "PRIMARY KEY (solo_id, attempt_id, band_slot))",
     ),
     (
         "solo_calls",
         "CREATE TABLE solo_calls ("
         "solo_id TEXT NOT NULL, "
+        "attempt_id TEXT NOT NULL, "
         "started_at REAL NOT NULL, "
         "band_slot INTEGER NOT NULL, "
         "call TEXT NOT NULL, "
@@ -145,7 +150,7 @@ _PROGRESS_TABLE_DDL: tuple[tuple[str, str], ...] = (
         "why_correct INTEGER NOT NULL, "
         "answered_at REAL NOT NULL, "
         "item_revision TEXT NOT NULL, "
-        "PRIMARY KEY (solo_id, started_at, band_slot))",
+        "PRIMARY KEY (solo_id, attempt_id, band_slot))",
     ),
 )
 

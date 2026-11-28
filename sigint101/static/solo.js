@@ -11,6 +11,7 @@
     passed: { word: "PASSED", cls: "solo-mark solo-mark--passed" },
     call_missed: { word: "MISSED", cls: "solo-mark solo-mark--call_missed" },
     expired: { word: "TIME UP", cls: "solo-mark solo-mark--expired" },
+    unreadable: { word: "UNREADABLE", cls: "solo-mark solo-mark--unreadable" },
   };
 
   var START_LABELS = {
@@ -203,7 +204,7 @@
     var currentState = "idle";
     var remaining = 0;
     var callUi = initialCallState();
-    var activeAttemptStartedAt = null;
+    var activeAttemptKey = null;
     var activeSlot = null;
 
     function showView(name) {
@@ -253,8 +254,9 @@
       currentState = body.state || "idle";
       remaining = Math.max(0, Number(body.remaining_s) || 0);
 
-      if (body.started_at !== activeAttemptStartedAt) {
-        activeAttemptStartedAt = body.started_at;
+      var attemptKey = body.attempt_id != null ? String(body.attempt_id) : String(body.started_at);
+      if (attemptKey !== activeAttemptKey) {
+        activeAttemptKey = attemptKey;
         activeSlot = null;
         callUi = initialCallState();
         setCallError("");
@@ -388,6 +390,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            attempt_id: lastBody.attempt_id,
             started_at: lastBody.started_at,
             band_slot: activeSlot,
             call: callUi.call,
@@ -448,7 +451,9 @@
       } else {
         callUi = initialCallState();
       }
-      activeAttemptStartedAt = body && body.started_at !== undefined ? body.started_at : null;
+      activeAttemptKey = body && body.attempt_id != null
+        ? String(body.attempt_id)
+        : (body && body.started_at !== undefined ? String(body.started_at) : null);
       activeSlot = (body && Array.isArray(body.legs) && body.legs[0]) ? body.legs[0].slot : 0;
       render(body);
     };

@@ -251,22 +251,27 @@ def _build_progress_v0(path: Path, variant: str) -> dict:
     if with_solos:
         conn.executescript("""
             CREATE TABLE solo_attempts (
-                solo_id    TEXT PRIMARY KEY,
-                started_at REAL NOT NULL,
-                window_s   INTEGER NOT NULL
+                solo_id       TEXT PRIMARY KEY,
+                attempt_id    TEXT NOT NULL,
+                started_at    REAL NOT NULL,
+                window_s      INTEGER NOT NULL,
+                boot_id       TEXT NOT NULL DEFAULT '',
+                attempt_order INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE solo_passes (
                 solo_id    TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
                 started_at REAL NOT NULL,
                 band_slot  INTEGER NOT NULL,
                 passed_at  REAL NOT NULL,
                 instrument TEXT NOT NULL,
                 provenance TEXT NOT NULL,
                 digest     TEXT NOT NULL,
-                PRIMARY KEY (solo_id, started_at, band_slot)
+                PRIMARY KEY (solo_id, attempt_id, band_slot)
             );
             CREATE TABLE solo_calls (
                 solo_id       TEXT NOT NULL,
+                attempt_id    TEXT NOT NULL,
                 started_at    REAL NOT NULL,
                 band_slot     INTEGER NOT NULL,
                 call          TEXT NOT NULL,
@@ -275,33 +280,34 @@ def _build_progress_v0(path: Path, variant: str) -> dict:
                 why_correct   INTEGER NOT NULL,
                 answered_at   REAL NOT NULL,
                 item_revision TEXT NOT NULL,
-                PRIMARY KEY (solo_id, started_at, band_slot)
+                PRIMARY KEY (solo_id, attempt_id, band_slot)
             );
         """)
         solo_prov = json.dumps({"instrument": "ism", "tool": "rtl_433"})
         solo_digest = "ef" * 32
         conn.execute(
-            "INSERT INTO solo_attempts(solo_id, started_at, window_s) "
-            "VALUES('u4-solo', 2000.0, 900)"
+            "INSERT INTO solo_attempts(solo_id, attempt_id, started_at, window_s, boot_id, "
+            "attempt_order) VALUES('u4-solo', '1', 2000.0, 900, 'boot-0', 1)"
         )
         conn.execute(
             "INSERT INTO solo_passes("
-            "solo_id, started_at, band_slot, passed_at, instrument, provenance, digest"
-            ") VALUES('u4-solo', 2000.0, 0, 2050.0, 'ism', ?, ?)",
+            "solo_id, attempt_id, started_at, band_slot, passed_at, instrument, provenance, digest"
+            ") VALUES('u4-solo', '1', 2000.0, 0, 2050.0, 'ism', ?, ?)",
             (solo_prov, solo_digest),
         )
         conn.execute(
             "INSERT INTO solo_calls("
-            "solo_id, started_at, band_slot, call, why_key, call_correct, why_correct, "
-            "answered_at, item_revision"
-            ") VALUES('u4-solo', 2000.0, 0, 'legal', 'readily-accessible', 1, 1, 2060.0, 'rev-1')"
+            "solo_id, attempt_id, started_at, band_slot, call, why_key, call_correct, "
+            "why_correct, answered_at, item_revision"
+            ") VALUES('u4-solo', '1', 2000.0, 0, 'legal', 'readily-accessible', 1, 1, "
+            "2060.0, 'rev-1')"
         )
-        expected["solo_attempts"] = [("u4-solo", 2000.0, 900)]
+        expected["solo_attempts"] = [("u4-solo", "1", 2000.0, 900, "boot-0", 1)]
         expected["solo_passes"] = [
-            ("u4-solo", 2000.0, 0, 2050.0, "ism", solo_prov, solo_digest)
+            ("u4-solo", "1", 2000.0, 0, 2050.0, "ism", solo_prov, solo_digest)
         ]
         expected["solo_calls"] = [
-            ("u4-solo", 2000.0, 0, "legal", "readily-accessible", 1, 1, 2060.0, "rev-1")
+            ("u4-solo", "1", 2000.0, 0, "legal", "readily-accessible", 1, 1, 2060.0, "rev-1")
         ]
     conn.commit()
     conn.close()

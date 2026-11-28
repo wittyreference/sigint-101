@@ -13,6 +13,17 @@ from . import childproc
 _ACTIVE_RUN_REGISTRAR: contextvars.ContextVar = contextvars.ContextVar(
     "sigint101_owned_run_registrar", default=None
 )
+_CURRENT_RECEIVER_RUN: contextvars.ContextVar = contextvars.ContextVar(
+    "sigint101_current_receiver_run", default=None
+)
+
+
+@dataclass(frozen=True)
+class RunRef:
+    """Immutable admission identity and monotonic order for one non-SupervisedReceiver run."""
+
+    order: int | None
+    token: str | None
 
 
 @dataclass(frozen=True)
@@ -23,6 +34,23 @@ class OwnedRun:
     run_id: object
     stop: object
     result: object = None
+    order: int | None = None
+    token: str | None = None
+
+
+def current_receiver_run():
+    """Return the exact Run/RunRef bound to the calling reader or supervisor thread, if any."""
+    return _CURRENT_RECEIVER_RUN.get()
+
+
+@contextmanager
+def bind_receiver_run(run):
+    """Bind an immutable receiver run to the current thread for reception provenance."""
+    tok = _CURRENT_RECEIVER_RUN.set(run)
+    try:
+        yield
+    finally:
+        _CURRENT_RECEIVER_RUN.reset(tok)
 
 
 def register_owned_run(handle: OwnedRun | None) -> OwnedRun | None:
@@ -104,6 +132,8 @@ class Run:
     exit_code: int | None = None
     preserve_drain: bool = False
     exit_snapshot: tuple = ()
+    order: int | None = None
+    token: str | None = None
 
 
 @dataclass(eq=False)
@@ -116,6 +146,8 @@ class StartIntent:
     run: Run | None = None
     spawn: object = None
     args: tuple = ()
+    order: int | None = None
+    token: str | None = None
 
 
 class SupervisedReceiver:
@@ -436,7 +468,14 @@ class SupervisedReceiver:
                 proc = exc.proc
             thread_failure = None
             with self._life:
-                self._run = run = intent.run = Run(proc, intent.number, self.watch, intent.args)
+                self._run = run = intent.run = Run(
+                    proc,
+                    intent.number,
+                    self.watch,
+                    intent.args,
+                    order=intent.order,
+                    token=intent.token,
+                )
                 self.watch.spawned(proc)
                 with self._reports_lock:
                     self._reports.add(run)
@@ -450,6 +489,8 @@ class SupervisedReceiver:
                         name=self.watch.tool,
                         run_id=run,
                         stop=lambda r=run: self.stop_owned_run(r),
+                        order=run.order,
+                        token=run.token,
                     )
                 )
                 try:
@@ -544,21 +585,22 @@ class SupervisedReceiver:
         return register_owned_run(handle)
 
     def _read_run(self, run):
-        try:
-            self._read(run.proc, run.number, *run.args)
-        finally:
-            run.wake.set()
-            if not hasattr(run.proc, "close_transport"):
-                with self._runs:
-                    current = self._runs.is_current(run.number)
-                if current:
-                    run.wake.set()
-                close = getattr(getattr(run.proc, "stdout", None), "close", None)
-                if close is not None:
-                    try:
-                        close()
-                    except (OSError, ValueError):
-                        pass
+        with bind_receiver_run(run):
+            try:
+                self._read(run.proc, run.number, *run.args)
+            finally:
+                run.wake.set()
+                if not hasattr(run.proc, "close_transport"):
+                    with self._runs:
+                        current = self._runs.is_current(run.number)
+                    if current:
+                        run.wake.set()
+                    close = getattr(getattr(run.proc, "stdout", None), "close", None)
+                    if close is not None:
+                        try:
+                            close()
+                        except (OSError, ValueError):
+                            pass
 
     def _statuses(self, run):
         return [(stage, stage.poll()) for stage in childproc._stages(run.proc)]
@@ -678,6 +720,10 @@ class SupervisedReceiver:
                 run.wake.wait()
 
     def _supervise(self, run):
+        with bind_receiver_run(run):
+            self._supervise_bound(run)
+
+    def _supervise_bound(self, run):
         ended, observed_at = [], None
         try:
             ended, observed_at = self._observe_exit(run)

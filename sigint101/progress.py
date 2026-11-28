@@ -157,22 +157,27 @@ CREATE TABLE IF NOT EXISTS replays_seen (
 # additive tables so existing databases gain them on open without touching any existing table.
 SCHEMA += """
 CREATE TABLE IF NOT EXISTS solo_attempts (
-    solo_id    TEXT PRIMARY KEY,
-    started_at REAL NOT NULL,
-    window_s   INTEGER NOT NULL
+    solo_id       TEXT PRIMARY KEY,
+    attempt_id    TEXT NOT NULL,
+    started_at    REAL NOT NULL,
+    window_s      INTEGER NOT NULL,
+    boot_id       TEXT NOT NULL DEFAULT '',
+    attempt_order INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS solo_passes (
     solo_id    TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
     started_at REAL NOT NULL,
     band_slot  INTEGER NOT NULL,
     passed_at  REAL NOT NULL,
     instrument TEXT NOT NULL,
     provenance TEXT NOT NULL,
     digest     TEXT NOT NULL,
-    PRIMARY KEY (solo_id, started_at, band_slot)
+    PRIMARY KEY (solo_id, attempt_id, band_slot)
 );
 CREATE TABLE IF NOT EXISTS solo_calls (
     solo_id       TEXT NOT NULL,
+    attempt_id    TEXT NOT NULL,
     started_at    REAL NOT NULL,
     band_slot     INTEGER NOT NULL,
     call          TEXT NOT NULL,
@@ -181,7 +186,7 @@ CREATE TABLE IF NOT EXISTS solo_calls (
     why_correct   INTEGER NOT NULL,
     answered_at   REAL NOT NULL,
     item_revision TEXT NOT NULL,
-    PRIMARY KEY (solo_id, started_at, band_slot)
+    PRIMARY KEY (solo_id, attempt_id, band_slot)
 );
 """
 
@@ -1107,10 +1112,16 @@ class Progress:
                         if kind.identity_column is not None
                         else ""
                     )
+                    id_select = (
+                        f", p.{kind.identity_column}"
+                        if kind.identity_column is not None
+                        else ""
+                    )
                     passed_slots = {
-                        (row[0], row[1], row[2])
+                        tuple(row)
                         for row in self._conn.execute(
-                            f"SELECT p.{kind.key_column}, p.started_at, p.{kind.slot_column} "
+                            f"SELECT p.{kind.key_column}, p.started_at, p.{kind.slot_column}"
+                            f"{id_select} "
                             f"FROM {kind.passes_table} p "
                             f"JOIN {kind.attempts_table} c "
                             f"  ON p.{kind.key_column} = c.{kind.key_column} "
@@ -1127,7 +1138,16 @@ class Progress:
                                     f"slotted attempt kind {kind.kind!r} qualifies() "
                                     f"must return a slot value or None, not True"
                                 )
-                            slot_key = (attempt[kind.key_column], attempt["started_at"], slot)
+                            aid = (
+                                attempt[kind.identity_column]
+                                if kind.identity_column is not None
+                                else None
+                            )
+                            slot_key = (
+                                (attempt[kind.key_column], attempt["started_at"], slot, aid)
+                                if kind.identity_column is not None
+                                else (attempt[kind.key_column], attempt["started_at"], slot)
+                            )
                             if slot_key in passed_slots:
                                 continue
                             pass_row = {
@@ -1136,11 +1156,6 @@ class Progress:
                                 "provenance": stamp["provenance"],
                                 "digest": stamp["digest"],
                             }
-                            aid = (
-                                attempt[kind.identity_column]
-                                if kind.identity_column is not None
-                                else None
-                            )
                             inserted = self._insert_attempt_pass_unlocked(
                                 kind,
                                 attempt[kind.key_column],
@@ -1188,16 +1203,17 @@ class Progress:
         """Credit open live-find attempts in one transaction using the first qualifying stamp."""
         return self.credit_attempts(CHALLENGE_KIND, stamps, qualifies)
 
-    def solo_calls(self, solo_id: str, started_at: float) -> list[dict]:
+    def solo_calls(self, solo_id: str, attempt_id: str) -> list[dict]:
         """Return all legal calls recorded for one solo attempt, ordered by band_slot."""
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return []
             rows = self._conn.execute(
-                "SELECT solo_id, started_at, band_slot, call, why_key, call_correct, "
-                "why_correct, answered_at, item_revision "
-                "FROM solo_calls WHERE solo_id=? AND started_at=? ORDER BY band_slot",
-                (solo_id, started_at),
+                "SELECT solo_id, attempt_id, started_at, band_slot, call, why_key, "
+                "call_correct, why_correct, answered_at, item_revision "
+                "FROM solo_calls WHERE solo_id=? AND attempt_id=? ORDER BY band_slot",
+                (solo_id, attempt_id),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1206,6 +1222,7 @@ class Progress:
         if leg_count <= 0:
             return None
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return None
             row = self._conn.execute(
@@ -1213,19 +1230,20 @@ class Progress:
                 "FROM solo_calls c "
                 "JOIN solo_passes p "
                 "  ON p.solo_id = c.solo_id "
-                " AND p.started_at = c.started_at "
+                " AND p.attempt_id = c.attempt_id "
                 " AND p.band_slot = c.band_slot "
                 "WHERE c.solo_id=? AND c.call_correct=1 AND c.why_correct=1 "
-                "GROUP BY c.started_at "
+                "GROUP BY c.attempt_id "
                 "HAVING COUNT(DISTINCT c.band_slot) >= ? "
                 "ORDER BY done_at DESC LIMIT 1",
                 (solo_id, int(leg_count)),
             ).fetchone()
         return float(row["done_at"]) if row and row["done_at"] is not None else None
 
-    def record_solo_call(
+    def stage_solo_call(
         self,
         solo_id: str,
+        attempt_id: str,
         started_at: float,
         band_slot: int,
         *,
@@ -1235,19 +1253,34 @@ class Progress:
         why_correct: bool,
         answered_at: float,
         item_revision: str,
+        on_staged=None,
     ) -> bool:
-        """Insert one solo legal call (insert-once via ON CONFLICT DO NOTHING)."""
+        """Stage one solo legal call in an uncommitted transaction; commit iff `on_staged` succeeds.
+
+        Guards on the active attempt_id and its heard solo_pass row so a stale or duplicate call
+        inserts nothing. If `on_staged` or commit fails, rolls back cleanly or quarantines the
+        store when rollback cannot be confirmed.
+        """
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
-                return False
-            with self._conn:
+                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+            self._begin_immediate_clean_unlocked()
+            try:
                 cur = self._conn.execute(
                     "INSERT INTO solo_calls("
-                    "solo_id, started_at, band_slot, call, why_key, call_correct, "
+                    "solo_id, attempt_id, started_at, band_slot, call, why_key, call_correct, "
                     "why_correct, answered_at, item_revision"
-                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    ") SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                    "WHERE EXISTS ("
+                    "  SELECT 1 FROM solo_attempts WHERE solo_id=? AND attempt_id=?"
+                    ") AND EXISTS ("
+                    "  SELECT 1 FROM solo_passes "
+                    "  WHERE solo_id=? AND attempt_id=? AND band_slot=?"
+                    ") ON CONFLICT DO NOTHING",
                     (
                         solo_id,
+                        attempt_id,
                         started_at,
                         band_slot,
                         call,
@@ -1256,21 +1289,23 @@ class Progress:
                         1 if why_correct else 0,
                         answered_at,
                         item_revision,
+                        solo_id,
+                        attempt_id,
+                        solo_id,
+                        attempt_id,
+                        band_slot,
                     ),
                 )
-            return bool(cur.rowcount)
-
-    def delete_solo_call(self, solo_id: str, started_at: float, band_slot: int) -> bool:
-        """Remove a newly inserted solo call when its event log write fails so resubmit works."""
-        with self._lock:
-            if self._closed:
-                return False
-            with self._conn:
-                cur = self._conn.execute(
-                    "DELETE FROM solo_calls WHERE solo_id=? AND started_at=? AND band_slot=?",
-                    (solo_id, started_at, band_slot),
-                )
-            return bool(cur.rowcount)
+                if not cur.rowcount:
+                    self._conn.rollback()
+                    return False
+                if on_staged is not None:
+                    on_staged()
+                self._conn.commit()
+            except BaseException as exc:
+                self._rollback_or_quarantine_unlocked(exc)
+                raise
+            return True
 
     def enroll_recall(self, lesson_ids, *, now: float) -> None:
         """Enrol newly eligible completed lessons into box 1 without overwriting existing rows."""

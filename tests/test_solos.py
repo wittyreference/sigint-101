@@ -494,6 +494,7 @@ def test_solo_window_provenance_lora_band_and_receiver_standdown_process_order(
         assert client.post(
             "/api/solos/u9-solo/call",
             json={
+                "attempt_id": body["attempt_id"],
                 "started_at": body["started_at"],
                 "band_slot": 0,
                 "call": "not_sure",
@@ -531,9 +532,12 @@ def test_solo_window_provenance_lora_band_and_receiver_standdown_process_order(
         assert client.get("/api/decode").status_code == 200
         # Simulate clock step backward, then Start u4-solo, then inject a reception with old order.
         now[0] -= 30.0
-        pre_order = client.app.state.rx_start_order["decode"]
+        pre_order = client.app.state.decoder._run.order
         assert client.post("/api/solos/u4-solo/start").status_code == 200
-        assert client.app.state.attempt_start_order[("solo", "u4-solo")] > pre_order
+        saved_u4 = client.app.state.progress.attempt(
+            console.SOLO_KIND, "u4-solo"
+        )["attempt"]
+        assert saved_u4["attempt_order"] > pre_order
         # Without restarting /api/decode, emitting on decoder must NOT credit u4-solo!
         client.app.state.decoder.on_reception(
             {"model": "Acurite-Tower", "mod": "ASK", "readings": {"temperature_C": 18.0}},
@@ -716,9 +720,12 @@ def test_legal_call_scoring_per_leg_stale_page_409_log_rollback_and_d16(tmp_path
         decoder_factory=make_decoder,
     ) as client:
         assert client.post("/api/solos/u4-solo/start").status_code == 200
-        started = client.get("/api/solos/u4-solo").json()["started_at"]
+        u4_state = client.get("/api/solos/u4-solo").json()
+        started = u4_state["started_at"]
+        attempt_id = u4_state["attempt_id"]
 
         good_call = {
+            "attempt_id": attempt_id,
             "started_at": started,
             "band_slot": 0,
             "call": "legal",
@@ -734,18 +741,38 @@ def test_legal_call_scoring_per_leg_stale_page_409_log_rollback_and_d16(tmp_path
         client.app.state.decoder.drain()
         assert client.get("/api/solos/u4-solo").json()["state"] == "reception_passed"
 
-        # 400 on blank/missing/unknown/other-solo why_key or unknown call.
+        # 400 on blank/missing/unknown/other-solo why_key, missing attempt_id, or unknown call.
         for bad_body in (
-            {"started_at": started, "band_slot": 0, "call": "legal", "why_key": ""},
-            {"started_at": started, "band_slot": 0, "call": "legal"},
-            {"started_at": started, "band_slot": 0, "call": "legal", "why_key": "unknown-key"},
             {
+                "started_at": started,
+                "band_slot": 0,
+                "call": "legal",
+                "why_key": "readily-accessible",
+            },
+            {
+                "attempt_id": attempt_id,
+                "started_at": started,
+                "band_slot": 0,
+                "call": "legal",
+                "why_key": "",
+            },
+            {"attempt_id": attempt_id, "started_at": started, "band_slot": 0, "call": "legal"},
+            {
+                "attempt_id": attempt_id,
+                "started_at": started,
+                "band_slot": 0,
+                "call": "legal",
+                "why_key": "unknown-key",
+            },
+            {
+                "attempt_id": attempt_id,
                 "started_at": started,
                 "band_slot": 0,
                 "call": "legal",
                 "why_key": "published-key-tension",
             },
             {
+                "attempt_id": attempt_id,
                 "started_at": started,
                 "band_slot": 0,
                 "call": "maybe",
@@ -754,10 +781,10 @@ def test_legal_call_scoring_per_leg_stale_page_409_log_rollback_and_d16(tmp_path
         ):
             assert client.post("/api/solos/u4-solo/call", json=bad_body).status_code == 400
 
-        # 409 on stale-page started_at mismatch (F11).
+        # 409 on stale-page attempt_id mismatch (F2).
         r_stale = client.post(
             "/api/solos/u4-solo/call",
-            json={**good_call, "started_at": started - 1.0},
+            json={**good_call, "attempt_id": "stale-attempt-id"},
         )
         assert r_stale.status_code == 409
 
@@ -826,12 +853,14 @@ def test_all_solo_gets_write_nothing_audit_hides_tile_and_rack_preserves_back_li
         # First pass u4-solo completely, then start a NEW attempt (active) so we also test F1
         # leak prevention AFTER an earlier pass!
         assert client.post("/api/solos/u4-solo/start").status_code == 200
-        started1 = client.get("/api/solos/u4-solo").json()["started_at"]
+        u4_1 = client.get("/api/solos/u4-solo").json()
+        started1 = u4_1["started_at"]
         assert client.get("/api/decode").status_code == 200
         client.app.state.decoder.drain()
         assert client.post(
             "/api/solos/u4-solo/call",
             json={
+                "attempt_id": u4_1["attempt_id"],
                 "started_at": started1,
                 "band_slot": 0,
                 "call": "legal",
@@ -957,3 +986,583 @@ def test_solo_stand_down_honors_tuning_gate_launch_permit_and_replay_refusal(
         r_ok = client.post("/api/solos/u4-solo/start")
         assert r_ok.status_code == 200
         assert events_seen == ["admit:solo", "release_for_claim", "end:solo"]
+
+
+# --- 7. Round 4 TDD regressions: F1 exact run identity, F2 attempt_id, F3 call durability, F4 ---
+
+
+def test_f1_parked_pocsag_hook_cannot_borrow_reopened_run_live_or_backfill(
+    tmp_path, monkeypatch
+):
+    """F1: a stopped POCSAG reader hook released after reopen must not credit live or backfill."""
+    import threading
+
+    now = [1_764_340_000.0]
+    _pin_log_clock(monkeypatch, now)
+
+    children: list = []
+
+    def make_pocsag():
+        def spawn(freq_hz, device):
+            n = len(children) + 1
+            # First run emits a page; second run is silent.
+            said = POCSAG_ALPHA if n == 1 else ""
+            ch = Child(
+                ["rtl_fm", "-M", "fm", "-f", str(freq_hz), "-d", str(device)],
+                said=said,
+            )
+            children.append(ch)
+            return ch
+
+        return PocsagDecoder(spawn=spawn, **_tools())
+
+    hook_entered = threading.Event()
+    release_hook = threading.Event()
+    hook_done = threading.Event()
+
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        pocsag_factory=make_pocsag,
+    ) as client:
+        pocsag = client.app.state.pocsag
+        real_hook = pocsag.on_reception
+        first_parked = [True]
+
+        def parked_hook(*args, **kwargs):
+            if first_parked[0]:
+                first_parked[0] = False
+                hook_entered.set()
+                assert release_hook.wait(timeout=5.0), "test timed out releasing parked hook"
+                try:
+                    return real_hook(*args, **kwargs)
+                finally:
+                    hook_done.set()
+            return real_hook(*args, **kwargs)
+
+        pocsag.on_reception = parked_hook
+
+        # 1. Start POCSAG child 1; its reader thread enters parked_hook before reception_lock.
+        assert client.get("/api/pocsag").status_code == 200
+        assert len(children) == 1
+        assert hook_entered.wait(timeout=5.0), "POCSAG child 1 reader never reached parked hook"
+
+        # 2. Solo Start stands down and reaps child 1 while its reader hook is still parked.
+        now[0] += 5.0
+        assert client.post("/api/solos/u5-solo/start").status_code == 200
+        assert children[0].poll() is not None, "solo Start did not reap POCSAG child 1"
+
+        # 3. Reopen POCSAG with a silent child 2 while the solo is active.
+        assert client.get("/api/pocsag").status_code == 200
+        assert len(children) == 2
+        assert children[1].poll() is None
+
+        # 4. Release child 1's parked hook: must NOT credit u5-solo live!
+        now[0] += 5.0
+        release_hook.set()
+        assert hook_done.wait(timeout=5.0), "parked hook did not finish after release"
+        assert client.get("/api/solos/u5-solo").json()["state"] == "active", (
+            "stopped POCSAG child 1 borrowed reopened child 2's order to credit live"
+        )
+
+    # 5. Restart console (startup backfill): child 1's reception must STILL not credit u5-solo!
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        pocsag_factory=make_pocsag,
+    ) as client2:
+        assert client2.get("/api/solos/u5-solo").json()["state"] == "active", (
+            "stopped POCSAG child 1 reception credited u5-solo on startup backfill"
+        )
+
+
+def test_f1_parked_pocsag_failed_live_credit_then_restart_backfill(tmp_path, monkeypatch):
+    """F1: failed live solo credit on a stopped run must not credit on restart backfill either."""
+    import threading
+
+    now = [1_764_341_000.0]
+    _pin_log_clock(monkeypatch, now)
+    children: list = []
+
+    def make_pocsag():
+        def spawn(freq_hz, device):
+            n = len(children) + 1
+            said = POCSAG_ALPHA if n == 1 else ""
+            ch = Child(
+                ["rtl_fm", "-M", "fm", "-f", str(freq_hz), "-d", str(device)],
+                said=said,
+            )
+            children.append(ch)
+            return ch
+
+        return PocsagDecoder(spawn=spawn, **_tools())
+
+    hook_entered = threading.Event()
+    release_hook = threading.Event()
+    hook_done = threading.Event()
+
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        pocsag_factory=make_pocsag,
+    ) as client:
+        pocsag = client.app.state.pocsag
+        real_hook = pocsag.on_reception
+        first_parked = [True]
+
+        def parked_hook(*args, **kwargs):
+            if first_parked[0]:
+                first_parked[0] = False
+                hook_entered.set()
+                assert release_hook.wait(timeout=5.0), "timed out waiting to release hook"
+                try:
+                    return real_hook(*args, **kwargs)
+                finally:
+                    hook_done.set()
+            return real_hook(*args, **kwargs)
+
+        pocsag.on_reception = parked_hook
+        assert client.get("/api/pocsag").status_code == 200
+        assert hook_entered.wait(timeout=5.0)
+
+        now[0] += 5.0
+        assert client.post("/api/solos/u5-solo/start").status_code == 200
+        assert children[0].poll() is not None
+        assert client.get("/api/pocsag").status_code == 200
+
+        # Block solo_passes inserts to simulate a failed live solo credit write.
+        db_path = tmp_path / "progress.db"
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.execute(
+                "CREATE TRIGGER fail_solo_credit BEFORE INSERT ON solo_passes "
+                "BEGIN SELECT RAISE(ABORT, 'credit busy'); END"
+            )
+        now[0] += 5.0
+        release_hook.set()
+        assert hook_done.wait(timeout=5.0)
+        with closing(sqlite3.connect(db_path)) as db, db:
+            db.execute("DROP TRIGGER fail_solo_credit")
+
+    # Restart console -> backfill must NOT grant the stopped child 1's reception!
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        pocsag_factory=make_pocsag,
+    ) as client2:
+        assert client2.get("/api/solos/u5-solo").json()["state"] == "active", (
+            "backfill credited stopped POCSAG child 1 after failed live credit and restart"
+        )
+
+
+def test_f1_parked_rtl433_get_cannot_advance_order_after_solo_start(tmp_path, monkeypatch):
+    """F1: a parked GET /api/decode resuming after solo Start must not advance order."""
+    import threading
+
+    now = [1_764_342_000.0]
+    _pin_log_clock(monkeypatch, now)
+    children: list = []
+
+    def make_decoder():
+        def spawn(cmd):
+            ch = Child(cmd, said="")
+            children.append(ch)
+            return ch
+
+        return Decoder(spawn=spawn, **_tools())
+
+    get_claimed = threading.Event()
+    release_get = threading.Event()
+    get_status: list[int] = []
+
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        decoder_factory=make_decoder,
+    ) as client:
+        real_log = console.log_event
+        park_first = [True]
+
+        def park_decode_start(path, kind, payload, **kw):
+            if kind == "decode_start" and park_first[0]:
+                park_first[0] = False
+                get_claimed.set()
+                assert release_get.wait(timeout=5.0), "timed out releasing parked GET /api/decode"
+            return real_log(path, kind, payload, **kw)
+
+        monkeypatch.setattr(console, "log_event", park_decode_start)
+
+        t = threading.Thread(
+            target=lambda: get_status.append(client.get("/api/decode").status_code),
+            daemon=True,
+        )
+        t.start()
+        assert get_claimed.wait(timeout=5.0), "GET /api/decode never reached _started"
+        assert len(children) == 1 and children[0].poll() is None
+
+        # Solo Start stands down and reaps child 1 while the earlier GET is parked before _started.
+        now[0] += 5.0
+        assert client.post("/api/solos/u4-solo/start").status_code == 200
+        assert children[0].poll() is not None
+
+        # Release the parked GET so _started("decode", ...) finishes without spawning a new child.
+        release_get.set()
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+        assert get_status == [200]
+        assert len(children) == 1
+
+        # Emitting on the already-released decoder must NOT credit u4-solo live or on backfill!
+        now[0] += 5.0
+        client.app.state.decoder.on_reception(
+            {"model": "Acurite-Tower", "mod": "ASK", "readings": {"temperature_C": 18.0}},
+            command="rtl_433 -f 433920000 -F json -d 0",
+            freq_hz=433_920_000,
+            radio={"kind": "rtl-sdr", "index": 0, "serial": None},
+        )
+        assert client.get("/api/solos/u4-solo").json()["state"] == "active", (
+            "parked GET /api/decode advanced order of released decoder and credited u4-solo"
+        )
+
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        decoder_factory=make_decoder,
+    ) as client2:
+        assert client2.get("/api/solos/u4-solo").json()["state"] == "active", (
+            "parked GET /api/decode caused backfill to credit released decoder"
+        )
+
+
+def test_f2_try_again_at_same_clock_reading_does_not_reuse_pass_or_call_and_refuses_stale(
+    tmp_path, monkeypatch
+):
+    """F2: Try again at the exact same wall-clock reading starts a fresh attempt_id."""
+    now = [1_764_343_000.0]
+    _pin_log_clock(monkeypatch, now)
+
+    def make_decoder():
+        return Decoder(spawn=lambda cmd: Child(cmd, said=RTL433_ASK), **_tools())
+
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        decoder_factory=make_decoder,
+    ) as client:
+        # 1. Start attempt 1, hear live ISM, submit legal call -> passed.
+        r1 = client.post("/api/solos/u4-solo/start")
+        assert r1.status_code == 200
+        body1 = r1.json()
+        aid1 = body1.get("attempt_id")
+        assert isinstance(aid1, str) and aid1, "solo payload must expose durable attempt_id"
+        assert client.get("/api/decode").status_code == 200
+        client.app.state.decoder.drain()
+        heard = client.get("/api/solos/u4-solo").json()
+        assert heard["state"] == "reception_passed"
+        assert heard["attempt_id"] == aid1
+
+        call1 = client.post(
+            "/api/solos/u4-solo/call",
+            json={
+                "attempt_id": aid1,
+                "started_at": heard["started_at"],
+                "band_slot": 0,
+                "call": "legal",
+                "why_key": "readily-accessible",
+            },
+        )
+        assert call1.status_code == 200
+        assert call1.json()["state"] == "passed"
+
+        # 2. Press Try again at the EXACT SAME clock reading (now[0] unchanged)!
+        r2 = client.post("/api/solos/u4-solo/start")
+        assert r2.status_code == 200
+        body2 = r2.json()
+        aid2 = body2.get("attempt_id")
+        assert isinstance(aid2, str) and aid2 and aid2 != aid1
+        assert body2["started_at"] == body1["started_at"]
+        assert body2["state"] == "active", (
+            "Try again at same clock reading inherited old pass/call state"
+        )
+        assert body2["legs"][0]["passed"] is False
+        assert body2["legs"][0]["called"] is False
+        assert "heard" not in body2["legs"][0]
+        assert "call_result" not in body2["legs"][0]
+        assert body2["passed_before_date"] is not None
+
+        # 3. Stale submission carrying attempt 1's attempt_id (same started_at!) is refused 409.
+        stale = client.post(
+            "/api/solos/u4-solo/call",
+            json={
+                "attempt_id": aid1,
+                "started_at": body2["started_at"],
+                "band_slot": 0,
+                "call": "legal",
+                "why_key": "readily-accessible",
+            },
+        )
+        assert stale.status_code == 409
+
+    # 4. Restart console (backfill): old attempt's reception at same clock must not credit #2.
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        decoder_factory=make_decoder,
+    ) as client2:
+        after = client2.get("/api/solos/u4-solo").json()
+        assert after["attempt_id"] == aid2
+        assert after["state"] == "active"
+        assert after["legs"][0]["passed"] is False
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_f3_legal_call_denied_delete_rollback_quarantine_and_sync_error_after_append(
+    tmp_path, monkeypatch, managed
+):
+    """F3: legal-call 500 leaves no row or visible solo_call event; bad rollback quarantines."""
+    now = [1_764_344_000.0]
+    _pin_log_clock(monkeypatch, now)
+    run_dir = tmp_path / ("managed" if managed else "legacy")
+    run_dir.mkdir()
+    if managed:
+        migrate_store_copy(
+            tmp_path / "f3_p.db", run_dir / "progress.db",
+            store="progress", allow_missing_source=True,
+            scratch_dir=tmp_path / "f3_sp",
+        )
+        migrate_store_copy(
+            tmp_path / "f3_e.db", run_dir / "exam.db",
+            store="exam", allow_missing_source=True,
+            scratch_dir=tmp_path / "f3_se",
+        )
+
+    def make_decoder():
+        return Decoder(spawn=lambda cmd: Child(cmd, said=RTL433_ASK), **_tools())
+
+    with _solo_client(
+        run_dir,
+        clock=lambda: now[0],
+        probe=_present,
+        decoder_factory=make_decoder,
+        managed=managed,
+    ) as client:
+        r_start = client.post("/api/solos/u4-solo/start")
+        assert r_start.status_code == 200
+        assert client.get("/api/decode").status_code == 200
+        client.app.state.decoder.drain()
+        heard = client.get("/api/solos/u4-solo").json()
+        assert heard["state"] == "reception_passed"
+        aid = heard["attempt_id"]
+        call_payload = {
+            "attempt_id": aid,
+            "started_at": heard["started_at"],
+            "band_slot": 0,
+            "call": "legal",
+            "why_key": "readily-accessible",
+        }
+
+        # (A) Fail journal write while SQLite authorizer denies DELETE on solo_calls:
+        # staged transaction rolls back without DELETE -> 500, GET stays reception_passed,
+        # retry succeeds!
+        def deny_delete(action, arg1, arg2, db_name, trigger_name):
+            if action == sqlite3.SQLITE_DELETE and arg1 == "solo_calls":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        client.app.state.progress._conn.set_authorizer(deny_delete)
+        try:
+            real_log = console.log_event
+            with monkeypatch.context() as mp:
+                mp.setattr(
+                    console,
+                    "log_event",
+                    lambda path, kind, payload, **kw: (
+                        (_ for _ in ()).throw(OSError("journal unavailable"))
+                        if kind == "solo_call"
+                        else real_log(path, kind, payload, **kw)
+                    ),
+                )
+                r_fail = client.post("/api/solos/u4-solo/call", json=call_payload)
+                assert r_fail.status_code == 500
+            after_fail = client.get("/api/solos/u4-solo").json()
+            assert after_fail["state"] == "reception_passed", (
+                "denied DELETE left solo_calls committed after 500"
+            )
+            assert after_fail["legs"][0]["called"] is False
+            assert [
+                e for e in read_events(run_dir / "events.jsonl") if e["kind"] == "solo_call"
+            ] == []
+        finally:
+            client.app.state.progress._conn.set_authorizer(None)
+
+        # (B) Event sync error AFTER append flushes bytes: 500 leaves NO committed row and NO
+        # visible solo_call event in events.jsonl, and retry still succeeds!
+        if managed:
+            real_fsync = events_mod.fsync_handle
+            sync_calls = [0]
+
+            def fail_after_flush(handle):
+                handle.flush()
+                sync_calls[0] += 1
+                raise OSError("injected sync error after append")
+
+            with monkeypatch.context() as mp:
+                mp.setattr(events_mod, "fsync_handle", fail_after_flush)
+                r_sync = client.post("/api/solos/u4-solo/call", json=call_payload)
+                assert r_sync.status_code == 500
+            assert sync_calls[0] >= 1
+            monkeypatch.setattr(events_mod, "fsync_handle", real_fsync)
+            assert client.get("/api/solos/u4-solo").json()["state"] == "reception_passed"
+            assert [
+                e for e in read_events(run_dir / "events.jsonl") if e["kind"] == "solo_call"
+            ] == [], "500 after sync failure left a visible solo_call event in events.jsonl"
+
+        # Retry succeeds cleanly!
+        r_ok = client.post("/api/solos/u4-solo/call", json=call_payload)
+        assert r_ok.status_code == 200
+        assert r_ok.json()["state"] == "passed"
+        assert len(
+            [e for e in read_events(run_dir / "events.jsonl") if e["kind"] == "solo_call"]
+        ) == 1
+
+    # (C) Unconfirmed rollback quarantines the store and GET never reports passed.
+    q_dir = tmp_path / f"quarantine_{managed}"
+    q_dir.mkdir()
+    if managed:
+        migrate_store_copy(
+            tmp_path / "f3q_p.db", q_dir / "progress.db",
+            store="progress", allow_missing_source=True,
+            scratch_dir=tmp_path / "f3q_sp",
+        )
+        migrate_store_copy(
+            tmp_path / "f3q_e.db", q_dir / "exam.db",
+            store="exam", allow_missing_source=True,
+            scratch_dir=tmp_path / "f3q_se",
+        )
+    with _solo_client(
+        q_dir,
+        clock=lambda: now[0],
+        probe=_present,
+        decoder_factory=make_decoder,
+        managed=managed,
+    ) as client_q:
+        assert client_q.post("/api/solos/u4-solo/start").status_code == 200
+        assert client_q.get("/api/decode").status_code == 200
+        client_q.app.state.decoder.drain()
+        heard_q = client_q.get("/api/solos/u4-solo").json()
+        aid_q = heard_q["attempt_id"]
+
+        orig_conn = client_q.app.state.progress._conn
+
+        class _BadRollbackConn:
+            def __getattr__(self, name):
+                return getattr(orig_conn, name)
+
+            def rollback(self):
+                raise sqlite3.OperationalError("rollback refused")
+
+        client_q.app.state.progress._conn = _BadRollbackConn()
+        real_log = console.log_event
+        with monkeypatch.context() as mp:
+            mp.setattr(
+                console,
+                "log_event",
+                lambda path, kind, payload, **kw: (
+                    (_ for _ in ()).throw(OSError("disk full"))
+                    if kind == "solo_call"
+                    else real_log(path, kind, payload, **kw)
+                ),
+            )
+            r_q = client_q.post(
+                "/api/solos/u4-solo/call",
+                json={
+                    "attempt_id": aid_q,
+                    "started_at": heard_q["started_at"],
+                    "band_slot": 0,
+                    "call": "legal",
+                    "why_key": "readily-accessible",
+                },
+            )
+            assert r_q.status_code == 500
+        assert client_q.app.state.progress.quarantined_reason is not None
+        r_get = client_q.get("/api/solos/u4-solo")
+        assert r_get.status_code == 503
+        assert r_get.json()["state"] == "unreadable"
+        with closing(sqlite3.connect(q_dir / "progress.db")) as db:
+            assert db.execute("SELECT count(*) FROM solo_calls").fetchone() == (0,)
+
+
+def test_f4_leaf_order_lock_never_nests_and_stand_down_uses_claim_sdr(tmp_path, monkeypatch):
+    """F4: order_lock never nests with reception_lock; stand-down delegates to _claim_sdr."""
+    import inspect
+    import threading
+
+    now = [1_764_345_000.0]
+    _pin_log_clock(monkeypatch, now)
+
+    overlap_detected: list[str] = []
+    held_locks: set[str] = set()
+    real_lock_cls = threading.Lock
+
+    class _TrackedLock:
+        def __init__(self, label):
+            self._label = label
+            self._inner = real_lock_cls()
+
+        def __enter__(self):
+            self._inner.acquire()
+            if self._label == "order" and "reception" in held_locks:
+                overlap_detected.append("order inside reception")
+            if self._label == "reception" and "order" in held_locks:
+                overlap_detected.append("reception inside order")
+            held_locks.add(self._label)
+            return self
+
+        def __exit__(self, *exc):
+            held_locks.discard(self._label)
+            self._inner.release()
+            return False
+
+    def make_decoder():
+        return Decoder(spawn=lambda cmd: Child(cmd, said=RTL433_ASK), **_tools())
+
+    with _solo_client(
+        tmp_path,
+        clock=lambda: now[0],
+        probe=_present,
+        decoder_factory=make_decoder,
+    ) as client:
+        # Expose and wrap the app's reception_lock and order_lock via app.state probes.
+        assert hasattr(client.app.state, "order_lock")
+        assert hasattr(client.app.state, "reception_lock")
+
+        # Check stand-down source does not duplicate radio_arbiter.reserve.
+        app_src = inspect.getsource(console.create_app)
+        sd_idx = app_src.index("def _stand_down_for_solo")
+        sd_end = app_src.index("def _solo_qualifies", sd_idx)
+        sd_body = app_src[sd_idx:sd_end]
+        assert "radio_arbiter.reserve" not in sd_body, (
+            "_stand_down_for_solo must delegate to _claim_sdr instead of repeating admission"
+        )
+
+        # Verify order_lock is never acquired while reception_lock is held during Start or credit.
+        orig_order = client.app.state.order_lock
+        orig_rec = client.app.state.reception_lock
+        tracked_order = _TrackedLock("order")
+        tracked_rec = _TrackedLock("reception")
+        assert orig_order is not orig_rec
+        client.app.state.order_lock = tracked_order
+        client.app.state.reception_lock = tracked_rec
+
+        assert client.post("/api/solos/u4-solo/start").status_code == 200
+        assert client.get("/api/decode").status_code == 200
+        client.app.state.decoder.drain()
+        assert client.get("/api/solos/u4-solo").json()["state"] == "reception_passed"
+        assert overlap_detected == [], f"order_lock nested with reception_lock: {overlap_detected}"

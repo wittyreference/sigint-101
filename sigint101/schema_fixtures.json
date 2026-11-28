@@ -5633,6 +5633,15 @@
               ],
               [
                 1,
+                "attempt_id",
+                "TEXT",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                2,
                 "started_at",
                 "REAL",
                 1,
@@ -5641,11 +5650,29 @@
                 0
               ],
               [
-                2,
+                3,
                 "window_s",
                 "INTEGER",
                 1,
                 null,
+                0,
+                0
+              ],
+              [
+                4,
+                "boot_id",
+                "TEXT",
+                1,
+                "''",
+                0,
+                0
+              ],
+              [
+                5,
+                "attempt_order",
+                "INTEGER",
+                1,
+                "0",
                 0,
                 0
               ]
@@ -5677,7 +5704,7 @@
                 "unique": 1
               }
             ],
-            "sql": "create table solo_attempts (solo_id text primary key, started_at real not null, window_s integer not null)",
+            "sql": "create table solo_attempts (solo_id text primary key, attempt_id text not null, started_at real not null, window_s integer not null, boot_id text not null default '', attempt_order integer not null default 0)",
             "without_rowid": false
           },
           "solo_calls": {
@@ -5693,8 +5720,8 @@
               ],
               [
                 1,
-                "started_at",
-                "REAL",
+                "attempt_id",
+                "TEXT",
                 1,
                 null,
                 2,
@@ -5702,6 +5729,15 @@
               ],
               [
                 2,
+                "started_at",
+                "REAL",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
                 "band_slot",
                 "INTEGER",
                 1,
@@ -5710,7 +5746,7 @@
                 0
               ],
               [
-                3,
+                4,
                 "call",
                 "TEXT",
                 1,
@@ -5719,7 +5755,7 @@
                 0
               ],
               [
-                4,
+                5,
                 "why_key",
                 "TEXT",
                 1,
@@ -5728,7 +5764,7 @@
                 0
               ],
               [
-                5,
+                6,
                 "call_correct",
                 "INTEGER",
                 1,
@@ -5737,7 +5773,7 @@
                 0
               ],
               [
-                6,
+                7,
                 "why_correct",
                 "INTEGER",
                 1,
@@ -5746,7 +5782,7 @@
                 0
               ],
               [
-                7,
+                8,
                 "answered_at",
                 "REAL",
                 1,
@@ -5755,7 +5791,7 @@
                 0
               ],
               [
-                8,
+                9,
                 "item_revision",
                 "TEXT",
                 1,
@@ -5779,14 +5815,14 @@
                   [
                     1,
                     1,
-                    "started_at",
+                    "attempt_id",
                     0,
                     "BINARY",
                     1
                   ],
                   [
                     2,
-                    2,
+                    3,
                     "band_slot",
                     0,
                     "BINARY",
@@ -5807,7 +5843,7 @@
                 "unique": 1
               }
             ],
-            "sql": "create table solo_calls (solo_id text not null, started_at real not null, band_slot integer not null, call text not null, why_key text not null, call_correct integer not null, why_correct integer not null, answered_at real not null, item_revision text not null, primary key (solo_id, started_at, band_slot))",
+            "sql": "create table solo_calls (solo_id text not null, attempt_id text not null, started_at real not null, band_slot integer not null, call text not null, why_key text not null, call_correct integer not null, why_correct integer not null, answered_at real not null, item_revision text not null, primary key (solo_id, attempt_id, band_slot))",
             "without_rowid": false
           },
           "solo_passes": {
@@ -5823,8 +5859,8 @@
               ],
               [
                 1,
-                "started_at",
-                "REAL",
+                "attempt_id",
+                "TEXT",
                 1,
                 null,
                 2,
@@ -5832,6 +5868,15 @@
               ],
               [
                 2,
+                "started_at",
+                "REAL",
+                1,
+                null,
+                0,
+                0
+              ],
+              [
+                3,
                 "band_slot",
                 "INTEGER",
                 1,
@@ -5840,7 +5885,7 @@
                 0
               ],
               [
-                3,
+                4,
                 "passed_at",
                 "REAL",
                 1,
@@ -5849,7 +5894,7 @@
                 0
               ],
               [
-                4,
+                5,
                 "instrument",
                 "TEXT",
                 1,
@@ -5858,7 +5903,7 @@
                 0
               ],
               [
-                5,
+                6,
                 "provenance",
                 "TEXT",
                 1,
@@ -5867,7 +5912,7 @@
                 0
               ],
               [
-                6,
+                7,
                 "digest",
                 "TEXT",
                 1,
@@ -5891,14 +5936,14 @@
                   [
                     1,
                     1,
-                    "started_at",
+                    "attempt_id",
                     0,
                     "BINARY",
                     1
                   ],
                   [
                     2,
-                    2,
+                    3,
                     "band_slot",
                     0,
                     "BINARY",
@@ -5919,7 +5964,7 @@
                 "unique": 1
               }
             ],
-            "sql": "create table solo_passes (solo_id text not null, started_at real not null, band_slot integer not null, passed_at real not null, instrument text not null, provenance text not null, digest text not null, primary key (solo_id, started_at, band_slot))",
+            "sql": "create table solo_passes (solo_id text not null, attempt_id text not null, started_at real not null, band_slot integer not null, passed_at real not null, instrument text not null, provenance text not null, digest text not null, primary key (solo_id, attempt_id, band_slot))",
             "without_rowid": false
           },
           "sort_answers": {
@@ -6644,6 +6689,15 @@
             ],
             [
               1,
+              "attempt_id",
+              "TEXT",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              2,
               "started_at",
               "REAL",
               1,
@@ -6652,11 +6706,29 @@
               0
             ],
             [
-              2,
+              3,
               "window_s",
               "INTEGER",
               1,
               null,
+              0,
+              0
+            ],
+            [
+              4,
+              "boot_id",
+              "TEXT",
+              1,
+              "''",
+              0,
+              0
+            ],
+            [
+              5,
+              "attempt_order",
+              "INTEGER",
+              1,
+              "0",
               0,
               0
             ]
@@ -6688,7 +6760,7 @@
               "unique": 1
             }
           ],
-          "sql": "create table solo_attempts (solo_id text primary key, started_at real not null, window_s integer not null)",
+          "sql": "create table solo_attempts (solo_id text primary key, attempt_id text not null, started_at real not null, window_s integer not null, boot_id text not null default '', attempt_order integer not null default 0)",
           "without_rowid": false
         },
         "solo_calls": {
@@ -6704,8 +6776,8 @@
             ],
             [
               1,
-              "started_at",
-              "REAL",
+              "attempt_id",
+              "TEXT",
               1,
               null,
               2,
@@ -6713,6 +6785,15 @@
             ],
             [
               2,
+              "started_at",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              3,
               "band_slot",
               "INTEGER",
               1,
@@ -6721,7 +6802,7 @@
               0
             ],
             [
-              3,
+              4,
               "call",
               "TEXT",
               1,
@@ -6730,7 +6811,7 @@
               0
             ],
             [
-              4,
+              5,
               "why_key",
               "TEXT",
               1,
@@ -6739,7 +6820,7 @@
               0
             ],
             [
-              5,
+              6,
               "call_correct",
               "INTEGER",
               1,
@@ -6748,7 +6829,7 @@
               0
             ],
             [
-              6,
+              7,
               "why_correct",
               "INTEGER",
               1,
@@ -6757,7 +6838,7 @@
               0
             ],
             [
-              7,
+              8,
               "answered_at",
               "REAL",
               1,
@@ -6766,7 +6847,7 @@
               0
             ],
             [
-              8,
+              9,
               "item_revision",
               "TEXT",
               1,
@@ -6790,14 +6871,14 @@
                 [
                   1,
                   1,
-                  "started_at",
+                  "attempt_id",
                   0,
                   "BINARY",
                   1
                 ],
                 [
                   2,
-                  2,
+                  3,
                   "band_slot",
                   0,
                   "BINARY",
@@ -6818,7 +6899,7 @@
               "unique": 1
             }
           ],
-          "sql": "create table solo_calls (solo_id text not null, started_at real not null, band_slot integer not null, call text not null, why_key text not null, call_correct integer not null, why_correct integer not null, answered_at real not null, item_revision text not null, primary key (solo_id, started_at, band_slot))",
+          "sql": "create table solo_calls (solo_id text not null, attempt_id text not null, started_at real not null, band_slot integer not null, call text not null, why_key text not null, call_correct integer not null, why_correct integer not null, answered_at real not null, item_revision text not null, primary key (solo_id, attempt_id, band_slot))",
           "without_rowid": false
         },
         "solo_passes": {
@@ -6834,8 +6915,8 @@
             ],
             [
               1,
-              "started_at",
-              "REAL",
+              "attempt_id",
+              "TEXT",
               1,
               null,
               2,
@@ -6843,6 +6924,15 @@
             ],
             [
               2,
+              "started_at",
+              "REAL",
+              1,
+              null,
+              0,
+              0
+            ],
+            [
+              3,
               "band_slot",
               "INTEGER",
               1,
@@ -6851,7 +6941,7 @@
               0
             ],
             [
-              3,
+              4,
               "passed_at",
               "REAL",
               1,
@@ -6860,7 +6950,7 @@
               0
             ],
             [
-              4,
+              5,
               "instrument",
               "TEXT",
               1,
@@ -6869,7 +6959,7 @@
               0
             ],
             [
-              5,
+              6,
               "provenance",
               "TEXT",
               1,
@@ -6878,7 +6968,7 @@
               0
             ],
             [
-              6,
+              7,
               "digest",
               "TEXT",
               1,
@@ -6902,14 +6992,14 @@
                 [
                   1,
                   1,
-                  "started_at",
+                  "attempt_id",
                   0,
                   "BINARY",
                   1
                 ],
                 [
                   2,
-                  2,
+                  3,
                   "band_slot",
                   0,
                   "BINARY",
@@ -6930,7 +7020,7 @@
               "unique": 1
             }
           ],
-          "sql": "create table solo_passes (solo_id text not null, started_at real not null, band_slot integer not null, passed_at real not null, instrument text not null, provenance text not null, digest text not null, primary key (solo_id, started_at, band_slot))",
+          "sql": "create table solo_passes (solo_id text not null, attempt_id text not null, started_at real not null, band_slot integer not null, passed_at real not null, instrument text not null, provenance text not null, digest text not null, primary key (solo_id, attempt_id, band_slot))",
           "without_rowid": false
         },
         "sort_answers": {
