@@ -15,6 +15,24 @@ to return before telling the child to send. The child can stay alive until the s
 build functions still come from the script that started the run.
 **How to apply.** A decoder needed on that same run can be provisioned by the updated kiosk
 installer. Update the server unit so the old script sees a difference and invokes that installer.
+## 2026-11-28: setting the first Meshtastic region can enable transmit
+**Finding.** The firmware enables transmit when a LoRa write moves the region off UNSET.
+The region change schedules a reboot. The local CLI writes the whole LoRa config and can
+return before the change is visible.
+[Firmware region handling](https://github.com/meshtastic/firmware/blob/6d41e279f1f5/src/modules/AdminModule.cpp#L816-L839)
+[Firmware save and reboot](https://github.com/meshtastic/firmware/blob/6d41e279f1f5/src/modules/AdminModule.cpp#L1364-L1374)
+[CLI config write](https://github.com/meshtastic/python/blob/2.7.11/meshtastic/node.py#L192-L210)
+[CLI acknowledgment handling](https://github.com/meshtastic/python/blob/2.7.11/meshtastic/__main__.py#L1186-L1190)
+**How to apply.** Read the enabled state first. If it was off, wait for the new region before
+restoring it and confirm the restored state. Retry both the restore and its readback across a
+daemon restart. Keep the original state across an interrupted write.
+
+## 2026-11-27: Meshtastic's radio power value is narrower than its protobuf field
+**Finding.** The LoRa protobuf accepts a signed 32-bit `tx_power`. The firmware stores it in a
+signed byte before interpreting zero as automatic power. For example, a value of -226 can become
+30 after narrowing. [Meshtastic RadioInterface](https://github.com/meshtastic/firmware/blob/master/src/mesh/RadioInterface.cpp)
+**How to apply.** Validate the representable range and reject zero before comparing a requested
+power against a module ceiling. Keep the configured value's readback separate from RF measurement.
 
 ## 2026-11-27: xdist workers still share loopback ports
 **Finding.** Worker processes isolate module patches and pytest gives each worker a temporary

@@ -47,14 +47,14 @@ def test_m29_offers_the_bench_answer_as_a_predict_choice():
     assert any(c["key"] == "a-bench" for c in lesson.choices)
 
 
-def test_m29_tile_reads_l29_and_badges_the_flipper_before_the_lesson_starts(tmp_path):
+def test_m29_tile_reads_l30_and_badges_the_flipper_before_the_lesson_starts(tmp_path):
     """U10 follows the mesh in the teaching order, and its tile names the kit it needs."""
     with TestClient(create_app(pack_dir=PACK.parent, data_dir=tmp_path,
                                probe=lambda: RadioProbe(False, "lsusb", "none"))) as client:
         home = client.get("/").text
         unit = client.get("/unit/10").text
     assert 'href="/unit/10"' in home and "Flipper" in home
-    assert re.search(r'tile__code">\s*L29\s*<', unit)
+    assert re.search(r'tile__code">\s*L30\s*<', unit)
     assert 'href="/lesson/29"' in unit
     assert re.findall(r'tile__need">\s*([^<]*?)\s*<', unit) == ["Flipper"]
 
