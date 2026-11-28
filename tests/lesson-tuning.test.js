@@ -52,8 +52,9 @@ function stub() {
 // throws is reported and the next tag still runs.
 // `band` puts a lesson band on the waterfall's canvas, as the lesson page's data-tune-* do.
 // `clock` stands in for action-clock.js: the stamp the page puts on the learner's action.
+// `gate` is what GET /api/tuning answers: the restore's state and what it waits on.
 function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", band = null,
-                      clock = null } = {}) {
+                      clock = null, gate = { restoring: true, waiting_on: null } } = {}) {
   let now = 0;
   let seq = 0;
   const timers = [];
@@ -79,6 +80,9 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
   const fetch = (url, opts) => {
     const method = (opts && opts.method) || "GET";
     requests.push({ url, method, hz: server.hz, at: now });
+    if (url.startsWith("/api/tuning") && method === "GET") {
+      return Promise.resolve({ ok: true, status: 200, json: async () => gate });
+    }
     if (url.startsWith("/api/tuning")) {
       if (restore === "lost") return Promise.reject(new TypeError("Failed to fetch"));
       return new Promise(resolve => {
@@ -118,9 +122,11 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
     setTimeout: (fn, ms) => { const id = ++seq; timers.push({ id, at: now + (ms || 0), fn }); return id; },
     clearTimeout: id => { const i = timers.findIndex(t => t.id === id); if (i >= 0) timers.splice(i, 1); },
     console,
+    listeners: {},
+    addEventListener(type, fn) { this.listeners[type] = fn; },
   };
   context.window = context;
-  if (clock) context.ActionClock = { stamp: () => clock };
+  if (clock) context.ActionClock = { stamp: () => (typeof clock === "function" ? clock() : clock) };
 
   const run = (name, attrs = {}) => {
     context.document.currentScript = { getAttribute: key => (key in attrs ? attrs[key] : null) };
@@ -138,6 +144,8 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
 
   return {
     note, full, fullText, requests, errors, server,
+    // The browser shows the page again from its back/forward cache.
+    pageshow: async persisted => { context.listeners.pageshow({ persisted }); await settle(); },
     polls: poll => requests.filter(r => r.url.startsWith(poll)),
     answer: async (status, body = {}) => { answer(status, body); await settle(); },
     // Move the fake clock on, firing every timer that falls due, in order.
@@ -236,6 +244,26 @@ test("a restore still running at the timeout: the panels poll anyway and the rai
   await page.answer(200, { tuned: true, lesson_id: 7 });
   assert.equal(page.note.hidden, true, "once the radios are on the lesson's frequencies, the note goes");
   assert.equal(page.polls("/api/decode").length, 1, "a late answer does not start a second poll loop");
+});
+
+test("a restore held up by a calibration says the radio is busy measuring, not tuning", async () => {
+  // The EM's ruling: past the timeout the rail asks the console's read-only gate state, and a
+  // restore waiting on a ppm calibration is shown as that, never as "Tuning…".
+  const page = lessonPage({ panels: ["decode"], gate: { restoring: true, waiting_on: "calibration" } });
+  await page.advance(TIMEOUT_MS);
+  assert.equal(page.note.hidden, false);
+  assert.deepEqual(page.note.lines, ["Radio busy", "measuring ppm"]);
+  for (const line of page.note.lines) assert.ok(line.length <= RAIL_CHARS, line);
+  assert.deepEqual(page.requests.filter(r => r.method === "GET" && r.url === "/api/tuning")
+                     .map(r => r.url), ["/api/tuning"]);
+  await page.answer(200, { tuned: true, lesson_id: 7 });
+  assert.equal(page.note.hidden, true);
+});
+
+test("a restore still tuning past the timeout says so once the console confirms it", async () => {
+  const page = lessonPage({ panels: ["decode"], gate: { restoring: true, waiting_on: null } });
+  await page.advance(TIMEOUT_MS);
+  assert.deepEqual(page.note.lines, ["Tuning…", ""]);
 });
 
 test("a refused restore says the radios were not retuned, with the reason, and the panels poll", async () => {
@@ -353,6 +381,26 @@ test("under the render proxy the refused restore says so and the panels poll at 
   assert.deepEqual(page.note.lines, ["Not retuned", "error 405"]);
   assert.equal(page.polls("/api/decode").length, 1);
   assert.equal(page.polls("/api/spectrum").length, 1);
+});
+
+test("a page shown again from the back/forward cache posts its restore again, stamped now", async () => {
+  // Review round 5: Back restored lesson A from the bfcache with no restore at all, so the
+  // receivers stayed where lesson B left them. The page's clock still maps the browser's timeline
+  // onto the console's (both ran on while it was frozen), so a stamp taken now is current, and
+  // the restore is not stale against B's.
+  let at = 1000;
+  const page = lessonPage({ panels: ["decode"], clock: () => ({ epoch: "5eed", at }) });
+  await page.answer(200, { tuned: true, lesson_id: 7 });
+  at = 9000;                                   // the learner went to B and came Back
+  await page.pageshow(false);                  // an ordinary load posts nothing more
+  assert.equal(page.requests.filter(r => r.method === "POST").length, 1);
+  await page.pageshow(true);
+  const posts = page.requests.filter(r => r.method === "POST").map(r => r.url);
+  assert.deepEqual(posts, ["/api/tuning?lesson_id=7&epoch=5eed&at=1000",
+                           "/api/tuning?lesson_id=7&epoch=5eed&at=9000"]);
+  await page.answer(409, { tuned: false, stale: true, reason: "a newer lesson was opened" });
+  assert.deepEqual(page.note.lines, ["Not retuned", "lesson changed"],
+                   "the second restore's answer is shown");
 });
 
 test("a page that names no lesson posts nothing and its panels poll at once", async () => {

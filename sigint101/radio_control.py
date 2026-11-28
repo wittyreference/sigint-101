@@ -62,6 +62,10 @@ class RadioArbiter:
 # How long a radio claim or a tune waits on a lesson's tuning restore before it is refused (C81).
 TUNING_WAIT_S = 2.0
 TUNING_REASON = "tuning the radios for this lesson"
+# What a wait says when a restore is held up by a ppm calibration, which holds the radio and the
+# launch permit for its capture: the calibration, as its panel names it, not a tuning.
+CALIBRATION_REASON = "measuring the clock error (ppm)"
+CALIBRATION = "ppm"
 
 # What a restore did with each receiver it is responsible for (C81).
 TUNED = "tuned"
@@ -127,6 +131,7 @@ class TuningGate:
         self._state = threading.Condition()
         self._restoring = 0
         self._claims = 0
+        self._calibrating = 0
         self._newest_restore = float("-inf")
         self._tuned_at = {}
         self.epoch = boot_epoch()
@@ -205,26 +210,48 @@ class TuningGate:
         """The deadline a claim's waits on restores share, across its retries."""
         return time.monotonic() + TUNING_WAIT_S
 
+    def busy_reason(self) -> str:
+        """Why a claim cannot start now: a calibration holding up the restore, or the tuning."""
+        with self._state:
+            return self._reason()
+
+    def _reason(self) -> str:
+        return CALIBRATION_REASON if self._calibrating else TUNING_REASON
+
+    def state(self) -> dict:
+        """What GET /api/tuning reports: is a restore under way, and is it waiting on a
+        calibration that holds the radio. Read-only."""
+        with self._state:
+            restoring = self._restoring > 0
+            return {"restoring": restoring,
+                    "waiting_on": "calibration" if restoring and self._calibrating else None}
+
     def wait_idle(self, until: float | None = None) -> None:
-        """Wait for every restore under way to finish, or raise TuningBusy at `until`."""
+        """Wait for every restore under way to finish, or raise TuningBusy at `until`, saying
+        what really holds the radio."""
         if until is None:
             until = self.claim_budget()
         with self._state:
             left = lambda: max(0.0, until - time.monotonic())  # noqa: E731
             if not self._state.wait_for(lambda: self._restoring == 0, timeout=left()):
-                raise TuningBusy(TUNING_REASON)
+                raise TuningBusy(self._reason())
 
-    def admit_claim(self) -> bool:
-        """Take the permit a claim launches under, unless a restore has begun (then False)."""
+    def admit_claim(self, owner: str | None = None) -> bool:
+        """Take the permit a claim launches under, unless a restore has begun (then False).
+        `owner` CALIBRATION marks a ppm calibration, so a wait behind it names it."""
         with self._state:
             if self._restoring:
                 return False
             self._claims += 1
+            if owner == CALIBRATION:
+                self._calibrating += 1
             return True
 
-    def end_claim(self) -> None:
+    def end_claim(self, owner: str | None = None) -> None:
         with self._state:
             self._claims -= 1
+            if owner == CALIBRATION:
+                self._calibrating -= 1
             self._state.notify_all()
 
 

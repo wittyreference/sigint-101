@@ -102,7 +102,6 @@ from .provenance import (
 from .radio_control import (
     CLAIM_QUEUE_WAIT_S,
     TUNED,
-    TUNING_REASON,
     RadioArbiter,
     ReceptionSink,
     Superseded,
@@ -582,6 +581,38 @@ class _Arrival:
         await self.app(scope, receive, send)
 
 
+class _UncachedPages:
+    """Serves every HTML page `Cache-Control: no-store` (C81).
+
+    Each page carries the console's clock (base.html), which its learner actions are stamped on.
+    A page the browser kept in its HTTP cache would come back on Back with its old clock, and
+    stamp its actions as long ago as the learner was away: its lesson's restore was then refused
+    as stale on the lesson the learner was on. Uncached, Back fetches the page again, with a
+    fresh clock, and the page posts its restore. A response header writes nothing.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_uncached(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                names = {name.lower() for name, _ in headers}
+                html = any(name.lower() == b"content-type" and value.startswith(b"text/html")
+                           for name, value in headers)
+                if html and b"cache-control" not in names:
+                    headers.append((b"cache-control", b"no-store"))
+                    message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_uncached)
+
+
 def arrival_ms(request) -> float | None:
     """When the request reached the console (_Arrival), or None if nothing noted it."""
     return getattr(request.state, "arrived_ms", None)
@@ -712,6 +743,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
     app.add_middleware(_Arrival)
+    app.add_middleware(_UncachedPages)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.exception_handler(StarletteHTTPException)
@@ -1265,6 +1297,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "caution": LAW_CAUTION, "sections": LAW_SECTIONS},
         )
 
+    @app.get("/api/tuning")
+    def lesson_tuning_state():
+        """Whether a lesson's restore is under way, and whether it waits on a ppm calibration.
+
+        Read-only: the lesson page asks once its panels stop waiting for a slow restore, so its
+        rail names what really holds the radio ("measuring", not "tuning").
+        """
+        return app.state.tuning_gate.state()
+
     @app.post("/api/tuning")
     def lesson_tuning(request: Request, lesson_id: int, epoch: str | None = None,
                       at: str | None = None):
@@ -1754,7 +1795,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 # A claim a restore sent back tries again only while its deadline lasts, even if
                 # the restore has ended meanwhile: its time to wait on restores is spent.
                 if sent_back and gate.past(budget):
-                    raise refusal(TUNING_REASON)
+                    raise refusal(gate.busy_reason())
                 if reason := calibration.release_failure():
                     raise refusal(reason)
                 for consumer in consumers.values():
@@ -1783,7 +1824,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     # that began while this claim queued sends it back, letting the radio go, to
                     # wait for the restore and try again. ppm holds the permit for its whole
                     # capture, as it holds the radio, so a restore waits for it to finish.
-                    permitted = gate.admit_claim()
+                    permitted = gate.admit_claim(target)
                     sent_back = not permitted
                     if permitted:
                         try:
@@ -1801,7 +1842,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 receiver.resume()
                             return start() if start is not None else None
                         finally:
-                            gate.end_claim()
+                            gate.end_claim(target)
             finally:
                 if intent is not None:
                     receiver.discard_start(intent)

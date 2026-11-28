@@ -1290,9 +1290,9 @@ def test_a_queued_claim_is_refused_at_its_deadline_even_if_the_restore_has_just_
             with _slow_restore(client) as (held, restore):
                 real_admit = gate.admit_claim
 
-                def admit():
+                def admit(*args):
                     # Sent back by the restore, which then ends before the claim tries again.
-                    if real_admit():
+                    if real_admit(*args):
                         return True
                     held.release.set()
                     restore.join(JOIN_S)
@@ -1308,6 +1308,66 @@ def test_a_queued_claim_is_refused_at_its_deadline_even_if_the_restore_has_just_
         assert answer.status_code == 503
         assert answer.json()["reason"] == "tuning the radios for this lesson"
         assert spawned == []
+
+
+# --- after round 5 (the EM's ruling): a calibration is named for what it is -------------------
+
+CALIBRATION_REASON = "measuring the clock error (ppm)"
+
+
+def test_a_poll_behind_a_calibration_names_the_calibration_not_a_tuning(tmp_path, monkeypatch):
+    # A restore that begins during a ppm calibration waits for it (the calibration holds the
+    # launch permit for its capture). Meanwhile the radio is held by the calibration, not by any
+    # tuning, so a poll that gives up says so, and the gate's read-only state says what the
+    # restore waits on. Show only what really happened.
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.3)
+    measuring, finish = threading.Event(), threading.Event()
+    spawned = []
+
+    def measure(**_):
+        measuring.set()
+        assert finish.wait(JOIN_S), "the held calibration was never released"
+        return {"ppm": 1.0, "reason": None}
+
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs, ppm_measure=measure) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
+        assert client.get("/api/tuning").json() == {"restoring": False, "waiting_on": None}
+        ppm = _Request(lambda: client.post("/api/ppm/measure"))
+        ppm.start()
+        try:
+            assert measuring.wait(JOIN_S)
+            restore = _Request(lambda: client.post("/api/tuning?lesson_id=1"))
+            restore.start()
+            time.sleep(0.2)
+            assert client.get("/api/tuning").json() == {"restoring": True,
+                                                        "waiting_on": "calibration"}
+            poll = client.get("/api/aprs")
+            assert poll.status_code == 503
+            assert poll.json()["reason"] == CALIBRATION_REASON
+            assert spawned == []
+        finally:
+            finish.set()
+        assert ppm.finish().status_code == 200
+        assert restore.finish().json() == {"tuned": True, "lesson_id": 1}
+        assert client.get("/api/tuning").json() == {"restoring": False, "waiting_on": None}
+        assert client.get("/api/aprs").status_code == 200
+        assert spawned == [144_390_000]
+
+
+def test_every_page_is_served_uncached_so_back_renders_a_fresh_clock(tmp_path):
+    # A page the browser served from its HTTP cache on Back still held its old clock meta, so its
+    # stamps lagged by as long as the learner had been away, and its restore was refused as stale
+    # on the lesson the learner was on. Every page is now fetched again on Back, with a fresh
+    # clock, and posts its restore. Saying so changes nothing: the GET stays read-only.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        for url in ("/lesson/1", "/lesson/2", "/operate/waterfall", "/"):
+            resp = client.get(url)
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/html")
+            assert "no-store" in resp.headers.get("cache-control", ""), url
 
 
 # --- the reception log --------------------------------------------------------------------------

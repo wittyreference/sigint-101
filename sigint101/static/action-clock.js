@@ -28,6 +28,18 @@
     return nav && nav.responseStart > 0 ? perf.timeOrigin + nav.responseStart : null;
   }
 
+  // Whether this document came out of the browser's cache rather than from the console: Back or
+  // Forward served from the HTTP cache, or a cache delivery. Its clock meta is from its first
+  // render, however long ago, so it cannot be mapped; its requests are ordered by arrival. (The
+  // console sends every page no-store, so this is the fallback, not the rule.)
+  function fromCache(perf) {
+    var entries = perf.getEntriesByType ? perf.getEntriesByType("navigation") : [];
+    var nav = entries && entries[0];
+    if (!nav) return false;
+    if (nav.deliveryType === "cache") return true;
+    return nav.type === "back_forward" && nav.transferSize === 0;
+  }
+
   // An action's stamp, on the console's clock: its time at render, plus the browser time since
   // the response arrived. The console rendered the page just before it arrived, so every tab maps
   // the shared timeline onto the console's clock the same way, off only by the network's delivery
@@ -55,12 +67,13 @@
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = { parseAnchor: parseAnchor, browserNow: browserNow, receivedAt: receivedAt,
-                       makeClock: makeClock, stamped: stamped };
+                       fromCache: fromCache, makeClock: makeClock, stamped: stamped };
     return;
   }
 
   var meta = document.querySelector('meta[name="sigint101-clock"]');
-  var clock = makeClock(parseAnchor(meta && meta.getAttribute("content")),
+  var anchor = fromCache(performance) ? null : parseAnchor(meta && meta.getAttribute("content"));
+  var clock = makeClock(anchor,
                         function () { return browserNow(performance); }, receivedAt(performance));
   root.ActionClock = { stamp: clock.stamp,
                        stamped: function (body) { return stamped(body, clock); } };

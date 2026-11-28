@@ -80,34 +80,66 @@
     return ["Not retuned", typeof reason === "string" && reason ? reason : "error " + res.status];
   }
 
-  // The learner's action, stamped on the console's clock (action-clock.js), so a request that
-  // reaches the console late is ordered by when the learner opened the lesson.
-  var stamp = root.ActionClock && root.ActionClock.stamp();
-  var url = "/api/tuning?lesson_id=" + encodeURIComponent(lessonId) +
-    (stamp ? "&epoch=" + encodeURIComponent(stamp.epoch) + "&at=" + stamp.at : "");
+  // Past the timeout the rail says what the console is doing: a restore held up by a ppm
+  // calibration (which holds the radio for its capture) is "measuring", never "Tuning…". The
+  // console's gate state is a read-only GET; until it answers, or if it cannot, "Tuning…".
+  function sayWaiting(isCurrent) {
+    say("Tuning…");
+    fetch("/api/tuning", { cache: "no-store" })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (state) {
+        if (isCurrent() && state && state.waiting_on === "calibration") {
+          say("Radio busy", "measuring ppm");
+        }
+      }, function () { /* the restore's own answer will say what happened */ });
+  }
 
-  var answered = false;
   var open;
   var ready = new Promise(function (resolve) { open = resolve; });
+  var latest = 0;
 
-  // The page goes on as soon as this tag has run; nothing here waits on the console. The panels
-  // below hold their first poll on `ready`, which opens when the restore answers or, failing
-  // that, at the timeout. A panel that polls after the timeout reads wherever its receiver really
-  // is, and the note says the radios are still being tuned until the console answers.
-  var timer = setTimeout(function () {
-    if (!answered) say("Tuning…");
-    open();
-  }, TIMEOUT_MS);
+  // One restore: the learner's action, stamped on the console's clock (action-clock.js), so a
+  // request that reaches the console late is ordered by when the learner opened the lesson. The
+  // page goes on as soon as it is sent; nothing here waits on the console. The panels below hold
+  // their first poll on `ready`, which opens when the restore answers or, failing that, at the
+  // timeout. Only the newest restore's answer is shown.
+  function restore() {
+    var run = ++latest;
+    var current = function () { return run === latest; };
+    var answered = false;
+    var stamp = root.ActionClock && root.ActionClock.stamp();
+    var url = "/api/tuning?lesson_id=" + encodeURIComponent(lessonId) +
+      (stamp ? "&epoch=" + encodeURIComponent(stamp.epoch) + "&at=" + stamp.at : "");
 
-  fetch(url, { method: "POST", cache: "no-store" })
-    .then(outcome, function () { return ["Not retuned", "no console"]; })
-    .then(function (problem) {
-      answered = true;
-      clearTimeout(timer);
-      if (problem) say(problem[0], problem[1]);
-      else clear();
+    var timer = setTimeout(function () {
+      if (!answered && current()) sayWaiting(function () { return !answered && current(); });
       open();
+    }, TIMEOUT_MS);
+
+    fetch(url, { method: "POST", cache: "no-store" })
+      .then(outcome, function () { return ["Not retuned", "no console"]; })
+      .then(function (problem) {
+        answered = true;
+        clearTimeout(timer);
+        if (current()) {
+          if (problem) say(problem[0], problem[1]);
+          else clear();
+        }
+        open();
+      });
+  }
+
+  restore();
+
+  // Shown again from the back/forward cache (Back, after another lesson retuned the radios): the
+  // page is as it was left, with no load to post its restore, so it posts it again. Its clock
+  // still maps the browser's timeline onto the console's (both ran on while it was frozen), so
+  // the stamp taken now is current, and the restore is newer than the other lesson's.
+  if (root.addEventListener) {
+    root.addEventListener("pageshow", function (event) {
+      if (event && event.persisted) restore();
     });
+  }
 
   root.LessonTuning = { ready: ready };
 })(this);

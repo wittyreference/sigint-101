@@ -66,6 +66,21 @@ test("a later action always stamps later, so the console can order a page's acti
   assert.deepEqual([...stamps].sort((a, b) => a - b), stamps);
 });
 
+test("a document the browser served from its cache stamps nothing, so arrival orders it", () => {
+  // Review round 5: Back served lesson A from the HTTP cache with its old clock meta, so its
+  // stamps lagged by the time the learner was away. A cached document cannot be mapped, so its
+  // requests are ordered by their arrival instead (the console sends pages no-store anyway).
+  const perf = (nav) => ({ timeOrigin: 0, now: () => 0, getEntriesByType: () => [nav] });
+  assert.equal(clock.fromCache(perf({ type: "back_forward", transferSize: 0, responseStart: 5 })),
+               true);
+  assert.equal(clock.fromCache(perf({ type: "back_forward", transferSize: 4200, responseStart: 5 })),
+               false);
+  assert.equal(clock.fromCache(perf({ type: "navigate", transferSize: 4200, responseStart: 5 })),
+               false);
+  assert.equal(clock.fromCache(perf({ type: "navigate", deliveryType: "cache", transferSize: 0,
+                                      responseStart: 5 })), true);
+});
+
 test("a page without the clock meta stamps nothing; the console then uses arrival order", () => {
   assert.equal(clock.makeClock(null, () => 0).stamp(), null);
 });
