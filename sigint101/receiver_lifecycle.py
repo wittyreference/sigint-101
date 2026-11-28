@@ -434,6 +434,7 @@ class SupervisedReceiver:
             except PartialLaunch as exc:
                 launch_failure = exc
                 proc = exc.proc
+            thread_failure = None
             with self._life:
                 self._run = run = intent.run = Run(proc, intent.number, self.watch, intent.args)
                 self.watch.spawned(proc)
@@ -444,10 +445,25 @@ class SupervisedReceiver:
                 if cancelled:
                     run.cancel.set()
                     self._fence(run)
-                if self._read is not None and launch_failure is None:
-                    run.reader = daemon(self._read_run, run,
-                                        name=f"sigint101-{self.watch.tool}-reader")
-                daemon(self._supervise, run, name=f"sigint101-{self.watch.tool}-supervisor")
+                register_owned_run(
+                    OwnedRun(
+                        name=self.watch.tool,
+                        run_id=run,
+                        stop=lambda r=run: self.stop_owned_run(r),
+                    )
+                )
+                try:
+                    if self._read is not None and launch_failure is None:
+                        run.reader = daemon(self._read_run, run,
+                                            name=f"sigint101-{self.watch.tool}-reader")
+                    daemon(self._supervise, run, name=f"sigint101-{self.watch.tool}-supervisor")
+                except BaseException as exc:
+                    thread_failure = exc
+                    run.cancel.set()
+                    self._fence(run)
+            if thread_failure is not None:
+                self._settle_unsupervised_run(run)
+                raise thread_failure
             if cancelled:
                 self._wait_physical(run, None)
                 if launch_failure is not None:
@@ -457,15 +473,49 @@ class SupervisedReceiver:
         finally:
             self.discard_start(intent)
 
+    def _settle_unsupervised_run(self, run):
+        """Kill and settle a newly spawned child when its reader or supervisor failed to start."""
+        try:
+            self._close_transport(run.proc)
+        except Exception as exc:
+            run.failure = f"{run.watch.tool} transport could not close: {exc}"
+        reaped = False
+        try:
+            result = self._stop_run(run)
+            reaped = self._apply_stop_result(run, result)
+        except Exception as exc:
+            run.failure = f"{run.watch.tool} cleanup failed: {exc}"
+        finally:
+            self._fence(run)
+            try:
+                self._close_transport(run.proc)
+            except Exception as exc:
+                reaped = False
+                run.failure = f"{run.watch.tool} transport could not close: {exc}"
+            if run.reader is not None:
+                run.reader.join(timeout=self.STOP_WAIT_S)
+            run.reaped = reaped
+            run.reap_failed = not reaped
+            if reaped:
+                run.failure = None
+            run.diagnosed.set()
+            self._notify_physical(run)
+            run.ready.set()
+            run.complete.set()
+            with self._reports_lock:
+                self._reports.discard(run)
+
     def start(self):
         self.launch_start(self.prepare_start())
 
     def stop_owned_run(self, expected_run) -> str | None:
-        """Atomically stop this receiver only if expected_run is still current."""
+        """Atomically stop this receiver only if expected_run is still current and active."""
         if expected_run is None:
             return None
         with self._life:
             if self._run is not expected_run:
+                return None
+            if expected_run.ready.is_set() or expected_run.reaped:
                 return None
             run, intent, retry = self._cancel()
         self._wait_physical(run, intent, retry)

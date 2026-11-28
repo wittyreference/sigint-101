@@ -645,9 +645,9 @@ class Sweeper:
         return register_owned_run(handle)
 
     def stop_owned_run(self, expected: tuple[int, object]) -> str | None:
-        """Atomically stop rtl_power only if expected (run_gen, proc) is still current."""
+        """Atomically stop rtl_power only if expected (run_gen, proc) is still current and alive."""
         with self._life:
-            if (self._run, self._proc) != expected:
+            if (self._run, self._proc) != expected or not self.running:
                 return None
             self._stop_locked()
             if reason := self.release_failure(pending=True):

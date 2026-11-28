@@ -2651,3 +2651,302 @@ def test_r6_merged_supervised_decoder_borrowed_and_owned_compare_and_stop(tmp_pa
             assert rtl.running
     finally:
         rtl.shutdown()
+
+
+def test_f5_stop_owned_run_does_not_cancel_pending_start_after_run_ends(tmp_path):
+    """F5: A's run ends by itself, B prepares a start, then A's cleanup must not cancel B."""
+    import io
+    import os
+    import subprocess
+
+    from sigint101.decode import Decoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.receiver_lifecycle import OwnedRun
+    from sigint101.spectrum import Sweeper
+
+    children: list = []
+
+    class ExitableChild:
+        def __init__(self, args):
+            self.args = list(args)
+            self.pid = 7700 + len(children)
+            self.returncode = None
+            self.stopped = threading.Event()
+            self.stdout = self
+            self.stderr = io.StringIO("")
+            self._r, self._w = os.pipe()
+            self._rf = os.fdopen(self._r, "r", encoding="utf-8")
+
+        def __iter__(self):
+            return iter(self._rf)
+
+        def close(self):
+            try:
+                self._rf.close()
+            except OSError:
+                pass
+
+        def finish_self(self, code=0):
+            self.returncode = code
+            try:
+                os.close(self._w)
+            except OSError:
+                pass
+            self.stopped.set()
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.finish_self(-15)
+
+        def kill(self):
+            self.finish_self(-9)
+
+        def wait(self, timeout=None):
+            if not self.stopped.wait(timeout=timeout):
+                raise subprocess.TimeoutExpired(self.args, timeout or 0)
+            return self.returncode
+
+    def spawn_rtl(cmd, **_kw):
+        ch = ExitableChild(cmd)
+        children.append(ch)
+        return ch
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    rtl = Decoder(
+        spawn=spawn_rtl, which=lambda n: n, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    try:
+        # 1. Start A owns run A.
+        handle_a = rtl.start_owned()
+        assert isinstance(handle_a, OwnedRun)
+        run_a = handle_a.run_id
+        assert len(children) == 1
+
+        # 2. A's child exits by itself and is reaped while _run still points at run A.
+        children[0].finish_self(0)
+        assert run_a.ready.wait(timeout=3.0), "run A did not settle after self-exit"
+        assert run_a.reaped is True
+        assert rtl._run is run_a
+        # Clear A's unreported-death notice and advance watch clock past backoff so B can start.
+        run_a.unreported_death = False
+        rtl.error = None
+        rtl.watch.clock = lambda: time.monotonic() + 600.0
+
+        # 3. Consumer B prepares a start (self._intent is now B's StartIntent).
+        intent_b = rtl.prepare_start()
+        assert intent_b is not None
+        assert rtl._intent is intent_b
+
+        # 4. A's failure cleanup runs stop_owned_run(run_a) — must return None and spare B!
+        assert handle_a.stop() is None
+        assert not intent_b.cancelled, "A's stop_owned_run cancelled B's pending StartIntent"
+        assert rtl._intent is intent_b
+
+        # 5. B finishes launching and runs cleanly.
+        rtl.launch_start(intent_b)
+        assert len(children) == 2
+        assert children[1].poll() is None
+        assert rtl.running
+    finally:
+        rtl.shutdown()
+
+    # 6. Sweeper: when A's child ended by itself, stop_owned_run returns None without _stop_locked.
+    sweeper_children: list = []
+
+    class SweeperChild:
+        def __init__(self, args):
+            self.args = list(args)
+            self.pid = 7800 + len(sweeper_children)
+            self.returncode = None
+            self.stdout = iter(())
+            self.stderr = io.StringIO("")
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    def spawn_sweep(cmd, **_kw):
+        ch = SweeperChild(cmd)
+        sweeper_children.append(ch)
+        return ch
+
+    sweeper = Sweeper(
+        spawn=spawn_sweep, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    try:
+        sh = sweeper.start_owned()
+        assert isinstance(sh, OwnedRun)
+        sweeper_children[0].returncode = 0
+        stop_calls: list[int] = []
+        orig_stop = sweeper._stop_locked
+
+        def spy_stop():
+            stop_calls.append(1)
+            return orig_stop()
+
+        sweeper._stop_locked = spy_stop
+        assert sh.stop() is None
+        assert stop_calls == [], (
+            "Sweeper.stop_owned_run called _stop_locked on an already-ended run"
+        )
+    finally:
+        sweeper.stop()
+
+
+def test_f6_launch_start_registers_owned_run_and_kills_child_when_daemon_fails(monkeypatch):
+    """F6: register OwnedRun in launch_start when intent.run is set; kill child if daemon fails."""
+    import io
+
+    import sigint101.receiver_lifecycle as rl_mod
+    from sigint101.decode import Decoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.receiver_lifecycle import OwnedRun, owned_run_scope
+
+    children: list = []
+
+    class StubChild:
+        def __init__(self, args):
+            self.args = list(args)
+            self.pid = 7900 + len(children)
+            self.returncode = None
+            self.killed = False
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.killed = True
+            self.returncode = -15
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    def spawn_rtl(cmd, **_kw):
+        ch = StubChild(cmd)
+        children.append(ch)
+        return ch
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    rtl = Decoder(
+        spawn=spawn_rtl, which=lambda n: n, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+
+    real_daemon = rl_mod.daemon
+
+    def fail_supervisor(target, *args, name):
+        if name.endswith("-supervisor"):
+            raise RuntimeError("cannot start supervisor thread")
+        return real_daemon(target, *args, name=name)
+
+    monkeypatch.setattr(rl_mod, "daemon", fail_supervisor)
+
+    registered: list[OwnedRun] = []
+    try:
+        with owned_run_scope(registered.append):
+            with pytest.raises(RuntimeError, match="cannot start supervisor thread"):
+                rtl.start_owned()
+        assert len(children) == 1
+        assert len(registered) == 1, (
+            "OwnedRun was not registered in launch_start when intent.run was set"
+        )
+        assert registered[0].run_id is rtl._run
+        assert children[0].poll() is not None, (
+            "child was left alive when daemon() failed in launch_start"
+        )
+        assert rtl._run.ready.is_set(), "failed run did not settle ready after daemon() failure"
+        assert registered[0].stop() is None
+    finally:
+        monkeypatch.setattr(rl_mod, "daemon", real_daemon)
+        rtl.shutdown()
+
+
+def test_f7_claim_sdr_start_none_does_not_invoke_start_owned_and_no_stop_stub(tmp_path):
+    """F7: _claim_sdr(target, start=None) must not invoke start_owned; unused _stop_stub is gone."""
+    from pathlib import Path
+
+    from sigint101.hardware import RadioProbe, RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=lambda cmd, **_kw: (_ for _ in ()).throw(AssertionError("should not spawn")),
+        radio_present=lambda: True,
+        list_devices=lambda: devs,
+    )
+    start_owned_calls: list[str] = []
+    orig_start_owned = sweeper.start_owned
+
+    def spy_start_owned(*args, **kwargs):
+        start_owned_calls.append("called")
+        return orig_start_owned(*args, **kwargs)
+
+    sweeper.start_owned = spy_start_owned
+
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=lambda: RadioProbe(True, "lsusb", "test"),
+        sweeper_factory=lambda: sweeper,
+    )
+    with TestClient(app):
+        handle = app.state.claim_sdr("sweeper", start=None)
+        assert handle is None
+        assert start_owned_calls == [], "_claim_sdr invoked start_owned when start is None"
+        assert not sweeper.running
+
+    app_source = Path(app_mod.__file__).read_text(encoding="utf-8")
+    assert "def _stop_stub" not in app_source, "unused _stop_stub should be deleted from app.py"
+
+
+def test_f8_base_exception_logs_cleanup_error_and_documents_calling_thread(tmp_path, caplog):
+    """F8: non-Exception BaseException logs cleanup_err; _start_attempt documents calling thread."""
+    import logging
+
+    from sigint101.hardware import RadioProbe
+    from sigint101.receiver_lifecycle import OwnedRun
+
+    class _AbortNow(BaseException):
+        pass
+
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=lambda: RadioProbe(True, "lsusb", "test"),
+    )
+
+    def launch_and_abort():
+        handle = OwnedRun(
+            name="test_rx",
+            run_id="run-1",
+            stop=lambda: "test_rx survived kill during abort",
+        )
+        from sigint101.receiver_lifecycle import register_owned_run
+
+        register_owned_run(handle)
+        raise _AbortNow("stop now")
+
+    with TestClient(app):
+        doc = app.state.start_attempt.__doc__ or ""
+        assert "calling thread" in doc.lower(), (
+            "_start_attempt must document calling-thread launches"
+        )
+        with caplog.at_level(logging.ERROR, logger="sigint101.app"):
+            with pytest.raises(_AbortNow):
+                app.state.start_attempt(challenges.CHALLENGE_KIND, 4, 900, launch=launch_and_abort)
+        assert any("test_rx survived kill during abort" in rec.message for rec in caplog.records), (
+            "cleanup_err on non-Exception BaseException was dropped instead of logged"
+        )

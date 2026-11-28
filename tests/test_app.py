@@ -94,9 +94,13 @@ class _StubSweeper:
     """
 
     def __init__(self, rows, *, proc=None):
+        import threading
+
         self._rows = list(rows)
         self._started = False
         self._proc = proc
+        self._run = 0
+        self._life = threading.RLock()
         self.low, self.high, self.bin_size, self.gain = 88_000_000, 108_000_000, 125_000, None
 
     @property
@@ -104,9 +108,33 @@ class _StubSweeper:
         return self._started and (self._proc is None or self._proc.poll() is None)
 
     def start(self):
-        self._started = True
-        if self._proc is None or self._proc.poll() is not None:
-            self._proc = Child(self.command())
+        with self._life:
+            self._started = True
+            if self._proc is None or self._proc.poll() is not None:
+                self._proc = Child(self.command())
+                self._run += 1
+
+    def start_owned(self, *, name: str = "sweeper"):
+        from sigint101.receiver_lifecycle import OwnedRun, register_owned_run
+
+        with self._life:
+            if self.running:
+                return None
+            self.start()
+            run_id = (self._run, self._proc)
+        handle = OwnedRun(
+            name=name,
+            run_id=run_id,
+            stop=lambda rid=run_id: self.stop_owned_run(rid),
+        )
+        return register_owned_run(handle)
+
+    def stop_owned_run(self, expected):
+        with self._life:
+            if (self._run, self._proc) != expected or not self.running:
+                return None
+            self.stop()
+            return None
 
     def command(self):
         return ["rtl_power", "-f", f"{self.low}:{self.high}:{self.bin_size}"]

@@ -2130,7 +2130,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                             if (
                                 receiver is not None
                                 and hasattr(receiver, "start_owned")
-                                and (start is None or start == getattr(receiver, "start", None))
+                                and start is not None
+                                and start == getattr(receiver, "start", None)
                             ):
                                 had, prev = _bump_rx_start_order(api)
                                 try:
@@ -2145,57 +2146,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 )
                             if start is None:
                                 return None, None
-                            if receiver is not None:
-                                was_running = bool(getattr(receiver, "running", False))
-                                prev_proc = getattr(receiver, "_proc", None)
-                                had, prev = _bump_rx_start_order(api)
-                                try:
-                                    result = start()
-                                except BaseException:
-                                    _revert_rx_start_order(api, had, prev)
-                                    raise
-                                cur_proc = getattr(receiver, "_proc", None)
-                                if (
-                                    not was_running
-                                    and getattr(receiver, "running", False)
-                                    and cur_proc is not None
-                                    and cur_proc is not prev_proc
-                                ):
-                                    def _stop_stub(
-                                        rx=receiver,
-                                        expected_proc=cur_proc,
-                                        label=target,
-                                    ) -> str | None:
-                                        if (
-                                            not getattr(rx, "running", False)
-                                            or getattr(rx, "_proc", None) is not expected_proc
-                                        ):
-                                            return None
-                                        stop_fn = (
-                                            getattr(rx, "stop", None)
-                                            or getattr(rx, "release", None)
-                                        )
-                                        if stop_fn is not None:
-                                            stop_fn()
-                                        failure = getattr(rx, "release_failure", None)
-                                        if failure and (reason := failure(pending=True)):
-                                            return reason
-                                        if (
-                                            getattr(rx, "running", False)
-                                            and getattr(rx, "_proc", None) is expected_proc
-                                        ):
-                                            return f"{label} did not stop after Start failed"
-                                        return None
-
-                                    handle = OwnedRun(
-                                        name=target,
-                                        run_id=cur_proc,
-                                        stop=_stop_stub,
-                                        result=result,
-                                    )
-                                    _record_owned_claim(handle)
-                                    return result, handle
-                                return result, None
                             had, prev = _bump_rx_start_order(api)
                             try:
                                 result = start()
@@ -3203,6 +3153,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         launch=None,
         cleanup=None,
     ) -> tuple[float, str | None]:
+        """Stage a new attempt and log its start event, stopping any owned runs on failure.
+
+        `launch` runs synchronously in the calling thread inside `owned_run_scope`, so
+        ContextVar registration captures every `OwnedRun` acquired during launch. Callers must
+        not launch receivers from an unpropagated background thread.
+        """
         label = kind.display_label
         start_error = None
         extra_cols = dict(extra or {})
@@ -3236,7 +3192,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
         def _register_handle(handle: OwnedRun) -> None:
             if not any(
-                existing.name == handle.name and existing.run_id == handle.run_id
+                existing.run_id is handle.run_id
+                or (existing.name == handle.name and existing.run_id == handle.run_id)
                 for existing in owned_handles
             ):
                 owned_handles.append(handle)
@@ -3384,16 +3341,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if not succeeded and (extra_cleanups or owned_handles):
             cleanup_err = _run_owned_cleanup()
             if caught_exc is not None:
-                if isinstance(caught_exc, Exception) and cleanup_err:
-                    if caught_exc.args and isinstance(caught_exc.args[0], str):
-                        caught_exc.args = (
-                            f"{caught_exc.args[0]}; {cleanup_err}",
-                            *caught_exc.args[1:],
-                        )
+                if cleanup_err:
+                    if isinstance(caught_exc, Exception):
+                        if caught_exc.args and isinstance(caught_exc.args[0], str):
+                            caught_exc.args = (
+                                f"{caught_exc.args[0]}; {cleanup_err}",
+                                *caught_exc.args[1:],
+                            )
+                        else:
+                            caught_exc.args = (*caught_exc.args, cleanup_err)
+                        if hasattr(caught_exc, "add_note"):
+                            caught_exc.add_note(cleanup_err)
                     else:
-                        caught_exc.args = (*caught_exc.args, cleanup_err)
-                    if hasattr(caught_exc, "add_note"):
-                        caught_exc.add_note(cleanup_err)
+                        logging.getLogger(__name__).error(
+                            "Owned-run cleanup failed while unwinding %s during %s start: %s",
+                            type(caught_exc).__name__,
+                            label,
+                            cleanup_err,
+                        )
             elif cleanup_err:
                 start_error = f"{start_error}; {cleanup_err}"
                 with reception_lock:
