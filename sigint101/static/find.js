@@ -9,6 +9,7 @@
     active: { word: "HUNTING", cls: "find-mark find-mark--active" },
     passed: { word: "FOUND", cls: "find-mark find-mark--passed" },
     expired: { word: "TIME UP", cls: "find-mark find-mark--expired" },
+    unreadable: { word: "UNREADABLE", cls: "find-mark find-mark--unreadable" },
   };
 
   var START_LABELS = {
@@ -16,6 +17,7 @@
     active: "Restart",
     passed: "Try again",
     expired: "Start again",
+    unreadable: "Unavailable",
   };
 
   var INSTRUMENT_LABELS = {
@@ -31,7 +33,7 @@
   };
 
   function markFor(state) {
-    return MARKS[state] || MARKS.idle;
+    return MARKS[state] || MARKS.unreadable;
   }
 
   function startLabel(state) {
@@ -143,6 +145,7 @@
       }
       if (startBtn) {
         startBtn.textContent = startLabel(currentState);
+        startBtn.disabled = currentState === "unreadable";
       }
       if (evidenceEl) {
         evidenceEl.textContent = evidenceLine(body);
@@ -157,12 +160,13 @@
       var myGen = generation;
       fetch("/api/challenges/" + unitId)
         .then(function (resp) {
-          if (!resp || !resp.ok) return null;
-          return resp.json();
+          if (!resp) return null;
+          if (!resp.ok && resp.status !== 503 && resp.status !== 500) return null;
+          return resp.json().catch(function () { return null; });
         })
         .then(function (body) {
           if (myGen !== generation) return;
-          if (body) render(body);
+          if (body && body.state) render(body);
         })
         .catch(function () { /* keep last known state until next poll */ })
         .finally(schedulePoll);

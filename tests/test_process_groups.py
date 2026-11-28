@@ -346,6 +346,114 @@ def test_owned_group_can_retry_kill_after_public_poll_error(monkeypatch, guard_e
         tool.wait(timeout=3)
 
 
+_SAFE_SIGNALS = {sig.name for sig in signal.Signals} - {"SIGCHLD", "SIGCLD"}
+_RAW_WAIT_NAMES = frozenset({"wait", "waitpid", "waitid", "wait3", "wait4"})
+_FORBIDDEN_METHOD_ATTRS = frozenset({
+    "subprocess_exec", "subprocess_shell",
+    "set_child_watcher", "get_child_watcher",
+    "add_signal_handler",
+})
+_FORBIDDEN_MODULE_ATTRS = {
+    "os": _RAW_WAIT_NAMES,
+    "signal": frozenset({"signal"}),
+    "asyncio": frozenset({
+        "create_subprocess_exec", "create_subprocess_shell",
+        "get_child_watcher", "set_child_watcher",
+    }),
+}
+
+
+def _const_str(node):
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _resolved_call_name(func, names):
+    name, dot, suffix = ast.unparse(func).partition(".")
+    return names.get(name, name) + dot + suffix
+
+
+def _imported_module_name(node, names):
+    """Resolve a module expression (`os`, `syscalls`, `__import__('os')`) to its top-level name."""
+    if isinstance(node, ast.Name):
+        return names.get(node.id, node.id).partition(".")[0]
+    if isinstance(node, ast.Call):
+        callee = _resolved_call_name(node.func, names)
+        if callee in ("__import__", "builtins.__import__"):
+            mod_arg = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "name"), None)
+            mod = _const_str(mod_arg)
+            return mod.partition(".")[0] if mod is not None else None
+    return None
+
+
+def _is_forbidden_indirection(node, call, names):
+    if call in ("__import__", "builtins.__import__"):
+        mod_arg = node.args[0] if node.args else next(
+            (kw.value for kw in node.keywords if kw.arg == "name"), None)
+        mod = _const_str(mod_arg)
+        return mod is None or mod.partition(".")[0] in _FORBIDDEN_MODULE_ATTRS
+    if call in ("getattr", "builtins.getattr") and len(node.args) >= 2:
+        attr = _const_str(node.args[1])
+        if attr in _FORBIDDEN_METHOD_ATTRS:
+            return True
+        target_mod = _imported_module_name(node.args[0], names)
+        if target_mod in _FORBIDDEN_MODULE_ATTRS:
+            return attr is None or attr in _FORBIDDEN_MODULE_ATTRS[target_mod]
+    return False
+
+
+def _signal_module_is_unshadowed(tree):
+    """True only when `signal` is imported as the stdlib module and never rebound or shadowed."""
+    imported = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.partition(".")[0]
+                if bound == "signal":
+                    if alias.name == "signal" and alias.asname is None:
+                        imported = True
+                    else:
+                        return False
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if (alias.asname or alias.name) == "signal" or (
+                        node.module == "signal" and alias.name == "*"):
+                    return False
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if node.id == "signal":
+                return False
+        elif isinstance(node, ast.arg) and node.arg == "signal":
+            return False
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == "signal":
+                return False
+        elif isinstance(node, ast.ExceptHandler) and node.name == "signal":
+            return False
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == "signal":
+            return False
+    return imported
+
+
+def _is_explicit_non_chld_signal(arg, *, signal_unshadowed):
+    """True only when `arg` is an explicit `signal.<CONST>` for an unshadowed `signal` import."""
+    return (
+        signal_unshadowed
+        and isinstance(arg, ast.Attribute)
+        and isinstance(arg.value, ast.Name)
+        and arg.value.id == "signal"
+        and arg.attr in _SAFE_SIGNALS
+    )
+
+
+def _signal_arg(node):
+    if node.args:
+        return node.args[0]
+    for keyword in node.keywords:
+        if keyword.arg in ("signalnum", "sig"):
+            return keyword.value
+    return None
+
+
 def _foreign_reapers(source, *, childproc_source=False):
     """Find raw waiters and asyncio hooks that can bypass an owned GroupPopen."""
     tree = ast.parse(source)
@@ -353,9 +461,12 @@ def _foreign_reapers(source, *, childproc_source=False):
         "os.wait", "os.waitpid", "os.waitid", "os.wait3", "os.wait4",
         "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell",
         "asyncio.get_child_watcher", "asyncio.set_child_watcher",
+        "subprocess_exec", "subprocess_shell",
     }
     names = {}
     allowed = set()
+    os_star = False
+    signal_star = False
     if childproc_source:
         for node in tree.body:
             if isinstance(node, ast.ClassDef) and node.name == "GroupPopen":
@@ -375,17 +486,40 @@ def _foreign_reapers(source, *, childproc_source=False):
         if isinstance(node, ast.Import):
             names.update((alias.asname, alias.name) for alias in node.names if alias.asname)
         elif isinstance(node, ast.ImportFrom) and node.module:
-            names.update((alias.asname or alias.name, f"{node.module}.{alias.name}")
-                         for alias in node.names)
+            for alias in node.names:
+                if alias.name == "*":
+                    if node.module in ("os", "signal"):
+                        if node.module == "os":
+                            os_star = True
+                        else:
+                            signal_star = True
+                        yield node.lineno
+                else:
+                    names[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    signal_unshadowed = _signal_module_is_unshadowed(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and node not in allowed:
-            name, dot, suffix = ast.unparse(node.func).partition(".")
-            call = names.get(name, name) + dot + suffix
-            arguments = (*node.args, *(keyword.value for keyword in node.keywords))
-            if (call in forbidden or call.endswith((".set_child_watcher", ".get_child_watcher"))
-                    or (call == "signal.signal" and any(
-                        isinstance(arg, (ast.Name, ast.Attribute))
-                        and ast.unparse(arg).split(".")[-1] == "SIGCHLD" for arg in arguments))):
+            call = _resolved_call_name(node.func, names)
+            bare_star_wait = (
+                os_star
+                and isinstance(node.func, ast.Name)
+                and node.func.id in _RAW_WAIT_NAMES
+            )
+            registers_signal = (
+                call == "signal.signal"
+                or (signal_star and isinstance(node.func, ast.Name) and node.func.id == "signal")
+                or call == "add_signal_handler"
+                or call.endswith(".add_signal_handler")
+            )
+            if (call in forbidden
+                    or bare_star_wait
+                    or call.endswith((".set_child_watcher", ".get_child_watcher",
+                                      ".subprocess_exec", ".subprocess_shell"))
+                    or _is_forbidden_indirection(node, call, names)
+                    or (registers_signal
+                        and not _is_explicit_non_chld_signal(
+                            _signal_arg(node), signal_unshadowed=signal_unshadowed
+                        ))):
                 yield node.lineno
 
 
@@ -407,8 +541,75 @@ def test_sigint101_has_no_reaper_outside_group_popen():
     "import asyncio; asyncio.get_event_loop_policy().set_child_watcher(watcher)",
     "import signal; signal.signal(signal.SIGCHLD, signal.SIG_IGN)",
     "import signal; signal.signal(signalnum=signal.SIGCHLD, handler=signal.SIG_IGN)",
+    "import signal; sig = signal.SIGCHLD; signal.signal(sig, signal.SIG_IGN)",
+    "import signal\nfrom signal import SIGTERM as sig\nsig = signal.SIGCHLD\n"
+    "signal.signal(sig, signal.SIG_IGN)",
+    "import signal\nfrom signal import SIGTERM as sig\ndef register(sig):\n"
+    " signal.signal(sig, signal.SIG_IGN)",
+    "from signal import SIGTERM as sig\ndef register(loop, sig, cb):\n"
+    " loop.add_signal_handler(sig, cb)",
+    "import signal\nsignal = fake\nsignal.signal(signal.SIGTERM, cb)",
+    "import signal\ndef register(signal, cb):\n signal.signal(signal.SIGTERM, cb)",
+    "import signal; signal.signal(17, signal.SIG_IGN)",
+    "import signal; loop.add_signal_handler(signal.SIGCHLD, cb)",
+    "loop.add_signal_handler(sig, cb)",
+    "import asyncio, signal; asyncio.get_running_loop().add_signal_handler(signal.SIGCHLD, cb)",
+    "loop.subprocess_exec(proto, 'rtl_433')",
+    "loop.subprocess_shell(proto, 'rtl_433')",
+    "import asyncio; asyncio.get_running_loop().subprocess_exec(proto, 'rtl_433')",
+    "import asyncio; asyncio.get_event_loop().subprocess_shell(proto, 'rtl_433')",
+    "from os import *",
+    "from signal import *",
+    "from os import *\nwait()",
+    "from os import *\nwaitpid(-1, 0)",
+    "from os import *\nwaitid(P_PID, pid, WEXITED)",
+    "from os import *\nwait3(0)",
+    "from os import *\nwait4(-1, 0)",
+    "import os; getattr(os, 'waitpid')(-1, 0)",
+    "import os as syscalls; getattr(syscalls, 'waitpid')",
+    "import os; fn = getattr(os, 'wait'); fn()",
+    "import os; getattr(os, name)(-1, 0)",
+    "import signal; getattr(signal, 'signal')(signal.SIGCHLD, cb)",
+    "getattr(loop, 'subprocess_exec')(proto, 'rtl_433')",
+    "getattr(loop, 'subprocess_shell')(proto, 'rtl_433')",
+    "getattr(loop, 'add_signal_handler')(17, cb)",
+    "__import__('os').waitpid(-1, 0)",
+    "mod = __import__('os'); mod.waitpid(-1, 0)",
+    "getattr(__import__('os'), 'waitpid')(-1, 0)",
+    "import builtins; builtins.__import__('os').waitpid(-1, 0)",
+    "__import__('signal').signal(17, cb)",
+    "__import__('asyncio').create_subprocess_exec('rtl_433')",
+    "__import__(mod_name).waitpid(-1, 0)",
     "class GroupPopen:\n def poll(self): return os.waitpid(-1, 0)",
     "class GroupPopen:\n def _exit_pending(self): return os.waitid(os.P_PID, self.pid, os.WEXITED)",
 ])
 def test_reaping_source_guard_rejects_an_independent_reaper(source):
     assert list(_foreign_reapers(source, childproc_source=True))
+
+
+@pytest.mark.parametrize("call", [
+    "wait()",
+    "waitpid(-1, 0)",
+    "waitid(P_PID, pid, WEXITED)",
+    "wait3(0)",
+    "wait4(-1, 0)",
+])
+def test_reaping_source_guard_flags_star_import_and_bare_wait_separately(call):
+    lines = list(_foreign_reapers(f"from os import *\n{call}"))
+    assert 1 in lines and 2 in lines
+
+
+@pytest.mark.parametrize("source", [
+    "import signal; signal.signal(signal.SIGTERM, cb)",
+    "import signal; signal.signal(signalnum=signal.SIGINT, handler=cb)",
+    "import signal; loop.add_signal_handler(signal.SIGTERM, cb)",
+    "import signal; loop.add_signal_handler(signal.SIGINT, cb)",
+    "import os; getattr(os, 'O_CLOEXEC', 0)",
+    "import os; getattr(os, 'pidfd_open', None)",
+    "import os\nclass GroupPopen:\n"
+    " def poll(self): return os.waitpid(self.pid, 0)\n"
+    " def _exit_pending(self):\n"
+    "  return os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)\n",
+])
+def test_reaping_source_guard_allows_explicit_non_sigchld_handlers(source):
+    assert list(_foreign_reapers(source, childproc_source=True)) == []

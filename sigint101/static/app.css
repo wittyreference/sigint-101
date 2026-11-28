@@ -3531,6 +3531,11 @@ body {
   background: transparent;
   color: var(--fg);
 }
+.find-mark--unreadable {
+  border: 2px dotted var(--accent);
+  background: transparent;
+  color: var(--fg-dim);
+}
 .tile__meta--find {
   display: flex;
   align-items: center;
