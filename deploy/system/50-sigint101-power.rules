@@ -1,0 +1,14 @@
+// Grant only the systemd-logind power-off actions to the non-root power watcher.
+polkit.addRule(function(action, subject) {
+  if (subject.user !== "sigint101-power") {
+    return undefined;
+  }
+  if (
+    action.id === "org.freedesktop.login1.power-off" ||
+    action.id === "org.freedesktop.login1.power-off-multiple-sessions" ||
+    action.id === "org.freedesktop.login1.power-off-ignore-inhibit"
+  ) {
+    return polkit.Result.YES;
+  }
+  return undefined;
+});
