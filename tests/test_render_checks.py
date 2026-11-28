@@ -774,6 +774,53 @@ def _load_render_check():
     return module
 
 
+def _capture_render_fixture(devtools, *, header=True):
+    reasons = set()
+
+    def measure(url):
+        calls = devtools.made[-1].calls
+
+        def setting(storage, key):
+            prefix = f"{storage}.setItem('{key}', "
+            for method, params in reversed(calls):
+                expr = params.get("expression", "")
+                if method == "Runtime.evaluate" and expr.startswith(prefix):
+                    return json.loads(expr[len(prefix):-1])
+            return None
+
+        theme = setting("localStorage", "sigint101.theme")
+        result = {"theme": theme, "width": 800, "height": 480, "back": True, "entry": True}
+        if url.endswith("/operate/waterfall"):
+            return {**result, "header": header, "capture": None}
+        state = setting("sessionStorage", "capture-fixture-state")
+        reason = setting("sessionStorage", "capture-fixture-reason")
+        if reason:
+            reasons.add((theme, reason))
+        label = {"idle": "Ready to record", "recording": "Recording…",
+                 "saving": "Saving…", "saved": "Capture saved"}.get(state, reason)
+        return {**result, "capture": {"state": label, "discard": state == "saving",
+                                      "record": True, "stop": True, "law": True, "status": True}}
+
+    port = devtools({"const law = pick('.capture__law')": measure})
+    return run(render_tool("capture"), TEST_CONSOLE, port=port), reasons
+
+
+def test_capture_render_checks_full_storage_refusals_in_every_theme(devtools):
+    proc, reasons = _capture_render_fixture(devtools)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    for theme in ("dark", "sunlight", "red-night"):
+        assert (theme, "Capture storage is full: 25 MB capture quota") in reasons
+        assert (theme, "Capture storage is full: keep 64 MiB free") in reasons
+
+
+def test_capture_render_fails_if_the_waterfall_header_does_not_fit(devtools):
+    proc, _ = _capture_render_fixture(devtools, header=False)
+    assert _verdicts(proc) == [
+        f"VERDICT: FAIL - capture {theme}" for theme in ("dark", "sunlight", "red-night")
+    ]
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+
+
 def test_the_scratch_console_keeps_its_state_in_its_own_folder_and_stops(tmp_path, strays):
     from urllib.request import urlopen
     render_check = _load_render_check()
@@ -2678,6 +2725,12 @@ def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devto
         else "VERDICT: FAIL - closing-stages red-night"
     )
     assert expected in _verdicts(proc)
+
+
+def test_capture_check_is_discovered_and_covers_the_capture_screen():
+    check, = [check for check in CHECKS if check.name == "capture"]
+    assert check.pages == ("/capture", "/operate/waterfall")
+    assert "/capture" in RENDER_CHECK_PAGES
 
 
 POWER_NOTICE_OK = {

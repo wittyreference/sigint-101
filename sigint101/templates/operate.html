@@ -5,6 +5,9 @@
 
 {% block title %}Operator mode{% endblock %}
 {% block status_actions %}
+{% if inst.api == 'spectrum' %}
+<a class="rack__log-link capture-link" href="/capture">Capture</a>
+{% endif %}
 <a class="rack__log-link" href="/logbook" aria-label="Open reception logbook">LOG</a>
 <a class="rack__log-link rack__field-link" href="/field" aria-label="Open command field card">FIELD</a>
 {% endblock %}

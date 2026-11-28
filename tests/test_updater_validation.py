@@ -1575,3 +1575,36 @@ def test_f7_trial_ro_connections_package_root_r21_post_marker_and_sigkill_reap(t
     proc.stderr.close()
 
 
+
+
+def test_capture_trial_is_read_only_and_snapshot_keeps_completed_pairs(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from sigint101.app import initialize_console_state, shutdown_console_state
+    from sigint101.capture_store import CaptureStore
+    from tests.test_app import FIXTURE_PACKS, _absent
+
+    src = tmp_path / "source"
+    src.mkdir(mode=0o700)
+    Progress(src / "progress.db").close()
+    ExamStore(src / "exam.db").close()
+    state = SimpleNamespace()
+    before = {p.name: p.read_bytes() for p in src.iterdir()}
+    initialize_console_state(state, pack_dir=FIXTURE_PACKS, data_dir=src, trial=True,
+                             read_only=True, probe=_absent)
+    try:
+        assert state.capture.snapshot()["state"] == "idle"
+        assert state.capture.store.catalog() == []
+    finally:
+        asyncio.run(shutdown_console_state(state, trial=True))
+    assert {p.name: p.read_bytes() for p in src.iterdir()} == before
+    store = CaptureStore(src)
+    item = store.save(b"iq", b"{}")
+    dest = tmp_path / "snapshot"
+    copy_generation_snapshot(src, dest, generation_id="gen-cap", scratch_dir=tmp_path / "scratch")
+    assert CaptureStore(dest).catalog() == [item]
+    clip = dest / "captures" / item["id"]
+    assert clip.stat().st_mode & 0o777 == 0o700
+    assert all(p.stat().st_mode & 0o777 == 0o600 for p in clip.iterdir())
+    assert (clip / f"{item['id']}.sigmf-data").read_bytes() == b"iq"
