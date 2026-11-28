@@ -529,6 +529,31 @@ def test_api_survey_reports_missing_nmcli_as_missing_tool(tmp_path):
     assert "nmcli is not installed" in body["reason"]
 
 
+def _provision_apt_packages() -> set[str]:
+    """Every package deploy/provision.sh's apt lists (APT_RUNTIME, APT_BUILD, ...) install."""
+    text = (REPO_ROOT / "deploy" / "provision.sh").read_text(encoding="utf-8")
+    packages: set[str] = set()
+    for body in re.findall(r"^APT_\w+=\(([^)]*)\)", text, re.M):
+        packages.update(body.split())
+    return packages
+
+
+def test_missing_nmcli_remedy_installs_what_carries_nmcli(tmp_path):
+    # F8: Debian ships nmcli in the network-manager package. A remedy that points at provision.sh
+    # holds only if provision.sh installs that package; otherwise it must name the package itself.
+    scanner = WifiSurvey(
+        spawn=lambda argv: pytest.fail("must not spawn when nmcli missing"),
+        which=lambda name: None,
+        radio_present=lambda: True,
+    )
+    with _client(tmp_path, survey_factory=lambda: scanner) as client:
+        step = client.get("/api/survey").json()["next_step"]
+    if "provision.sh" in step:
+        assert "network-manager" in _provision_apt_packages(), step
+    else:
+        assert re.search(r"\bnetwork-manager\b", step), step
+
+
 # --- Lesson loader + panel template + Lesson 39 consolidation pack -----------------------------
 
 
