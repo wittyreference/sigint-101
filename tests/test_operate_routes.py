@@ -164,7 +164,7 @@ def test_rack_picker_groups_every_instrument_with_a_short_description(tmp_path):
     groups = re.findall(r'<section class="rack__group"[^>]*>\s*<h2[^>]*>([^<]+)</h2>'
                         r'(.*?)</section>', picker, re.S)
     expected = {
-        "Spectrum": {"waterfall", "rds", "apt"},
+        "Spectrum": {"waterfall", "rds", "meteor", "apt"},
         "Aircraft and ships": {"adsb", "acars", "ais"},
         "Pagers and packets": {"ism", "aprs", "pager", "dmr", "sstv", "lora"},
         "Counter-surveillance": {"flock", "rayhunter"},
@@ -188,8 +188,8 @@ def test_rack_picker_groups_every_instrument_with_a_short_description(tmp_path):
     ("waterfall", "canvas class=\"waterfall\""), ("ism", "data-decode-panel"),
     ("adsb", "data-adsb-panel"), ("aprs", "data-aprs-panel"), ("pager", "data-pocsag-panel"),
     ("acars", "data-acars-panel"), ("ais", "data-ais-panel"), ("rds", "data-rds-panel"),
-    ("dmr", "data-dmr-panel"), ("apt", "data-apt-panel"), ("sstv", "data-sstv-panel"),
-    ("lora", "data-lora-panel"), ("flock", "data-flock-panel"),
+    ("dmr", "data-dmr-panel"), ("apt", "data-apt-replay-panel"), ("sstv", "data-sstv-panel"),
+    ("meteor", "data-meteor-panel"), ("lora", "data-lora-panel"), ("flock", "data-flock-panel"),
     ("rayhunter", "data-rayhunter-panel"), ("flipper", "data-flipper-panel"),
     ("clock", "data-ppm-panel"),
     ("health", "data-prov-panel"),
@@ -197,6 +197,25 @@ def test_rack_picker_groups_every_instrument_with_a_short_description(tmp_path):
 def test_each_view_draws_the_same_panel_the_lessons_do(tmp_path, key, hook):
     with _client(tmp_path) as client:
         assert hook in client.get(f"/operate/{key}").text
+
+
+def test_apt_rack_is_labelled_replay_and_cannot_start_live_apt(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGINT101_METEOR_HZ", "137100000")
+    with _client(tmp_path, pack_dir=LESSON_PACKS) as client:
+        apt_html = client.get("/operate/apt").text
+        meteor_html = client.get("/operate/meteor").text
+        lesson_html = client.get("/lesson/24").text
+    assert "APT replay" in apt_html
+    assert "data-apt-replay-panel" in apt_html
+    assert "data-apt-panel" not in apt_html
+    assert "August 2025" in apt_html
+    assert 'href="/operate/meteor"' in apt_html
+    assert 'href="/lesson/24"' in apt_html
+    assert "data-meteor-panel" in meteor_html
+    assert 'src="/static/meteor.js"' in meteor_html
+    assert "gallery-ink-red" in meteor_html
+    assert "137.100" in meteor_html
+    assert "data-apt-panel" in lesson_html
 
 
 def test_the_waterfall_view_has_free_tuning_a_step_key_and_gain(tmp_path):

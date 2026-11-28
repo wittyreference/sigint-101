@@ -683,8 +683,8 @@ def _flipper_device():
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
             aprs_factory=None, pocsag_factory=None, acars_factory=None, ais_factory=None,
-            dmr_factory=None, apt_factory=None, sstv_factory=None, flock_factory=None,
-            rayhunter_factory=None, flipper_factory=None, pool_path=None):
+            dmr_factory=None, apt_factory=None, sstv_factory=None, meteor_factory=None,
+            flock_factory=None, rayhunter_factory=None, flipper_factory=None, pool_path=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
@@ -694,6 +694,7 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
                      pocsag_factory=pocsag_factory, acars_factory=acars_factory,
                      ais_factory=ais_factory, dmr_factory=dmr_factory,
                      apt_factory=apt_factory, sstv_factory=sstv_factory,
+                     meteor_factory=meteor_factory,
                      flock_factory=flock_factory, rayhunter_factory=rayhunter_factory,
                      flipper_factory=flipper_factory, pool_path=pool_path)
     return TestClient(app)

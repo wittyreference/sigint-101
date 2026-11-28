@@ -25,7 +25,7 @@ from sigint101.spectrum import TuneError
 def test_the_rack_offers_the_instruments_the_spec_lists_in_its_order():
     assert [i.label for i in INSTRUMENTS] == [
         "Waterfall", "ISM", "ADS-B", "APRS", "Pager framing", "ACARS", "AIS", "RDS", "DMR/P25",
-        "APT", "SSTV", "LoRa", "Flock", "Rayhunter", "Flipper", "Clock", "Health"]
+        "APT", "SSTV", "Meteor", "LoRa", "Flock", "Rayhunter", "Flipper", "Clock", "Health"]
 
 
 def test_every_instrument_has_a_distinct_url_key_and_the_waterfall_is_the_default():
@@ -42,8 +42,8 @@ def test_only_the_single_channel_decoders_take_a_frequency_override():
     assert tunable("aprs").key == "aprs"
     # Fixed-channel and non-SDR instruments have no override: ADS-B is 1090 by definition, AIS
     # decodes both marine channels at once, and the waterfall tunes through /api/tune.
-    for api in ("adsb", "ais", "apt", "sstv", "lora", "flock", "rayhunter", "flipper", "spectrum",
-                "nope"):
+    for api in ("adsb", "ais", "apt", "sstv", "meteor", "lora", "flock", "rayhunter", "flipper",
+                "spectrum", "nope"):
         assert tunable(api) is None
 
 
@@ -156,6 +156,8 @@ def test_a_pager_reception_line_has_no_place_for_a_pages_words():
     ("rayhunter", {"name": "IMSI Requested", "severity": "low"}, "IMSI Requested"),
     ("apt", {"path": "apt/x.png", "meta": {"filename": "x.png"}}, "x.png"),
     ("sstv", {"path": "sstv/y.png", "mode": "PD120", "meta": {}}, "PD120"),
+    ("meteor", {"path": "meteor/pass1/MSU-MR-1.png", "product": "1",
+                "satellite": "METEOR-M2 3"}, "METEOR-M2 3"),
 ])
 def test_every_instrument_has_a_one_line_summary(key, item, expect):
     assert expect in reception_summary(key, item)
