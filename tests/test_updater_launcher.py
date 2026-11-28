@@ -1782,6 +1782,3 @@ def test_f12_service_entry_rejects_unlocked_writer_fd_and_accepts_locked_fd(tmp_
         sealed = mod._seal_inherited_writer_fd(writer_lock, cli_fd=handle.fd)
         assert sealed == handle.fd
         assert os.get_inheritable(sealed) is False
-
-
-

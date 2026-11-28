@@ -1265,4 +1265,3 @@ def test_managed_to_managed_apply_and_unserved_abort_restores_prior_managed_pair
     restored = json.loads((root / "current.json").read_text(encoding="utf-8"))
     assert restored["commit"] == c2
     assert restored["predecessor"] == sel_v2["predecessor"]
-

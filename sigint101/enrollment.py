@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -15,7 +16,12 @@ from .bench_gate import require_bench_marker
 from .kiosk import exit_flag
 from .locks import acquire_mutation_gate, ensure_lock_files
 from .process_checks import require_kiosk_page_closed
-from .runtime import probe_python_abi, stage_sealed_runtime, verify_runtime_compatibility
+from .runtime import (
+    probe_python_abi,
+    reclaim_abandoned_runtime_staging,
+    stage_sealed_runtime,
+    verify_runtime_compatibility,
+)
 from .storage import fsync_dir, fsync_file, validate_updater_root
 
 
@@ -151,9 +157,14 @@ def _load_reviewed_launchers(repo: Path) -> tuple[set[str], str | None, str | No
     return legacy_digests, default_legacy, managed_digest
 
 
+def staged_desktop_wrapper_path(wrapper_file: Path) -> Path:
+    """Return the separate privileged staging sibling for the desktop wrapper (F2)."""
+    return wrapper_file.with_name(f"{wrapper_file.name}.managed")
+
+
 def _nearest_existing_dir(path: Path) -> Path:
     cur = path
-    while not cur.exists():
+    while not cur.exists() and not cur.is_symlink():
         parent = cur.parent
         if parent == cur:
             break
@@ -163,10 +174,76 @@ def _nearest_existing_dir(path: Path) -> Path:
 
 def _dir_is_writable(path: Path) -> tuple[bool, Path]:
     anc = _nearest_existing_dir(path)
-    if not anc.is_dir():
+    if anc.is_symlink() or not anc.is_dir():
         return False, anc
     use_eff = os.access in os.supports_effective_ids
     return os.access(anc, os.W_OK | os.X_OK, effective_ids=use_eff), anc
+
+
+def _is_valid_hex_sha256(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
+def _preflight_replaceable_file(
+    target: Path,
+    *,
+    label: str,
+    require_readable: bool = False,
+    check_sticky: bool = True,
+) -> None:
+    """Check target type, parent chain, readability, and replaceability before any write (F3)."""
+    anc = _nearest_existing_dir(target.parent)
+    if anc.is_symlink() or not anc.is_dir():
+        raise EnrollmentError(
+            f"Permission denied: parent path for {label} is not a directory: {anc} "
+            "(no changes made)"
+        )
+    try:
+        lst = os.lstat(target)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(lst.st_mode):
+        raise EnrollmentError(
+            f"Permission denied: {label} is a directory: {target} (no changes made)"
+        )
+    if not stat.S_ISREG(lst.st_mode):
+        raise EnrollmentError(
+            f"Permission denied: {label} is not a regular file: {target} (no changes made)"
+        )
+    use_eff = os.access in os.supports_effective_ids
+    if require_readable and not os.access(target, os.R_OK, effective_ids=use_eff):
+        raise EnrollmentError(
+            f"Permission denied: cannot read {label}: {target} (no changes made)"
+        )
+    if check_sticky and target.parent.is_dir():
+        parent_st = os.stat(target.parent)
+        if (parent_st.st_mode & stat.S_ISVTX) and os.geteuid() not in (
+            lst.st_uid,
+            parent_st.st_uid,
+        ):
+            raise EnrollmentError(
+                f"Permission denied: cannot replace {label} in sticky directory {target.parent} "
+                "(no changes made)"
+            )
+
+
+def _file_matches_managed_wrapper(path: Path, managed_bytes: bytes) -> bool:
+    try:
+        lst = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(lst.st_mode) or not (lst.st_mode & 0o111):
+        return False
+    try:
+        return path.read_bytes() == managed_bytes
+    except OSError:
+        return False
 
 
 def _preflight_install_targets(
@@ -176,63 +253,33 @@ def _preflight_install_targets(
     unit_file: Path,
     wrapper_file: Path,
     managed_dir: Path,
-) -> bool:
-    """Verify every install target is writable BEFORE creating locks, shims, or current.json (R2-2).
+) -> str:
+    """Verify every install target's type and replaceability BEFORE any write (R2-2, F2, F3).
 
-    Returns True when the desktop wrapper already holds the exact managed wrapper bytes (e.g.
-    after the operator ran the printed sudo install step) and needs no write.
+    Returns wrapper_mode:
+    - "direct": wrapper_file.parent is writable; enrollment activates wrapper_file only after
+      publishing the completed hand-over record.
+    - "staged_privileged": wrapper_file.parent is unwritable, live wrapper_file stays untouched,
+      and `<wrapper>.managed` already holds exact executable managed wrapper bytes ready for
+      post-enrollment activation (`sudo mv -f`).
+    - "already_active": wrapper_file.parent is unwritable and wrapper_file already holds exact
+      executable managed wrapper bytes (e.g. rerun after prior activation).
     """
     managed_wrapper_src = managed_dir / "sigint101-course-managed.sh"
     managed_wrapper_bytes = managed_wrapper_src.read_bytes()
+    staged_wrapper = staged_desktop_wrapper_path(wrapper_file)
 
-    wrapper_already_installed = False
-    if wrapper_file.is_dir():
-        raise EnrollmentError(
-            f"Permission denied: desktop wrapper target is a directory: {wrapper_file} "
-            "(no changes made)"
-        )
-    if (
-        wrapper_file.is_file()
-        and not wrapper_file.is_symlink()
-        and wrapper_file.read_bytes() == managed_wrapper_bytes
-        and bool(wrapper_file.stat().st_mode & 0o111)
+    # Check root itself first (must not be a symlink or non-directory file).
+    try:
+        root_lst = os.lstat(root)
+    except FileNotFoundError:
+        root_lst = None
+    if root_lst is not None and (
+        stat.S_ISLNK(root_lst.st_mode) or not stat.S_ISDIR(root_lst.st_mode)
     ):
-        wrapper_already_installed = True
-    else:
-        ok, anc = _dir_is_writable(wrapper_file.parent)
-        if not ok:
-            raise EnrollmentError(
-                f"Permission denied: cannot write install target {wrapper_file} "
-                f"(directory {anc} is not writable); install the managed desktop wrapper with: "
-                f"sudo install -m 0755 {managed_wrapper_src} {wrapper_file} "
-                "(or pass --desktop-wrapper <writable-path>), then rerun --enroll "
-                "(no changes made)"
-            )
-
-    if unit_file.is_dir():
         raise EnrollmentError(
-            f"Permission denied: unit target is a directory: {unit_file} (no changes made)"
+            f"Permission denied: updater root is not a directory: {root} (no changes made)"
         )
-    ok_unit, anc_unit = _dir_is_writable(unit_file.parent)
-    if not ok_unit:
-        raise EnrollmentError(
-            f"Permission denied: cannot write install target {unit_file} "
-            f"(directory {anc_unit} is not writable); fix permissions with: "
-            f"sudo chown {os.geteuid()}:{os.getegid()} {anc_unit} && chmod 0755 {anc_unit} "
-            "and rerun --enroll (no changes made)"
-        )
-
-    deploy_dir = checkout / "deploy"
-    if deploy_dir.is_dir():
-        ok_deploy, anc_deploy = _dir_is_writable(deploy_dir)
-        if not ok_deploy:
-            raise EnrollmentError(
-                f"Permission denied: cannot write checkout shims under {deploy_dir} "
-                f"(directory {anc_deploy} is not writable); fix permissions with: "
-                f"sudo chown {os.geteuid()}:{os.getegid()} {anc_deploy} && chmod 0755 {anc_deploy} "
-                "and rerun --enroll (no changes made)"
-            )
-
     ok_root, anc_root = _dir_is_writable(root)
     if not ok_root:
         raise EnrollmentError(
@@ -242,7 +289,173 @@ def _preflight_install_targets(
             "and rerun --enroll (no changes made)"
         )
 
-    return wrapper_already_installed
+    # Check systemd unit destination type and writability.
+    _preflight_replaceable_file(unit_file, label="unit target", require_readable=False)
+    ok_unit, anc_unit = _dir_is_writable(unit_file.parent)
+    if not ok_unit:
+        raise EnrollmentError(
+            f"Permission denied: cannot write install target {unit_file} "
+            f"(directory {anc_unit} is not writable); fix permissions with: "
+            f"sudo chown {os.geteuid()}:{os.getegid()} {anc_unit} && chmod 0755 {anc_unit} "
+            "and rerun --enroll (no changes made)"
+        )
+
+    # F3: check checkout/deploy AND every individual shim destination (type + replaceability).
+    deploy_dir = checkout / "deploy"
+    try:
+        deploy_lst = os.lstat(deploy_dir)
+    except FileNotFoundError:
+        deploy_lst = None
+    if deploy_lst is not None:
+        if stat.S_ISLNK(deploy_lst.st_mode) or not stat.S_ISDIR(deploy_lst.st_mode):
+            raise EnrollmentError(
+                f"Permission denied: checkout deploy path is not a directory: {deploy_dir} "
+                "(no changes made)"
+            )
+        ok_deploy, anc_deploy = _dir_is_writable(deploy_dir)
+        if not ok_deploy:
+            raise EnrollmentError(
+                f"Permission denied: cannot write checkout shims under {deploy_dir} "
+                f"(directory {anc_deploy} is not writable); fix permissions with: "
+                f"sudo chown {os.geteuid()}:{os.getegid()} {anc_deploy} && chmod 0755 {anc_deploy} "
+                "and rerun --enroll (no changes made)"
+            )
+        for legacy_name in ("install.sh", "provision.sh"):
+            _preflight_replaceable_file(
+                deploy_dir / legacy_name,
+                label=f"checkout shim target deploy/{legacy_name}",
+                require_readable=True,
+            )
+
+    # F2/F3: check desktop wrapper and its staged sibling without replacing the live entry early.
+    _preflight_replaceable_file(
+        wrapper_file,
+        label="desktop wrapper target",
+        require_readable=False,
+        check_sticky=False,
+    )
+    _preflight_replaceable_file(
+        staged_wrapper,
+        label="staged desktop wrapper target",
+        require_readable=False,
+        check_sticky=False,
+    )
+
+    ok_wrap, anc_wrap = _dir_is_writable(wrapper_file.parent)
+    if ok_wrap:
+        _preflight_replaceable_file(
+            wrapper_file,
+            label="desktop wrapper target",
+            require_readable=False,
+            check_sticky=True,
+        )
+        return "direct"
+
+    if _file_matches_managed_wrapper(wrapper_file, managed_wrapper_bytes):
+        return "already_active"
+
+    if _file_matches_managed_wrapper(staged_wrapper, managed_wrapper_bytes):
+        return "staged_privileged"
+
+    raise EnrollmentError(
+        f"Permission denied: cannot write install target {wrapper_file} "
+        f"(directory {anc_wrap} is not writable); stage the managed desktop wrapper without "
+        f"replacing the live entry: sudo install -m 0755 {managed_wrapper_src} {staged_wrapper} "
+        "(or pass --desktop-wrapper <writable-path>), then rerun --enroll; after enrollment "
+        f"completes, activate it with: sudo mv -f {staged_wrapper} {wrapper_file} "
+        "(no changes made)"
+    )
+
+
+def _save_original_once(originals_dir: Path, name: str, data: bytes) -> Path:
+    """Persist verified original bytes once (0400, fsynced) without overwriting on reruns (F4)."""
+    originals_dir.mkdir(mode=0o700, exist_ok=True)
+    dest = originals_dir / name
+    try:
+        lst = os.lstat(dest)
+    except FileNotFoundError:
+        lst = None
+    if lst is not None and stat.S_ISREG(lst.st_mode):
+        return dest
+    _atomic_write_bytes(dest, data, mode=0o400)
+    return dest
+
+
+def _read_regular_bytes(path: Path) -> bytes | None:
+    try:
+        lst = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(lst.st_mode):
+        return None
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore_file_best_effort(path: Path, data: bytes, *, mode: int) -> bool:
+    """Restore a file after a late enrollment write failure, even if temp creation fails."""
+    try:
+        _atomic_write_bytes(path, data, mode=mode)
+        return True
+    except OSError:
+        pass
+    try:
+        flags = os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(os.fspath(path), flags)
+        try:
+            view = memoryview(data)
+            written = 0
+            while written < len(view):
+                written += os.write(fd, view[written:])
+            os.fsync(fd)
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        fsync_dir(path.parent)
+        return True
+    except OSError:
+        return False
+
+
+def _is_completed_active_control(root: Path, control_id: str) -> bool:
+    ctrl_raw = _read_regular_bytes(root / "control.json")
+    enr_raw = _read_regular_bytes(root / "enrollment.json")
+    if not ctrl_raw or not enr_raw:
+        return False
+    try:
+        ctrl = json.loads(ctrl_raw.decode("utf-8"))
+        enr = json.loads(enr_raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return (
+        isinstance(ctrl, dict)
+        and ctrl.get("control_id") == control_id
+        and isinstance(enr, dict)
+        and (enr.get("status") == "complete" or enr.get("handoff_complete") is True)
+    )
+
+
+def _collect_protected_ids(root: Path) -> tuple[set[str], set[str]]:
+    protected_runtimes: set[str] = set()
+    protected_controls: set[str] = set()
+    for fname in ("current.json", "control.json", "enrollment.json"):
+        raw = _read_regular_bytes(root / fname)
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            rid = data.get("runtime_id")
+            if isinstance(rid, str) and rid:
+                protected_runtimes.add(rid)
+            cid = data.get("control_id")
+            if isinstance(cid, str) and cid:
+                protected_controls.add(cid)
+    return protected_runtimes, protected_controls
 
 
 def enroll_legacy_fixture(
@@ -305,26 +518,36 @@ def enroll_legacy_fixture(
     if not exit_flag(runtime_dir).exists():
         raise EnrollmentError("deliberate Exit flag is required before enrollment starts")
 
-    # 1b) R2-2: Preflight EVERY install target (including /usr/local/bin/sigint101-course)
-    # BEFORE creating locks, staging runtimes, writing current.json, or touching shims!
-    wrapper_already_installed = _preflight_install_targets(
+    # 1b) R2-2 / F2 / F3: Preflight EVERY install target (type + replaceability + permissions)
+    # BEFORE creating locks, staging runtimes, writing current.json, or touching shims or wrapper!
+    wrapper_mode = _preflight_install_targets(
         root=root,
         checkout=checkout,
         unit_file=unit_file,
         wrapper_file=wrapper_file,
         managed_dir=managed_dir,
     )
+    staged_wrapper = staged_desktop_wrapper_path(wrapper_file)
 
     # 2) Create permanent lock inodes and hold exclusive mutation gate.
     ensure_lock_files(root, home=home)
     with acquire_mutation_gate(
         root, blocking=False, inherited_gate_fd=inherited_gate_fd, home=home
     ):
+        # 2b) F5 & F1: Under the mutation gate, reclaim abandoned private staging siblings left by
+        # killed attempts in runtimes/ and control/, never touching published or active entries.
+        protected_runtimes, protected_controls = _collect_protected_ids(root)
+        reclaim_abandoned_runtime_staging(root / "runtimes", protected_names=protected_runtimes)
+        ctrl_mod = _load_control_manifest_module(repo)
+        ctrl_mod.reclaim_abandoned_control_staging(
+            root / "control", protected_names=protected_controls
+        )
+
         # 3) Stage sealed dependency snapshot probed against host_python ABI (F4, U3, R2-1).
         # Never blindly reuse an existing runtime directory: verify its manifest or refuse.
         runtime_dir_path = root / "runtimes" / runtime_id
         abi = probe_python_abi(host_python)
-        if runtime_dir_path.exists():
+        if runtime_dir_path.exists() or runtime_dir_path.is_symlink():
             rt_manifest = verify_runtime_compatibility(
                 runtime_dir_path,
                 current_abi=abi,
@@ -341,11 +564,32 @@ def enroll_legacy_fixture(
             )
         skipped_pth_files = list(rt_manifest.get("skipped_pth_files", []))
 
-        # 4) Stage initial control generation and stable dispatcher.
-        ctrl_mod = _load_control_manifest_module(repo)
+        # 4) F1: Stage control generation privately & atomically, and verify any existing control
+        # generation against its manifest before selecting it or replacing the unit.
         control_dir = root / "control" / control_id
-        if not control_dir.exists():
+        if control_dir.exists() or control_dir.is_symlink():
+            try:
+                ctrl_mod.verify_control_generation(control_dir, expected_control_id=control_id)
+            except (RuntimeError, OSError, ValueError) as exc:
+                if not control_dir.is_symlink() and not _is_completed_active_control(
+                    root, control_id
+                ):
+                    ctrl_mod.remove_staging_tree(control_dir)
+                    if control_dir.parent.is_dir():
+                        fsync_dir(control_dir.parent)
+                    raise EnrollmentError(
+                        f"partial or corrupt control generation refused and reclaimed: "
+                        f"{control_dir} ({exc}); rerun --enroll"
+                    ) from exc
+                raise EnrollmentError(
+                    f"existing control generation failed manifest verification: "
+                    f"{control_dir} ({exc})"
+                ) from exc
+        else:
             ctrl_mod.stage_control_generation(repo, control_dir, control_id=control_id)
+
+        # Verify control generation against its manifest immediately before selecting it.
+        ctrl_mod.verify_control_generation(control_dir, expected_control_id=control_id)
 
         bin_dir = root / "bin"
         bin_dir.mkdir(mode=0o700, exist_ok=True)
@@ -390,9 +634,9 @@ def enroll_legacy_fixture(
             mode=0o600,
         )
 
-        # 6) Resolve original legacy script and launcher digests (R2-2: never record shims as
-        # originals; recognise reviewed legacy launchers via deploy/reviewed-launchers.sha256),
-        # persist enrollment.json durably, then install checkout shims.
+        # 6) Resolve & durably preserve original legacy scripts and desktop launcher bytes/digests
+        # BEFORE replacing any shim, unit, or desktop wrapper (R2-2, F3, F4).
+        originals_dir = root / "originals"
         prior_enrollment: dict = {}
         enr_path = root / "enrollment.json"
         if enr_path.is_file() and not enr_path.is_symlink():
@@ -408,7 +652,7 @@ def enroll_legacy_fixture(
             prior_shims = {}
 
         shim_records: dict[str, dict[str, str]] = {}
-        shim_writes: list[tuple[Path, bytes]] = []
+        shim_writes: list[tuple[Path, bytes, bytes | None, int]] = []
         for legacy_name, shim_name in (
             ("install.sh", "install-shim.sh"),
             ("provision.sh", "provision-shim.sh"),
@@ -416,21 +660,29 @@ def enroll_legacy_fixture(
             target = checkout / "deploy" / legacy_name
             shim_bytes = (managed_dir / shim_name).read_bytes()
             shim_sha = hashlib.sha256(shim_bytes).hexdigest()
-            cur_bytes = target.read_bytes() if target.is_file() else b""
-            cur_sha = hashlib.sha256(cur_bytes).hexdigest()
+            cur_bytes = _read_regular_bytes(target)
+            cur_mode = (os.lstat(target).st_mode & 0o7777) if cur_bytes is not None else 0o755
+            cur_sha = hashlib.sha256(cur_bytes or b"").hexdigest()
 
-            if cur_sha != shim_sha:
+            if cur_bytes is not None and cur_sha != shim_sha:
+                orig_sha = cur_sha
+                _save_original_once(originals_dir, legacy_name, cur_bytes)
+            elif cur_bytes is None:
                 orig_sha = cur_sha
             else:
-                # Target already carries the shim (rerun): recover original digest from prior
-                # enrollment.json or from the enrolled git commit; never record shim_sha!
+                # Target already carries the shim (rerun): recover original digest from preserved
+                # originals/, prior enrollment.json, or enrolled git commit; never record shim_sha!
+                saved_orig = _read_regular_bytes(originals_dir / legacy_name)
+                saved_sha = hashlib.sha256(saved_orig).hexdigest() if saved_orig else None
                 prev_entry = prior_shims.get(legacy_name)
                 prev_orig = (
                     prev_entry.get("original_sha256")
                     if isinstance(prev_entry, dict)
                     else None
                 )
-                if isinstance(prev_orig, str) and prev_orig and prev_orig != shim_sha:
+                if saved_sha and saved_sha != shim_sha:
+                    orig_sha = saved_sha
+                elif isinstance(prev_orig, str) and prev_orig and prev_orig != shim_sha:
                     orig_sha = prev_orig
                 else:
                     git_blob = (
@@ -454,53 +706,92 @@ def enroll_legacy_fixture(
                 "shim_sha256": shim_sha,
             }
             if target.parent.is_dir():
-                shim_writes.append((target, shim_bytes))
+                shim_writes.append((target, shim_bytes, cur_bytes, cur_mode))
 
-        reviewed_legacy_digests, default_legacy_digest, reviewed_managed_digest = (
+        reviewed_legacy_digests, _default_legacy_digest, reviewed_managed_digest = (
             _load_reviewed_launchers(repo)
         )
         managed_wrapper_bytes = (managed_dir / "sigint101-course-managed.sh").read_bytes()
         managed_wrapper_sha = hashlib.sha256(managed_wrapper_bytes).hexdigest()
+        managed_wrapper_digests = {managed_wrapper_sha}
+        if reviewed_managed_digest:
+            managed_wrapper_digests.add(reviewed_managed_digest)
+
         prior_wrapper = prior_enrollment.get("desktop_wrapper")
         prior_wrapper_orig = (
             prior_wrapper.get("original_sha256")
             if isinstance(prior_wrapper, dict)
             else None
         )
+        cur_wrapper_bytes = _read_regular_bytes(wrapper_file)
         cur_wrapper_sha = (
-            hashlib.sha256(wrapper_file.read_bytes()).hexdigest()
-            if wrapper_file.is_file() and not wrapper_file.is_symlink()
+            hashlib.sha256(cur_wrapper_bytes).hexdigest()
+            if cur_wrapper_bytes is not None
             else None
         )
-        if cur_wrapper_sha in reviewed_legacy_digests:
-            wrapper_orig_sha = cur_wrapper_sha
-            wrapper_orig_reviewed = True
-        elif cur_wrapper_sha in (managed_wrapper_sha, reviewed_managed_digest):
-            if (
-                isinstance(prior_wrapper_orig, str)
-                and prior_wrapper_orig
-                and prior_wrapper_orig not in (managed_wrapper_sha, reviewed_managed_digest)
-            ):
-                wrapper_orig_sha = prior_wrapper_orig
-                wrapper_orig_reviewed = prior_wrapper_orig in reviewed_legacy_digests
-            else:
-                wrapper_orig_sha = default_legacy_digest
-                wrapper_orig_reviewed = default_legacy_digest is not None
-        elif cur_wrapper_sha is not None:
-            wrapper_orig_sha = cur_wrapper_sha
-            wrapper_orig_reviewed = False
-        else:
-            wrapper_orig_sha = default_legacy_digest
-            wrapper_orig_reviewed = default_legacy_digest is not None
 
-        desktop_wrapper_record = {
+        # F4: Preserve the verified original launcher bytes/digest BEFORE replacing the wrapper;
+        # if the prior launcher was already overwritten and cannot be recovered, record "unknown"
+        # with original_reviewed=False (never substitute the current checkout's launcher digest).
+        wrapper_backup_path: Path | None = None
+        if cur_wrapper_sha is not None and cur_wrapper_sha not in managed_wrapper_digests:
+            wrapper_backup_path = _save_original_once(
+                originals_dir, "desktop-wrapper.sh", cur_wrapper_bytes or b""
+            )
+            wrapper_orig_sha = cur_wrapper_sha
+            wrapper_orig_reviewed = cur_wrapper_sha in reviewed_legacy_digests
+        else:
+            saved_wrapper_bytes = _read_regular_bytes(originals_dir / "desktop-wrapper.sh")
+            saved_wrapper_sha = (
+                hashlib.sha256(saved_wrapper_bytes).hexdigest()
+                if saved_wrapper_bytes is not None
+                else None
+            )
+            if saved_wrapper_sha and saved_wrapper_sha not in managed_wrapper_digests:
+                wrapper_backup_path = originals_dir / "desktop-wrapper.sh"
+                wrapper_orig_sha = saved_wrapper_sha
+                wrapper_orig_reviewed = saved_wrapper_sha in reviewed_legacy_digests
+            elif (
+                _is_valid_hex_sha256(prior_wrapper_orig)
+                and prior_wrapper_orig not in managed_wrapper_digests
+            ):
+                wrapper_orig_sha = str(prior_wrapper_orig)
+                wrapper_orig_reviewed = wrapper_orig_sha in reviewed_legacy_digests
+            else:
+                wrapper_orig_sha = "unknown"
+                wrapper_orig_reviewed = False
+
+        activation_command = (
+            f"sudo mv -f {staged_wrapper} {wrapper_file}"
+            if wrapper_mode == "staged_privileged"
+            else None
+        )
+        desktop_wrapper_record: dict[str, object] = {
             "path": str(wrapper_file),
             "original_sha256": wrapper_orig_sha,
             "original_reviewed": wrapper_orig_reviewed,
             "managed_sha256": managed_wrapper_sha,
+            "state": (
+                "staged_pending_activation"
+                if wrapper_mode == "staged_privileged"
+                else ("active" if wrapper_mode == "already_active" else "pending")
+            ),
+            "staged_path": str(staged_wrapper) if wrapper_mode == "staged_privileged" else None,
+            "activation_command": activation_command,
         }
+        if wrapper_backup_path is not None:
+            desktop_wrapper_record["original_backup_path"] = str(wrapper_backup_path)
 
-        enrollment_meta = {
+        prior_unit_bytes = _read_regular_bytes(unit_file)
+        prior_unit_mode = (
+            (os.lstat(unit_file).st_mode & 0o7777) if prior_unit_bytes is not None else 0o644
+        )
+        if prior_unit_bytes is not None and b"dispatcher.py" not in prior_unit_bytes:
+            _save_original_once(originals_dir, "sigint101.service", prior_unit_bytes)
+
+        enrollment_meta: dict[str, object] = {
+            "status": "in_progress",
+            "handoff_complete": False,
             "operation_id": operation_id,
             "control_id": control_id,
             "runtime_id": runtime_id,
@@ -521,31 +812,99 @@ def enroll_legacy_fixture(
             mode=0o600,
         )
 
-        for target, shim_bytes in shim_writes:
-            _atomic_write_bytes(target, shim_bytes, mode=0o755)
+        # 6b) Install checkout shims with defined rollback on any late write failure (F3).
+        written_shims: list[tuple[Path, bytes | None, int]] = []
+        unit_replaced = False
 
-        # 7) Install gate-aware desktop wrapper atomically before unit switch/drain (or verify
-        # exact managed wrapper bytes if operator already installed it via sudo install).
-        if not wrapper_already_installed:
-            _atomic_write_bytes(wrapper_file, managed_wrapper_bytes, mode=0o755)
-        elif wrapper_file.read_bytes() != managed_wrapper_bytes:
-            raise EnrollmentError(f"desktop wrapper drifted during enrollment: {wrapper_file}")
+        def _rollback_late_writes(failed_step: str, exc: BaseException) -> EnrollmentError:
+            rollback_ok = True
+            if unit_replaced:
+                if prior_unit_bytes is not None:
+                    rollback_ok &= _restore_file_best_effort(
+                        unit_file, prior_unit_bytes, mode=prior_unit_mode
+                    )
+                else:
+                    try:
+                        unit_file.unlink(missing_ok=True)
+                        fsync_dir(unit_file.parent)
+                    except OSError:
+                        rollback_ok = False
+                if reload_systemd is not None:
+                    try:
+                        reload_systemd()
+                    except Exception:
+                        rollback_ok = False
+            for shim_target, orig_bytes, orig_mode in reversed(written_shims):
+                if orig_bytes is not None:
+                    rollback_ok &= _restore_file_best_effort(
+                        shim_target, orig_bytes, mode=orig_mode
+                    )
+                else:
+                    try:
+                        shim_target.unlink(missing_ok=True)
+                        fsync_dir(shim_target.parent)
+                    except OSError:
+                        rollback_ok = False
+            recovery_cmd = (
+                "resolve the write error and rerun sigint101-updater --enroll"
+                if rollback_ok
+                else (
+                    f"restore originals from {originals_dir} (or git -C {checkout} checkout -- "
+                    "deploy/install.sh deploy/provision.sh), then rerun sigint101-updater --enroll"
+                )
+            )
+            failed_meta = {
+                **enrollment_meta,
+                "status": "failed",
+                "handoff_complete": False,
+                "failed_step": failed_step,
+                "rollback_ok": rollback_ok,
+                "recovery_command": recovery_cmd,
+            }
+            try:
+                _atomic_write_bytes(
+                    enr_path,
+                    (json.dumps(failed_meta, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                    mode=0o600,
+                )
+            except OSError:
+                pass
+            state_note = (
+                "earlier enrollment writes rolled back cleanly"
+                if rollback_ok
+                else "automatic rollback incomplete"
+            )
+            return EnrollmentError(
+                f"late enrollment write failed at {failed_step}: {exc} "
+                f"({state_note}; recovery: {recovery_cmd})"
+            )
+
+        for target, shim_bytes, orig_bytes, orig_mode in shim_writes:
+            try:
+                _atomic_write_bytes(target, shim_bytes, mode=0o755)
+            except OSError as exc:
+                raise _rollback_late_writes(f"deploy/{target.name}", exc) from exc
+            written_shims.append((target, orig_bytes, orig_mode))
 
         if on_boundary is not None:
             on_boundary("before_unit_install")
 
-        # 8) Atomically install the managed unit rendered from deploy/managed/sigint101.service.
+        # 7) Re-verify control generation, then atomically install the managed unit and reload.
+        ctrl_mod.verify_control_generation(control_dir, expected_control_id=control_id)
         unit_text = _render_managed_unit(
             template_path=managed_dir / "sigint101.service",
             host_python=host_python,
             dispatcher_path=dispatcher_dest,
             updater_root=root,
         )
-        _atomic_write_bytes(unit_file, unit_text.encode("utf-8"), mode=0o644)
-        fsync_file(unit_file)
-
-        if reload_systemd is not None:
-            reload_systemd()
+        try:
+            _atomic_write_bytes(unit_file, unit_text.encode("utf-8"), mode=0o644)
+            unit_replaced = True
+            fsync_file(unit_file)
+            if reload_systemd is not None:
+                reload_systemd()
+        except OSError as exc:
+            raise _rollback_late_writes("unit_install", exc) from exc
 
         if on_boundary is not None:
             on_boundary("after_unit_install_before_drain")
@@ -553,7 +912,49 @@ def enroll_legacy_fixture(
         if drain_old_service is not None:
             drain_old_service()
 
-    return {
+        # 8) F3: Publish durable completed hand-over record BEFORE enabling the managed wrapper.
+        final_wrapper_state = (
+            "staged_pending_activation" if wrapper_mode == "staged_privileged" else "active"
+        )
+        completed_wrapper_record = {
+            **desktop_wrapper_record,
+            "state": final_wrapper_state,
+        }
+        completed_meta = {
+            **enrollment_meta,
+            "status": "complete",
+            "handoff_complete": True,
+            "desktop_wrapper": completed_wrapper_record,
+        }
+        _atomic_write_bytes(
+            enr_path,
+            (json.dumps(completed_meta, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            mode=0o600,
+        )
+
+        if on_boundary is not None:
+            on_boundary("before_wrapper_activation")
+
+        # 9) F2: Activate the managed desktop wrapper ONLY AFTER enrollment is complete and usable.
+        if wrapper_mode == "direct":
+            try:
+                _atomic_write_bytes(wrapper_file, managed_wrapper_bytes, mode=0o755)
+            except OSError as exc:
+                managed_src = managed_dir / "sigint101-course-managed.sh"
+                raise EnrollmentError(
+                    f"enrollment completed but activating desktop wrapper {wrapper_file} failed: "
+                    f"{exc}; recovery: install -m 0755 {managed_src} "
+                    f"{wrapper_file} or rerun --enroll"
+                ) from exc
+        elif wrapper_mode == "staged_privileged":
+            if not _file_matches_managed_wrapper(staged_wrapper, managed_wrapper_bytes):
+                raise EnrollmentError(
+                    f"staged desktop wrapper drifted during enrollment: {staged_wrapper}"
+                )
+        elif not _file_matches_managed_wrapper(wrapper_file, managed_wrapper_bytes):
+            raise EnrollmentError(f"desktop wrapper drifted during enrollment: {wrapper_file}")
+
+    result: dict[str, object] = {
         "mode": "legacy",
         "operation_id": operation_id,
         "control_id": control_id,
@@ -561,4 +962,9 @@ def enroll_legacy_fixture(
         "skipped_pth_files": skipped_pth_files,
         "dispatcher": str(dispatcher_dest),
         "unit_path": str(unit_file),
+        "handoff_complete": True,
+        "wrapper_state": final_wrapper_state,
     }
+    if activation_command is not None:
+        result["wrapper_activation_command"] = activation_command
+    return result

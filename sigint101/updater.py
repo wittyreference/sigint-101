@@ -37,7 +37,11 @@ from .release_prep import (
     validate_remote_url,
     verify_candidate_contracts,
 )
-from .runtime import probe_python_abi, verify_runtime_compatibility
+from .runtime import (
+    probe_python_abi,
+    reclaim_abandoned_runtime_staging,
+    verify_runtime_compatibility,
+)
 from .snapshot import copy_generation_snapshot
 from .storage import fsync_dir, fsync_file, validate_updater_root
 from .trial import run_private_trial
@@ -454,6 +458,13 @@ def apply_update(
         # Validate sealed runtime ABI before staging/stopping.
         verify_runtime_compatibility(
             runtime_dir, current_abi=probe_python_abi(host_python), verify_files=True
+        )
+
+        # F5: reclaim abandoned runtime staging siblings under the exclusive mutation gate
+        # before space-budget checks so interrupted attempts cannot starve retries.
+        reclaim_abandoned_runtime_staging(
+            resolved_root / "runtimes",
+            protected_names={runtime_id},
         )
 
         # Conservative initial space budget check BEFORE staging or stopping service (§1, §5.1).

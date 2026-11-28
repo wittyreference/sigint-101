@@ -358,11 +358,14 @@ def test_r2_2_enroll_preflights_unwritable_wrapper_and_preserves_originals_on_re
         assert not root.exists()
         assert not unit_path.exists()
 
-        # 2) Operator runs the exact privileged step (wrapper now holds managed bytes while
-        # sysbin stays 0555), then reruns --enroll with the same argv.
+        # 2) Operator runs the exact staged privileged step (wrapper.managed holds managed bytes
+        # while live wrapper_path keeps the original launcher and sysbin stays 0555), then reruns
+        # --enroll with the same argv, then activates wrapper.managed -> wrapper_path.
+        staged_wrapper_path = wrapper_path.with_name(f"{wrapper_path.name}.managed")
+        assert str(staged_wrapper_path) in err
         os.chmod(sysbin, 0o755)
-        wrapper_path.write_bytes(managed_wrapper_bytes)
-        os.chmod(wrapper_path, 0o755)
+        staged_wrapper_path.write_bytes(managed_wrapper_bytes)
+        os.chmod(staged_wrapper_path, 0o755)
         os.chmod(sysbin, 0o555)
 
         rc2 = updater_cli_main(
@@ -380,6 +383,11 @@ def test_r2_2_enroll_preflights_unwritable_wrapper_and_preserves_originals_on_re
         assert enr["desktop_wrapper"]["managed_sha256"] == managed_wrapper_sha
         assert enr["desktop_wrapper"]["original_sha256"] != managed_wrapper_sha
         assert enr["desktop_wrapper"]["original_sha256"] == legacy_launcher_sha
+
+        # Activate staged wrapper atomically after enrollment completes.
+        os.chmod(sysbin, 0o755)
+        os.replace(staged_wrapper_path, wrapper_path)
+        os.chmod(sysbin, 0o555)
 
         # 3) A rerun AFTER shims are already installed MUST still preserve the true originals
         # (never recording the shim bytes as original_sha256).

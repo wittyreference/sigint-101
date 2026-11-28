@@ -1970,6 +1970,3 @@ def test_trial_and_service_uvicorn_configs_force_lifespan_on():
             assert isinstance(kw["lifespan"], ast.Constant) and kw["lifespan"].value == "on", (
                 f"{rel_path}: uvicorn.Config must pass lifespan='on'"
             )
-
-
-

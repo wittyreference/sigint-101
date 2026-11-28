@@ -226,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
         control_dir = root / "control" / control_id
         if not control_dir.is_dir() or control_dir.is_symlink():
             raise RuntimeError(f"selected control generation missing: {control_id}")
+        manifest_path = control_dir / "control_manifest.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            raise RuntimeError(f"selected control generation manifest missing: {control_id}")
 
         if args.command == "serve":
             env = os.environ.copy()

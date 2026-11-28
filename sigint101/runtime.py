@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import secrets
 import shutil
 import stat
@@ -22,6 +23,7 @@ RUNTIME_MANIFEST_FILENAME = "runtime.json"
 RUNTIME_FORMAT_VERSION = 1
 _COPY_CHUNK = 65536
 _BYTECODE_SUFFIXES = (".pyc", ".pyo")
+_RUNTIME_STAGING_RE = re.compile(r"^\.[^/]+\.staging\.\d+\.[0-9a-f]+$")
 
 
 class RuntimeCompatibilityError(RuntimeError):
@@ -151,6 +153,8 @@ def _remove_staging_tree(path: Path) -> None:
     """Remove an incomplete staging directory, resetting read-only permissions first."""
     if not path.exists() and not path.is_symlink():
         return
+    if path.is_symlink():
+        return
     for cur, dirs, files in os.walk(path, topdown=True, followlinks=False):
         cp = Path(cur)
         try:
@@ -158,10 +162,12 @@ def _remove_staging_tree(path: Path) -> None:
         except OSError:
             pass
         for d in dirs:
-            try:
-                os.chmod(cp / d, 0o700)
-            except OSError:
-                pass
+            dp = cp / d
+            if not dp.is_symlink():
+                try:
+                    os.chmod(dp, 0o700)
+                except OSError:
+                    pass
         for f in files:
             fp = cp / f
             if not fp.is_symlink():
@@ -170,6 +176,38 @@ def _remove_staging_tree(path: Path) -> None:
                 except OSError:
                     pass
     shutil.rmtree(path, ignore_errors=True)
+
+
+def reclaim_abandoned_runtime_staging(
+    runtimes_dir: str | Path,
+    *,
+    protected_names: set[str] | None = None,
+) -> list[str]:
+    """Reclaim abandoned runtime staging siblings under the mutation gate (F5).
+
+    Removes only real directories matching the private `.staging.` sibling pattern left by killed
+    attempts; never removes published runtimes, protected names, or symlinks.
+    """
+    parent = Path(runtimes_dir)
+    if parent.is_symlink() or not parent.is_dir():
+        return []
+    protected = protected_names or set()
+    reclaimed: list[str] = []
+    for name in sorted(os.listdir(parent)):
+        if name in protected or not _RUNTIME_STAGING_RE.match(name):
+            continue
+        entry = parent / name
+        try:
+            lst = os.lstat(entry)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(lst.st_mode) or not stat.S_ISDIR(lst.st_mode):
+            continue
+        _remove_staging_tree(entry)
+        reclaimed.append(name)
+    if reclaimed:
+        fsync_dir(parent)
+    return reclaimed
 
 
 def _hash_manifest_files(files: dict[str, dict]) -> str:

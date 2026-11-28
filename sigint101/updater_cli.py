@@ -140,6 +140,8 @@ def _format_receipt(info: dict) -> str:
         parts.append(f"mode={info['mode']}")
     if info.get("recovery_command"):
         parts.append(f"next={info['recovery_command']!r}")
+    if info.get("wrapper_activation_command"):
+        parts.append(f"activate={info['wrapper_activation_command']!r}")
     return " ".join(parts)
 
 
