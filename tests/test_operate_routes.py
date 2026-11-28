@@ -1635,11 +1635,36 @@ def test_a_measured_ppm_is_part_of_the_provenance(tmp_path):
 # --- round 7 (Codex D-146 F1): a claim that waited on a restore keeps its deadline ------------
 
 
-def _end_the_restore_late(gate, until):
-    """Hold the gate's condition past `until`, then end the restore under it: the waiting claim's
-    wait has timed out, and the gate is idle by the time it gets the lock back."""
+class _ConditionWaits:
+    """Signals when a claim is inside the gate's Condition.wait, and with what timeout.
+
+    The gate's own wait is wrapped on this one gate only; the implementation is unchanged. Once
+    `entered` is set the claim has released the condition and is waiting, so the test can take
+    the condition and be sure the claim is behind it."""
+
+    def __init__(self, gate):
+        self.entered = threading.Event()
+        self.started = None
+        self.timeout = None
+        real = gate._state.wait
+
+        def wait(timeout=None):
+            if not self.entered.is_set():
+                self.started, self.timeout = time.monotonic(), timeout
+                self.entered.set()
+            return real(timeout)
+
+        gate._state.wait = wait
+
+
+def _end_the_restore_late(gate, waits):
+    """Once the claim is waiting, hold the gate's condition past that wait's own timeout, then end
+    the restore under it: the claim's wait has timed out, and the gate is idle by the time it gets
+    the lock back."""
+    assert waits.entered.wait(JOIN_S), "the claim never waited on the restore"
     with gate._state:
-        time.sleep(max(0.0, until - time.monotonic()) + 0.1)
+        expiry = waits.started + (waits.timeout or 0.0)
+        time.sleep(max(0.0, expiry - time.monotonic()) + 0.1)
         gate.end_restore()
 
 
@@ -1648,6 +1673,7 @@ def test_the_gate_refuses_a_claim_whose_wait_ran_out_even_if_the_restore_ended_m
     # timeout, so a claim that had waited out its whole budget went on to launch.
     gate = radio_control.TuningGate()
     gate.begin_restore(gate.now_ms())
+    waits = _ConditionWaits(gate)
     until = time.monotonic() + 0.2
     outcome = {}
 
@@ -1660,8 +1686,7 @@ def test_the_gate_refuses_a_claim_whose_wait_ran_out_even_if_the_restore_ended_m
 
     waiter = threading.Thread(target=claim, daemon=True)
     waiter.start()
-    time.sleep(0.05)                        # the claim is waiting on the restore
-    _end_the_restore_late(gate, until)
+    _end_the_restore_late(gate, waits)
     waiter.join(JOIN_S)
     assert not waiter.is_alive()
     assert outcome["result"] == radio_control.TUNING_REASON
@@ -1684,11 +1709,10 @@ def test_a_claims_first_wait_on_a_restore_is_refused_at_its_deadline(tmp_path, m
                  sweeper_factory=_sweeper, pack_dir=packs) as client:
         gate = client.app.state.tuning_gate
         gate.begin_restore(gate.now_ms())
-        started = time.monotonic()
+        waits = _ConditionWaits(gate)
         poll = _Request(lambda: client.get("/api/aprs"))
         poll.start()
-        time.sleep(0.05)                    # the claim is waiting on the restore
-        _end_the_restore_late(gate, started + radio_control.TUNING_WAIT_S)
+        _end_the_restore_late(gate, waits)
         answer = poll.finish()
         assert answer.status_code == 503
         assert answer.json()["reason"] == radio_control.TUNING_REASON
