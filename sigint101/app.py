@@ -119,6 +119,18 @@ from .replay import (
 from .retrieval import MAX_CARDS
 from .retrieval import due as recall_due
 from .safety import notice_for, rack_lora_send
+from .solos import (
+    SOLO_AUDITS,
+    SOLO_KIND,
+    SOLOS,
+    format_solo_payload,
+    score_legal_call,
+    solo_is_audited,
+    validate_solo_catalog,
+)
+from .solos import (
+    qualifies_slot as solo_qualifies_slot,
+)
 from .spectrum import (
     DEFAULT_BIN,
     DEFAULT_HIGH,
@@ -145,6 +157,10 @@ REPLAY_RUNNING = "a replay is running"
 
 class ReplayBusy(ReplayUnavailable):
     """Another replay is running or acquiring the arbiter."""
+
+
+class SoloStandDownError(RuntimeError):
+    """A running receiver failed to stand down when starting a solo attempt."""
 
 
 def start_replay(state, recording: Recording) -> None:
@@ -545,6 +561,9 @@ def initialize_console_state(
         state.attempt_start_errors = {}
         if not hasattr(state, "attempt_registry"):
             state.attempt_registry = {}
+        state.rx_order = 0
+        state.rx_start_order = {}
+        state.attempt_start_order = {}
         state.stamp_window = None
         state.stamp_retry_at = 0.0
         if not trial and backfill_stamps is not None:
@@ -616,13 +635,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                recordings_dir=RECORDINGS_DIR, replay_factory=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None,
-               clock=time.time, managed: bool = False) -> FastAPI:
+               clock=time.time, managed: bool = False,
+               solos=None, solo_audits=None) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
     reports "no radio" — which is how the suite honours the no-mock-hardware invariant with no
     dongle attached. The module-level `app` below uses the real ones.
     """
+    active_solos = SOLOS if solos is None else tuple(solos)
+    active_solo_audits = SOLO_AUDITS if solo_audits is None else dict(solo_audits)
+    validate_solo_catalog(active_solos, active_solo_audits, require_audit=False)
     # The status bar reads the UPS's INA219. A box without a measurement shows a dash.
     # Tests can supply a gauge at the app boundary.
     battery = BatteryGauge() if battery_gauge is None else battery_gauge
@@ -733,7 +756,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
     app.state.attempt_registry = {}
+    app.state.solos = active_solos
+    app.state.solo_audits = active_solo_audits
+    app.state.rx_order = 0
+    app.state.rx_start_order = {}
+    app.state.attempt_start_order = {}
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+    def _audited_solo_by_id(solo_id: str):
+        for item in app.state.solos:
+            if item.id == solo_id and solo_is_audited(item, app.state.solo_audits):
+                return item
+        return None
+
+    def _audited_solo_for_unit(unit_id: int):
+        for item in app.state.solos:
+            if item.unit_id == unit_id and solo_is_audited(item, app.state.solo_audits):
+                return item
+        return None
+
+    def _audited_capstone():
+        for item in app.state.solos:
+            if item.unit_id is None and solo_is_audited(item, app.state.solo_audits):
+                return item
+        return None
 
     @app.exception_handler(StarletteHTTPException)
     async def error_page(request: Request, exc: StarletteHTTPException):
@@ -841,6 +887,21 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 "href": f"/unit/{unit.id}/challenge",
                 "find_state": find["state"],
                 "remaining_s": find["remaining_s"],
+            })
+        solo = _audited_solo_for_unit(unit.id)
+        if tiles and solo is not None:
+            solo_state = _solo_payload(solo)
+            tiles.append({
+                "kind": "solo",
+                "solo_id": solo.id,
+                "unit_id": unit.id,
+                "code": "SOLO",
+                "name": "Solo",
+                "glyph": unit.glyph,
+                "status": "",
+                "href": f"/unit/{unit.id}/solo",
+                "solo_state": solo_state["state"],
+                "remaining_s": solo_state["remaining_s"],
             })
         return templates.TemplateResponse(
             request=request,
@@ -1238,6 +1299,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 return back, f"Unit {back.rsplit('/', 1)[-1]}"
             if re.fullmatch(r"/unit/\d+/challenge", back):
                 return back, "Live find"
+            if re.fullmatch(r"/unit/\d+/solo", back):
+                return back, "Solo"
+            if back == "/capstone":
+                return back, "Capstone"
         return "/", "Home"
 
     @app.get("/law", response_class=HTMLResponse)
@@ -1699,11 +1764,37 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
         "meteor": MeteorUnavailable,
     }
+    claim_api = {
+        "sweeper": "spectrum", "decoder": "decode", "rds": "rds", "adsb": "adsb",
+        "aprs": "aprs", "pocsag": "pocsag", "acars": "acars", "ais": "ais",
+        "dmr": "dmr", "apt": "apt", "sstv": "sstv", "meteor": "meteor",
+    }
+
+    def _bump_rx_start_order(api: str | None) -> tuple[bool, int]:
+        """Advance rx_start_order[api] before spawn so a fast reader thread never races _started."""
+        if not api:
+            return False, 0
+        with reception_lock:
+            had = api in app.state.rx_start_order
+            prev = app.state.rx_start_order.get(api, 0)
+            app.state.rx_order += 1
+            app.state.rx_start_order[api] = app.state.rx_order
+            return had, prev
+
+    def _revert_rx_start_order(api: str | None, had: bool, prev: int) -> None:
+        if not api:
+            return
+        with reception_lock:
+            if had:
+                app.state.rx_start_order[api] = prev
+            else:
+                app.state.rx_start_order.pop(api, None)
 
     def _claim_sdr(target: str, start=None, *, reclaim=True):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
         deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
         refusal = unavailable[target]
+        api = claim_api.get(target)
         consumers = {name: getattr(app.state, name) for name in SDR_CONSUMERS}
         receiver = consumers.get(target)
         intent = None
@@ -1735,10 +1826,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                         if failure and (reason := failure(pending=True)):
                             raise refusal(reason)
                 if prepare is not None:
-                    return receiver.launch_start(intent, claimed=True)
+                    had, prev = _bump_rx_start_order(api)
+                    try:
+                        return receiver.launch_start(intent, claimed=True)
+                    except BaseException:
+                        _revert_rx_start_order(api, had, prev)
+                        raise
                 if receiver is not None and reclaim:
                     receiver.resume()
-                return start() if start is not None else None
+                if start is None:
+                    return None
+                had, prev = _bump_rx_start_order(api)
+                try:
+                    return start()
+                except BaseException:
+                    _revert_rx_start_order(api, had, prev)
+                    raise
         finally:
             if intent is not None:
                 receiver.discard_start(intent)
@@ -1815,7 +1918,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _started(kind: str, payload: dict) -> None:
         last_refusal.pop(kind, None)
-        log_event(app.state.events_path, f"{kind}_start", payload)
+        with reception_lock:
+            app.state.rx_order += 1
+            app.state.rx_start_order[kind] = app.state.rx_order
+            log_event(app.state.events_path, f"{kind}_start", payload)
 
     def _live_state(watch) -> str:
         """"starting" until a fresh tool has held on a moment, then "running"."""
@@ -1982,10 +2088,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         listener = app.state.lora
         if not listener.running:
+            had, prev = _bump_rx_start_order("lora")
             try:
                 listener.start()
             except LoRaUnavailable as exc:
+                _revert_rx_start_order("lora", had, prev)
                 return _refused("lora", exc, {"packets": [], **listener.send_state()})
+            except BaseException:
+                _revert_rx_start_order("lora", had, prev)
+                raise
             _started("lora", {"host": listener.hostname, "port": listener.port})
         return {
             "available": True,
@@ -2604,12 +2715,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         label = kind.display_label
         start_error = None
         extra_cols = dict(extra or {})
-        # Hold reception_lock across pre_start, reading the clock, storing the attempt, launch,
+        # Run pre_start (e.g. receiver stand-down) before acquiring reception_lock so joining a
+        # receiver's reader thread while that thread is waiting on reception_lock cannot deadlock.
+        if pre_start is not None:
+            pre_start()
+        # Hold reception_lock across reading the clock, storing the attempt, launch,
         # and appending the start event so log order matches what live receptions see, while
         # preserving lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
         with reception_lock:
-            if pre_start is not None:
-                pre_start()
             started_at = round(clock(), 3)
             previous = None
             try:
@@ -2670,6 +2783,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 app.state.progress.restore_attempt(kind, key, previous)
                         except (OSError, sqlite3.Error):
                             pass
+                    else:
+                        app.state.rx_order += 1
+                        app.state.attempt_start_order[(kind.kind, key)] = app.state.rx_order
             elif start_error is None:
                 start_error = f"the {label} store is closed"
             _set_attempt_start_error(kind, key, start_error)
@@ -2708,7 +2824,123 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 return True, err
             return True, None
 
+    def _stand_down_for_solo() -> None:
+        """Stop every running SDR consumer, replay, and LoRa before a solo starts.
+
+        Runs outside reception_lock so joining a receiver's reader thread cannot deadlock a
+        thread waiting to log an in-flight reception.
+        """
+        deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
+        consumers = {name: getattr(app.state, name) for name in SDR_CONSUMERS}
+        calibration = app.state.ppm_calibration
+        if reason := calibration.release_failure():
+            raise SoloStandDownError(reason)
+        for consumer in consumers.values():
+            failure = getattr(consumer, "release_failure", None)
+            if failure and (reason := failure()):
+                raise SoloStandDownError(reason)
+        with app.state.radio_arbiter.reserve("solo", SoloStandDownError, deadline):
+            if reason := calibration.release_failure():
+                raise SoloStandDownError(reason)
+            for consumer in consumers.values():
+                consumer.release()
+                failure = getattr(consumer, "release_failure", None)
+                if failure and (reason := failure(pending=True)):
+                    raise SoloStandDownError(reason)
+            replay = app.state.replay
+            if replay.running:
+                replay.stop()
+                if reason := replay.release_failure(pending=True):
+                    raise SoloStandDownError(reason)
+        lora_listener = app.state.lora
+        if lora_listener.running:
+            lora_listener.stop()
+
+    def _solo_qualifies(attempt: dict, stamp: dict) -> int | None:
+        solo = _audited_solo_by_id(attempt["solo_id"])
+        if solo is None:
+            return None
+        slot = solo_qualifies_slot(solo, attempt, stamp)
+        if slot is None:
+            return None
+        # Live path: enforce process-order counter so a receiver started before Start cannot
+        # credit the attempt even after a backward clock step (R2-B2). Backfill enforces the
+        # equivalent log-order check via _solo_backfill_gate.
+        if "_log_pos" not in stamp:
+            inst = rack_instrument(stamp.get("instrument", ""))
+            if inst is None:
+                return None
+            rx_ord = app.state.rx_start_order.get(inst.api, 0)
+            att_ord = app.state.attempt_start_order.get((SOLO_KIND.kind, solo.id), 0)
+            if not (rx_ord > att_ord):
+                return None
+        return slot
+
+    def _solo_backfill_gate(
+        attempt: dict,
+        stamp: dict,
+        events_list: list[dict],
+        start_pos: dict,
+    ) -> bool:
+        inst = rack_instrument(stamp.get("instrument", ""))
+        if inst is None:
+            return False
+        s_pos = start_pos.get(
+            (SOLO_KIND.kind, attempt["solo_id"], float(attempt["started_at"]))
+        )
+        if s_pos is None:
+            return True
+        r_pos = stamp.get("_log_pos")
+        if r_pos is None:
+            return False
+        start_kind = f"{inst.api}_start"
+        return any(
+            s_pos < idx < r_pos
+            and isinstance(events_list[idx], dict)
+            and events_list[idx].get("kind") == start_kind
+            for idx in range(s_pos + 1, min(r_pos, len(events_list)))
+        )
+
+    def _solo_payload(solo) -> dict:
+        read_error = None
+        try:
+            saved = app.state.progress.attempt(SOLO_KIND, solo.id)
+            attempt = saved["attempt"]
+            calls = (
+                app.state.progress.solo_calls(solo.id, float(attempt["started_at"]))
+                if attempt is not None
+                else []
+            )
+            passed_before_ts = app.state.progress.latest_solo_complete_pass_ts(
+                solo.id, len(solo.legs)
+            )
+        except (OSError, sqlite3.Error) as exc:
+            saved = {"attempt": None, "attempt_passes": [], "latest_pass": None, "passes": 0}
+            calls = []
+            passed_before_ts = None
+            read_error = f"the solo state could not be read: {exc}"
+        now = round(clock(), 3)
+        error = (
+            read_error
+            or app.state.attempt_start_errors.get((SOLO_KIND.kind, solo.id))
+            or app.state.attempt_errors.get(SOLO_KIND.kind)
+        )
+        return format_solo_payload(
+            solo,
+            saved["attempt"],
+            saved.get("attempt_passes", []),
+            calls,
+            passed_before_ts,
+            now,
+            error=error,
+        )
+
     _register_attempt_kind(CHALLENGE_KIND, qualifies=_challenge_qualifies)
+    _register_attempt_kind(
+        SOLO_KIND,
+        qualifies=_solo_qualifies,
+        backfill_gate=_solo_backfill_gate,
+    )
     app.state.register_attempt_kind = _register_attempt_kind
     app.state.start_attempt = _start_attempt
     app.state.record_attempt_pass = _record_attempt_pass
@@ -3043,12 +3275,192 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             },
         )
 
+    @app.get("/api/solos/{solo_id}")
+    def solo_get(solo_id: str):
+        """Return one audited solo's leak-free state, legs, and call result."""
+        solo = _audited_solo_by_id(solo_id)
+        if solo is None:
+            raise HTTPException(status_code=404, detail=f"solo {solo_id!r} not found")
+        return _solo_payload(solo)
+
+    @app.post("/api/solos/{solo_id}/start")
+    def solo_start(solo_id: str):
+        """Start or restart an audited solo after standing down running receivers."""
+        solo = _audited_solo_by_id(solo_id)
+        if solo is None:
+            raise HTTPException(status_code=404, detail=f"solo {solo_id!r} not found")
+        try:
+            _, start_error = _start_attempt(
+                SOLO_KIND,
+                solo.id,
+                solo.window_s,
+                pre_start=_stand_down_for_solo,
+            )
+        except SoloStandDownError as exc:
+            err = f"the solo could not stand down a running receiver: {exc}"
+            _set_attempt_start_error(SOLO_KIND, solo.id, err)
+            payload = _solo_payload(solo)
+            payload["error"] = err
+            return JSONResponse(status_code=503, content=payload)
+        payload = _solo_payload(solo)
+        if start_error is not None:
+            payload["error"] = start_error
+            return JSONResponse(status_code=500, content=payload)
+        return payload
+
+    @app.post("/api/solos/{solo_id}/call")
+    def solo_call(solo_id: str, body: dict = Body(default={})):
+        """Score and record one learner legal call for a heard leg of the active attempt."""
+        solo = _audited_solo_by_id(solo_id)
+        if solo is None:
+            raise HTTPException(status_code=404, detail=f"solo {solo_id!r} not found")
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"recorded": False, "reason": "bad body"})
+        band_slot = body.get("band_slot")
+        if type(band_slot) is not int:
+            return JSONResponse(
+                status_code=400, content={"recorded": False, "reason": "band_slot must be an int"}
+            )
+        leg = next((item for item in solo.legs if item.slot == band_slot), None)
+        if leg is None:
+            return JSONResponse(
+                status_code=400,
+                content={"recorded": False, "reason": f"unknown band_slot {band_slot}"},
+            )
+        started_at = body.get("started_at")
+        if type(started_at) not in (int, float):
+            return JSONResponse(
+                status_code=400, content={"recorded": False, "reason": "started_at is required"}
+            )
+        call_val = body.get("call")
+        why_key = body.get("why_key")
+        try:
+            scored = score_legal_call(leg, call_val, why_key)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"recorded": False, "reason": str(exc)})
+
+        with reception_lock:
+            saved = app.state.progress.attempt(SOLO_KIND, solo.id)
+            attempt = saved["attempt"]
+            if (
+                attempt is None
+                or round(float(attempt["started_at"]), 3) != round(float(started_at), 3)
+            ):
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "recorded": False,
+                        "reason": "stale solo attempt — reload before submitting",
+                    },
+                )
+            passed_slots = {p["band_slot"] for p in saved.get("attempt_passes", [])}
+            if band_slot not in passed_slots:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "recorded": False,
+                        "reason": "hear a qualifying live reception before submitting the call",
+                    },
+                )
+            answered_at = round(clock(), 3)
+            inserted = app.state.progress.record_solo_call(
+                solo.id,
+                float(attempt["started_at"]),
+                band_slot,
+                call=scored["call"],
+                why_key=scored["why_key"],
+                call_correct=scored["call_correct"],
+                why_correct=scored["why_correct"],
+                answered_at=answered_at,
+                item_revision=scored["item_revision"],
+            )
+            if not inserted:
+                return JSONResponse(
+                    status_code=409,
+                    content={"recorded": False, "reason": "legal call already submitted"},
+                )
+            try:
+                log_event(
+                    app.state.events_path,
+                    "solo_call",
+                    {
+                        "solo_id": solo.id,
+                        "started_at": float(attempt["started_at"]),
+                        "band_slot": band_slot,
+                        "answered_at": answered_at,
+                        "call": scored["call"],
+                        "why_key": scored["why_key"],
+                        "call_correct": scored["call_correct"],
+                        "why_correct": scored["why_correct"],
+                        "legal_passed": scored["legal_passed"],
+                        "item_revision": scored["item_revision"],
+                        **SOLO_KIND.replay_flags(),
+                    },
+                    sync=managed,
+                )
+            except OSError as exc:
+                try:
+                    app.state.progress.delete_solo_call(
+                        solo.id, float(attempt["started_at"]), band_slot
+                    )
+                except (OSError, sqlite3.Error):
+                    pass
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "recorded": False,
+                        "reason": f"the solo call could not be logged: {exc}",
+                    },
+                )
+        return _solo_payload(solo)
+
+    @app.get("/unit/{unit_id}/solo", response_class=HTMLResponse)
+    def unit_solo_view(request: Request, unit_id: int):
+        """Interactive Tier C solo screen for an audited unit solo."""
+        unit = get_unit(unit_id)
+        solo = _audited_solo_for_unit(unit_id)
+        if unit is None or solo is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no solo")
+        payload = _solo_payload(solo)
+        return templates.TemplateResponse(
+            request=request,
+            name="solo.html",
+            context={
+                "title": f"Unit {unit.id} · Solo",
+                "back_href": f"/unit/{unit.id}",
+                "back_label": f"Unit {unit.id}",
+                "solo": payload,
+                "back_self": f"/unit/{unit.id}/solo",
+            },
+        )
+
+    @app.get("/capstone", response_class=HTMLResponse)
+    def capstone_view(request: Request):
+        """Interactive Tier C multi-band capstone solo screen."""
+        solo = _audited_capstone()
+        if solo is None:
+            raise HTTPException(status_code=404, detail="capstone solo not available")
+        payload = _solo_payload(solo)
+        return templates.TemplateResponse(
+            request=request,
+            name="solo.html",
+            context={
+                "title": "Capstone · Solo",
+                "back_href": "/",
+                "back_label": "Home",
+                "solo": payload,
+                "back_self": "/capstone",
+            },
+        )
+
     @app.get("/operate")
-    def operate_home():
+    def operate_home(back: str | None = None):
         """The rack opens on the instrument last used, or the waterfall the first time."""
         last = app.state.progress.get_place(RACK_PLACE)
         key = last if rack_instrument(last or "") else DEFAULT_INSTRUMENT
-        return RedirectResponse(f"/operate/{key}", status_code=303)
+        back_href, _ = _safe_back(back)
+        query = f"?back={back_href}" if back_href != "/" else ""
+        return RedirectResponse(f"/operate/{key}{query}", status_code=303)
 
     @app.post("/api/rack/place")
     def rack_place(payload: dict = Body(default={})):
@@ -3086,10 +3498,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if freq_hz is None and len(inst.fixed_hz) == 1:
             freq_hz = inst.fixed_hz[0]
         back_href, back_label = _safe_back(back)
+        back_query = f"?back={back_href}" if back_href != "/" else ""
         return templates.TemplateResponse(
             request=request,
             name="operate.html",
             context={"title": "Operator mode", "back_href": back_href, "back_label": back_label,
+                     "back_query": back_query,
                      "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
                      # The pager shows framing only wherever it is tuned; its dial says so.
                      "text_withheld": inst.key == "pager",

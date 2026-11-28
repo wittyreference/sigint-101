@@ -54,7 +54,7 @@
         <h2 class="rack__group-title" id="{{ heading_id }}">{{ heading }}</h2>
         {% for key, detail in entries.items() %}
         {% set i = instruments|selectattr('key', 'equalto', key)|first %}
-        <a class="rack__pick{% if i.key == inst.key %} rack__pick--on{% endif %}" href="/operate/{{ i.key }}"{% if i.key == inst.key %} aria-current="page"{% endif %} data-rack-pick="{{ i.key }}">
+        <a class="rack__pick{% if i.key == inst.key %} rack__pick--on{% endif %}" href="/operate/{{ i.key }}{{ back_query }}"{% if i.key == inst.key %} aria-current="page"{% endif %} data-rack-pick="{{ i.key }}">
           <span class="rack__pick-label">{{ 'POCSAG' if i.key == 'pager' else i.label }}</span>
           <span class="rack__pick-tool">{{ flock_tool if i.key == 'flock' else i.tool }}</span>
           <span class="rack__pick-detail">{{ detail }}</span>
