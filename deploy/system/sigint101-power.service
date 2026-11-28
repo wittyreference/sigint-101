@@ -1,0 +1,40 @@
+# SIGINT 101 low-battery safe-shutdown watcher.
+# Ships disarmed; reads the UPS INA219 directly without modifying registers.
+[Unit]
+Description=SIGINT 101 low-battery power watcher
+After=local-fs.target systemd-logind.service polkit.service
+
+[Service]
+Type=exec
+User=sigint101-power
+Group=sigint101-power
+SupplementaryGroups=i2c
+EnvironmentFile=-/etc/sigint101/power.conf
+ExecStart=/usr/local/bin/sigint101-power
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=sigint101-power
+RuntimeDirectoryMode=0755
+UMask=0022
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=char-i2c rw
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

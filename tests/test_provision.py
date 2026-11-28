@@ -767,3 +767,249 @@ def test_provision_does_not_mark_an_unconfirmed_mesh_power_default_done(box):
     assert second.returncode == 0, second.stdout + second.stderr
     assert state.read_text() == "1 9 True 8 False\n"
     assert box.calls().count("--set lora.tx_power 8") == 2
+
+
+# --- step_power (safe-shutdown watcher provisioning, slice 2a) ------------------
+
+
+POWER_SOURCE_FILES = (
+    "sigint101/__init__.py",
+    "sigint101/battery.py",
+    "sigint101/power.py",
+    "deploy/system/sigint101-power.service",
+    "deploy/system/sigint101-power",
+    "deploy/system/50-sigint101-power.rules",
+    "deploy/system/sigint101-power.sysusers.conf",
+)
+
+
+def _setup_power_box(
+    box: ProvisionBox,
+    tmp_path: Path,
+    *,
+    i2c_group: str | None = "i2c",
+    i2c_gid: int = 998,
+    unit_state: str = "enabled",
+    user_exists: bool = False,
+):
+    """Populate a sysroot-backed ProvisionBox with the real power watcher source files."""
+    sysroot = tmp_path / "sysroot"
+    sysroot.mkdir(exist_ok=True)
+    course = box.home / "sigint-101"
+    for rel in POWER_SOURCE_FILES:
+        src = REPO / rel
+        dst = course / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        if os.access(src, os.X_OK):
+            dst.chmod(0o755)
+
+    real_cmp = shutil.which("cmp")
+    real_install = shutil.which("install")
+    assert real_cmp and real_install
+    (box.bin / "cmp").unlink()
+    _stub(
+        box.bin / "cmp",
+        'args=()\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        f'    /usr/local/*|/etc/*|/var/lib/*) args+=("{sysroot}$a") ;;\n'
+        '    *) args+=("$a") ;;\n'
+        '  esac\n'
+        'done\n'
+        f'exec "{real_cmp}" "${{args[@]}}"\n',
+    )
+    user_flag = tmp_path / "power-user-created"
+    if user_exists:
+        user_flag.touch()
+    _stub(
+        box.bin / "sudo",
+        f'echo "sudo $*" >> "{box.log}"\n'
+        'cmd="$1"; shift\n'
+        'case "$cmd" in\n'
+        '  install)\n'
+        '    args=()\n'
+        '    for a in "$@"; do\n'
+        '      case "$a" in\n'
+        f'        /usr/local/*|/etc/*|/var/lib/*) args+=("{sysroot}$a") ;;\n'
+        '        *) args+=("$a") ;;\n'
+        '      esac\n'
+        '    done\n'
+        f'    exec "{real_install}" "${{args[@]}}"\n'
+        '    ;;\n'
+        '  systemd-sysusers|useradd)\n'
+        f'    touch "{user_flag}"\n'
+        '    exit 0 ;;\n'
+        '  tee) exec cat >/dev/null ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n',
+    )
+    _stub(
+        box.bin / "systemctl",
+        f'echo "systemctl $*" >> "{box.log}"\n'
+        'case "$*" in\n'
+        '  "get-default") echo graphical.target; exit 0 ;;\n'
+        '  "is-enabled sigint101-power.service")\n'
+        f'    echo "{unit_state}"\n'
+        f'    [ "{unit_state}" = "enabled" ] ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n',
+    )
+    if i2c_group is None:
+        _stub(box.bin / "stat", 'echo "stat: cannot stat /dev/i2c-1" >&2; exit 1')
+    else:
+        _stub(
+            box.bin / "stat",
+            'if [ "$*" = "-c %G /dev/i2c-1" ]; then\n'
+            f'  echo "{i2c_group}"; exit 0\n'
+            'fi\n'
+            'exit 1',
+        )
+    _stub(
+        box.bin / "getent",
+        'if [ "$1" = "passwd" ] && [ "$2" = "sigint101-power" ]; then\n'
+        f'  if [ -f "{user_flag}" ]; then\n'
+        '    echo "sigint101-power:x:997:997::/nonexistent:/usr/sbin/nologin"\n'
+        '    exit 0\n'
+        '  fi\n'
+        '  exit 2\n'
+        'fi\n'
+        f'if [ "$1" = "group" ] && [ "$2" = "{i2c_group or ""}" ]; then\n'
+        f'  echo "{i2c_group}:x:{i2c_gid}:"; exit 0\n'
+        'fi\n'
+        'exit 2',
+    )
+    for extra in ("mktemp", "touch"):
+        found = shutil.which(extra)
+        assert found
+        if not (box.bin / extra).exists():
+            (box.bin / extra).symlink_to(found)
+    return sysroot
+
+
+def _power_section(stdout: str) -> str:
+    found = re.search(
+        r"^==> Low-battery power watcher[^\n]*\n(.*?)(?=^==> |\Z)",
+        stdout,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert found, f"no power watcher section in output:\n{stdout}"
+    return found.group(1)
+
+
+def test_step_power_installs_files_is_idempotent_and_preserves_power_conf(box, tmp_path):
+    sysroot = _setup_power_box(box, tmp_path)
+
+    # --check writes nothing.
+    chk = box.run("--check")
+    assert chk.returncode == 0, chk.stdout + chk.stderr
+    assert "  would  " in _power_section(chk.stdout)
+    assert not (sysroot / "etc/systemd/system/sigint101-power.service").exists()
+    assert not (sysroot / "etc/sigint101/power.conf").exists()
+
+    # First apply installs all 7 files, creates user, enables unit, and never creates power.conf.
+    first = box.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    expected_installed = [
+        "etc/systemd/system/sigint101-power.service",
+        "usr/local/bin/sigint101-power",
+        "usr/local/lib/sigint101-power/sigint101/__init__.py",
+        "usr/local/lib/sigint101-power/sigint101/battery.py",
+        "usr/local/lib/sigint101-power/sigint101/power.py",
+        "etc/polkit-1/rules.d/50-sigint101-power.rules",
+        "usr/local/lib/sysusers.d/sigint101-power.conf",
+    ]
+    for rel in expected_installed:
+        assert (sysroot / rel).is_file(), f"missing installed {rel}"
+    assert not (sysroot / "etc/sigint101/power.conf").exists()
+    assert "enable --now sigint101-power.service" in box.calls()
+
+    # Plant an operator power.conf and confirm a second run makes 0 changes and preserves it.
+    conf = sysroot / "etc/sigint101/power.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("SIGINT101_POWER_THRESHOLD_V=9.50\n", encoding="utf-8")
+    second = box.run()
+    assert second.returncode == 0, second.stdout + second.stderr
+    sec2 = _power_section(second.stdout)
+    assert "  did    " not in sec2 and "  would  " not in sec2
+    assert conf.read_text(encoding="utf-8") == "SIGINT101_POWER_THRESHOLD_V=9.50\n"
+
+
+def test_step_power_group_dropin_resets_list_refuses_root_and_warns_when_missing(box, tmp_path):
+    # (i) Non-system group i2cdev (GID >= 100) writes reset+add drop-in.
+    sysroot = _setup_power_box(box, tmp_path, i2c_group="i2cdev", i2c_gid=120)
+    res = box.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    dropin = sysroot / "etc/systemd/system/sigint101-power.service.d/10-i2c-group.conf"
+    assert dropin.is_file()
+    assert dropin.read_text(encoding="utf-8") == (
+        "[Service]\nSupplementaryGroups=\nSupplementaryGroups=i2cdev\n"
+    )
+
+    # (ii) root (or GID < 100) warns and writes no drop-in.
+    for grp, gid in [("root", 0), ("staff", 50)]:
+        d2 = tmp_path / f"grp-{grp}"
+        d2.mkdir()
+        b2 = ProvisionBox(d2)
+        s2 = _setup_power_box(b2, d2, i2c_group=grp, i2c_gid=gid)
+        r2 = b2.run()
+        assert r2.returncode == 0, r2.stdout + r2.stderr
+        assert "  WARN   " in _power_section(r2.stdout)
+        assert not (s2 / "etc/systemd/system/sigint101-power.service.d/10-i2c-group.conf").exists()
+
+    # (iii) /dev/i2c-1 missing warns and writes no drop-in.
+    d3 = tmp_path / "missing-i2c"
+    d3.mkdir()
+    b3 = ProvisionBox(d3)
+    s3 = _setup_power_box(b3, d3, i2c_group=None)
+    r3 = b3.run()
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    sec3 = _power_section(r3.stdout)
+    assert "  WARN   " in sec3 and "I2C not enabled" in sec3
+    assert not (s3 / "etc/systemd/system/sigint101-power.service.d/10-i2c-group.conf").exists()
+
+
+def test_step_power_skips_older_checkout_and_managed_updater_and_respects_owner_state(
+    box, tmp_path
+):
+    # (a) Older/partial checkout (default ProvisionBox has no deploy/system/ or power.py):
+    # warns and continues.
+    for args in ((), ("--check",)):
+        res = box.run(*args)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "  WARN   " in _power_section(res.stdout)
+        assert "Hand-over hygiene" in res.stdout
+
+    # (b) Any non-enabled unit state on an already-installed unit skips and never re-enables.
+    for state in ("disabled", "masked", "masked-runtime", "static"):
+        d_st = tmp_path / f"st-{state}"
+        d_st.mkdir()
+        b_st = ProvisionBox(d_st)
+        s_st = _setup_power_box(b_st, d_st, unit_state=state, user_exists=True)
+        # Pre-install unit so it's not first install.
+        unit_dst = s_st / "etc/systemd/system/sigint101-power.service"
+        unit_dst.parent.mkdir(parents=True, exist_ok=True)
+        unit_dst.write_text("[Unit]\nDescription=old\n", encoding="utf-8")
+        for args in (("--check",), ()):
+            r_st = b_st.run(*args)
+            assert r_st.returncode == 0, r_st.stdout + r_st.stderr
+            sec = _power_section(r_st.stdout)
+            assert "turned off by the owner" in sec and state in sec
+            assert "enable --now sigint101-power.service" not in b_st.calls()
+            assert "restart sigint101-power.service" not in b_st.calls()
+
+    # (c) Managed updater enrollment markers skip with WARN and install nothing.
+    for marker in ("current.json", "control.json"):
+        d_m = tmp_path / f"mgr-{marker}"
+        d_m.mkdir()
+        b_m = ProvisionBox(d_m)
+        s_m = _setup_power_box(b_m, d_m)
+        updater = b_m.home / ".local/state/sigint101-updater"
+        updater.mkdir(parents=True, exist_ok=True)
+        (updater / marker).write_text("{}\n", encoding="utf-8")
+        for args in (("--check",), ()):
+            r_m = b_m.run(*args)
+            assert r_m.returncode == 0, r_m.stdout + r_m.stderr
+            sec = _power_section(r_m.stdout)
+            assert "  WARN   " in sec and "managed box" in sec
+            assert not (s_m / "etc/systemd/system/sigint101-power.service").exists()
