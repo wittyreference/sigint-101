@@ -1,0 +1,68 @@
+<!-- ABOUTME: Course band map (/bands): fixed log-scale decorative dial over a scrolling ladder of
+     ABOUTME: 764x76 lesson rows grouped under primary-source allocations, plus off-dial and no-radio lessons. -->
+{% extends "base.html" %}
+{% import "_panels.html" as panels %}
+
+{% block title %}Band map{% endblock %}
+
+{% block content %}
+<section class="bandmap" aria-label="Course band map">
+  <p class="bandmap__caption">{{ caption }}</p>
+  <div class="bandmap__overview" aria-hidden="true">
+    <svg class="bandmap__dial" viewBox="0 0 800 48" width="800" height="48">
+      {% if bandmap.fm_bar %}
+      <rect class="bandmap__fm-bar"
+            x="{{ bandmap.fm_bar.x_start }}" y="4"
+            width="{{ '%.1f'|format(bandmap.fm_bar.x_end - bandmap.fm_bar.x_start) }}" height="16"/>
+      {% endif %}
+      <line class="bandmap__axis" x1="18" y1="20" x2="782" y2="20"/>
+      {% for tick in bandmap.ticks %}
+      <line class="bandmap__tick{% if tick.replay_only %} bandmap__tick--replay{% endif %}"
+            x1="{{ tick.x }}" y1="4" x2="{{ tick.x }}" y2="20"/>
+      {% endfor %}
+      {% for label in bandmap.axis_labels %}
+      <text class="bandmap__dial-label" x="{{ label.x }}" y="42" text-anchor="{{ label.anchor }}">{{ label.text }}</text>
+      {% endfor %}
+    </svg>
+  </div>
+  <div class="scroll-frame bandmap__frame">
+    <div class="bandmap__entries" tabindex="0">
+      {% for group in bandmap.groups %}
+      <section class="bandmap__group">
+        <h2 class="bandmap__heading">{{ group.allocation.heading }}{% if group.allocation.service %} &middot; {{ group.allocation.service }}{% endif %}</h2>
+        <div class="bandmap__rows">
+          {% for row in group.rows %}
+          <a class="bandmap__row" href="/lesson/{{ row.lesson_id }}" data-lesson-id="{{ row.lesson_id }}">
+            <span class="bandmap__row-body">
+              <span class="bandmap__line1">M{{ row.lesson_id }} &middot; {% if row.kind == 'default_sweep' %}sweeps {{ panels.mhz(row.low_hz) }}-{{ panels.mhz(row.high_hz) }} MHz{% else %}tunes {{ panels.mhz(row.center_hz) }} MHz{% endif %} &middot; {{ row.title }}</span>
+              <span class="bandmap__line2">{% if row.status == 'replay-only' %}<span class="logbook-mark logbook-mark--replay">REPLAY ONLY</span> {{ row.note }}{% else %}{{ row.tool }} &middot; {{ row.instrument_label }}{% if row.fixed_hz|length > 1 %} &middot; decoder listens on {% for hz in row.fixed_hz %}{{ panels.mhz(hz) }}{% if not loop.last %} and {% endif %}{% endfor %} MHz{% endif %}{% endif %}</span>
+            </span>
+            <span class="bandmap__arrow" aria-hidden="true">&rarr;</span>
+          </a>
+          {% endfor %}
+        </div>
+      </section>
+      {% endfor %}
+      {% if bandmap.off_dial %}
+      <section class="bandmap__group">
+        <h2 class="bandmap__heading">Not on this dial</h2>
+        <div class="bandmap__rows">
+          {% for row in bandmap.off_dial %}
+          <a class="bandmap__row bandmap__row--off-dial" href="/lesson/{{ row.lesson_id }}" data-lesson-id="{{ row.lesson_id }}">
+            <span class="bandmap__row-body">
+              <span class="bandmap__line1">M{{ row.lesson_id }} &middot; {{ row.title }}</span>
+              <span class="bandmap__line2">{{ row.note }}</span>
+            </span>
+            <span class="bandmap__arrow" aria-hidden="true">&rarr;</span>
+          </a>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+      {% if bandmap.no_radio_line %}
+      <p class="bandmap__no-radio">{{ bandmap.no_radio_line }}</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}

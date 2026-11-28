@@ -96,6 +96,8 @@
     if (picker && picker.scrollHeight - picker.clientHeight > 2) return picker;
     var law = document.querySelector(".law__entries");
     if (law && law.scrollHeight - law.clientHeight > 2) return law;
+    var bandmap = document.querySelector(".bandmap__entries");
+    if (bandmap && bandmap.scrollHeight - bandmap.clientHeight > 2) return bandmap;
     return null;
   }
 
