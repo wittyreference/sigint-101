@@ -104,7 +104,7 @@ class ReceptionSink:
             self._open = False
 
 
-async def finish_console(receivers, stores, sink, timeout):
+async def finish_console(receivers, stores, sink, timeout, *, report_owners=None):
     deadline = time.monotonic() + timeout
     # Keep one second for both independent closes, scaled down with an injected test deadline.
     drain_end = deadline - min(1.0, timeout / 4)
@@ -133,10 +133,15 @@ async def finish_console(receivers, stores, sink, timeout):
     jobs = start_work(receivers)
     await observe(jobs, drain_end, sink.pending)
     sink.seal()
+    if report_owners is not None:
+        try:
+            errors.extend(report_owners())
+        except Exception as exc:
+            errors.append(f"radio ownership: {exc}")
     errors.extend(f"{name}: shutdown still pending" for name, job in jobs.items() if job.is_alive())
     if pending := sink.pending():
         errors.append(f"{pending} reception reports still pending")
     stores = start_work(stores)
     await observe(stores, deadline)
     errors.extend(f"{name}: close still pending" for name, job in stores.items() if job.is_alive())
-    return errors
+    return list(dict.fromkeys(errors))

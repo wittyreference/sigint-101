@@ -20,7 +20,7 @@ from .childproc import (
     RunGuard,
     command_line,
     spawn,
-    stop_process,
+    stop_and_confirm,
 )
 from .hardware import (
     DeviceSelectionError,
@@ -489,9 +489,9 @@ class _Feed:
                 if sock.fileno() != -1:
                     raise
 
-    def stop_child(self) -> bool:
+    def stop_child(self, *, kill_only, wait_s):
         """Stop and reap rtl_ais while leaving the UDP socket open to drain queued datagrams."""
-        return stop_process(self._proc)
+        return stop_and_confirm(self._proc, kill_only=kill_only, wait_s=wait_s)
 
     def terminate(self):
         self.close_transport()

@@ -9,11 +9,12 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, suppress
 from types import SimpleNamespace
 
 import pytest
 
-from sigint101 import app, aprs, childproc, decode, ppm, radio_control, receiver_lifecycle
+from sigint101 import adsb, app, aprs, childproc, decode, ppm, radio_control, receiver_lifecycle
 from sigint101.events import read_events
 from sigint101.spectrum import Sweeper
 from tests.child_fakes import Child, LateProc
@@ -782,9 +783,9 @@ radio_control.ReceptionSink.seal = sealed
 finish = app.finish_console
 
 
-async def finish_console(*args):
+async def finish_console(*args, **kwargs):
     phase[0] = "drain"
-    return await finish(*args)
+    return await finish(*args, **kwargs)
 
 
 app.finish_console = finish_console
@@ -969,8 +970,8 @@ def test_cleanup_fault_still_fences_the_run_and_closes_its_transport(
             return super().wait(timeout)
 
     class Feed(Proc):
-        def stop_child(self):
-            return childproc.stop_process(self)
+        def stop_child(self, **options):
+            return childproc.stop_and_confirm(self, **options)
 
         def close_transport(self):
             record("close")
@@ -999,7 +1000,8 @@ def test_cleanup_fault_still_fences_the_run_and_closes_its_transport(
     assert events[0] == ("terminate", True)
     assert proc.sent == ["TERM"]
     if failure == "stop":
-        assert ticket.reap_failed and "child wait failed" in ticket.failure
+        assert not ticket.reap_failed and decoder.release_failure(pending=True) is None
+        assert "child wait failed" in ticket.diagnostic_fault
         assert all(action != "join" for action, _ in events)
     else:
         assert not ticket.reap_failed
@@ -1188,3 +1190,295 @@ def test_ppm_retains_its_long_capture_window_without_losing_typed_queue_refusals
             waterfall.join(6)
         assert finished.is_set()
         assert claims["/api/spectrum"].status_code == 200
+
+
+@pytest.mark.parametrize("transport", [False, True], ids=["pipe", "feed"])
+def test_supervised_stop_escalates_after_wait_error(monkeypatch, transport):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    waits = []
+
+    class Proc(Child):
+        def wait(self, timeout=None):
+            waits.append(tuple(self.sent))
+            if "KILL" not in self.sent:
+                raise OSError("TERM wait failed")
+            return super().wait(timeout)
+
+    class Feed(adsb._Feed):
+        def _lines(self):
+            return iter(())
+
+    proc = Proc(stubborn=True)
+    decoder = _aprs(Feed(proc) if transport else proc)
+    decoder.start()
+    try:
+        decoder.stop()
+        assert proc.sent == ["TERM", "KILL"]
+        assert waits == [("TERM",), ("TERM", "KILL")]
+        assert decoder._run.reaped
+    finally:
+        proc.code = -9
+        _finish_fault_fake(decoder)
+
+
+def _finish_fault_fake(decoder):
+    with suppress(aprs.AprsUnavailable):
+        decoder.shutdown()
+
+
+@pytest.mark.parametrize("outcome,detail", [
+    ("timeout", "survived kill"),
+    ("wait-error", "KILL wait failed"),
+    ("signal-error", "KILL signal failed"),
+    ("status-error", "status unreadable"),
+    ("no-status", "no exit status"),
+])
+def test_supervised_retained_reason_follows_kill_wait_outcome(
+        tmp_path, monkeypatch, outcome, detail):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    waits = []
+
+    class Proc(Child):
+        def poll(self):
+            if outcome == "status-error" and waits and self.code is None:
+                raise OSError("status unreadable")
+            return super().poll()
+
+        def kill(self):
+            super().kill()
+            if outcome == "signal-error" and self.code is None:
+                raise PermissionError("KILL signal failed")
+
+        def wait(self, timeout=None):
+            waits.append(tuple(self.sent))
+            if "KILL" not in self.sent:
+                raise OSError("TERM wait failed")
+            if outcome == "wait-error" and self.code is None:
+                raise OSError("KILL wait failed")
+            if outcome == "no-status" and self.code is None:
+                return 0
+            return super().wait(timeout)
+
+    proc = Proc(unkillable=True)
+    decoder = _aprs(proc)
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
+                 sweeper_factory=lambda: _StubSweeper([])) as client:
+        decoder.start()
+        try:
+            decoder.stop()
+            reason = decoder.release_failure(pending=True)
+            assert reason and detail in reason
+            assert ("survived kill" in reason) == (outcome == "timeout")
+            assert ("could not be confirmed stopped" in reason) == (outcome != "timeout")
+            if outcome == "signal-error":
+                assert waits == [("TERM",)]
+            assert client.get("/api/hardware").json()["state"] == "busy"
+            for _ in range(2):
+                response = client.get("/api/spectrum")
+                assert response.status_code == 503 and response.json()["reason"] == reason
+            assert not client.app.state.sweeper.running
+        finally:
+            proc.code = -9
+
+
+@pytest.mark.parametrize("control", ["stop", "release", "retune", "shutdown"])
+def test_supervised_control_retries_kept_child_immediately(monkeypatch, control):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    proc = Child(unkillable=True)
+    decoder = _aprs(proc)
+    decoder.start()
+    try:
+        decoder.stop()
+        assert proc.sent == ["TERM", "KILL"]
+        assert decoder.release_failure()
+        decoder.retune(decoder.freq_hz)
+        assert proc.sent == ["TERM", "KILL"]
+        proc.unkillable = False
+        if control == "retune":
+            decoder.retune(145_000_000)
+        else:
+            getattr(decoder, control)()
+        assert proc.sent == ["TERM", "KILL", "KILL"]
+        assert decoder._run.reaped
+        assert decoder.release_failure(pending=True) is None
+    finally:
+        proc.code = -9
+        _finish_fault_fake(decoder)
+
+
+def test_supervised_reader_wakes_do_not_postpone_pending_retry(monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.2)
+    done, retried = threading.Event(), threading.Event()
+
+    class Proc(Child):
+        def kill(self):
+            super().kill()
+            if len(self.sent) > 2:
+                retried.set()
+
+    proc = Proc(unkillable=True)
+    decoder = _aprs(proc)
+    decoder.start()
+    run = decoder._run
+
+    def reader_wakes():
+        while not done.wait(0.01):
+            run.wake.set()
+
+    reader = threading.Thread(target=reader_wakes, daemon=True)
+    reader.start()
+    try:
+        decoder.stop()
+        assert retried.wait(1.5), "reader wakes postponed the periodic retry"
+    finally:
+        done.set()
+        reader.join(2)
+        proc.code = -9
+        _finish_fault_fake(decoder)
+
+
+def test_console_shutdown_reports_each_unconfirmed_radio_consumer_before_stores_close(
+        monkeypatch, caplog):
+    monkeypatch.setattr(app, "SHUTDOWN_TOTAL_S", 0.3)
+    unblock = threading.Event()
+    reasons = {
+        "sweeper": "unconfirmed sweep",
+        "aprs": "unconfirmed decoder",
+        "ppm": "unconfirmed calibration",
+    }
+    logged_at_close = []
+
+    class Consumer:
+        def __init__(self, name):
+            self.name = name
+
+        def stop(self):
+            if self.name == "sweeper":
+                raise RuntimeError(reasons[self.name])
+            if self.name == "aprs":
+                unblock.wait(2)
+
+        def release_failure(self, *, pending=False):
+            assert pending == (self.name != "ppm")
+            return reasons.get(self.name)
+
+    def close():
+        logged_at_close.append(tuple(caplog.messages))
+
+    state = SimpleNamespace(**dict.fromkeys((*app.SDR_CONSUMERS, "lora", "flock", "rayhunter")))
+    state.sweeper, state.aprs, state.ais = map(Consumer, ("sweeper", "aprs", "ais"))
+    state.ppm_calibration = Consumer("ppm")
+    state.radio_arbiter = radio_control.RadioArbiter()
+    state.reception_sink = radio_control.ReceptionSink()
+    state.progress = state.exam_store = SimpleNamespace(close=close)
+    try:
+        errors = asyncio.run(app.shutdown_console_state(state))
+    finally:
+        unblock.set()
+
+    assert len(logged_at_close) == 2
+    for name, reason in reasons.items():
+        entry = f"{name}: {reason}"
+        assert all(f"console shutdown: {entry}" in messages for messages in logged_at_close)
+        assert caplog.messages.count(f"console shutdown: {entry}") == errors.count(entry) == 1
+    assert set(errors) == {f"{name}: {reason}" for name, reason in reasons.items()} | {
+        "aprs: shutdown still pending",
+    }
+
+
+def test_reader_drain_failure_keeps_a_confirmed_reap(monkeypatch):
+    proc = Child()
+    decoder = _aprs(proc)
+    decoder.start()
+    run = decoder._run
+
+    def fail_drain(_run):
+        raise OSError("could not join reader")
+
+    monkeypatch.setattr(decoder, "_drain_reader", fail_drain)
+    proc.code = 1
+    run.wake.set()
+    assert run.complete.wait(4)
+    assert run.reaped and not run.reap_failed
+    assert decoder.release_failure(pending=True) is None
+    assert run.diagnostic_fault == "reader drain failed: could not join reader"
+
+
+def test_supervised_controls_share_an_inflight_retry_acknowledgement(monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    retrying, can_reap, both_waiting = (threading.Event() for _ in range(3))
+
+    class Proc(Child):
+        def kill(self):
+            if "KILL" in self.sent:
+                retrying.set()
+                self.unkillable = not can_reap.wait(3)
+            super().kill()
+
+    proc = Proc(unkillable=True)
+    decoder = _aprs(proc)
+    decoder.start()
+    decoder.stop()
+    wait = decoder._wait_physical
+    waits = []
+
+    def observe_wait(*args):
+        waits.append(args)
+        if len(waits) == 2:
+            both_waiting.set()
+        return wait(*args)
+
+    monkeypatch.setattr(decoder, "_wait_physical", observe_wait)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as controls:
+            try:
+                stop = controls.submit(decoder.stop)
+                assert retrying.wait(2), "the stop did not request an immediate retry"
+                release = controls.submit(decoder.release)
+                assert both_waiting.wait(2)
+                assert waits[0][2] is not None and waits[0][2] is waits[1][2]
+                assert not stop.done() and not release.done()
+            finally:
+                can_reap.set()
+        stop.result()
+        release.result()
+        assert proc.sent == ["TERM", "KILL", "KILL"] and decoder._run.reaped
+    finally:
+        proc.code = -9
+        _finish_fault_fake(decoder)
+
+
+def test_claim_already_queued_does_not_retry_a_failed_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    queued, proceed = threading.Event(), threading.Event()
+    proc = Child(unkillable=True)
+    decoder = _aprs(proc)
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
+                 sweeper_factory=lambda: _StubSweeper([])) as client:
+        decoder.start()
+        arbiter = client.app.state.radio_arbiter
+        reserve = arbiter.reserve
+
+        @contextmanager
+        def queued_reservation(*args):
+            queued.set()
+            assert proceed.wait(3)
+            with reserve(*args):
+                yield
+
+        monkeypatch.setattr(arbiter, "reserve", queued_reservation)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as claims:
+                claim = claims.submit(client.get, "/api/spectrum")
+                try:
+                    assert queued.wait(2)
+                    decoder.stop()
+                    assert proc.sent == ["TERM", "KILL"]
+                    assert decoder.release_failure() is not None
+                finally:
+                    proceed.set()
+                assert claim.result(timeout=3).status_code == 503
+            assert proc.sent == ["TERM", "KILL"]
+            assert client.get("/api/hardware").json()["state"] == "busy"
+        finally:
+            proc.code = -9

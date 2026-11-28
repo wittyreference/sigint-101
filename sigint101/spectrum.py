@@ -11,7 +11,14 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from .childproc import FIRST_RETRY_S, MAX_RETRY_S, STABLE_AFTER_S, running_command, spawn
+from .childproc import (
+    FIRST_RETRY_S,
+    MAX_RETRY_S,
+    STABLE_AFTER_S,
+    running_command,
+    spawn,
+    stop_and_confirm,
+)
 from .hardware import (
     RTL_POWER,
     DeviceSelectionError,
@@ -452,13 +459,6 @@ def _popen(cmd):
 
 # The refusal for an rtl_power that a stop could not end. It is the radio's state, not the run's:
 # every start and every handoff is refused with it until the old rtl_power's exit is confirmed.
-SURVIVED_KILL = f"{RTL_POWER} survived kill; the dongle may still be held"
-
-
-def _unconfirmed(exc) -> str:
-    return f"{RTL_POWER} could not be confirmed stopped ({exc}); the dongle may still be held"
-
-
 class Sweeper:
     """Owns one long-lived rtl_power process and a bounded buffer of recent rows.
 
@@ -1105,7 +1105,7 @@ class Sweeper:
             self._settle_retirement(self._stop_child(proc))
         elif self._retiring is not None:
             # An rtl_power an earlier stop could not confirm: signal it again and retry its reap.
-            self._settle_retirement(self._kill_and_confirm(self._retiring))
+            self._settle_retirement(self._stop_child(self._retiring, kill_only=True))
         if self._thread is not None:
             # The reader owns the pipe and ends as the process does. One that outlives this
             # wait (an rtl_power not reaped keeps the pipe open) appends nothing: its start is
@@ -1113,49 +1113,9 @@ class Sweeper:
             self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
 
-    def _stop_child(self, proc) -> str | None:
-        """Ask rtl_power to stop, insist if it must, and wait for the reap; None once confirmed.
-
-        terminate() only asks; the wait is what confirms the OS has reaped it and the USB device
-        is free for the next program. An rtl_power that ignores the ask, and a wait that errs
-        (which confirms nothing), are both escalated to SIGKILL at once.
-        """
-        try:
-            try:
-                proc.terminate()
-            except OSError:
-                pass                            # gone already; the wait says
-            proc.wait(timeout=self.STOP_WAIT_S)
-        except Exception:
-            return self._kill_and_confirm(proc)
-        return None
-
-    def _kill_and_confirm(self, proc) -> str | None:
-        """SIGKILL a retiring rtl_power that is still ours, then wait for its reap.
-
-        Returns None once its exit is confirmed, else why not. The signal goes to the kept process
-        object only after poll() shows it still unreaped, so a reaped process's PID, which may be
-        another process's by now, is never signalled. An error in the poll, the signal or the wait
-        confirms nothing.
-        """
-        try:
-            if proc.poll() is not None:
-                return None
-        except Exception as exc:
-            return _unconfirmed(exc)            # cannot tell it is still ours: no signal
-        try:
-            proc.kill()
-        except OSError:
-            pass                                # gone already; the wait says
-        except Exception as exc:
-            return _unconfirmed(exc)
-        try:
-            proc.wait(timeout=self.STOP_WAIT_S)
-        except subprocess.TimeoutExpired:
-            return SURVIVED_KILL
-        except Exception as exc:
-            return _unconfirmed(exc)
-        return None
+    def _stop_child(self, proc, *, kill_only=False) -> str | None:
+        result = stop_and_confirm(proc, wait_s=self.STOP_WAIT_S, kill_only=kill_only)
+        return result.reason(RTL_POWER)
 
     def _settle_retirement(self, failure: str | None) -> None:
         """Drop the retiring rtl_power once its exit is confirmed; otherwise keep it, and say why.

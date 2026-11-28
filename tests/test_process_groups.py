@@ -1,6 +1,7 @@
 # ABOUTME: Tests signaling Linux process groups while their leader still owns the group ID.
 # ABOUTME: Uses real forked helpers and checks for pipe EOF and absence of post-reap signals.
 
+import ast
 import ctypes
 import os
 import select
@@ -10,10 +11,11 @@ import sys
 import textwrap
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
-from sigint101 import childproc
+from sigint101 import childproc, receiver_lifecycle
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="requires Linux subreaping")
 
@@ -301,3 +303,109 @@ def test_group_priority_changes_only_a_live_owned_leader(forked_group, monkeypat
     tool.wait(timeout=3)
     assert not tool.lower_priority(19)
     assert len(changed) == (1 if target > previous else 0)
+
+
+@pytest.mark.parametrize("guard_error", [False, True], ids=["owned", "guard-error"])
+def test_owned_group_can_retry_kill_after_public_poll_error(monkeypatch, guard_error):
+    # Refuse to reap during the test so all signal and confirmation paths are observable.
+    with childproc.spawn([sys.executable, "-c", "import sys; sys.stdin.read(1)"],
+                         stdin=subprocess.PIPE, stderr=subprocess.DEVNULL) as tool:
+        signals = []
+        signal_group = tool._signal_group
+        receiver = receiver_lifecycle.SupervisedReceiver()
+        receiver._runs = childproc.RunGuard()
+        receiver.watch = childproc.ChildWatch("helper")
+        receiver.error = None
+        receiver._init_lifecycle()
+        receiver._closing = True
+        run = receiver_lifecycle.Run(tool, receiver._runs.current, receiver.watch, ())
+        receiver._run = run
+        run.cancel.set()
+
+        def read_status():
+            raise OSError("public status failed")
+
+        def send(sig):
+            signals.append((sig, tool._waitpid_lock.locked()))
+            signal_group(sig)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(tool, "poll", read_status)
+            patch.setattr(tool, "wait", lambda timeout=None: read_status())
+            patch.setattr(tool, "_signal_group", send)
+            if guard_error:
+                patch.setattr(tool, "_exit_pending", read_status)
+            receiver._supervise(run)
+            assert [sig for sig, locked in signals if sig == signal.SIGKILL and locked] == (
+                [] if guard_error else [signal.SIGKILL]
+            )
+            assert "could not be confirmed stopped" in receiver.release_failure(pending=True)
+            assert not run.reaped
+        tool.kill()
+        tool.wait(timeout=3)
+
+
+def _foreign_reapers(source, *, childproc_source=False):
+    """Find raw waiters and asyncio hooks that can bypass an owned GroupPopen."""
+    tree = ast.parse(source)
+    forbidden = {
+        "os.wait", "os.waitpid", "os.waitid", "os.wait3", "os.wait4",
+        "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell",
+        "asyncio.get_child_watcher", "asyncio.set_child_watcher",
+    }
+    names = {}
+    allowed = set()
+    if childproc_source:
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "GroupPopen":
+                for method in node.body:
+                    if isinstance(method, ast.FunctionDef):
+                        for call in ast.walk(method):
+                            if not isinstance(call, ast.Call):
+                                continue
+                            if method.name == "poll" and ast.unparse(call) == (
+                                    "os.waitpid(self.pid, 0)"):
+                                allowed.add(call)
+                            if method.name == "_exit_pending" and ast.unparse(call) == (
+                                    "os.waitid(os.P_PID, self.pid, "
+                                    "os.WEXITED | os.WNOHANG | os.WNOWAIT)"):
+                                allowed.add(call)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update((alias.asname, alias.name) for alias in node.names if alias.asname)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.update((alias.asname or alias.name, f"{node.module}.{alias.name}")
+                         for alias in node.names)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node not in allowed:
+            name, dot, suffix = ast.unparse(node.func).partition(".")
+            call = names.get(name, name) + dot + suffix
+            if (call in forbidden or call.endswith((".set_child_watcher", ".get_child_watcher"))
+                    or (call == "signal.signal" and any(
+                        isinstance(arg, (ast.Name, ast.Attribute))
+                        and ast.unparse(arg).split(".")[-1] == "SIGCHLD" for arg in node.args))):
+                yield node.lineno
+
+
+def test_sigint101_has_no_reaper_outside_group_popen():
+    root = Path(childproc.__file__).parent
+    assert not [
+        (path.name, line)
+        for path in root.rglob("*.py")
+        for line in _foreign_reapers(
+            path.read_text(encoding="utf-8"), childproc_source=path == root / "childproc.py")
+    ]
+
+
+@pytest.mark.parametrize("source", [
+    "import os; os.wait()",
+    "from os import waitpid as reap; reap(-1, 0)",
+    "import os as syscalls; syscalls.waitpid(pid, 0)",
+    "from asyncio import create_subprocess_exec as spawn; spawn()",
+    "import asyncio; asyncio.get_event_loop_policy().set_child_watcher(watcher)",
+    "import signal; signal.signal(signal.SIGCHLD, signal.SIG_IGN)",
+    "class GroupPopen:\n def poll(self): return os.waitpid(-1, 0)",
+    "class GroupPopen:\n def _exit_pending(self): return os.waitid(os.P_PID, self.pid, os.WEXITED)",
+])
+def test_reaping_source_guard_rejects_an_independent_reaper(source):
+    assert list(_foreign_reapers(source, childproc_source=True))

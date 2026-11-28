@@ -543,13 +543,28 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
     ]
     receivers.append(("ppm", state.ppm_calibration.stop))
     stores = [("progress", state.progress.close), ("exam", state.exam_store.close)]
+    logger = logging.getLogger(__name__)
+    reported_owners = set()
+
+    def report_owners():
+        reasons = []
+        for name in SDR_CONSUMERS:
+            failure = getattr(getattr(state, name), "release_failure", None)
+            if failure is not None and (reason := failure(pending=True)):
+                reasons.append(f"{name}: {reason}")
+        if reason := state.ppm_calibration.release_failure():
+            reasons.append(f"ppm: {reason}")
+        for reason in reasons:
+            logger.error("console shutdown: %s", reason)
+        reported_owners.update(reasons)
+        return reasons
+
     state.shutdown_errors = await finish_console(
-        receivers, stores, state.reception_sink, SHUTDOWN_TOTAL_S
+        receivers, stores, state.reception_sink, SHUTDOWN_TOTAL_S, report_owners=report_owners,
     )
-    if ppm_failure := state.ppm_calibration.release_failure():
-        state.shutdown_errors.append(f"ppm: {ppm_failure}")
     for reason in state.shutdown_errors:
-        logging.getLogger(__name__).error("console shutdown: %s", reason)
+        if reason not in reported_owners:
+            logger.error("console shutdown: %s", reason)
     return state.shutdown_errors
 
 
@@ -1634,7 +1649,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     receiver.validate_start(intent)
                 for name, consumer in consumers.items():
                     if name != target:
-                        consumer.release()
+                        getattr(consumer, "release_for_claim", consumer.release)()
                         failure = getattr(consumer, "release_failure", None)
                         if failure and (reason := failure(pending=True)):
                             raise refusal(reason)

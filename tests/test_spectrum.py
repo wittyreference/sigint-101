@@ -235,7 +235,7 @@ class FakeProc:
         self.terminated = False
 
     def poll(self):
-        return None
+        return 0 if self.terminated else None
 
     def terminate(self):
         self.terminated = True
@@ -1606,7 +1606,7 @@ class StallingProc:
         self._unblock.wait(timeout=5)
 
     def poll(self):
-        return None
+        return 0 if self.terminated else None
 
     def terminate(self):
         self.terminated = True
@@ -2688,7 +2688,7 @@ def test_a_kept_rtl_power_is_not_signalled_once_its_exit_shows():
     procs[0].close_pipe()
 
 
-def test_an_rtl_power_whose_exit_cannot_be_read_is_never_signalled():
+def test_an_unguarded_rtl_power_whose_exit_cannot_be_read_is_never_signalled():
     # An exit status that cannot be read cannot show the PID is still ours, so nothing is sent.
     sweeper, procs = _held_sweeper(lambda: SignalledProc(stubborn=True, wait_error="interrupted"))
     procs[0].poll_error = "status unreadable"
@@ -2725,3 +2725,46 @@ def test_a_stop_in_flight_reports_rtl_power_still_releasing_the_radio():
     sweeper.start()
     assert len(procs) == 2
     sweeper.stop()
+
+
+def test_a_failed_kill_signal_keeps_rtl_power_without_waiting():
+    class SignalFails(SignalledProc):
+        def kill(self):
+            self.sent.append("KILL")
+            raise PermissionError("KILL signal failed")
+
+        def wait(self, timeout=None):
+            if "KILL" in self.sent:
+                self.die(-9)
+            return super().wait(timeout)
+
+    sweeper, procs = _held_sweeper(lambda: SignalFails(stubborn=True, wait_error="wait failed"))
+    try:
+        sweeper.stop()
+        assert sweeper.release_failure() == (
+            "rtl_power could not be confirmed stopped (KILL signal failed);"
+            " the dongle may still be held"
+        )
+        assert procs[0].poll() is None and procs[0].sent == ["TERM", "KILL"]
+    finally:
+        procs[0].die(-9)
+        sweeper.stop()
+
+
+def test_a_returned_wait_without_exit_status_keeps_rtl_power():
+    class PrematureWait(SignalledProc):
+        def wait(self, timeout=None):
+            return 0
+
+    sweeper, procs = _held_sweeper(lambda: PrematureWait(unkillable=True))
+    try:
+        sweeper.stop()
+        reason = sweeper.release_failure()
+        assert reason and "could not be confirmed stopped" in reason and "no exit status" in reason
+        assert procs[0].sent == ["TERM", "KILL"]
+        with pytest.raises(SpectrumUnavailable, match="could not be confirmed stopped"):
+            sweeper.start()
+        assert len(procs) == 1
+    finally:
+        procs[0].die(-9)
+        sweeper.stop()
