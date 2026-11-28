@@ -122,12 +122,17 @@ class Hook:
 
     def __call__(self, item):
         self.calls.append(item)
-        lock = getattr(self._owner, "_lock", None)
+        runs = getattr(self._owner, "_runs", None)
+        lock = runs.lock if runs is not None else getattr(self._owner, "_lock", None)
         if lock is not None:
             free = lock.acquire(blocking=False)
             if free:
                 lock.release()
             self.lock_free.append(free)
+
+    def assert_unlocked(self):
+        assert len(self.lock_free) == len(self.calls) > 0
+        assert all(self.lock_free)
 
 
 def _hook(receiver):
@@ -340,7 +345,7 @@ def test_rtl433_reports_each_sensor_read():
     dec.drain()
     assert hook.calls == [d.as_dict() for d in dec.recent()]
     assert [c["model"] for c in hook.calls] == ["Acurite-Tower", "LaCrosse-TX141THBv2"]
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
     dec.recent()
     dec.release()                            # reading or clearing history reports nothing
     assert len(hook.calls) == 2
@@ -356,7 +361,7 @@ def test_aprs_reports_the_updated_station_for_each_packet():
     roster = {s["source"]: s for s in dec.stations()}
     assert hook.calls[2] == roster["KD2ABC-9"]
     assert hook.calls[1] == roster["K9XYZ"]
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
     dec.stations()
     assert len(hook.calls) == 3
 
@@ -372,7 +377,7 @@ def test_pocsag_reports_each_page_with_the_words_already_withheld(freq_hz):
     assert hook.calls[0]["text"] is None
     assert hook.calls[0]["text_withheld"] is True
     assert SECRET not in repr(hook.calls)
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
 
 
 def test_rds_reports_the_station_when_its_identity_is_learned_or_changes():
@@ -386,7 +391,7 @@ def test_rds_reports_the_station_when_its_identity_is_learned_or_changes():
         ("0x6201", None), ("0x6201", "YLEKLAS1"), ("0x1234", "YLEKLAS1")]
     assert [c["group_count"] for c in hook.calls] == [1, 3, 6]
     assert hook.calls[-1] == dec.station().as_dict()
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
 
 
 def test_rds_does_not_log_a_scrolling_ps_name_as_new_stations():
@@ -408,7 +413,7 @@ def test_acars_reports_each_message():
     dec.drain()
     assert hook.calls == list(reversed(dec.messages()))
     assert [c["flight"] for c in hook.calls] == ["AF7728", "KL1681"]
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
 
 
 def test_dmr_reports_each_call():
@@ -418,7 +423,7 @@ def test_dmr_reports_each_call():
     dec.drain()
     assert hook.calls == list(reversed(dec.calls()))
     assert [c["protocol"] for c in hook.calls] == ["DMR", "P25"]
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
 
 
 def test_ais_reports_each_vessel_the_first_time_it_is_heard_since_start():
@@ -431,7 +436,7 @@ def test_ais_reports_each_vessel_the_first_time_it_is_heard_since_start():
     assert hook.calls[0]["message_count"] == 1           # the contact as first heard
     assert hook.calls[1]["name"] == "EVER DIADEM"
     assert set(hook.calls[0]) == set(dec.vessels()[0])
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
     dec.stop()
     dec.start()                                          # a fresh run: each is a new contact
     dec.drain()
@@ -450,7 +455,7 @@ def test_adsb_reports_each_aircraft_the_first_time_it_is_heard_since_start():
     assert hook.calls[0]["message_count"] == 1
     assert hook.calls[1]["range_nm"] is not None         # placed on the scope like the API does
     assert set(hook.calls[0]) == set(dec.aircraft()[0])
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
     dec.stop()
     dec.start()
     dec.drain()
@@ -496,7 +501,7 @@ def test_flock_reports_each_device_the_first_time_it_is_detected_since_start():
     assert hook.calls[0]["tier"] == 4
     assert hook.calls[0]["count"] == 1
     assert set(hook.calls[0]) == set(dec.detections()[0])
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
     dec.stop()
 
 
@@ -522,7 +527,7 @@ def test_lora_reports_each_packet_received_over_the_air():
         lis.stop()
     assert hook.calls == [p.as_dict() for p in lis.recent()]
     assert [c["from_id"] for c in hook.calls] == ["!433d1234", "!0d3e5f60"]
-    assert all(hook.lock_free)
+    hook.assert_unlocked()
 
 
 def _png(path):
@@ -629,4 +634,4 @@ def test_rayhunter_reports_each_warning_the_first_time_it_is_parsed():
     rows.append(_RH_SIB)                                 # the Orbic flags one more
     mon.warnings()
     assert [c["severity"] for c in hook.calls] == ["high", "low", "medium"]
-    assert all(hook.lock_free)
+    hook.assert_unlocked()

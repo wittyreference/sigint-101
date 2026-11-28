@@ -1413,8 +1413,11 @@ def test_decode_reports_503_and_a_reason_when_no_radio(tmp_path):
     assert resp.status_code == 503
     body = resp.json()
     assert body["available"] is False
+    assert body["command"] is None
     assert body["decodes"] == []         # never a fabricated read
-    assert "RTL-SDR" in body["reason"]
+    assert body["reason"] == "no RTL-SDR on the USB bus — SIGINT 101 will not fake a decode"
+    assert body["cause"] == "no_radio"
+    assert body["message"] == "No RTL-SDR on the USB bus."
 
 
 def test_decode_reports_503_when_rtl_433_is_missing(tmp_path):
@@ -1423,7 +1426,13 @@ def test_decode_reports_503_when_rtl_433_is_missing(tmp_path):
                                                  which=lambda name: None)) as client:
         resp = client.get("/api/decode")
     assert resp.status_code == 503
-    assert "rtl_433" in resp.json()["reason"]
+    body = resp.json()
+    assert body["available"] is False
+    assert body["command"] is None
+    assert body["decodes"] == []
+    assert body["reason"] == "rtl_433 is not installed, so SIGINT 101 cannot decode the ISM band"
+    assert body["cause"] == "missing_tool"
+    assert body["message"] == "rtl_433 is not installed."
 
 
 def test_decode_default_decoder_also_refuses_without_a_radio(tmp_path):

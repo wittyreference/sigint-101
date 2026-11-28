@@ -212,8 +212,8 @@ def test_an_apt_pass_that_times_out_cleanly_is_not_a_death(tmp_path):
 # the next poll showed the new run. The retune cancels the run that died, so its death, its error
 # and its back-off end with it; the next start launches at the new frequency.
 
-RETUNABLE = {"acars": 131_725_000, "aprs": 144_800_000, "dmr": 451_000_000,
-             "pocsag": 929_662_500, "rds": 94_700_000}
+RETUNABLE = {"acars": 131_725_000, "aprs": 144_800_000, "decode": 315_000_000,
+             "dmr": 451_000_000, "pocsag": 929_662_500, "rds": 94_700_000}
 
 
 def _build_tuned(name, tmp_path):
@@ -221,8 +221,14 @@ def _build_tuned(name, tmp_path):
     build, unavailable, _ = DECODERS[name]
     spawned, tuned = [], []
 
-    def spawn_child(freq_hz, _device):
-        spawned.append(Child(["rtl_fm", "-f", str(freq_hz)]))
+    def spawn_child(*args):
+        if name == "decode":
+            argv = list(args[0])
+            freq_hz = int(argv[argv.index("-f") + 1])
+            spawned.append(Child(argv))
+        else:
+            freq_hz = args[0]
+            spawned.append(Child(["rtl_fm", "-f", str(freq_hz)]))
         tuned.append(freq_hz)
         return spawned[-1]
 
@@ -296,24 +302,36 @@ def test_a_tool_that_survived_kill_still_refuses_after_a_retune(tmp_path, name, 
     build, unavailable, _ = DECODERS[name]
     stages = []
 
-    def spawn_pipeline(*_args):
+    def spawn_child(*_args):
+        if name == "decode":
+            child = Child(["rtl_433"], unkillable=True)
+            stages.append((child,))
+            return child
         stages.append((Child(["rtl_fm"]), Child(["multimon-ng"], unkillable=True)))
         return Pipeline(*stages[-1])
 
-    dec = build(spawn_pipeline, tmp_path)
+    dec = build(spawn_child, tmp_path)
     dec.watch.clock = _Clock()
-    dec.EOF_WAIT_S = 0.01
+    if hasattr(dec, "EOF_WAIT_S"):
+        dec.EOF_WAIT_S = 0.01
     dec.start()
-    run = dec._run
-    stages[0][0].kill()                         # rtl_fm is killed; multimon-ng cannot be
-    assert run.physical.wait(5)
-    assert "survived kill" in run.failure
+    run = dec._run if hasattr(dec, "_runs") else None
+    if name == "decode":
+        dec.stop()
+    else:
+        stages[0][0].kill()                     # rtl_fm is killed; multimon-ng cannot be
+    if run is not None:
+        assert run.physical.wait(5)
+        assert "survived kill" in run.failure
+    else:
+        assert "survived kill" in (dec.release_failure(pending=True) or "")
     dec.retune(RETUNABLE[name])
     with pytest.raises(unavailable, match="survived kill; the dongle may still be held"):
         dec.start()
     assert len(stages) == 1
-    stages[0][1].unkillable = False             # let the supervisor's retry reap it
-    assert run.complete.wait(5)
+    stages[0][-1].unkillable = False            # let the supervisor's retry reap it
+    if run is not None:
+        assert run.complete.wait(5)
 
 
 def test_rtl_433_that_survived_kill_still_refuses_after_a_retune(tmp_path):
@@ -418,6 +436,8 @@ def test_quick_deaths_across_retunes_still_wait_and_say_where_the_next_try_is(la
 
 def _unseen_by_the_supervisor(child, run):
     """The supervisor's polls find the child alive until the run is cancelled; others see it."""
+    if not hasattr(run, "cancel"):
+        return
     real = child.poll
 
     def poll():
@@ -516,20 +536,26 @@ def test_rtl_433_deaths_its_reader_has_not_recorded_yet_still_count_at_a_retune(
     assert len(procs) == 3
 
 
-def test_rtl_433_that_survived_kill_refuses_every_start_until_it_is_reaped(tmp_path):
+def test_rtl_433_that_survived_kill_refuses_every_start_until_it_is_reaped(tmp_path, monkeypatch):
     # Codex D-091 F7: the first refusal used to consume the only marker, and the second start
     # spawned beside the live rtl_433.
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.05)
     dec, unavailable, spawned, _ = _build("decode", tmp_path,
                                           lambda: Child(["rtl_433"], unkillable=True))
     dec.start()
-    dec.retune(315_000_000)                     # the stop inside the retune cannot kill it
-    for _ in range(3):
-        with pytest.raises(unavailable, match="survived kill; the dongle may still be held"):
-            dec.start()
-    assert len(spawned) == 1                    # nothing spawned beside the live child
-    assert dec.release_failure() == decode.SURVIVED_KILL     # and the handoff check says so
-    assert dec.release_failure(pending=True) == decode.SURVIVED_KILL
-    spawned[0].code = -signal.SIGKILL           # the kill lands once it leaves the kernel
+    run = dec._run if hasattr(dec, "_runs") else None
+    try:
+        dec.retune(315_000_000)                 # the stop inside the retune cannot kill it
+        for _ in range(3):
+            with pytest.raises(unavailable, match="survived kill; the dongle may still be held"):
+                dec.start()
+        assert len(spawned) == 1                # nothing spawned beside the live child
+        assert dec.release_failure() == decode.SURVIVED_KILL     # and the handoff check says so
+        assert dec.release_failure(pending=True) == decode.SURVIVED_KILL
+    finally:
+        spawned[0].code = -signal.SIGKILL       # the kill lands once it leaves the kernel
+    if run is not None:
+        assert run.complete.wait(5) and run.reaped
     assert dec.release_failure() is None
     dec.start()                                 # reaped: the radio is free again
     assert len(spawned) == 2 and dec.error is None
@@ -589,20 +615,27 @@ class _WaitFails(Child):
         return super().wait(timeout)
 
 
-def test_rtl_433_whose_stop_wait_fails_is_kept_until_its_exit_is_confirmed(tmp_path):
+def test_rtl_433_whose_stop_wait_fails_is_kept_until_its_exit_is_confirmed(tmp_path, monkeypatch):
     # F2: the wait error skipped keeping the child, so a live rtl_433 was dropped and the radio
     # handed on.
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.05)
     dec, unavailable, spawned, _ = _build("decode", tmp_path, _WaitFails)
     dec.start()
-    dec.retune(315_000_000)                     # the error is the stop's, not the caller's
-    for _ in range(3):
-        with pytest.raises(unavailable, match="could not be confirmed stopped"):
-            dec.start()
-    assert len(spawned) == 1
-    reason = dec.release_failure()
-    assert reason == dec.release_failure(pending=True)
-    assert "wait failed" in reason and "the dongle may still be held" in reason
-    spawned[0].code = -signal.SIGKILL           # its exit shows at last
+    run = dec._run if hasattr(dec, "_runs") else None
+    try:
+        dec.retune(315_000_000)                 # the error is the stop's, not the caller's
+        for _ in range(3):
+            with pytest.raises(unavailable, match="could not be confirmed stopped"):
+                dec.start()
+        assert len(spawned) == 1
+        assert spawned[0].poll() is None
+        reason = dec.release_failure()
+        assert reason == dec.release_failure(pending=True)
+        assert "wait failed" in reason and "the dongle may still be held" in reason
+    finally:
+        spawned[0].code = -signal.SIGKILL       # its exit shows at last
+    if run is not None:
+        assert run.complete.wait(5) and run.reaped
     assert dec.release_failure(pending=True) is None
     dec.start()
     assert len(spawned) == 2 and dec.error is None
@@ -624,9 +657,10 @@ class _OneWaitFails(Child):
         return super().wait(timeout)
 
 
-def test_rtl_433_stop_escalates_to_kill_after_a_wait_error(tmp_path):
+def test_rtl_433_stop_escalates_to_kill_after_a_wait_error(tmp_path, monkeypatch):
     # Codex D-096 F1: the wait error skipped SIGKILL, so an rtl_433 that ignores SIGTERM kept the
     # radio reserved for good.
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
     dec, _, spawned, _ = _build("decode", tmp_path, _OneWaitFails)
     dec.start()
     dec.retune(315_000_000)
@@ -639,38 +673,49 @@ def test_rtl_433_stop_escalates_to_kill_after_a_wait_error(tmp_path):
 
 
 @pytest.mark.parametrize("again", ["stop", "release", "retune"])
-def test_a_later_stop_signals_a_kept_rtl_433_again_and_retries_its_reap(tmp_path, again):
+def test_a_later_stop_signals_a_kept_rtl_433_again_and_retries_its_reap(tmp_path, again,
+                                                                        monkeypatch):
     # Codex D-096 F1: a child the first stop could not confirm was never signalled again.
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
     dec, unavailable, spawned, _ = _build("decode", tmp_path,
                                           lambda: _OneWaitFails(unkillable=True))
     dec.start()
-    dec.retune(315_000_000)                     # TERM ignored, the wait errs, KILL ignored too
-    assert spawned[0].sent == ["TERM", "KILL"]
-    with pytest.raises(unavailable, match="survived kill"):
+    try:
+        dec.retune(315_000_000)                 # TERM ignored, the wait errs, KILL ignored too
+        assert spawned[0].sent == ["TERM", "KILL"]
+        with pytest.raises(unavailable, match="survived kill"):
+            dec.start()
+        assert dec.release_failure() is not None
+        spawned[0].unkillable = False           # the next SIGKILL lands
+        {"stop": dec.stop, "release": dec.release,
+         "retune": lambda: dec.retune(868_000_000)}[again]()
+        assert spawned[0].sent == ["TERM", "KILL", "KILL"]
+        assert dec.release_failure(pending=True) is None
+        dec.resume()
         dec.start()
-    assert dec.release_failure() is not None
-    spawned[0].unkillable = False               # the next SIGKILL lands
-    {"stop": dec.stop, "release": dec.release,
-     "retune": lambda: dec.retune(868_000_000)}[again]()
-    assert spawned[0].sent == ["TERM", "KILL", "KILL"]
-    assert dec.release_failure(pending=True) is None
-    dec.resume()
-    dec.start()
-    assert len(spawned) == 2 and dec.error is None
-    spawned[1].unkillable = False
-    spawned[1].failed = True
-    dec.stop()
+        assert len(spawned) == 2 and dec.error is None
+    finally:
+        for child in spawned:
+            child.unkillable = False
+            child.failed = True
+            child.code = -signal.SIGKILL
+        dec.stop()
 
 
-def test_a_kept_rtl_433_is_not_signalled_once_its_exit_shows(tmp_path):
+def test_a_kept_rtl_433_is_not_signalled_once_its_exit_shows(tmp_path, monkeypatch):
     # A reaped child's PID may be another process's by now: only a child still ours is signalled.
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
     dec, _, spawned, _ = _build("decode", tmp_path, lambda: _OneWaitFails(unkillable=True))
     dec.start()
-    dec.retune(315_000_000)
-    spawned[0].code = -signal.SIGKILL           # it exited, and poll() has its status
-    dec.stop()
-    assert spawned[0].sent == ["TERM", "KILL"]  # no further signal
-    assert dec.release_failure(pending=True) is None
+    try:
+        dec.retune(315_000_000)
+        spawned[0].code = -signal.SIGKILL       # it exited, and poll() has its status
+        dec.stop()
+        assert spawned[0].sent == ["TERM", "KILL"]  # no further signal
+        assert dec.release_failure(pending=True) is None
+    finally:
+        spawned[0].code = -signal.SIGKILL
+        dec.stop()
 
 
 class _SlowToStop(Child):
