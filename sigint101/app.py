@@ -112,6 +112,16 @@ from .radio_control import (
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .receiver_socket import PortOccupied
+from .replay import (
+    RECORDINGS_DIR,
+    Recording,
+    RecordingNotFound,
+    RecordingRefused,
+    ReplayDecoder,
+    ReplayUnavailable,
+    list_recordings,
+    load_recording,
+)
 from .retrieval import MAX_CARDS
 from .retrieval import due as recall_due
 from .safety import notice_for, rack_lora_send
@@ -136,6 +146,31 @@ BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
 PACK_DIR = REPO_DIR / "lesson_packs"
 DATA_DIR = REPO_DIR / "data"
+REPLAY_RUNNING = "a replay is running"
+
+
+class ReplayBusy(ReplayUnavailable):
+    """Another replay is running or acquiring the arbiter."""
+
+
+def start_replay(state, recording: Recording) -> None:
+    """Start a validated recording under the same reservation as the live decoder."""
+    replay = state.replay
+    if not state.replay_start_lock.acquire(blocking=False):
+        raise ReplayBusy(REPLAY_RUNNING)
+    try:
+        if replay.running:
+            raise ReplayBusy(REPLAY_RUNNING)
+        if reason := replay.release_failure(pending=True):
+            raise ReplayUnavailable(reason)
+        deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
+        with state.radio_arbiter.reserve("replay", ReplayUnavailable, deadline):
+            state.decoder.release()
+            if reason := state.decoder.release_failure(pending=True):
+                raise ReplayUnavailable(reason)
+            replay.start_replay(recording)
+    finally:
+        state.replay_start_lock.release()
 
 # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
 SDR_CONSUMERS = (
@@ -435,6 +470,7 @@ def initialize_console_state(
     ppm_measure=None,
     backfill_stamps=None,
     attach_reception_hooks=None,
+    replay_factory=None,
 ) -> None:
     """Shared console initialization used by both public startup and read-only updater trials.
 
@@ -494,6 +530,9 @@ def initialize_console_state(
         if trial:
             state.ppm_measure = ppm_measure or measure_pilot_ppm
         else:
+            state.replay = (replay_factory or ReplayDecoder)(
+                events_path=state.events_path, progress=state.progress, sync=managed)
+            state.replay_start_lock = threading.Lock()
             state.ppm_calibration = PpmCalibration()
             state.ppm_measure = ppm_measure or state.ppm_calibration.measure
         state.receptions = None
@@ -545,7 +584,7 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
         return errors
 
     state.radio_arbiter.close()
-    names = (*SDR_CONSUMERS, "lora", "flock", "rayhunter")
+    names = (*SDR_CONSUMERS, "replay", "lora", "flock", "rayhunter")
     receivers = [
         (name, getattr(receiver, "shutdown", receiver.stop))
         for name in names
@@ -625,6 +664,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                apt_factory=None, sstv_factory=None, meteor_factory=None,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
+               recordings_dir=RECORDINGS_DIR, replay_factory=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None,
                clock=time.time, managed: bool = False) -> FastAPI:
@@ -735,6 +775,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             ppm_measure=ppm_measure,
             backfill_stamps=_run_startup_backfill,
             attach_reception_hooks=_attach_hooks,
+            replay_factory=replay_factory,
         )
         try:
             yield
@@ -1818,6 +1859,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     # PPM may have failed to reap since this request joined the queue.
                     if reason := calibration.release_failure():
                         raise refusal(reason)
+                    # A replay of a recording holds the ISM panel; the live decoder waits for it.
+                    if target == "decoder" and app.state.replay.running:
+                        raise refusal(REPLAY_RUNNING)
                     if not reclaim and getattr(receiver, "released", False):
                         raise refusal("the radio was released to another program")
                     # The last admission: a launch (a receiver, or the ppm calibration's rtl_fm)
@@ -1855,6 +1899,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _receiver_cause(kind, exc, reason):
         """Classify the refusal that actually fired, without polling hardware again."""
+        if reason == REPLAY_RUNNING:
+            return {"cause": "replaying"}
         if reason.startswith("no RTL-SDR on the USB bus"):
             return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
                     "next_step": "Plug in the RTL-SDR."}
@@ -2007,6 +2053,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         the decoder by that reclaim, so flipping between the two keeps working.
         """
         decoder = app.state.decoder
+        if app.state.replay.running:
+            return _refused("decode", DecodeUnavailable(REPLAY_RUNNING), {"decodes": []})
         if not decoder.running:
             try:
                 _claim_sdr("decoder", decoder.start)
@@ -2020,6 +2068,58 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": decoder.freq_hz,
             "decodes": [d.as_dict() for d in decoder.recent(limit)],
         }
+
+    @app.get("/api/replay/recordings")
+    def replay_recordings():
+        recordings, refused = list_recordings(recordings_dir)
+        fields = ("stem", "instrument", "frequency_hz", "sample_rate", "datetime",
+                  "hw", "license", "source", "bytes")
+        return {
+            "recordings": [{key: getattr(recording, key) for key in fields}
+                           for recording in recordings],
+            "refused": [{"stem": stem, "reason": reason} for stem, reason in refused],
+        }
+
+    def _replay_refusal(status, reason):
+        return JSONResponse(status_code=status, content={
+            **app.state.replay.snapshot(), "reason": str(reason),
+        })
+
+    @app.post("/api/replay/{instrument}/start")
+    def replay_start(instrument: str, payload: dict = Body(default={})):
+        if instrument != "ism":
+            return _replay_refusal(404, "this instrument has no replay")
+        try:
+            recording = load_recording(recordings_dir, payload.get("recording"))
+            start_replay(app.state, recording)
+        except RecordingNotFound as exc:
+            return _replay_refusal(404, exc)
+        except RecordingRefused as exc:
+            return _replay_refusal(400, exc)
+        except ReplayBusy as exc:
+            return _replay_refusal(409, exc)
+        except ReplayUnavailable as exc:
+            return _refused("replay", exc, {**app.state.replay.snapshot(), "reason": str(exc)})
+        return app.state.replay.snapshot()
+
+    @app.post("/api/replay/{instrument}/stop")
+    def replay_stop(instrument: str):
+        if instrument != "ism":
+            return _replay_refusal(404, "this instrument has no replay")
+        replay = app.state.replay
+        try:
+            replay.stop()
+            if reason := replay.release_failure(pending=True):
+                raise ReplayUnavailable(reason)
+        except ReplayUnavailable as exc:
+            return _refused("replay", exc, {**replay.snapshot(), "reason": str(exc)})
+        return replay.snapshot()
+
+    @app.get("/api/replay/{instrument}")
+    def replay_state(instrument: str):
+        if instrument != "ism":
+            return _replay_refusal(404, "this instrument has no replay")
+        return app.state.replay.snapshot()
 
     @app.get("/api/lora")
     def lora(limit: int | None = None):
@@ -2768,10 +2868,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         error = app.state.stamp_error
         try:
             earned = {stamp["instrument"]: stamp for stamp in app.state.progress.stamps()}
+            replayed = app.state.progress.replays_seen()
         except (OSError, sqlite3.Error) as exc:
             return [], error or f"the logbook could not be read: {exc}"
         empty = {"first_ts": None, "count": 0, "provenance": None, "digest": None}
-        rows = [{"instrument": inst.key, "label": inst.label, **earned.get(inst.key, empty)}
+        rows = [{"instrument": inst.key, "label": inst.label, **earned.get(inst.key, empty),
+                 "replayed": replayed.get(inst.key)}
                 for inst in INSTRUMENTS if inst.key in STAMP_INSTRUMENTS]
         return rows, error
 
@@ -2788,6 +2890,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         for row in rows:
             if row["count"]:
                 row["first_heard"] = datetime.fromtimestamp(row["first_ts"], tz=timezone.utc)
+            if row["replayed"]:
+                row["first_seen"] = datetime.fromtimestamp(row["replayed"]["first_ts"],
+                                                           tz=timezone.utc)
         return templates.TemplateResponse(
             request=request, name="logbook.html",
             context={"title": "Logbook", "back_href": "/operate", "back_label": "Rack",

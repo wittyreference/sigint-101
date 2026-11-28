@@ -101,6 +101,14 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
         };
       });
     }
+    // The ISM panel's replay reads (5a-2): this kit is not replaying and has no recordings, so
+    // the panel goes on to its live poll.
+    if (url === "/api/replay/ism") {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ state: "idle" }) });
+    }
+    if (url === "/api/replay/recordings") {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ recordings: [] }) });
+    }
     return new Promise(() => {});   // a poll the test never needs answered
   };
 
@@ -499,4 +507,14 @@ test("before the console has confirmed anything, the rail names no activity", as
   assert.equal(page.note.hidden, false);
   assert.ok(!/^tuning/i.test(page.note.lines[0]), `the rail said "${page.note.lines[0]}"`);
   assert.notDeepEqual(page.note.lines, ["Radio busy", "measuring ppm"]);
+});
+
+test("the ISM panel's replay status read does not wait for the lesson's tuning", async () => {
+  // Merging 5a-2 (replay): only the first live poll waits for the restore, because it claims the
+  // radio. The replay status read is read-only, so a replay under way shows at once.
+  const page = lessonPage({ panels: ["decode"] });
+  assert.equal(page.polls("/api/replay/ism").length, 1, "the replay read waited for the tuning");
+  assert.equal(page.polls("/api/decode").length, 0, "the live poll did not wait for the tuning");
+  await page.answer(200, { tuned: true, lesson_id: 7 });
+  assert.equal(page.polls("/api/decode").length, 1);
 });
