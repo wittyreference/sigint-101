@@ -1557,6 +1557,14 @@ def test_f6_managed_desktop_wrapper_keeps_start_kiosk_fixes_outside_gate_blocks(
     ]
     assert strip_managed(managed_text) == legacy_body
 
+    # install.sh may SIGKILL a watchdog only on a reviewed launcher (deploy/watchdog_helper.py):
+    # the wrapper enrollment installs must be on that frozen list, as its bytes are now.
+    import hashlib
+
+    reviewed = (REPO_ROOT / "deploy" / "reviewed-launchers.sha256").read_text(encoding="utf-8")
+    managed_sha = hashlib.sha256(managed_text.encode("utf-8")).hexdigest()
+    assert f"{managed_sha}  deploy/managed/sigint101-course-managed.sh" in reviewed.splitlines()
+
 
 def test_f7_f8_f9_f10_f11_control_import_closure_and_nits(tmp_path):
     sys.path.insert(0, str(MANAGED_DIR))
