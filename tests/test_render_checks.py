@@ -17,22 +17,16 @@ from pathlib import Path
 
 import pytest
 
+from tests.render_routes import CHECKS, RENDER_CHECK_PAGES, RENDER_DIR
+from tools.render.check_specs import Check, discover_checks
+
 REPO = Path(__file__).resolve().parent.parent
-SCROLL = REPO / "tools" / "render" / "render_scroll.py"
-FIGURE = REPO / "tools" / "render" / "render_figure.py"
-FIT = REPO / "tools" / "render" / "render_fit.py"
-LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
-LORA = REPO / "tools" / "render" / "render_lora.py"
-CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
-SURVEY = REPO / "tools" / "render" / "render_survey.py"
-RECALL = REPO / "tools" / "render" / "render_recall.py"
-LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
-FIELD = REPO / "tools" / "render" / "render_field.py"
-BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
-CLOSING = REPO / "tools" / "render" / "render_closing.py"
-EVAL = REPO / "tools" / "render" / "render_eval.py"
-CHECK = REPO / "tools" / "render" / "render_check.py"
+CHECK = RENDER_DIR / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
+
+def render_tool(stem):
+    return RENDER_DIR / f"render_{stem}.py"
+
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -373,7 +367,7 @@ def test_render_fit_exits_0_only_when_all_controls_fit(devtools, tmp_path, case)
     demo, predict, status, verdict = case
     shot = tmp_path / "predict.png"
     port = devtools({DEMO_FIT: demo, PREDICT_FIT: predict})
-    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(shot), port=port)
+    proc = run(render_tool("fit"), "http://127.0.0.1:1/lesson/29", str(shot), port=port)
     assert_ends(proc, status, verdict)
     assert "800x480  demo Next bottom = 480px  predict Commit bottom = 480px" in proc.stdout
     assert shot.is_file()
@@ -383,14 +377,15 @@ def test_render_fit_exits_0_only_when_all_controls_fit(devtools, tmp_path, case)
                          ids=["no-result", "no-stage"])
 def test_render_fit_cannot_pass_without_a_measurement(devtools, tmp_path, predict):
     port = devtools({DEMO_FIT: DEMO_FITS, PREDICT_FIT: predict})
-    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"), port=port)
+    proc = run(render_tool("fit"), "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"),
+               port=port)
     assert_no_pass(proc)
     assert proc.returncode == 1
     assert _verdicts(proc)[0].startswith("VERDICT: FAIL - predict:")
 
 
 def test_render_fit_cannot_pass_without_devtools(tmp_path, closed_port):
-    proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"),
+    proc = run(render_tool("fit"), "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"),
                port=closed_port, timeout=3)
     assert_no_pass(proc)
 
@@ -418,22 +413,24 @@ SCROLL_CASES = {
 @pytest.mark.parametrize("case", SCROLL_CASES.values(), ids=SCROLL_CASES.keys())
 def test_render_scroll_exits_0_only_on_pass(devtools, case):
     mode, answers, status, verdict = case
-    proc = run(SCROLL, "http://127.0.0.1:1/lesson/2", mode, port=devtools(answers))
+    proc = run(render_tool("scroll"), "http://127.0.0.1:1/lesson/2", mode, port=devtools(answers))
     assert_ends(proc, status, verdict)
 
 
 def test_render_scroll_run_plainly_exits_1_on_fail(devtools):
     port = devtools({EXPLAIN: {**EXPLAIN_OK, "scrollable": False}})
-    proc = run(SCROLL, "http://127.0.0.1:1/lesson/2", "explain", port=port, fast=False)
+    proc = run(render_tool("scroll"), "http://127.0.0.1:1/lesson/2", "explain",
+               port=port, fast=False)
     assert_ends(proc, 1, "VERDICT: FAIL")
 
 
 def test_render_scroll_with_no_browser_exits_non_zero(closed_port):
-    proc = run(SCROLL, "http://127.0.0.1:1/lesson/2", "explain", port=closed_port)
+    proc = run(render_tool("scroll"), "http://127.0.0.1:1/lesson/2", "explain", port=closed_port)
     assert_no_pass(proc)
 
 
-@pytest.mark.parametrize("script", [SCROLL, FIT], ids=["scroll", "fit"])
+@pytest.mark.parametrize("script", [render_tool("scroll"), render_tool("fit")],
+                         ids=["scroll", "fit"])
 @pytest.mark.parametrize("disconnect_at", ["handshake", "frame"])
 def test_render_exits_when_devtools_disconnects(devtools, script, disconnect_at):
     port = devtools({}, disconnect_at=disconnect_at)
@@ -460,31 +457,32 @@ FIGURE_CASES = {
 @pytest.mark.parametrize("case", FIGURE_CASES.values(), ids=FIGURE_CASES.keys())
 def test_render_figure_exits_0_only_on_pass(devtools, tmp_path, case):
     answers, status, verdict = case
-    proc = run(FIGURE, "http://127.0.0.1:1/exam", "dark", str(tmp_path / "fig"),
+    proc = run(render_tool("figure"), "http://127.0.0.1:1/exam", "dark", str(tmp_path / "fig"),
                port=devtools(answers))
     assert_ends(proc, status, verdict)
 
 
 def test_render_figure_run_plainly_exits_1_on_fail(devtools, tmp_path):
     port = devtools({CARD: CARD_OK, OVERLAY: {"err": "overlay not open"}})
-    proc = run(FIGURE, "http://127.0.0.1:1/exam", "dark", str(tmp_path / "fig"), port=port,
-               fast=False)
+    proc = run(render_tool("figure"), "http://127.0.0.1:1/exam", "dark", str(tmp_path / "fig"),
+               port=port, fast=False)
     assert_ends(proc, 1, "VERDICT: FAIL")
 
 
 def test_render_figure_errors_exit_non_zero(devtools, tmp_path, closed_port):
     out = str(tmp_path / "fig")
     # The card's expression threw: a page with no app on it (an error page, a wrong address).
-    assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark", out,
+    assert_no_pass(run(render_tool("figure"), "http://127.0.0.1:1/exam", "dark", out,
                        port=devtools({CARD: THROWS, OVERLAY: OVERLAY_OK})))
     # No browser listening.
-    assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark", out, port=closed_port))
+    assert_no_pass(run(render_tool("figure"), "http://127.0.0.1:1/exam", "dark", out,
+                       port=closed_port))
     # The screenshots cannot be saved: their folder does not exist.
-    assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark",
+    assert_no_pass(run(render_tool("figure"), "http://127.0.0.1:1/exam", "dark",
                        str(tmp_path / "missing" / "fig"),
                        port=devtools({CARD: CARD_OK, OVERLAY: OVERLAY_OK})))
     # No page address given.
-    assert_no_pass(run(FIGURE, port=closed_port))
+    assert_no_pass(run(render_tool("figure"), port=closed_port))
 
 
 @pytest.fixture
@@ -565,8 +563,11 @@ def render_make(tmp_path, console_url, devtools, strays):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for name in _runner_check_names():
-        (screen / name).write_text(
+    for check in CHECKS:
+        _, *fields = check._fields
+        declaration = {field: getattr(check, field) for field in fields}
+        (screen / check.path.name).write_text(
+            f"RENDER_CHECK = {declaration!r}\n"
             "import os, sys\n"
             "from pathlib import Path\n"
             "from urllib.request import urlopen\n"
@@ -574,7 +575,9 @@ def render_make(tmp_path, console_url, devtools, strays):
             "assert os.environ['CDP_PORT'] == os.environ['FAKE_CDP_PORT']\n"
             "if name == 'render_scroll.py':\n"
             "    assert sys.argv[2] == 'home'\n"
-            "print('ran', name, sys.argv[1], flush=True)\n"
+            "assert 'RENDER_URL' not in os.environ\n"
+            "assert ('RENDER_FENCE' not in os.environ) == RENDER_CHECK['scratch']\n"
+            "print('ran', name, *sys.argv[1:2], flush=True)\n"
             "fake = 'http://127.0.0.1:' + os.environ['FAKE_CDP_PORT']\n"
             "urlopen(f'{fake}/mark/{name}', timeout=10).close()\n"
             "if name == 'render_scroll.py' and os.environ.get('PROBE_CONSOLE'):\n"
@@ -608,7 +611,7 @@ def render_make(tmp_path, console_url, devtools, strays):
         if not has_chromium:
             chromium.unlink()
         if fit_answers is not None:
-            real = (*real, FIT)
+            real = (*real, render_tool("fit"))
         for script in real:
             (screen / script.name).unlink()
             (screen / script.name).symlink_to(script)
@@ -646,16 +649,8 @@ def _proxy_url(proc):
 
 
 @pytest.mark.parametrize(
-    "failing",
-    [
-        "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name, CLOSING.name,
-    ],
-    ids=[
-        "all-pass", "fit-fails", "scroll-fails", "figure-fails",
-        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails", "closing-fails",
-    ],
+    "failing", ["", *(check.path.name for check in CHECKS)],
+    ids=["all-pass", *(f"{check.name}-fails" for check in CHECKS)],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
     proc = render_make(FAILING_CHECK=failing)
@@ -664,18 +659,8 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
     assert proxy != console_url
     assert proc.stdout.splitlines() == [
         f"Fenced the console behind a render proxy at {proxy} (process {pid}).",
-        f"ran {FIT.name} {proxy}/lesson/29",
-        f"ran {SCROLL.name} {proxy}/",
-        f"ran {FIGURE.name} {proxy}/exam/review/T6C02",
-        f"ran {LOGBOOK.name} {proxy}",
-        f"ran {LORA.name} {proxy}",
-        f"ran {CARD_SORT.name} {proxy}",
-        f"ran {SURVEY.name} {proxy}",
-        f"ran {RECALL.name} {proxy}",
-        f"ran {LIVE_FIND.name} {proxy}",
-        f"ran {FIELD.name} {proxy}",
-        f"ran {BANDMAP.name} {proxy}",
-        f"ran {CLOSING.name} {proxy}",
+        *(" ".join(("ran", check.path.name, *check.arguments(proxy, Path())[:1]))
+          for check in CHECKS),
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -709,7 +694,8 @@ def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make
 
 
 def _ran_urls(proc):
-    return [line.split()[2] for line in proc.stdout.splitlines() if line.startswith("ran ")]
+    return [line.split()[2] for line in proc.stdout.splitlines()
+            if line.startswith("ran ") and len(line.split()) == 3]
 
 
 def test_render_check_without_render_url_measures_a_scratch_console_not_the_kiosks(render_make):
@@ -718,7 +704,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 12, proc.stdout
+    assert len(urls) == sum(not check.scratch for check in CHECKS), proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -773,32 +759,26 @@ def test_render_check_stops_the_whole_browser_before_removing_its_profile(render
             os.kill(int(pidfile.read_text()), 9)
 
 
-API_TOOLS = {
-    "fit": (FIT, ["http://127.0.0.1:1/lesson/29", "{tmp}/predict.png"],
-            {DEMO_FIT: DEMO_FITS, PREDICT_FIT: PREDICT_FITS}),
-    "scroll": (SCROLL, ["http://127.0.0.1:1/", "home"], {HOME: HOME_OK}),
-    "figure": (FIGURE, ["http://127.0.0.1:1/exam/review/T6C02", "dark", "{tmp}/fig"],
-               {CARD: CARD_OK, OVERLAY: OVERLAY_OK}),
-    "logbook": (LOGBOOK, ["http://127.0.0.1:9"], {}),
-    "lora": (LORA, ["http://127.0.0.1:9"], {}),
-    "card-sort": (CARD_SORT, ["http://127.0.0.1:9"], {}),
-    "eval": (EVAL, ["http://127.0.0.1:1/operate/ism", "1"], {}),
-    "survey": (SURVEY, ["http://127.0.0.1:9"], {}),
-    "live-find": (LIVE_FIND, ["http://127.0.0.1:9"], {}),
-    "field": (FIELD, ["http://127.0.0.1:9"], {}),
-    "bandmap": (BANDMAP, ["http://127.0.0.1:9"], {}),
-    "closing": (CLOSING, ["http://127.0.0.1:9"], {}),
-}
+# The expression evaluator stays a manual tool and still has the same standalone fence checks.
+API_TOOLS = (*CHECKS, Check(
+    render_tool("eval"), "eval", ("/operate/ism",), False, target="/operate/ism", args=("1",)))
+SHARED_MEASUREMENTS = {DEMO_FIT: DEMO_FITS, PREDICT_FIT: PREDICT_FITS, HOME: HOME_OK,
+                       CARD: CARD_OK, OVERLAY: OVERLAY_OK}
+LAYOUT_TOOLS = [tool for tool in CHECKS if tool.name in {"fit", "scroll"}]
+TEST_CONSOLE = "http://127.0.0.1:9"
 
 
-@pytest.mark.parametrize("tool", API_TOOLS.values(), ids=API_TOOLS.keys())
+def _run_tool(tool, output, port):
+    return run(tool.path, *tool.arguments(TEST_CONSOLE, output), port=port, fast=not tool.scratch)
+
+
+@pytest.mark.parametrize("tool", API_TOOLS, ids=[tool.name for tool in API_TOOLS])
 def test_every_render_tool_blocks_the_console_api_before_it_loads_a_page(devtools, tmp_path,
                                                                          tool):
     # A page's own polls (/api/<receiver>, /api/receptions, ...) start receivers and claim the
     # radio; the rack's and the lessons' posts write learner state. Blocking /api/* before the
     # first navigation keeps a check to layout alone.
-    script, args, answers = tool
-    run(script, *(arg.format(tmp=tmp_path) for arg in args), port=devtools(answers))
+    _run_tool(tool, tmp_path, devtools(SHARED_MEASUREMENTS))
     calls = devtools.made[-1].settled()
     methods = [method for method, _ in calls]
     assert "Page.navigate" in methods, methods
@@ -831,11 +811,10 @@ def _leaves_blank_before_closing(calls):
     assert confirmed, "closed without waiting for about:blank"
 
 
-@pytest.mark.parametrize("tool", API_TOOLS.values(), ids=API_TOOLS.keys())
+@pytest.mark.parametrize("tool", API_TOOLS, ids=[tool.name for tool in API_TOOLS])
 def test_every_render_tool_leaves_its_page_on_about_blank_before_it_closes(devtools, tmp_path,
                                                                            tool):
-    script, args, answers = tool
-    run(script, *(arg.format(tmp=tmp_path) for arg in args), port=devtools(answers))
+    _run_tool(tool, tmp_path, devtools(SHARED_MEASUREMENTS))
     _leaves_blank_before_closing(devtools.made[-1].settled())
 
 
@@ -847,7 +826,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 12, methods
+    assert len(marks) == len(CHECKS), methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -862,7 +841,7 @@ def test_no_render_tool_sets_its_own_block_or_closes_devtools_itself():
     # teardown; a tool that drives a page without the shared client has no block at all.
     import re
     for path in sorted((REPO / "tools" / "render").glob("*.py")):
-        if path == SCROLL:
+        if path == render_tool("scroll"):
             continue
         text = path.read_text(encoding="utf-8")
         assert "setBlockedURLs" not in text, f"{path.name} sets its own API block"
@@ -874,13 +853,11 @@ def test_no_render_tool_sets_its_own_block_or_closes_devtools_itself():
                 f"{path.name} loads pages without the shared block"
 
 
-@pytest.mark.parametrize("tool", [API_TOOLS["scroll"], API_TOOLS["fit"]], ids=["scroll", "fit"])
+@pytest.mark.parametrize("tool", LAYOUT_TOOLS, ids=[tool.name for tool in LAYOUT_TOOLS])
 def test_a_tool_whose_page_cannot_reach_about_blank_fails(devtools, tmp_path, tool):
     # The block must not end with a console page loaded. If about:blank cannot be reached the
     # check says so and fails, even when every layout verdict passed.
-    script, args, answers = tool
-    proc = run(script, *(arg.format(tmp=tmp_path) for arg in args),
-               port=devtools(answers, blank_fails=True))
+    proc = _run_tool(tool, tmp_path, devtools(SHARED_MEASUREMENTS, blank_fails=True))
     assert "VERDICT: PASS" in proc.stdout, proc.stdout
     assert proc.returncode != 0, (proc.stdout, proc.stderr)
     assert "about:blank" in proc.stderr, proc.stderr
@@ -910,25 +887,22 @@ def test_a_page_that_cannot_reach_blank_is_closed_before_the_block_ends(render_m
     assert "<closed>" not in methods[methods.index("Network.setBlockedURLs"):closed_target]
 
 
-@pytest.mark.parametrize("tool", API_TOOLS.values(), ids=API_TOOLS.keys())
+@pytest.mark.parametrize("tool", API_TOOLS, ids=[tool.name for tool in API_TOOLS])
 @pytest.mark.parametrize("refused", ["Network.enable", "Network.setBlockedURLs"])
 def test_a_refused_api_block_stops_a_tool_before_it_loads_any_page(devtools, tmp_path, tool,
                                                                    refused):
     # Chrome answering the block setup with a protocol error must not read as a block in place.
-    script, args, answers = tool
-    proc = run(script, *(arg.format(tmp=tmp_path) for arg in args),
-               port=devtools(answers, errors={refused}))
+    proc = _run_tool(tool, tmp_path, devtools(SHARED_MEASUREMENTS, errors={refused}))
     assert proc.returncode != 0, (proc.stdout, proc.stderr)
     loads = [params.get("url") for method, params in devtools.made[-1].settled()
              if method == "Page.navigate"]
     assert all(url == "about:blank" for url in loads), loads
 
 
-@pytest.mark.parametrize("tool", [API_TOOLS["scroll"], API_TOOLS["fit"]], ids=["scroll", "fit"])
+@pytest.mark.parametrize("tool", LAYOUT_TOOLS, ids=[tool.name for tool in LAYOUT_TOOLS])
 def test_a_devtools_protocol_error_fails_the_tool(devtools, tmp_path, tool):
-    script, args, answers = tool
-    proc = run(script, *(arg.format(tmp=tmp_path) for arg in args),
-               port=devtools(answers, errors={"Emulation.setDeviceMetricsOverride"}))
+    proc = _run_tool(tool, tmp_path, devtools(SHARED_MEASUREMENTS,
+                                            errors={"Emulation.setDeviceMetricsOverride"}))
     assert proc.returncode != 0, (proc.stdout, proc.stderr)
     assert "Emulation.setDeviceMetricsOverride" in proc.stderr, proc.stderr
 
@@ -938,7 +912,7 @@ def test_both_devtools_clients_refuse_to_load_a_page_before_the_block_is_confirm
     import importlib
     port = devtools({})
     fake = devtools.made[-1]
-    monkeypatch.syspath_prepend(str(SCROLL.parent))
+    monkeypatch.syspath_prepend(str(render_tool("scroll").parent))
     monkeypatch.setenv("CDP_PORT", str(port))
     scroll = importlib.import_module("render_scroll")
     fit = importlib.import_module("render_fit")
@@ -953,19 +927,16 @@ def test_both_devtools_clients_refuse_to_load_a_page_before_the_block_is_confirm
     assert "Page.navigate" not in [method for method, _ in fake.calls]
 
 
-@pytest.mark.parametrize("tool", API_TOOLS.values(), ids=API_TOOLS.keys())
+@pytest.mark.parametrize("tool", API_TOOLS, ids=[tool.name for tool in API_TOOLS])
 def test_a_tool_run_on_its_own_loads_its_pages_through_a_render_proxy(devtools, tmp_path, tool):
     # Run alone, a tool puts its own render proxy in front of the console it was given: the
     # browser never gets the console's own address.
-    script, args, answers = tool
-    args = [arg.format(tmp=tmp_path) for arg in args]
-    given = "/".join(args[0].split("/")[:3])
-    run(script, *args, port=devtools(answers))
+    _run_tool(tool, tmp_path, devtools(SHARED_MEASUREMENTS))
     pages = [params["url"] for method, params in devtools.made[-1].settled()
              if method == "Page.navigate" and params.get("url") != "about:blank"]
     assert pages, "the tool loaded no page"
     for url in pages:
-        assert not url.startswith(given + "/"), url
+        assert not (url == TEST_CONSOLE or url.startswith(TEST_CONSOLE + "/")), url
         assert url.startswith("http://127.0.0.1:"), url
 
 
@@ -973,7 +944,7 @@ def test_neither_devtools_client_loads_a_console_page_directly(devtools, monkeyp
     # A blocked client still refuses a page that is not behind a render proxy.
     import importlib
     port = devtools({})
-    monkeypatch.syspath_prepend(str(SCROLL.parent))
+    monkeypatch.syspath_prepend(str(render_tool("scroll").parent))
     monkeypatch.setenv("CDP_PORT", str(port))
     monkeypatch.delenv("RENDER_FENCE", raising=False)
     scroll = importlib.import_module("render_scroll")
@@ -1045,15 +1016,6 @@ def test_an_unreadable_proc_never_counts_as_the_group_gone(tmp_path, monkeypatch
             os.kill(int(child_pid.read_text()), 9)
 
 
-def _runner_check_names(runner=CHECK):
-    """The scripts a runner runs, read from its own check list (render_check.check_list)."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(f"runner_{abs(hash(str(runner)))}", runner)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return [entry[0] for entry in module.check_list("http://127.0.0.1:9", Path("/out"))]
-
-
 def _pages_loaded_from(proxy, calls):
     """The path and query of every page loaded from the runner's render proxy."""
     pages = set()
@@ -1064,15 +1026,8 @@ def _pages_loaded_from(proxy, calls):
     return pages
 
 
-def _coverage_problems(proc, calls, names):
-    """What keeps the route coverage from being whole; empty when it is.
-
-    Every check the runner lists must start (open its DevTools session, in order, after the
-    runner's own) and navigate to at least one page, and every page loaded from the runner's
-    proxy must be in the GET guard's walk. Recall's pages come from scratch consoles of its own,
-    behind proxies of its own, so they count as navigations but not as pages of the target.
-    """
-    from tests.render_routes import RENDER_CHECK_PAGES
+def _coverage_problems(proc, calls, checks):
+    """Check that every discovered tool navigates and its target pages are walked."""
     proxy, _ = _proxy_url(proc)
     sessions, problems = [], []
     for method, params in calls:
@@ -1080,88 +1035,85 @@ def _coverage_problems(proc, calls, names):
             sessions.append([])
         elif sessions:
             sessions[-1].append((method, params))
-    checks = sessions[1:]          # the first session is the runner's own block
-    if len(checks) != len(names):
-        problems.append(f"{len(checks)} checks started a DevTools session; the runner lists "
-                        f"{len(names)}: {names}")
-    for name, session in zip(names, checks):
-        if not any(method == "Page.navigate" and params.get("url") != "about:blank"
-                   for method, params in session):
-            problems.append(f"{name} navigated to no page")
-    for page in sorted(_pages_loaded_from(proxy, calls) - set(RENDER_CHECK_PAGES)):
-        problems.append(f"{page} is not in the GET walk")
+    tool_sessions = sessions[1:]     # the first session is the runner's own block
+    if len(tool_sessions) != len(checks):
+        problems.append(f"{len(tool_sessions)} checks started a DevTools session; "
+                        f"discovered {len(checks)}: {[check.name for check in checks]}")
+    for check, session in zip(checks, tool_sessions):
+        urls = {params["url"] for method, params in session
+                if method == "Page.navigate" and params.get("url") != "about:blank"}
+        if not urls:
+            problems.append(f"{check.name} navigated to no page")
+        pages = _pages_loaded_from(proxy, session)
+        if check.scratch:
+            if pages:
+                problems.append(f"{check.name} loaded the runner's console from a scratch check")
+        else:
+            if any(url != proxy and not url.startswith(proxy + "/") for url in urls):
+                problems.append(f"{check.name} navigated outside the runner's proxy")
+            for page in sorted(pages - (set(RENDER_CHECK_PAGES) & set(check.pages))):
+                problems.append(f"{page} is not in the GET walk for {check.name}")
     return problems
 
 
-def _runner_copy(render_make, edit):
-    """Replace the fixture's runner with a copy of the real one, changed by `edit`."""
-    text = CHECK.read_text(encoding="utf-8")
-    text = text.replace("HERE = Path(__file__).resolve().parent",
-                        f"HERE = Path({str(CHECK.parent)!r})")
-    runner = render_make.screen / "render_check.py"
-    runner.unlink()
-    runner.write_text(edit(text), encoding="utf-8")
-    return runner
-
-
-def _add_check(text, line):
-    old = '        ("render_closing.py", console),\n'
-    assert old in text
-    return text.replace(old, old + line)
-
-
-def test_every_check_the_runner_lists_starts_and_its_pages_are_walked(render_make):
-    # Driven from the runner's own list: each check it names runs for real against the fake
-    # DevTools, must start and navigate, and every page it loads from the target must be walked.
-    names = _runner_check_names()
-    proc = render_make(real=[CHECK.parent / name for name in names], timeout=300)
+def test_every_discovered_check_starts_and_its_pages_are_walked(render_make):
+    # Real checks, real subprocesses and actual Page.navigate calls. The fake is Chromium.
+    proc = render_make(real=[check.path for check in CHECKS], timeout=300)
     calls = render_make.calls()
-    assert _coverage_problems(proc, calls, names) == [], (proc.stdout[-1500:],
-                                                         proc.stderr[-1500:])
+    assert _coverage_problems(proc, calls, CHECKS) == [], (proc.stdout[-1500:],
+                                                          proc.stderr[-1500:])
     assert len(_pages_loaded_from(_proxy_url(proc)[0], calls)) >= 10
 
 
-def test_a_page_the_walk_lacks_is_caught_however_its_url_is_written(render_make):
-    # The case that slipped past the source scan: a check given an unwalked page in a single-
-    # quoted f-string. Read from the navigations, it is caught.
-    old = '("render_fit.py", f"{console}/lesson/29",'
-    runner = _runner_copy(render_make, lambda text: text.replace(
-        old, "(\"render_fit.py\", f'{console}/lesson/28',"))
-    names = _runner_check_names(runner)
-    proc = render_make(real=(FIT,), timeout=120)
-    problems = _coverage_problems(proc, render_make.calls(), names)
-    assert "/lesson/28 is not in the GET walk" in problems, (problems, proc.stderr)
+def test_make_render_check_picks_up_a_dropped_script(render_make):
+    (render_make.screen / "render_extra.py").write_text(
+        'RENDER_CHECK = {"name": "extra", "pages": ("/",), "scratch": False}\n'
+        'import os, sys\n'
+        'assert sys.argv[1] == os.environ["RENDER_FENCE"]\n'
+        'print("ran the dropped check")\n',
+        encoding="utf-8",
+    )
+    proc = render_make()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "ran the dropped check" in proc.stdout
 
 
-EXTRA_CHECK = (
-    "import sys\n"
-    "sys.path.insert(0, {real!r})\n"
-    "from render_scroll import connect, fence, leave_page\n"
-    "browser = connect()\n"
-    "browser.call('Page.navigate', {{'url': fence(sys.argv[1] + '/unwalked')}})\n"
-    "leave_page(browser)\n"
-)
+def test_make_render_check_refuses_a_script_without_a_declaration(render_make):
+    (render_make.screen / "render_undeclared.py").write_text(
+        'raise AssertionError("the undeclared script ran")\n', encoding="utf-8",
+    )
+    proc = render_make()
+    assert proc.returncode != 0, proc.stdout
+    assert "render_undeclared.py" in proc.stderr and "RENDER_CHECK" in proc.stderr
+    assert "the undeclared script ran" not in proc.stderr
+    assert "Fenced the console" not in proc.stdout
 
 
-@pytest.mark.parametrize("present", [True, False], ids=["unwalked-page", "never-started"])
-def test_a_check_added_to_the_runner_is_measured_too(render_make, present):
-    # The case the hand-kept list missed: a new check in the runner. Whether it loads an
-    # unwalked page, or never starts at all, the coverage measure must say so.
-    runner = _runner_copy(render_make, lambda text: _add_check(
-        text, '        ("render_extra.py", console),\n'))
-    if present:
-        (render_make.screen / "render_extra.py").write_text(
-            EXTRA_CHECK.format(real=str(CHECK.parent)), encoding="utf-8")
-    names = _runner_check_names(runner)
-    assert names[-1] == "render_extra.py"
-    # Absent, it is the one check that cannot start, so every other one runs for real.
-    real = () if present else [CHECK.parent / name for name in names[:-1]]
-    proc = render_make(real=real, timeout=300)
-    problems = _coverage_problems(proc, render_make.calls(), names)
-    if present:
-        assert "/unwalked is not in the GET walk" in problems, (problems, proc.stderr)
+@pytest.mark.parametrize("starts", [True, False], ids=["unwalked-page", "never-started"])
+def test_a_discovered_check_is_measured_even_if_it_never_starts(render_make, starts):
+    # One discovered tool is enough to exercise the coverage guard. Its declaration does not
+    # excuse a navigation to a different page, or a clean exit without a DevTools session.
+    for check in CHECKS:
+        (render_make.screen / check.path.name).unlink()
+    script = render_make.screen / "render_extra.py"
+    body = (
+        f"import sys\nsys.path.insert(0, {str(RENDER_DIR)!r})\n"
+        "from render_scroll import connect, fence, leave_page\n"
+        "browser = connect()\n"
+        "try:\n"
+        "    browser.call('Page.navigate', {'url': fence(f'{sys.argv[1]}/unwalked')})\n"
+        "finally:\n"
+        "    leave_page(browser)\n"
+    ) if starts else "raise SystemExit(0)\n"
+    script.write_text('RENDER_CHECK = {"name": "extra", "pages": ("/",), "scratch": False}\n'
+                      + body, encoding="utf-8")
+    proc = render_make()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    problems = _coverage_problems(proc, render_make.calls(), discover_checks(render_make.screen))
+    if starts:
+        assert problems == ["/unwalked is not in the GET walk for extra"]
     else:
-        assert any("checks started a DevTools session" in p for p in problems), problems
+        assert problems == ["0 checks started a DevTools session; discovered 1: ['extra']"]
 
 
 def _fake_browser(tmp_path):
@@ -1209,7 +1161,7 @@ def _runner_in_process(monkeypatch, tmp_path, console, chromium, *, real_block=F
     if not real_block:
         monkeypatch.setattr(render_check, "api_block",
                             lambda port, problems, held: contextlib.nullcontext())
-    monkeypatch.setattr(render_check, "run_checks", lambda console, port, output: 0)
+    monkeypatch.setattr(render_check, "run_checks", lambda console, port, output, checks: 0)
     monkeypatch.setattr(render_check, "BROWSER_STOP_S", 0.3)
     monkeypatch.setattr(render_check.signal, "signal", lambda *args: None)
     monkeypatch.setattr(render_check.tempfile, "tempdir", str(tmp_path))
@@ -1235,7 +1187,7 @@ def test_an_unconfirmed_browser_stop_keeps_the_profile(tmp_path, monkeypatch, co
     # raises, or a check of the group that raises, leaves it unconfirmed: the profile stays.
     chromium, pidfile = _fake_browser(tmp_path)
 
-    def checks_once_the_browser_is_up(console, port, output):
+    def checks_once_the_browser_is_up(console, port, output, checks):
         for _ in range(200):     # the stand-in has made its profile and is running
             if pidfile.is_file() and pidfile.read_text():
                 break
@@ -1313,7 +1265,7 @@ def test_devtools_gone_before_blank_with_the_browser_alive_reaches_nothing_at_th
     chromium, pidfile = _fake_browser(tmp_path)
     loaded = []
 
-    def checks_leave_a_page_loaded(fenced, port, output):
+    def checks_leave_a_page_loaded(fenced, port, output, checks):
         loaded.append(fenced)
         fake.url = f"{fenced}/lesson/1"
         return 0
@@ -1349,7 +1301,7 @@ def test_a_browser_that_will_not_stop_is_held_until_a_deadline_then_the_run_fail
     fake = FakeDevTools({}, blank_fails=True, errors={"Target.closeTarget"}, polls=True)
     chromium, pidfile = _fake_browser(tmp_path)
 
-    def checks_leave_a_page_loaded(fenced, port, output):
+    def checks_leave_a_page_loaded(fenced, port, output, checks):
         fake.url = f"{fenced}/lesson/1"
         return 0
 
@@ -1402,7 +1354,7 @@ def test_render_check_keeps_the_profile_and_fails_when_the_browser_will_not_stop
     monkeypatch.setattr(render_check, "chromium_port", lambda browser, profile: "1")
     monkeypatch.setattr(render_check, "api_block",
                         lambda port, problems, held: contextlib.nullcontext())
-    monkeypatch.setattr(render_check, "run_checks", lambda console, port, output: 0)
+    monkeypatch.setattr(render_check, "run_checks", lambda console, port, output, checks: 0)
     monkeypatch.setattr(render_check, "BROWSER_STOP_S", 0.3)
     monkeypatch.setattr(render_check.signal, "signal", lambda *args: None)
     monkeypatch.setattr(render_check.tempfile, "tempdir", str(tmp_path))
@@ -1495,7 +1447,7 @@ def _signal_scenario(render_make, tmp_path, sig, swept):
     import signal as signals
     pidfile = tmp_path / "browser.pid"
     check = render_make.start(RENDER_URL=None, CHROMIUM_FORKS=str(pidfile),
-                              STALL_CHECK=FIT.name)
+                              STALL_CHECK=render_tool("fit").name)
     try:
         line, started = "", ""
         while not line.startswith("ran "):
@@ -1647,7 +1599,7 @@ def test_lora_render_checks_send_and_notice_in_all_themes(devtools, defect):
         }
         for theme in THEMES
     }
-    proc = run(LORA, "http://127.0.0.1:9", port=devtools(answers))
+    proc = run(render_tool("lora"), "http://127.0.0.1:9", port=devtools(answers))
     assert proc.returncode == int(defect is not None), (proc.stdout, proc.stderr)
     assert _verdicts(proc) == [
         f"VERDICT: {'FAIL' if defect and theme == 'red-night' else 'PASS'} - LoRa send {theme}"
@@ -1670,7 +1622,7 @@ def _logbook_pages(*, rack_defect=None, logbook_defect=None):
 
 def test_logbook_render_checks_all_three_themes(devtools):
     port = devtools(_logbook_pages())
-    proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("logbook"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert _verdicts(proc) == ["VERDICT: PASS - rack dark",
                                "VERDICT: PASS - logbook dark",
@@ -1687,14 +1639,14 @@ def test_logbook_render_checks_all_three_themes(devtools):
 ])
 def test_logbook_verdict_fails_when_a_later_theme_does_not_fit(devtools, defect):
     port = devtools(_logbook_pages(logbook_defect=defect))
-    proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("logbook"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - logbook red-night"
 
 
 def test_logbook_render_refuses_an_undersized_rack_log_key(devtools):
     port = devtools(_logbook_pages(rack_defect={"target": [76, 71]}))
-    proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("logbook"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert "VERDICT: FAIL - rack red-night" in _verdicts(proc)
 
@@ -1702,7 +1654,7 @@ def test_logbook_render_refuses_an_undersized_rack_log_key(devtools):
 @pytest.mark.parametrize("defect", [{"stripVisible": False}, {"doc": [800, 481]}])
 def test_rack_render_fails_if_the_later_theme_overflows_or_blocks_the_strip(devtools, defect):
     port = devtools(_logbook_pages(rack_defect=defect))
-    proc = run(LOGBOOK, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("logbook"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-2:] == ["VERDICT: FAIL - rack red-night",
                                    "VERDICT: PASS - logbook red-night"]
@@ -1743,7 +1695,7 @@ def _card_sort_pages(*, sort_defect=None, law_defect=None):
 
 def test_card_sort_render_checks_card_screen_and_law_in_all_three_themes(devtools):
     port = devtools(_card_sort_pages())
-    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("card_sort"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert _verdicts(proc) == [
         "VERDICT: PASS - card-sort dark",
@@ -1770,7 +1722,7 @@ def test_card_sort_render_checks_card_screen_and_law_in_all_three_themes(devtool
 ])
 def test_card_sort_render_fails_when_card_screen_overflows_or_shrinks_buttons(devtools, defect):
     port = devtools(_card_sort_pages(sort_defect=defect))
-    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("card_sort"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-2:] == [
         "VERDICT: FAIL - card-sort red-night",
@@ -1788,7 +1740,7 @@ def test_card_sort_render_fails_when_card_screen_overflows_or_shrinks_buttons(de
 ])
 def test_card_sort_render_fails_when_law_page_does_not_scroll_or_drops_back(devtools, defect):
     port = devtools(_card_sort_pages(law_defect=defect))
-    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("card_sort"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - law red-night"
 
@@ -1800,7 +1752,7 @@ def test_card_sort_render_stubs_fetch_before_clicking_so_no_answers_post():
     node = shutil.which("node")
     assert node, "node is required to test the CARD_SORT browser snippet"
     import ast
-    tree = ast.parse(CARD_SORT.read_text(encoding="utf-8"))
+    tree = ast.parse(render_tool("card_sort").read_text(encoding="utf-8"))
     snippet = next(
         node_.value.value
         for node_ in tree.body
@@ -1901,7 +1853,7 @@ def _survey_pages(*, defect=None):
 
 def test_survey_render_checks_populated_panel_in_all_three_themes(devtools):
     port = devtools(_survey_pages())
-    proc = run(SURVEY, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("survey"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert _verdicts(proc) == [
         "VERDICT: PASS - survey dark",
@@ -1927,7 +1879,7 @@ def test_survey_render_checks_populated_panel_in_all_three_themes(devtools):
 ])
 def test_survey_render_fails_when_populated_panel_overflows_or_stays_empty(devtools, defect):
     port = devtools(_survey_pages(defect=defect))
-    proc = run(SURVEY, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("survey"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - survey red-night"
 
@@ -1955,7 +1907,7 @@ def test_survey_render_never_posts_predict_to_console_and_stubs_fetch():
 
     fake = RecordingDevTools(_survey_pages())
     try:
-        proc = run(SURVEY, "http://127.0.0.1:9", port=fake.port)
+        proc = run(render_tool("survey"), "http://127.0.0.1:9", port=fake.port)
     finally:
         fake.close()
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
@@ -1969,12 +1921,12 @@ def test_survey_render_never_posts_predict_to_console_and_stubs_fetch():
     # /api/survey GETs are stubbed without ever reaching origFetch.
     node = shutil.which("node")
     assert node, "node is required to test the SURVEY fetch shim"
-    sys.path.insert(0, str(SURVEY.parent))
+    sys.path.insert(0, str(render_tool("survey").parent))
     try:
         import render_survey  # noqa: PLC0415
         shim = render_survey.fetch_shim(render_survey.populated_payload())
     finally:
-        sys.path.remove(str(SURVEY.parent))
+        sys.path.remove(str(render_tool("survey").parent))
     harness = f"""
 const assert = require("node:assert/strict");
 let origCalls = 0;
@@ -2052,7 +2004,7 @@ def _live_find_pages(*, screen_defect=None, tile_defect=None, rack_defect=None):
 
 def test_live_find_render_checks_tiles_screens_and_rack_in_all_three_themes(devtools):
     port = devtools(_live_find_pages())
-    proc = run(LIVE_FIND, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("live_find"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert _verdicts(proc) == [
         "VERDICT: PASS - live-find tile u4 dark",
@@ -2092,7 +2044,7 @@ def test_live_find_render_fails_on_overflow_undersized_key_or_matching_marks(
 ):
     kwargs = {f"{kind}_defect": defect}
     port = devtools(_live_find_pages(**kwargs))
-    proc = run(LIVE_FIND, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("live_find"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     expected = {
         "screen": "VERDICT: FAIL - live-find screen u5 red-night",
@@ -2104,11 +2056,11 @@ def test_live_find_render_fails_on_overflow_undersized_key_or_matching_marks(
 
 def test_recall_render_console_uses_no_radio_probe(tmp_path, monkeypatch):
     # F5: render_recall.py must pass a no-radio probe so it never touches a live SDR bus.
-    sys.path.insert(0, str(RECALL.parent))
+    sys.path.insert(0, str(render_tool("recall").parent))
     try:
         import render_recall  # noqa: PLC0415
     finally:
-        sys.path.remove(str(RECALL.parent))
+        sys.path.remove(str(render_tool("recall").parent))
 
     captured: dict = {}
 
@@ -2176,7 +2128,7 @@ def _field_pages(*, page_defect=None, rack_defect=None):
 
 def test_field_render_checks_rack_and_page_including_no_split_hyphens(devtools):
     port = devtools(_field_pages())
-    proc = run(FIELD, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("field"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert _verdicts(proc) == [
         "VERDICT: PASS - rack-field-ism dark",
@@ -2199,7 +2151,7 @@ def test_field_render_checks_rack_and_page_including_no_split_hyphens(devtools):
 ])
 def test_field_render_fails_on_split_hyphen_overflow_or_small_font(devtools, defect):
     port = devtools(_field_pages(page_defect=defect))
-    proc = run(FIELD, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("field"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - field red-night"
 
@@ -2255,7 +2207,7 @@ def _bandmap_pages(*, home_defect=None, page_defect=None, end_defect=None):
 
 def test_bandmap_render_checks_home_and_bands_in_all_three_themes(devtools):
     port = devtools(_bandmap_pages())
-    proc = run(BANDMAP, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("bandmap"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert _verdicts(proc) == [
         "VERDICT: PASS - bandmap home dark",
@@ -2297,7 +2249,7 @@ def test_bandmap_render_checks_home_and_bands_in_all_three_themes(devtools):
 def test_bandmap_render_fails_on_layout_or_shape_defects(devtools, kind, defect):
     kwargs = {f"{kind}_defect": defect}
     port = devtools(_bandmap_pages(**kwargs))
-    proc = run(BANDMAP, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("bandmap"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     expected = (
         "VERDICT: FAIL - bandmap home red-night"
@@ -2343,7 +2295,7 @@ def _closing_pages(*, predict_defect=None, stages_defect=None):
 
 def test_closing_render_checks_all_stages_in_all_three_themes(devtools):
     port = devtools(_closing_pages())
-    proc = run(CLOSING, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("closing"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert _verdicts(proc) == [
         "VERDICT: PASS - closing-predict dark",
@@ -2367,7 +2319,7 @@ def test_closing_render_checks_all_stages_in_all_three_themes(devtools):
 def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devtools, kind, defect):
     kwargs = {f"{kind}_defect": defect}
     port = devtools(_closing_pages(**kwargs))
-    proc = run(CLOSING, "http://127.0.0.1:9", port=port)
+    proc = run(render_tool("closing"), "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     expected = (
         "VERDICT: FAIL - closing-predict red-night"

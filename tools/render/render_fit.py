@@ -1,5 +1,6 @@
 # ABOUTME: Checks that demo and predict controls fit the forced 800x480 DevTools viewport.
 # ABOUTME: Reports the primary-button positions and saves a screenshot of the predict stage.
+
 import base64
 import json
 import os
@@ -17,6 +18,15 @@ from render_scroll import (  # noqa: E402
     check_reply,
     fence,
 )
+
+RENDER_CHECK = {
+    "name": "fit",
+    "pages": ("/lesson/29",),
+    "scratch": False,
+    "order": 10,
+    "target": "/lesson/29",
+    "args": ("{output}/predict.png",),
+}
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "9222"))
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8008/lesson/29"

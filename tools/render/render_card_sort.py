@@ -7,6 +7,13 @@ import time
 
 from render_scroll import connect, fence, leave_page
 
+RENDER_CHECK = {
+    "name": "card-sort",
+    "pages": ("/lesson/5", "/law?back=/lesson/5"),
+    "scratch": False,
+    "order": 60,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 
 CARD_SORT = """
