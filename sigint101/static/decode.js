@@ -80,6 +80,12 @@
   var recording = null;
   var startRefusal = "";
 
+  class ConsoleHTTPError extends Error {
+    constructor(status) {
+      super("Console returned HTTP " + status + ".");
+    }
+  }
+
   function updateKeys(body) {
     keys.forEach(function (key) {
       var strip = key.closest(".tune");
@@ -106,21 +112,25 @@
       init.body = JSON.stringify(payload);
     }
     return fetch(path, init).then(async function (reply) {
-      var body = await reply.json();
-      return gen === generation ? { ok: reply.ok, body: body } : null;
+      try {
+        var body = await reply.json();
+        return gen === generation ? { ok: reply.ok, body: body } : null;
+      } catch (error) {
+        if (!reply.ok) throw new ConsoleHTTPError(reply.status);
+        throw error;
+      }
     });
   }
 
   async function listRecordings() {
     // The kit's recordings belong to the page, regardless of which mode is on screen.
     var reply = await fetch("/api/replay/recordings", { cache: "no-store" });
-    if (reply.ok) {
-      var body = await reply.json();
-      recording = (body.recordings || []).find(function (item) {
-        return item.instrument === "ism";
-      });
-      updateKeys();
-    }
+    if (!reply.ok) throw new ConsoleHTTPError(reply.status);
+    var body = await reply.json();
+    recording = (body.recordings || []).find(function (item) {
+      return item.instrument === "ism";
+    });
+    updateKeys();
   }
 
   function replayNote(body) {
@@ -218,8 +228,16 @@
       }
       paint(result.body, result.ok);
       if (result.body.state === "replaying") later(gen, 500);
-    } catch (_) {
-      if (gen === generation) paint({ reason: "Lost contact with the console." }, false);
+    } catch (error) {
+      if (gen !== generation) return;
+      var reason = error instanceof ConsoleHTTPError ? error.message : "Lost contact with the console.";
+      if (back) {
+        paint({ reason: reason }, false);
+        later(gen, 500);
+      } else {
+        // A lost reply cannot tell us whether the replay actually started.
+        poll(switchMode("live", "Replay start unconfirmed · " + reason));
+      }
     } finally {
       busy = false;
       updateKeys();

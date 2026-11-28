@@ -85,7 +85,9 @@ function page() {
       showCommand() {},
     },
     fetch(url, init = {}) {
-      return new Promise(resolve => requests.push({ url, method: init.method || "GET", resolve }));
+      return new Promise((resolve, reject) => {
+        requests.push({ url, method: init.method || "GET", resolve, reject });
+      });
     },
     setTimeout(fn) { timers.push(fn); },
     clearTimeout() {},
@@ -220,3 +222,59 @@ for (const competing of [false, true]) {
       assert.ok(!p.empty.textContent.includes(reason));
     });
 }
+
+for (const recordingList of [false, true]) {
+  for (const nonJson of [false, true]) {
+    const step = recordingList ? "recording list" : "start POST";
+    const failure = nonJson ? "plain-text 502" : "rejected fetch";
+    test("Replay returns to live after a " + failure + " on the " + step, async () => {
+      const p = page();
+      await p.ready();
+      p.take("/api/decode");
+      p.key.click();
+      const list = "/api/replay/recordings";
+      if (!recordingList) await p.answer(list, LIST);
+      const request = recordingList ? p.take(list) : p.take("/api/replay/ism/start", "POST");
+      if (nonJson) {
+        request.resolve({ ok: false, status: 502, json: async () => {
+          throw new SyntaxError("Bad Gateway");
+        } });
+      } else {
+        request.reject(new TypeError("Failed to fetch"));
+      }
+      await turn();
+
+      assert.ok(!p.classes.has("tune--replay"));
+      assert.equal(p.key.textContent, "Replay");
+      assert.equal(p.key.disabled, false);
+      assert.match(p.empty.textContent, /Replay start unconfirmed/);
+      assert.ok(p.empty.textContent.includes(nonJson ? "HTTP 502" : "Lost contact with the console."));
+      assert.ok(!p.requests.some(q => q.method === "POST"));
+      await p.answer("/api/decode", LIVE);
+      assert.equal(p.badge.textContent, "LIVE");
+      p.timers.shift()();
+      await p.answer("/api/decode", LIVE);
+    });
+  }
+}
+
+test("a lost Back to live reply resumes checking the replay", async () => {
+  const p = page();
+  await p.ready();
+  p.take("/api/decode");
+  await p.start();
+  p.timers.shift()(); // Put the old replay status request in flight.
+  const old = p.take("/api/replay/ism");
+  p.key.click();
+  p.take("/api/replay/ism/stop", "POST").reject(new TypeError("Failed to fetch"));
+  await turn();
+
+  assert.match(p.empty.textContent, /Lost contact with the console/);
+  assert.equal(p.key.textContent, "Back to live");
+  assert.equal(p.timers.length, 1);
+  p.timers.shift()();
+  await p.answer("/api/replay/ism", REPLAYING);
+  old.resolve({ ok: true, json: async () => ({ ...REPLAYING, state: "stopped" }) });
+  await turn();
+  assert.equal(p.badge.textContent, "REPLAY");
+});
