@@ -88,7 +88,7 @@ from .operate import (
 )
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
-from .ppm import PpmCalibration, PpmUnavailable
+from .ppm import PpmCalibration, PpmUnavailable, measure_pilot_ppm
 from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress, RecallNotDue
 from .provenance import (
     BaselineLog,
@@ -478,8 +478,11 @@ def initialize_console_state(
         state.exam_store = ExamStore(
             resolved_data / "exam.db", managed=managed, read_only=read_only
         )
-        state.ppm_calibration = PpmCalibration()
-        state.ppm_measure = ppm_measure or state.ppm_calibration.measure
+        if trial:
+            state.ppm_measure = ppm_measure or measure_pilot_ppm
+        else:
+            state.ppm_calibration = PpmCalibration()
+            state.ppm_measure = ppm_measure or state.ppm_calibration.measure
         state.receptions = None
         state.reception_error = None
         state.stamp_error = None
