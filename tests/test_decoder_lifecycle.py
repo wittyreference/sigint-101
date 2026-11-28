@@ -415,6 +415,127 @@ def test_quick_deaths_across_retunes_still_wait_and_say_where_the_next_try_is(la
     dec.stop()
 
 
+def _unseen_by_the_supervisor(child, run):
+    """The supervisor's polls find the child alive until the run is cancelled; others see it."""
+    real = child.poll
+
+    def poll():
+        if threading.current_thread().name.endswith("-supervisor") and not run.cancel.is_set():
+            return None
+        return real()
+
+    child.poll = poll
+
+
+@pytest.mark.parametrize("name", sorted(RETUNABLE))
+def test_quick_deaths_the_supervisor_has_not_seen_yet_still_count_at_a_retune(tmp_path, name):
+    # Codex D-091 F6: the child has exited, but its supervisor has not observed it when the
+    # retune fences the run. The exit is visible, so the retune counts it before the fence.
+    dec, unavailable, spawned, tuned = _build_tuned(name, tmp_path)
+    clock = dec.watch.clock
+    dec.start()
+    _unseen_by_the_supervisor(spawned[0], dec._run)
+    spawned[0].kill()
+    dec.retune(RETUNABLE[name])
+    assert dec.watch.retry_in() is None         # one quick death: its wait is lifted
+    dec.start()
+    assert len(spawned) == 2
+    _unseen_by_the_supervisor(spawned[1], dec._run)
+    spawned[1].kill()
+    dec.retune(OTHER_HZ[name])                  # the second in a row: its grown wait stands
+    assert dec.watch.retry_in() == 2 * childproc.FIRST_RETRY_S
+    with pytest.raises(unavailable, match="keeps dying"):
+        dec.start()
+    assert len(spawned) == 2
+    clock.now += dec.watch.retry_in()
+    dec.start()
+    _unseen_by_the_supervisor(spawned[2], dec._run)
+    spawned[2].kill()
+    dec.retune(RETUNABLE[name])                 # the third: the wait keeps growing
+    assert dec.watch.retry_in() == 4 * childproc.FIRST_RETRY_S
+    with pytest.raises(unavailable, match="keeps dying"):
+        dec.start()
+    assert tuned == [tuned[0], RETUNABLE[name], OTHER_HZ[name]]
+
+
+@pytest.mark.parametrize("name", sorted(RETUNABLE))
+def test_a_death_the_supervisor_recorded_is_not_counted_again_by_the_retune(tmp_path, name):
+    # The other order: the supervisor has recorded the death and is held before it fences the
+    # run when the retune looks for a visible exit. One death, one count: its wait is lifted.
+    dec, _, spawned, tuned = _build_tuned(name, tmp_path)
+    needs_diagnostics = dec._needs_diagnostics
+    recorded, go_on = threading.Event(), threading.Event()
+
+    def held(run):
+        recorded.set()
+        assert go_on.wait(5)
+        return needs_diagnostics(run)
+
+    dec._needs_diagnostics = held
+    dec.start()
+    run = dec._run
+    spawned[0].kill()
+    assert recorded.wait(5)                     # recorded under _life; the run is not fenced
+    retune = threading.Thread(target=dec.retune, args=(RETUNABLE[name],))
+    retune.start()
+    assert run.cancel.wait(5)                   # the retune has looked, cancelled and fenced
+    go_on.set()
+    retune.join(5)
+    assert not retune.is_alive()
+    assert dec.watch.retry_in() is None and dec.watch.reason is None
+    dec.start()
+    assert tuned[-1] == RETUNABLE[name] and len(spawned) == 2
+    dec.stop()
+
+
+def test_rtl_433_deaths_its_reader_has_not_recorded_yet_still_count_at_a_retune(late_tuned):
+    # Codex D-091 F6, rtl_433's path: the child has exited but its pipe is still open, so the
+    # reader has recorded nothing when the retune marks the watch stopping.
+    dec, unavailable, procs, tuned, clock = late_tuned("decode")
+    dec.STOP_WAIT_S = 0.01
+    dec.start()
+    procs[0].die(-signal.SIGKILL)
+    dec.retune(LATE_TUNED["decode"])
+    assert dec.watch.retry_in() is None
+    dec.start()
+    assert len(procs) == 2
+    procs[1].die(-signal.SIGKILL)
+    dec.retune(OTHER_HZ["decode"])
+    assert dec.watch.retry_in() == 2 * childproc.FIRST_RETRY_S
+    with pytest.raises(unavailable, match="keeps dying"):
+        dec.start()
+    assert len(procs) == 2
+    clock.now += dec.watch.retry_in()
+    dec.start()
+    procs[2].die(-signal.SIGKILL)
+    dec.retune(LATE_TUNED["decode"])
+    assert dec.watch.retry_in() == 4 * childproc.FIRST_RETRY_S
+    with pytest.raises(unavailable, match="keeps dying"):
+        dec.start()
+    assert len(procs) == 3
+
+
+def test_rtl_433_that_survived_kill_refuses_every_start_until_it_is_reaped(tmp_path):
+    # Codex D-091 F7: the first refusal used to consume the only marker, and the second start
+    # spawned beside the live rtl_433.
+    dec, unavailable, spawned, _ = _build("decode", tmp_path,
+                                          lambda: Child(["rtl_433"], unkillable=True))
+    dec.start()
+    dec.retune(315_000_000)                     # the stop inside the retune cannot kill it
+    for _ in range(3):
+        with pytest.raises(unavailable, match="survived kill; the dongle may still be held"):
+            dec.start()
+    assert len(spawned) == 1                    # nothing spawned beside the live child
+    assert dec.release_failure() == decode.SURVIVED_KILL     # and the handoff check says so
+    assert dec.release_failure(pending=True) == decode.SURVIVED_KILL
+    spawned[0].code = -signal.SIGKILL           # the kill lands once it leaves the kernel
+    assert dec.release_failure() is None
+    dec.start()                                 # reaped: the radio is free again
+    assert len(spawned) == 2 and dec.error is None
+    spawned[1].unkillable = False
+    dec.stop()
+
+
 @pytest.mark.parametrize("name", sorted(LATE_TUNED))
 def test_a_retune_after_the_grown_wait_ran_out_starts_at_once(late_tuned, name):
     # The wait only survives while it runs: a retune after it has run out is never held.

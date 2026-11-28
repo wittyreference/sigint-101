@@ -197,6 +197,9 @@ class Decoder:
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
+        # An rtl_433 a stop could not kill. Until it is reaped it may still hold the dongle, so
+        # every start and every handoff is refused (release_failure).
+        self._unreaped = None
         # The run a reader may list, report and record into. start() hands it to the reader it
         # starts; every stop moves it on, so a reader that outlives its stop is shut out (_read).
         self._run = 0
@@ -262,6 +265,13 @@ class Decoder:
         with self._life:
             if int(freq_hz) == self.freq_hz:
                 return
+            # A child that has exited but whose reader has not seen its pipe close yet: count the
+            # death now, before stopping() makes the reader's record stale, so the back-off still
+            # advances. ChildWatch commits one death per child, so the reader recording the same
+            # exit at the same moment cannot count it twice.
+            proc = self._proc
+            if proc is not None and proc.poll() is not None:
+                self._note_end(proc, self._run)
             self._stop_locked()
             self.freq_hz = int(freq_hz)
             with self._lock:
@@ -275,10 +285,35 @@ class Decoder:
         with self._life:
             self._start_locked()
 
+    def release_failure(self, *, pending=False) -> str | None:
+        """Why the radio cannot be handed on: an rtl_433 a stop could not end is not reaped yet.
+
+        The console asks every receiver this before a handoff, as it asks the supervised ones.
+        `pending` is accepted for that same call; a stop here is synchronous, so nothing else is
+        ever still on its way out.
+        """
+        proc = self._unreaped
+        if proc is None:
+            return None
+        try:
+            alive = proc.poll() is None
+        except (OSError, ValueError):
+            alive = True
+        return SURVIVED_KILL if alive else None
+
     def _start_locked(self) -> None:
         if self.running:
             return
         self._settle()
+        # Every start refuses while the old rtl_433 is alive, not just the first: the child and
+        # its refusal are kept until its exit is confirmed.
+        if self._unreaped is not None:
+            if self.release_failure():
+                raise DecodeUnavailable(SURVIVED_KILL)
+            self._unreaped = None
+            with self._lock:
+                if self.error == SURVIVED_KILL:
+                    self.error = None
         if self._released:
             raise DecodeUnavailable(
                 "the radio was released to another program; resume decoding to take it back")
@@ -380,6 +415,7 @@ class Decoder:
         self.watch.stopping()
         proc, self._proc = self._proc, None
         if proc is not None and not stop_process(proc):
+            self._unreaped = proc               # it may still hold the dongle until reaped
             self.error = SURVIVED_KILL
         if self._thread is not None:
             self._thread.join(timeout=self.STOP_WAIT_S)

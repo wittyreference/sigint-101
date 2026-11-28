@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sigint101 import app, aprs, childproc, radio_control, receiver_lifecycle
+from sigint101 import app, aprs, childproc, decode, radio_control, receiver_lifecycle
 from sigint101.events import read_events
 from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _StubSweeper
@@ -39,6 +39,35 @@ def test_two_failed_teardown_claims_refuse_without_retrying_under_reservation(tm
         assert not client.app.state.sweeper.running
         proc.unkillable = False
         proc.stubborn = False
+
+
+def test_an_rtl_433_that_survived_kill_holds_the_radio_until_it_is_reaped(tmp_path):
+    # Codex D-091 F7: rtl_433's decoder told one refusal and then let a claim spawn beside the
+    # live child. It now answers the handoff check like the supervised receivers do.
+    rtl_433 = Child(["rtl_433"], unkillable=True)
+    sensors = decode.Decoder(spawn=lambda *_: rtl_433, radio_present=lambda: True,
+                             which=lambda t: t)
+    aprs_children = []
+
+    def spawn_aprs(*_):
+        aprs_children.append(Child(["rtl_fm"]))
+        return aprs_children[-1]
+
+    with _client(tmp_path, probe=_present, decoder_factory=lambda: sensors,
+                 aprs_factory=lambda: aprs.AprsDecoder(spawn=spawn_aprs,
+                                                       radio_present=lambda: True,
+                                                       which=lambda t: t)) as client:
+        assert client.get("/api/decode").status_code == 200
+        refused = [client.get("/api/aprs") for _ in range(3)]   # the stand-down cannot kill it
+        refused += [client.get("/api/decode") for _ in range(2)]
+        assert not aprs_children                               # nothing spawned beside it
+        rtl_433.code = -signal.SIGKILL                         # the kill lands at last
+        back = client.get("/api/aprs")
+        client.app.state.aprs.stop()
+    for resp in refused:
+        assert resp.status_code == 503
+        assert "rtl_433 survived kill; the dongle may still be held" in resp.json()["reason"]
+    assert back.status_code == 200 and len(aprs_children) == 1
 
 
 def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_path, monkeypatch):
