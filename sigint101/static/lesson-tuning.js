@@ -71,7 +71,7 @@
 
   function read(res, body) {
     if (res.ok) {
-      if (body.tuned !== false) return null;
+      if (body.tuned !== false || body.faded) return null;
       var why = Object.keys(body.skipped || {}).map(function (k) { return body.skipped[k]; });
       return ["Tuning skipped", why.indexOf("you retuned") >= 0 ? "you retuned" : "lesson changed"];
     }

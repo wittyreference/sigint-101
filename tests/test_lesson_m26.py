@@ -315,7 +315,134 @@ def test_m26_faded_tune_strip_and_badge_fonts_are_at_least_18px():
     for selector in (
         ".tune--faded .tune__caption",
         ".tune--faded .tune__freq span",
+        "[data-ais-faded] .decoder__title",
         "[data-ais-faded] .decoder__status",
     ):
         px = _font_px(selector)
         assert px is not None and px >= 18.0, f"{selector} font-size is {px!r}px; expected >= 18px"
+
+
+def test_m26_load_sequence_leaves_rack_sweep_aprs_and_running_rows_untouched(tmp_path):
+    """F5: opening a faded pack (GET + POST /api/tuning + POST /api/opened) retunes nothing."""
+    retunes: list[tuple[str, tuple]] = []
+
+    class _RunningRackSweeper:
+        low = 432_920_000
+        high = 434_920_000
+        bin_size = 25_000
+        target = 433_920_000
+
+        def __init__(self):
+            self.running = True
+            self.rows = [{"low": self.low, "high": self.high, "bins": [-45.0, -40.0]}]
+
+        def retune(self, low, high, bin_size, target=None):
+            retunes.append(("sweeper", (low, high, bin_size, target)))
+            self.low, self.high, self.bin_size, self.target = low, high, bin_size, target
+            self.running = False
+            self.rows.clear()
+
+        def stop(self):
+            self.running = False
+
+        def release(self):
+            retunes.append(("sweeper.release", ()))
+
+        def resume(self):
+            pass
+
+    class _RackAprs:
+        home_hz = 144_390_000
+
+        def __init__(self):
+            self.freq_hz = 144_800_000
+            self.running = False
+
+        def retune(self, freq_hz):
+            retunes.append(("aprs", (freq_hz,)))
+            self.freq_hz = freq_hz
+
+        def stop(self):
+            self.running = False
+
+        def release(self):
+            pass
+
+        def resume(self):
+            pass
+
+    class _SpyAis:
+        running = False
+
+        def start(self):
+            retunes.append(("ais.start", ()))
+
+        def stop(self):
+            pass
+
+        def release(self):
+            pass
+
+        def resume(self):
+            pass
+
+    sweeper = _RunningRackSweeper()
+    aprs = _RackAprs()
+    app = create_app(
+        pack_dir=PACK_DIR,
+        data_dir=tmp_path,
+        probe=_absent_probe,
+        sweeper_factory=lambda: sweeper,
+        aprs_factory=lambda: aprs,
+        ais_factory=_SpyAis,
+    )
+    with TestClient(app) as client:
+        epoch, at = app.state.tuning_gate.anchor()
+        assert client.get("/lesson/26").status_code == 200
+        r_tune = client.post(f"/api/tuning?lesson_id=26&epoch={epoch}&at={at}")
+        assert r_tune.status_code == 200
+        assert r_tune.json() == {"tuned": False, "lesson_id": 26, "faded": True}
+        assert client.post("/api/opened?lesson_id=26").status_code == 200
+
+        assert retunes == [], f"faded load sequence must not retune or start receivers: {retunes}"
+        assert (sweeper.low, sweeper.high, sweeper.target) == (
+            432_920_000,
+            434_920_000,
+            433_920_000,
+        )
+        assert sweeper.running is True
+        assert len(sweeper.rows) == 1, "running sweeper must keep its buffered rows"
+        assert aprs.freq_hz == 144_800_000
+
+
+def test_m26_faded_load_preserves_c81_action_ordering(tmp_path):
+    """F5: faded restore skips receivers while still participating in C81's action ordering."""
+    app = create_app(pack_dir=PACK_DIR, data_dir=tmp_path, probe=_absent_probe)
+    with TestClient(app) as client:
+        # Leave the rack tuned away from home.
+        app.state.aprs.freq_hz = 144_800_000
+        app.state.sweeper.low = 432_920_000
+        app.state.sweeper.high = 434_920_000
+        app.state.sweeper.target = 433_920_000
+        epoch, base = app.state.tuning_gate.anchor()
+
+        # Learner opens faded L26 at base - 10; a delayed L1 restore stamped earlier is stale.
+        r_faded = client.post(f"/api/tuning?lesson_id=26&epoch={epoch}&at={base - 10}")
+        assert r_faded.status_code == 200
+        assert r_faded.json() == {"tuned": False, "lesson_id": 26, "faded": True}
+
+        r_stale_l1 = client.post(f"/api/tuning?lesson_id=1&epoch={epoch}&at={base - 20}")
+        assert r_stale_l1.status_code == 409
+        assert r_stale_l1.json()["stale"] is True
+        assert app.state.aprs.freq_hz == 144_800_000
+        assert app.state.sweeper.target == 433_920_000
+
+        # Opening non-faded L1 later still restores receivers and supersedes an older L26 POST.
+        r_l1 = client.post(f"/api/tuning?lesson_id=1&epoch={epoch}&at={base}")
+        assert r_l1.status_code == 200
+        assert r_l1.json() == {"tuned": True, "lesson_id": 1}
+        assert app.state.aprs.freq_hz == app.state.aprs.home_hz
+
+        r_stale_faded = client.post(f"/api/tuning?lesson_id=26&epoch={epoch}&at={base - 5}")
+        assert r_stale_faded.status_code == 409
+        assert r_stale_faded.json()["stale"] is True

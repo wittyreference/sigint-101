@@ -2628,11 +2628,16 @@ FADING_UNTUNED_FITS = {
     "freqText": "100.0MHz",
     "dialPending": True,
     "namesDecoder": False,
+    "aisRequests": 0,
     "captionFontPx": 18,
     "unitFontPx": 18,
+    "titleFontPx": 18,
     "badgeFontPx": 18,
     "captionClipped": False,
     "dialClipped": False,
+    "titleFits": True,
+    "badgeFits": True,
+    "headOverlap": False,
     "buttonsFit": True,
     "buttonsOverlap": False,
     "dialFits": True,
@@ -2648,17 +2653,27 @@ FADING_OFFBAND_FITS = {
         "100.0 MHz is outside the marine VHF band (~162 MHz). Step to ~162 MHz and tap Tune."
     ),
 }
+FADING_REJECTED_MOVED_FITS = {
+    **FADING_UNTUNED_FITS,
+    "freqText": "162.0MHz",
+    "aisRequests": 0,
+}
 FADING_TUNED_FITS = {
     **FADING_UNTUNED_FITS,
-    "badge": "NO RADIO",
-    "emptyText": "No RTL-SDR radio detected.",
+    "badge": "TOOL MISSING",
+    "emptyText": (
+        "The marine VHF receiver is not installed on this unit."
+        " · See the Field card for receiver setup."
+    ),
     "freqText": "162.0MHz",
     "dialPending": True,
+    "aisRequests": 1,
 }
 FADING_STEPPED_OFF_FITS = {
     **FADING_UNTUNED_FITS,
     "freqText": "164.0MHz",
     "dialPending": True,
+    "aisRequests": 1,
 }
 FADING_OBSERVE_FITS = {
     **FADING_TUNED_FITS,
@@ -2670,6 +2685,44 @@ FADING_EXPLAIN_FITS = {
     "completeFits": True,
     "completeBottom": 473,
 }
+FADING_SETTLE_STARTING_FITS = {
+    **FADING_TUNED_FITS,
+    "theme": "dark",
+    "badge": "STARTING",
+    "emptyText": "Checking receiver…",
+    "dialPending": True,
+}
+FADING_SETTLE_RUNNING_FITS = {
+    **FADING_TUNED_FITS,
+    "theme": "dark",
+    "badge": "LIVE",
+    "emptyText": "Listening · no vessels heard yet",
+    "dialPending": False,
+}
+FADING_SETTLE_STOPPED_FITS = {
+    **FADING_TUNED_FITS,
+    "theme": "dark",
+    "badge": "STOPPED",
+    "emptyText": "The marine VHF receiver stopped unexpectedly. · retrying in 4 s",
+    "dialPending": True,
+}
+FADING_REFUSAL_CAP_FITS = {
+    **FADING_TUNED_FITS,
+    "theme": "dark",
+    "badge": "UNAVAILABLE",
+    "emptyText": (
+        "The marine VHF receiver is unavailable right now."
+        " · See the Field card if this persists."
+    ),
+    "dialPending": True,
+}
+FADING_REFUSAL_NO_RADIO_FITS = {
+    **FADING_TUNED_FITS,
+    "theme": "dark",
+    "badge": "NO RADIO",
+    "emptyText": "No RTL-SDR radio detected. · Plug in the RTL-SDR.",
+    "dialPending": True,
+}
 
 
 def _fading_pages(*, kind=None, defect=None):
@@ -2678,27 +2731,46 @@ def _fading_pages(*, kind=None, defect=None):
         pred = {**FADING_PREDICT_FITS, "theme": theme}
         untuned = {**FADING_UNTUNED_FITS, "theme": theme}
         offband = {**FADING_OFFBAND_FITS, "theme": theme}
+        rejected_moved = {**FADING_REJECTED_MOVED_FITS, "theme": theme}
         tuned = {**FADING_TUNED_FITS, "theme": theme}
         stepped_off = {**FADING_STEPPED_OFF_FITS, "theme": theme}
         obs = {**FADING_OBSERVE_FITS, "theme": theme}
         exp = {**FADING_EXPLAIN_FITS, "theme": theme}
         if theme == "red-night" and kind and defect:
-            {
+            target = {
                 "predict": pred,
                 "untuned": untuned,
                 "offband": offband,
+                "rejected_moved": rejected_moved,
                 "tuned": tuned,
                 "stepped_off": stepped_off,
                 "observe": obs,
                 "explain": exp,
-            }[kind].update(defect)
+            }.get(kind)
+            if target is not None:
+                target.update(defect)
         pages[f"measureFadingPredict({json.dumps(theme)})"] = pred
         pages[f"measureFadingStage('operate') /* untuned {theme} */"] = untuned
         pages[f"measureFadingStage('operate') /* offband {theme} */"] = offband
+        pages[f"measureFadingStage('operate') /* rejected_moved {theme} */"] = rejected_moved
         pages[f"measureFadingStage('operate') /* tuned {theme} */"] = tuned
         pages[f"measureFadingStage('operate') /* stepped_off {theme} */"] = stepped_off
         pages[f"measureFadingStage('observe') /* observe {theme} */"] = obs
         pages[f"measureFadingExplain({json.dumps(theme)})"] = exp
+    extra = {
+        "settle_starting": dict(FADING_SETTLE_STARTING_FITS),
+        "settle_running": dict(FADING_SETTLE_RUNNING_FITS),
+        "settle_stopped_starting": dict(FADING_SETTLE_STARTING_FITS),
+        "settle_stopped": dict(FADING_SETTLE_STOPPED_FITS),
+        "refusal_capability_timeout": dict(FADING_REFUSAL_CAP_FITS),
+        "refusal_rejected_datagram": dict(FADING_SETTLE_STOPPED_FITS),
+        "refusal_missing_tool": {**FADING_TUNED_FITS, "theme": "dark"},
+        "refusal_no_radio": dict(FADING_REFUSAL_NO_RADIO_FITS),
+    }
+    if kind in extra and defect:
+        extra[kind].update(defect)
+    for tag, value in extra.items():
+        pages[f"measureFadingStage('operate') /* {tag} */"] = value
     return pages
 
 
@@ -2712,11 +2784,22 @@ def test_fading_render_checks_all_stages_in_all_three_themes(devtools):
             f"VERDICT: PASS - fading predict {theme}",
             f"VERDICT: PASS - fading operate untuned {theme}",
             f"VERDICT: PASS - fading operate offband {theme}",
+            f"VERDICT: PASS - fading operate rejected-moved {theme}",
             f"VERDICT: PASS - fading operate tuned {theme}",
             f"VERDICT: PASS - fading operate stepped-off {theme}",
             f"VERDICT: PASS - fading observe {theme}",
             f"VERDICT: PASS - fading explain {theme}",
         ])
+    expected.extend([
+        "VERDICT: PASS - fading settle starting",
+        "VERDICT: PASS - fading settle running",
+        "VERDICT: PASS - fading settle stopped-starting",
+        "VERDICT: PASS - fading settle stopped",
+        "VERDICT: PASS - fading refusal capability-timeout",
+        "VERDICT: PASS - fading refusal rejected-datagram",
+        "VERDICT: PASS - fading refusal missing-tool",
+        "VERDICT: PASS - fading refusal no-radio",
+    ])
     assert _verdicts(proc) == expected
 
 
@@ -2728,9 +2811,15 @@ def test_fading_render_checks_all_stages_in_all_three_themes(devtools):
     ("untuned", "fading operate untuned red-night", {"narrationH": 50}),
     ("untuned", "fading operate untuned red-night", {"captionFontPx": 13}),
     ("untuned", "fading operate untuned red-night", {"unitFontPx": 14}),
+    ("untuned", "fading operate untuned red-night", {"titleFontPx": 14}),
     ("untuned", "fading operate untuned red-night", {"badgeFontPx": 13}),
     ("untuned", "fading operate untuned red-night", {"captionClipped": True}),
+    ("untuned", "fading operate untuned red-night", {"titleFits": False}),
+    ("untuned", "fading operate untuned red-night", {"badgeFits": False}),
+    ("untuned", "fading operate untuned red-night", {"headOverlap": True}),
     ("offband", "fading operate offband red-night", {"badge": "LIVE"}),
+    ("rejected_moved", "fading operate rejected-moved red-night", {"badge": "OFF BAND"}),
+    ("rejected_moved", "fading operate rejected-moved red-night", {"aisRequests": 1}),
     ("tuned", "fading operate tuned red-night", {"badge": "UNTUNED"}),
     ("tuned", "fading operate tuned red-night", {"namesDecoder": True}),
     ("tuned", "fading operate tuned red-night", {"dialPending": False}),
@@ -2739,6 +2828,12 @@ def test_fading_render_checks_all_stages_in_all_three_themes(devtools):
     ("observe", "fading observe red-night", {"buttonsOverlap": True}),
     ("observe", "fading observe red-night", {"namesDecoder": True}),
     ("explain", "fading explain red-night", {"completeFits": False}),
+    ("settle_starting", "fading settle starting", {"dialPending": False}),
+    ("settle_running", "fading settle running", {"dialPending": True}),
+    ("settle_stopped", "fading settle stopped", {"dialPending": False}),
+    ("refusal_capability_timeout", "fading refusal capability-timeout", {"namesDecoder": True}),
+    ("refusal_rejected_datagram", "fading refusal rejected-datagram", {"emptyText": "Stopped."}),
+    ("refusal_no_radio", "fading refusal no-radio", {"badge": "UNAVAILABLE"}),
 ])
 def test_fading_render_fails_on_decoder_leak_dishonest_badge_or_clip(devtools, kind, label, defect):
     port = devtools(_fading_pages(kind=kind, defect=defect))

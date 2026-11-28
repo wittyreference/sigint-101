@@ -10,7 +10,6 @@
   var AIS_BAND_HIGH_HZ = 162100000;
   var TUNER_MIN_HZ = 24000000;
   var TUNER_MAX_HZ = 1766000000;
-  var DECODER_NAME_RE = /\brtl[_\s-]?ais(?:-sigint101)?\b|\baisdecoder\b/gi;
 
   // How a vessel reads as a line: its name once the static message arrives, else its MMSI.
   function ident(vessel) {
@@ -91,45 +90,65 @@
     };
   }
 
-  // F1: moving the dial after Tune drops back to UNTUNED and unconfirmed so the roster can never
-  // stay live beside an uncommitted or off-band dial.
-  function onFadedDialMove(freqHz, wasActive) {
-    if (wasActive) {
+  // F1: moving the dial after any attempted Tune (accepted or rejected) drops back to UNTUNED
+  // and unconfirmed so stale refusals or live rosters never stay beside an uncommitted dial.
+  function onFadedDialMove(freqHz, hadAttempt) {
+    if (hadAttempt) {
       return {
         active: false,
+        attempted: false,
         confirmed: false,
         state: fadedTuneState(freqHz, false),
       };
     }
-    return { active: false, confirmed: false, state: null };
+    return { active: false, attempted: false, confirmed: false, state: null };
   }
 
-  function scrubDecoderText(text) {
-    if (typeof text !== "string") return text;
-    return text.replace(DECODER_NAME_RE, function (_match, offset) {
-      return offset === 0 ? "The AIS decoder" : "the AIS decoder";
-    });
+  // F1b: a settling receiver ("starting") can still fail, so keep the dial pending until the
+  // console confirms state === "running".
+  function isAisReceiverConfirmed(body) {
+    return Boolean(body && body.available !== false && body.state === "running");
   }
 
-  // F2: keep refusal badges honest (TOOL MISSING, NO RADIO, STOPPED) while keeping decoder binary
-  // names and operator provisioning hints off the faded lesson panel.
+  // F2: keep refusal badges and retry times honest across every cause while replacing raw server
+  // diagnostics (binary names, capability flags, deploy/provision.sh) with learner-facing copy.
   function scrubFadedRefusal(body) {
     var src = body || {};
     var out = {};
-    Object.keys(src).forEach(function (k) { out[k] = src[k]; });
+    if (typeof src.available === "boolean") out.available = src.available;
+    if (typeof src.cause === "string") out.cause = src.cause;
+    if (typeof src.state === "string") out.state = src.state;
+    if (typeof src.retry_in === "number") out.retry_in = src.retry_in;
+
+    if (out.cause === "stopped" || out.state === "stopped") {
+      out.reason = "The marine VHF receiver stopped unexpectedly.";
+      return out;
+    }
     if (out.cause === "missing_tool") {
-      out.message = "The AIS decoder is not installed on this unit.";
+      out.message = "The marine VHF receiver is not installed on this unit.";
       out.reason = out.message;
       out.next_step = "See the Field card for receiver setup.";
       return out;
     }
-    if (typeof out.reason === "string") out.reason = scrubDecoderText(out.reason);
-    if (typeof out.message === "string") out.message = scrubDecoderText(out.message);
-    if (typeof out.next_step === "string") {
-      out.next_step = /provision\.sh/i.test(out.next_step)
-        ? "See the Field card for receiver setup."
-        : scrubDecoderText(out.next_step);
+    if (out.cause === "no_radio") {
+      out.message = "No RTL-SDR radio detected.";
+      out.reason = out.message;
+      out.next_step = "Plug in the RTL-SDR.";
+      return out;
     }
+    if (out.cause === "replaying") {
+      out.message = "The radio is busy with a replay.";
+      out.reason = out.message;
+      out.next_step = "Stop the replay, then tap Tune again.";
+      return out;
+    }
+    if (src.reason === "Lost contact with the console.") {
+      out.reason = src.reason;
+      return out;
+    }
+    out.message = "The marine VHF receiver is unavailable right now.";
+    out.reason = out.message;
+    out.next_step = "See the Field card if this persists.";
     return out;
   }
 
@@ -144,6 +163,7 @@
       inAisBand: inAisBand,
       fadedTuneState: fadedTuneState,
       onFadedDialMove: onFadedDialMove,
+      isAisReceiverConfirmed: isAisReceiverConfirmed,
       scrubFadedRefusal: scrubFadedRefusal,
       stepFadedFreq: stepFadedFreq,
       nextFadedStep: nextFadedStep,
@@ -237,6 +257,7 @@
     var freqHz = first && first.dataset.freqHz ? parseInt(first.dataset.freqHz, 10) : 100000000;
     var stepHz = first && first.dataset.stepHz ? parseInt(first.dataset.stepHz, 10) : steps[0];
     var tunedInBand = false;
+    var tuneAttempted = false;
     var receiverConfirmed = false;
     var pollTimer = null;
     var pollGen = 0;
@@ -297,7 +318,7 @@
               fadedPanels.forEach(function (p) { showEmpty(p, scrubbed); });
               waiting = true;
             } else {
-              receiverConfirmed = true;
+              receiverConfirmed = isAisReceiverConfirmed(res.body);
               syncStrips();
               fadedPanels.forEach(function (p) { render(p, res.body); });
             }
@@ -310,7 +331,7 @@
             receiverConfirmed = false;
             syncStrips();
             fadedPanels.forEach(function (p) {
-              showEmpty(p, { reason: "Lost contact with the console." });
+              showEmpty(p, scrubFadedRefusal({ reason: "Lost contact with the console." }));
             });
             pollTimer = setTimeout(tickFaded, RETRY_MS);
           });
@@ -323,9 +344,10 @@
         btn.addEventListener("click", function () {
           var dir = parseInt(btn.dataset.fadedDir, 10) || 0;
           freqHz = stepFadedFreq(freqHz, dir, stepHz);
-          var moved = onFadedDialMove(freqHz, tunedInBand);
+          var moved = onFadedDialMove(freqHz, tunedInBand || tuneAttempted);
           if (tunedInBand) stopFadedPoll();
           tunedInBand = moved.active;
+          tuneAttempted = moved.attempted;
           receiverConfirmed = moved.confirmed;
           syncStrips();
           if (moved.state) applyFadedState(moved.state);
@@ -342,6 +364,7 @@
       if (applyBtn) {
         applyBtn.addEventListener("click", function () {
           var state = fadedTuneState(freqHz, true);
+          tuneAttempted = true;
           if (state.tuned) {
             tunedInBand = true;
             receiverConfirmed = Boolean(state.confirmed);

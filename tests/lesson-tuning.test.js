@@ -518,3 +518,11 @@ test("the ISM panel's replay status read does not wait for the lesson's tuning",
   await page.answer(200, { tuned: true, lesson_id: 7 });
   assert.equal(page.polls("/api/decode").length, 1);
 });
+
+test("a faded lesson's tuning answer leaves the rail quiet and opens panels at once", async () => {
+  const page = lessonPage({ lessonId: "26", panels: ["decode"] });
+  await page.answer(200, { tuned: false, lesson_id: 26, faded: true });
+  assert.equal(page.note.hidden, true, "faded no-op restore must not show a Tuning skipped note");
+  assert.equal(page.full.hidden, true);
+  assert.equal(page.polls("/api/decode").length, 1);
+});

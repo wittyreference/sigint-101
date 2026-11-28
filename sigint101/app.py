@@ -937,6 +937,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         band is one the sweep cannot take (a pack the loader let through).
         """
         gate = app.state.tuning_gate
+        if lesson.is_faded:
+            gate.skip_restore(at)
+            return {}, None
         token = gate.begin_restore(at)
 
         def home(receiver):
@@ -1380,18 +1383,23 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         `epoch` and `at` stamp the learner's action on the console's clock (action-clock.js), so
         a request that arrives late is ordered by when the learner acted. The answer says what
         happened, never more: {"tuned": true} only when every receiver is on the lesson's
-        frequency; {"tuned": false, "skipped": {receiver: why}} when a step gave way to a newer
-        action; 409 with "stale" when a newer lesson's restore already ran; 422 with the sweep's
-        own reason when the lesson's band is one it cannot take.
+        frequency; {"tuned": false, "faded": true} when a faded consolidation lesson skips
+        receiver resets while still ordering against older actions; {"tuned": false, "skipped":
+        {receiver: why}} when a step gave way to a newer action; 409 with "stale" when a newer
+        lesson's restore already ran; 422 with the sweep's own reason when the lesson's band is
+        one it cannot take.
         """
         _require_lesson(lesson_id)
+        lesson = app.state.lessons[lesson_id]
         gate = app.state.tuning_gate
         try:
-            outcomes, refusal = _restore_lesson_tuning(app.state.lessons[lesson_id],
+            outcomes, refusal = _restore_lesson_tuning(lesson,
                                                        gate.stamp(epoch, at, arrival_ms(request)))
         except Superseded as exc:
             return JSONResponse(status_code=409, content={
                 "tuned": False, "lesson_id": lesson_id, "stale": True, "reason": str(exc)})
+        if lesson.is_faded:
+            return {"tuned": False, "lesson_id": lesson_id, "faded": True}
         if refusal is not None:
             log_event(app.state.events_path, "tuning_refused",
                       {"lesson_id": lesson_id, "reason": refusal})

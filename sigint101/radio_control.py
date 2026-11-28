@@ -175,6 +175,14 @@ class TuningGate:
             self._restoring -= 1
             self._state.notify_all()
 
+    def skip_restore(self, at: float) -> None:
+        """Order a faded lesson that restores no receiver against earlier restores and tunes,
+        without holding radio claims or touching any receiver."""
+        with self._state:
+            if at < self._newest_restore:
+                raise Superseded(STALE_REASON)
+            self._newest_restore = at
+
     def restore_step(self, receiver: str, token: float, reset) -> str:
         """Run `reset` for `receiver` unless a newer action overtook restore `token`; say which."""
         with self._step:
