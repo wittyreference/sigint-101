@@ -85,18 +85,20 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "usr/local/lib/sigint101-power/sigint101/battery.py",
         "33e91635e86833a459f812bcadb51a90337734779c7d5e7d221fec0b08562451",
     ),
-    # Safe shutdown slice 2a: low-battery watcher (ships hard-disarmed until slice 2b).
+    # Safe shutdown slice 2a (round 2 N2): low-battery watcher, disarmed until 2b; logs notice
+    # write errors instead of blocking power-off.
     (
         "sigint101/power.py",
         "sysroot",
         "usr/local/lib/sigint101-power/sigint101/power.py",
-        "3435292c55df6122ac8d2c8e8786f57ee7631cfdde8c036abf3db95264d2cf18",
+        "10757067da00987274006c864f2ee91decfb4006aa42e54111c86677e648d8d4",
     ),
-    # Safe shutdown slice 2a: hardened non-root systemd unit for the power watcher.
+    # Safe shutdown slice 2a (round 2 F2): hardened non-root unit installed under
+    # /usr/local/lib/systemd/system so owner masks in /etc/systemd/system work and win.
     (
         "deploy/system/sigint101-power.service",
         "sysroot",
-        "etc/systemd/system/sigint101-power.service",
+        "usr/local/lib/systemd/system/sigint101-power.service",
         "b63f4ea7d457355c1c082c2075c27b8b6f60e5ba6718f9b562607d240df71d2a",
     ),
     # Safe shutdown slice 2a: self-locating python3 -I launcher for the power watcher.
@@ -392,8 +394,9 @@ class StatefulLegacyBox:
             "LANG": "C.UTF-8",
             "SIGINT101_POWER_THRESHOLD_V": "9.50",
         }
+        notice_path = self.sysroot / "run" / "sigint101-power" / "notice.json"
         proc = subprocess.run(
-            [str(launcher), "--startup-only"],
+            [str(launcher), "--startup-only", "--notice-path", str(notice_path)],
             env=env,
             capture_output=True,
             text=True,

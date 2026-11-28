@@ -455,8 +455,11 @@ class PowerWatcher:
         if failed:
             assert self._retry_deadline_mono is not None
             payload["retry_deadline_mono"] = self._retry_deadline_mono
-        _write_notice_file(self.notice_path, payload)
         self._last_notice_write = now
+        try:
+            _write_notice_file(self.notice_path, payload)
+        except OSError as exc:
+            self._log.error("failed to write power notice %s: %s", self.notice_path, exc)
 
     def _attempt_poweroff(self, now: float, reading: BatteryReading) -> None:
         self._log.critical(

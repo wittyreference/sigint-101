@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +16,6 @@ import pytest
 from sigint101 import battery
 from sigint101.battery import BatteryReading, ConversionNotReadyError, INA219Config
 from sigint101.power import (
-    HOLD_S,
     LOCKED_2A_REASON,
     MAX_GAP_S,
     MINIMAL_ENV,
@@ -275,7 +273,10 @@ def test_hold_notice_poweroff_nominal_monotonic_sequence(tmp_path):
     assert raw["started_mono"] == pytest.approx(1060.0)
     assert raw["deadline_mono"] == pytest.approx(1120.0)
     assert raw["updated_mono"] == pytest.approx(1060.0)
-    assert "retry_deadline_mono" not in raw
+    assert set(raw) == {
+        "active", "failed", "voltage", "threshold_v",
+        "started_mono", "deadline_mono", "updated_mono",
+    }
     assert read_power_notice(notice_path, clock=clk)["remaining_s"] == 60
 
     # t=62..118: NOTICE refreshes updated_mono and counts down.
@@ -379,6 +380,10 @@ def test_poweroff_failure_enters_failed_state_announces_retry_and_recovers(tmp_p
     raw = json.loads(notice_path.read_text(encoding="utf-8"))
     assert raw["active"] is True
     assert raw["failed"] is True
+    assert set(raw) == {
+        "active", "failed", "voltage", "threshold_v",
+        "started_mono", "deadline_mono", "updated_mono", "retry_deadline_mono",
+    }
     first_retry_deadline = raw["retry_deadline_mono"]
     assert first_retry_deadline == pytest.approx(clk() + POWEROFF_RETRY_S)
 
@@ -882,5 +887,66 @@ def test_unit_file_is_non_root_and_hardened():
             f"{key}: expected [{val!r}], got {directives.get(key)!r}"
         )
     # Sanity-check plausibility constants stay ordered.
-    assert 0.0 < PLAUSIBLE_MIN_V < HOLD_S and PLAUSIBLE_MIN_V < PLAUSIBLE_MAX_V
-    assert MAX_GAP_S == 15.0 and stat.S_ISREG(stat.S_IFREG) and sys.version_info >= (3, 11)
+    assert 0.0 < PLAUSIBLE_MIN_V < PLAUSIBLE_MAX_V
+    assert MAX_GAP_S == 15.0 and sys.version_info >= (3, 11)
+
+
+def test_notice_write_failure_logs_error_and_does_not_block_poweroff(tmp_path, caplog):
+    # A missing or unwritable notice directory must never crash the watcher or prevent a
+    # confirmed low battery from reaching systemctl poweroff (N2).
+    missing_notice = tmp_path / "no-such-dir" / "notice.json"
+    clk = _Clock(2000.0)
+    poweroffs: list[float] = []
+
+    watcher = PowerWatcher(
+        threshold_v=9.5,
+        notice_path=missing_notice,
+        reader=lambda: (CFG_DEFAULT, _reading(9.2)),
+        clock=clk,
+        sleep=lambda _: None,
+        poweroff=lambda: poweroffs.append(clk()),
+        can_power_off=lambda: (True, 's "yes"'),
+    )
+    with caplog.at_level(logging.ERROR, logger="sigint101.power"):
+        watcher.startup()
+        assert watcher.tick() == "HOLDING"
+        for _ in range(12):
+            clk.advance(5.0)
+            watcher.tick()
+        assert watcher.state == "NOTICE"
+        for _ in range(29):
+            clk.advance(2.0)
+            assert watcher.tick() == "NOTICE"
+        # Notice write fails right before power-off too, yet power-off is still reached.
+        clk.advance(2.0)
+        assert watcher.tick() == "POWERING_OFF"
+
+    assert len(poweroffs) == 1
+    assert any(
+        r.levelno == logging.ERROR and "notice" in r.getMessage().lower()
+        for r in caplog.records
+    )
+
+    # Also confirm POWEROFF_FAILED survives a failing notice write without crashing.
+    w_fail = PowerWatcher(
+        threshold_v=9.5,
+        notice_path=missing_notice,
+        reader=lambda: (CFG_DEFAULT, _reading(9.2)),
+        clock=clk,
+        sleep=lambda _: None,
+        poweroff=lambda: _raise(
+            subprocess.CalledProcessError(1, ["/usr/bin/systemctl", "poweroff"])
+        ),
+        can_power_off=lambda: (True, 's "yes"'),
+    )
+    w_fail.startup()
+    w_fail.tick()
+    for _ in range(12):
+        clk.advance(5.0)
+        w_fail.tick()
+    for _ in range(30):
+        clk.advance(2.0)
+        w_fail.tick()
+    assert w_fail.state == "POWEROFF_FAILED"
+    clk.advance(2.0)
+    assert w_fail.tick() == "POWEROFF_FAILED"

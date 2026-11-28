@@ -667,18 +667,9 @@ install_power_dropin() {
   rm -f "$tmp"
 }
 
-enable_power_service() {
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now sigint101-power.service
-}
-
-restart_power_service() {
-  sudo systemctl daemon-reload
-  sudo systemctl restart sigint101-power.service
-}
-
 # Installs the non-root low-battery power watcher on legacy (non-managed) boxes. Never creates
-# or overwrites /etc/sigint101/power.conf, and respects any non-enabled owner unit state.
+# or overwrites /etc/sigint101/power.conf, installs the unit under /usr/local/lib/systemd/system
+# so owner masks in /etc/systemd/system win, and respects any non-enabled owner unit state.
 step_power() {
   step "Low-battery power watcher (sigint101-power.service; ships disarmed)"
   local updater_root="${SIGINT101_UPDATER_ROOT:-$HOME/.local/state/sigint101-updater}"
@@ -709,8 +700,17 @@ step_power() {
     fi
   done
 
-  local unit_dst="/etc/systemd/system/sigint101-power.service"
+  # Check the unit state before installing anything so a masked unit is never overwritten.
+  local pre_state=""
+  pre_state="$(systemctl is-enabled sigint101-power.service 2>/dev/null || true)"
+  if [ "$pre_state" = "masked" ] || [ "$pre_state" = "masked-runtime" ]; then
+    skip "sigint101-power.service turned off by the owner ($pre_state)"
+    return 0
+  fi
+
+  local unit_dst="/usr/local/lib/systemd/system/sigint101-power.service"
   local unit_existed=0 changed=0 unit_changed=0
+  # Use cmp -s against itself as an existence check so sysroot cmp stubs redirect it cleanly.
   if cmp -s "$unit_dst" "$unit_dst" 2>/dev/null; then
     unit_existed=1
   fi
@@ -748,12 +748,20 @@ step_power() {
     apply "create system user sigint101-power" ensure_power_user
   fi
 
-  local grp="" gid="" dropin_dst="/etc/systemd/system/sigint101-power.service.d/10-i2c-group.conf"
+  local grp="" gid="" have_i2c_group=0 dropin_content="" dropin_label=""
+  local dropin_dst="/etc/systemd/system/sigint101-power.service.d/10-i2c-group.conf"
+  if command -v getent >/dev/null && getent group i2c >/dev/null 2>&1; then
+    have_i2c_group=1
+  fi
   if command -v stat >/dev/null; then
     grp="$(stat -c %G /dev/i2c-1 2>/dev/null)" || grp=""
   fi
   if [ -z "$grp" ]; then
     warn "I2C not enabled; /dev/i2c-1 missing, the watcher cannot read"
+    if [ "$have_i2c_group" = 0 ]; then
+      dropin_content="$(printf '[Service]\nSupplementaryGroups=\n')"
+      dropin_label="reset-only (no i2c group)"
+    fi
   elif [ "$grp" = "i2c" ]; then
     ok "/dev/i2c-1 group is i2c"
   else
@@ -762,22 +770,37 @@ step_power() {
     fi
     if [ "$grp" = "root" ] || [[ ! "$gid" =~ ^[0-9]+$ ]] || (( gid < 100 )); then
       warn "/dev/i2c-1 group '$grp' (gid ${gid:-unknown}) refused; leaving unit without a group drop-in"
-    else
-      local dropin_content
-      dropin_content="$(printf '[Service]\nSupplementaryGroups=\nSupplementaryGroups=%s\n' "$grp")"
-      if printf '%s\n' "$dropin_content" | cmp -s - "$dropin_dst" 2>/dev/null; then
-        ok "$dropin_dst"
-      else
-        changed=1
-        unit_changed=1
-        apply "install I2C group drop-in ($dropin_dst for $grp)" \
-          install_power_dropin "$dropin_dst" "$dropin_content"
+      if [ "$have_i2c_group" = 0 ]; then
+        dropin_content="$(printf '[Service]\nSupplementaryGroups=\n')"
+        dropin_label="reset-only (no i2c group)"
       fi
+    else
+      dropin_content="$(printf '[Service]\nSupplementaryGroups=\nSupplementaryGroups=%s\n' "$grp")"
+      dropin_label="for $grp"
+    fi
+  fi
+  if [ -n "$dropin_content" ]; then
+    if printf '%s\n' "$dropin_content" | cmp -s - "$dropin_dst" 2>/dev/null; then
+      ok "$dropin_dst"
+    else
+      changed=1
+      unit_changed=1
+      apply "install I2C group drop-in ($dropin_dst $dropin_label)" \
+        install_power_dropin "$dropin_dst" "$dropin_content"
     fi
   fi
 
   if [ "$unit_existed" = 0 ]; then
-    apply "enable and start sigint101-power.service" enable_power_service
+    if [ "$CHECK" = 1 ]; then
+      would "enable and start sigint101-power.service"
+    else
+      sudo systemctl daemon-reload || true
+      if sudo systemctl enable --now sigint101-power.service; then
+        did "enable and start sigint101-power.service"
+      else
+        warn "sigint101-power.service did not start; see systemctl status sigint101-power"
+      fi
+    fi
   else
     local state
     state="$(systemctl is-enabled sigint101-power.service 2>/dev/null || true)"
@@ -787,7 +810,16 @@ step_power() {
       fi
       skip "sigint101-power.service turned off by the owner (${state:-unknown})"
     elif [ "$changed" = 1 ]; then
-      apply "reload and restart sigint101-power.service" restart_power_service
+      if [ "$CHECK" = 1 ]; then
+        would "reload and restart sigint101-power.service"
+      else
+        sudo systemctl daemon-reload || true
+        if sudo systemctl restart sigint101-power.service; then
+          did "reload and restart sigint101-power.service"
+        else
+          warn "sigint101-power.service did not start; see systemctl status sigint101-power"
+        fi
+      fi
     else
       ok "sigint101-power.service enabled and up to date"
     fi
