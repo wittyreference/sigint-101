@@ -1197,6 +1197,29 @@ def test_a_render_check_walk_against_a_live_console_changes_none_of_its_state(tm
         assert _stored_state(tmp_path) == before
 
 
+def test_reading_the_tuning_gates_state_writes_nothing_and_starts_nothing(tmp_path):
+    # GET /api/tuning (the lesson rail asks it once a restore runs late) only reads the gate:
+    # no row, no event, no retune, no receiver started, and no restore registered, so an older
+    # restore that comes after it is still taken, not refused as stale.
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        _tuned_away(client)
+        before = _stored_state(tmp_path)
+        running = {name: getattr(app.state, name).running for name in ("aprs", "decoder",
+                                                                       "sweeper")}
+        for _ in range(3):
+            resp = client.get("/api/tuning")
+            assert resp.status_code == 200
+            assert resp.json() == {"restoring": False, "waiting_on": None}
+        assert _stored_state(tmp_path) == before
+        assert app.state.aprs.freq_hz == RACK_APRS_HZ
+        assert app.state.decoder.freq_hz == RACK_ISM_HZ
+        assert {name: getattr(app.state, name).running for name in running} == running
+        epoch = app.state.tuning_gate.epoch
+        lesson = min(app.state.lessons)
+        assert client.post(f"/api/tuning?lesson_id={lesson}&epoch={epoch}&at=1").status_code == 200
+
+
 def test_a_lesson_get_enrols_no_completed_check_lesson_for_recall(tmp_path):
     app = create_app(data_dir=tmp_path, probe=_absent)
     with TestClient(app) as client:
