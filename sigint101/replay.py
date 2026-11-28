@@ -19,12 +19,18 @@ from pathlib import Path
 from sqlite3 import Error as SqliteError
 from threading import Lock
 
+from . import childproc
 from .childproc import ChildWatch, RunGuard, command_line, spawn
 from .decode import Decode, parse_decode_line
 from .events import log_event
 from .hardware import RTL_433
 from .operate import instrument, validate_decoder_hz
-from .receiver_lifecycle import DIAGNOSTIC_WAIT_S, SupervisedReceiver, daemon
+from .receiver_lifecycle import (
+    DIAGNOSTIC_WAIT_S,
+    REAP_RETRY_WAIT_S,
+    SupervisedReceiver,
+    daemon,
+)
 from .spectrum import TuneError
 
 RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "recordings"
@@ -330,6 +336,7 @@ class _Playback:
     deadline: float = 0.0
     capped: bool = False
     journal_lock: Lock = field(default_factory=Lock)
+    reap_lock: Lock = field(default_factory=Lock)
     logged_start: bool = False
 
 
@@ -349,6 +356,7 @@ class ReplayDecoder(SupervisedReceiver):
         # Only competing starts share this lock. Stop and shutdown remain C40 controls.
         self._starting = Lock()
         self._recording = None
+        self.freq_hz = None
         self._start_error = None
         self._runs = RunGuard()
         self._init_lifecycle()
@@ -408,6 +416,60 @@ class ReplayDecoder(SupervisedReceiver):
         finally:
             self._recording = None
             self._starting.release()
+
+    @staticmethod
+    def _kill_and_wait(proc, timeout):
+        if proc.poll() is not None:
+            return
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=timeout)
+
+    def _stop_child(self, proc):
+        # The supervisor has already fenced this run. Only signal the child it still owns.
+        try:
+            if proc.poll() is not None:
+                return
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=childproc.STOP_WAIT_S)
+            except Exception:
+                # A failed TERM wait also needs immediate escalation.
+                self._kill_and_wait(proc, childproc.STOP_WAIT_S)
+        except subprocess.TimeoutExpired:
+            pass  # The supervisor retains the child and reports the KILL timeout.
+        except Exception as exc:
+            raise ReplayUnavailable(f"rtl_433 could not be confirmed stopped: {exc}") from exc
+
+    def _unreaped_reason(self, run):
+        return "rtl_433 survived kill; the replay may still be running"
+
+    def _retry_reap(self, run, timeout):
+        # A later control and the supervisor can both retry. They share the same kept child.
+        with run.args[0].reap_lock:
+            try:
+                self._kill_and_wait(run.proc, timeout)
+            except subprocess.TimeoutExpired:
+                run.failure = self._unreaped_reason(run)
+                return False
+            except Exception as exc:
+                run.failure = f"rtl_433 could not be confirmed stopped: {exc}"
+                return False
+            run.reaped = True
+            self._notify_physical(run)
+            return True
+
+    def _cancel(self):
+        run, intent = super()._cancel()
+        if run is not None and run.reap_failed and not run.reaped:
+            self._retry_reap(run, REAP_RETRY_WAIT_S)
+            run.wake.set()
+        return run, intent
 
     def _expire(self, run):
         playback = run.args[0]

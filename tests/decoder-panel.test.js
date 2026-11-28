@@ -142,3 +142,9 @@ test("the waterfall follows each refusal and redraws the last measured pass on r
   assert.equal(reason.hidden, true);
   assert.equal(painted, 2);
 });
+
+test("replay is never badged LIVE or STARTING", () => {
+  const expected = { text: "REPLAY", cls: "decoder__status decoder__status--replay" };
+  assert.deepStrictEqual(panel.liveBadge({ mode: "replay", state: "starting" }), expected);
+  assert.deepStrictEqual(panel.liveBadge({ replay: true, state: "running" }), expected);
+});

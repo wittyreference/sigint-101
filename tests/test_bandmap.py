@@ -68,13 +68,13 @@ def test_real_packs_partition_cleanly_into_the_four_classes():
     assert tuned_ids == {6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 24, 25, 26, 27}
     assert default_ids == {1, 2, 3, 4}
     assert off_dial_ids == {11, 18, 19, 28, 29, 39}
-    assert no_radio_ids == {5, 17, 20, 21, 22, 23}
+    assert no_radio_ids == {5, 17, 20, 21, 22, 23, 40}
 
     # Pairwise disjoint and covering every loaded lesson id.
     all_sets = [tuned_ids, default_ids, off_dial_ids, no_radio_ids]
     assert sum(len(s) for s in all_sets) == len(lessons)
     assert set().union(*all_sets) == set(lessons)
-    assert band_map.no_radio_line == "No radio in: M5, M17, M20-M23"
+    assert band_map.no_radio_line == "No radio in: M5, M17, M20-M23, M40"
 
 
 def test_real_packs_frequencies_separate_rows_sorting_and_tools():

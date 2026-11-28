@@ -28,8 +28,8 @@ Use `make selftest-serial` to run the same coverage gate in one process.
 The native AIS tests need `cc` and GitHub access to fetch the pinned `rtl-ais` source.
 To run them offline, set `SIGINT101_RTL_AIS_SOURCE` to an already patched checkout of that pin.
 
-With `make run` active and Chromium installed, run `make render-check` in another terminal for the 800×480 layout checks.
-Use `make render-check RENDER_URL=http://127.0.0.1:8009` for a console on a different port.
+With Chromium installed, run `make render-check` for the 800×480 layout checks. It starts its own scratch console on a free loopback port with a throwaway data folder, and stops it afterwards, so the console on 8008 (its learner state and its radio) is never touched.
+Use `make render-check RENDER_URL=http://127.0.0.1:8009` to measure a console that is already running instead.
 
 ### A fresh Recon
 On the Recon's stock Debian Bookworm, with a network connection, as the user the desktop logs in

@@ -290,7 +290,8 @@ def test_group_priority_changes_only_a_live_owned_leader(forked_group, monkeypat
         setpriority(which, pid, nice)
 
     monkeypatch.setattr(os, "setpriority", record)
-    assert tool.lower_priority(target)
+    # An inherited nice value of 19 already meets the target.
+    assert tool.lower_priority(target) is (target > previous)
     assert not tool.lower_priority(previous)
     assert os.getpriority(os.PRIO_PROCESS, tool.pid) == target
     assert os.getpriority(os.PRIO_PROCESS, helper) == helper_priority

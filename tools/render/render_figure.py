@@ -1,5 +1,6 @@
 # ABOUTME: Render an exam card with a figure at a forced 800x480 over CDP, then open the diagram.
 # ABOUTME: Asserts the card still fits and the overlay's Close bar is on screen; saves PNGs.
+
 import base64
 import json
 import os
@@ -7,7 +8,16 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_scroll import connect  # noqa: E402
+from render_scroll import connect, fence  # noqa: E402
+
+RENDER_CHECK = {
+    "name": "figure",
+    "pages": ("/exam/review/T6C02",),
+    "scratch": False,
+    "order": 30,
+    "target": "/exam/review/T6C02",
+    "args": ("dark", "{output}/figure"),
+}
 
 URL = sys.argv[1]
 THEME = sys.argv[2] if len(sys.argv) > 2 else "dark"
@@ -45,10 +55,11 @@ def main():
         "Emulation.setDeviceMetricsOverride",
         {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False},
     )
-    c.call("Page.navigate", {"url": URL})
+    page = fence(URL)   # through the render proxy, never the console itself
+    c.call("Page.navigate", {"url": page})
     time.sleep(2)
     c.ev("localStorage.setItem('sigint101.theme','%s')" % THEME)
-    c.call("Page.navigate", {"url": URL})
+    c.call("Page.navigate", {"url": page})
     time.sleep(2)
     card = c.ev(CARD)
     print("card", json.dumps(card))

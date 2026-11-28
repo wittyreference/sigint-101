@@ -1,5 +1,6 @@
 # ABOUTME: Load a page at a forced 800x480 over CDP, evaluate a JS expression, print its JSON.
 # ABOUTME: Optional third arg saves a screenshot. Usage: render_eval.py URL 'expr' [out.png].
+
 import base64
 import json
 import os
@@ -7,7 +8,9 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_scroll import connect  # noqa: E402
+from render_scroll import connect, fence  # noqa: E402
+
+RENDER_CHECK = None
 
 
 def main():
@@ -21,7 +24,7 @@ def main():
         "Emulation.setDeviceMetricsOverride",
         {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False},
     )
-    c.call("Page.navigate", {"url": url})
+    c.call("Page.navigate", {"url": fence(url)})
     time.sleep(2.5)
     for _ in range(20):
         if c.ev("document.readyState") == "complete":
