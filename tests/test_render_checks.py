@@ -894,3 +894,44 @@ globalThis.window = {{ fetch: origFetch }};
 """
     node_proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
     assert node_proc.returncode == 0, node_proc.stdout + node_proc.stderr
+
+
+def test_recall_render_console_uses_no_radio_probe(tmp_path, monkeypatch):
+    # F5: render_recall.py must pass a no-radio probe so it never touches a live SDR bus.
+    sys.path.insert(0, str(RECALL.parent))
+    try:
+        import render_recall  # noqa: PLC0415
+    finally:
+        sys.path.remove(str(RECALL.parent))
+
+    captured: dict = {}
+
+    def fake_create_app(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    class FakeServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        def run(self):
+            return None
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(render_recall, "create_app", fake_create_app)
+    monkeypatch.setattr(render_recall.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(render_recall, "urlopen", lambda *_a, **_kw: FakeResp())
+
+    server, thread, _base = render_recall._run_server(tmp_path, lambda: 1_700_000_000.0)
+    render_recall._stop_server(server, thread)
+
+    probe_fn = captured["kwargs"].get("probe")
+    assert callable(probe_fn), "render_recall._run_server must pass a no-radio probe"
+    probe = probe_fn()
+    assert probe.present is False

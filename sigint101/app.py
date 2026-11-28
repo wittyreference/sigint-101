@@ -1024,9 +1024,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             )
         except RecallNotDue as exc:
             return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "recall", {
-            "lesson": lesson_id, "source": source, "correct": correct, "box": new_box,
-        })
+        try:
+            log_event(
+                app.state.events_path,
+                "recall",
+                {"lesson": lesson_id, "source": source, "correct": correct, "box": new_box},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(
             f"/lesson/{lesson_id}?recall=answered&source={source}&card={card}",
             status_code=303,

@@ -11,10 +11,12 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from sigint101 import events as events_mod
 from sigint101 import retrieval
 from sigint101.app import create_app
 from sigint101.events import read_events
 from sigint101.hardware import RadioProbe
+from sigint101.migrations import migrate_store_copy
 from sigint101.progress import Progress
 
 REPO = Path(__file__).resolve().parent.parent
@@ -84,10 +86,15 @@ def _make_packs(tmp_path: Path) -> Path:
 def _dump_tables(db_path: Path, tables: tuple[str, ...]) -> dict[str, list[tuple]]:
     conn = sqlite3.connect(str(db_path))
     try:
-        return {
-            table: conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
-            for table in tables
-        }
+        out: dict[str, list[tuple]] = {}
+        for table in tables:
+            cols = [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
+            quote_sql = ", ".join(f'quote("{c}")' for c in cols)
+            order_sql = ", ".join(f'"{c}"' for c in cols)
+            out[table] = conn.execute(
+                f'SELECT {quote_sql} FROM "{table}" ORDER BY {order_sql}, {quote_sql}'
+            ).fetchall()
+        return out
     finally:
         conn.close()
 
@@ -153,8 +160,137 @@ def test_clock_behind_last_seen_makes_nothing_due():
     rows = {
         1: {"box": 1, "last_seen": t0},
         2: {"box": 3, "last_seen": t0 - 100},
+        3: {"box": 5, "last_seen": t0},
     }
+    # Step back past every box's full interval so an abs(now - last_seen) regression is caught.
     assert retrieval.due(rows, now=t0 - 10_000, exclude=5) == []
+    assert retrieval.due(rows, now=t0 - 2 * DAY, exclude=5) == []
+    assert retrieval.due(rows, now=t0 - 31 * DAY, exclude=5) == []
+    for box, wait in enumerate(retrieval.BOX_INTERVALS, start=1):
+        assert retrieval.is_due(box, t0, now=t0 - wait - DAY) is False
+
+
+def test_clock_stepped_back_past_wait_shows_no_card_and_post_gets_409(tmp_path):
+    pack_dir = _make_packs(tmp_path)
+    data_dir = tmp_path / "data"
+    _seed_completed(data_dir, (1,))
+    t0 = 1_700_000_000.0
+    now = [t0]
+
+    with _recall_client(data_dir, pack_dir, lambda: now[0]) as client:
+        assert client.get("/lesson/5").status_code == 200  # enrol L1 at t0
+        snap = _dump_tables(data_dir / "progress.db", (*ALL_NON_RETRIEVAL_TABLES, "retrieval"))
+
+        # Step the clock back 2 full days (exceeding box 1's 1-day wait).
+        now[0] = t0 - 2 * DAY
+        resp = client.get("/lesson/5")
+        assert resp.status_code == 200
+        assert 'data-stage="recall"' not in resp.text
+        assert 'data-stage="frame"' in resp.text
+
+        post = client.post(
+            "/api/recall?lesson_id=5&source=1&card=1",
+            data={"choice": "beta"},
+            follow_redirects=False,
+        )
+        assert post.status_code == 409
+        assert _dump_tables(
+            data_dir / "progress.db", (*ALL_NON_RETRIEVAL_TABLES, "retrieval")
+        ) == snap
+
+
+def test_managed_mode_recall_syncs_event_and_answers_500_on_sync_failure(tmp_path, monkeypatch):
+    pack_dir = _make_packs(tmp_path)
+    gen_dir = tmp_path / "managed_gen"
+    gen_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    migrate_store_copy(
+        tmp_path / "missing_progress.db", gen_dir / "progress.db",
+        store="progress", allow_missing_source=True, scratch_dir=scratch,
+    )
+    migrate_store_copy(
+        tmp_path / "missing_exam.db", gen_dir / "exam.db",
+        store="exam", allow_missing_source=True, scratch_dir=scratch,
+    )
+
+    now = [1_700_000_000.0]
+    app = create_app(
+        pack_dir=pack_dir,
+        data_dir=gen_dir,
+        probe=lambda: RadioProbe(present=False, reason="test"),
+        clock=lambda: now[0],
+        managed=True,
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        # Complete L1 through real routes and open L5 to enrol L1 in managed mode.
+        assert client.post(
+            "/api/predict?lesson_id=1", data={"prediction": "one"}, follow_redirects=False
+        ).status_code == 303
+        assert client.post("/api/complete?lesson_id=1").status_code == 200
+        assert client.get("/lesson/5").status_code == 200
+
+        # One day later, answering recall must fsync events.jsonl before replying 303.
+        now[0] += DAY
+        fsync_calls: list[str] = []
+        real_fsync = events_mod.fsync_handle
+
+        def spy_fsync(handle):
+            fsync_calls.append("file")
+            return real_fsync(handle)
+
+        monkeypatch.setattr(events_mod, "fsync_handle", spy_fsync)
+        ok = client.post(
+            "/api/recall?lesson_id=5&source=1&card=1",
+            data={"choice": "beta"},
+            follow_redirects=False,
+        )
+        assert ok.status_code == 303
+        assert fsync_calls == ["file"]
+
+        # Three days later (box 2 due), a sync OSError must answer 500 JSON like /api/check.
+        now[0] += 3 * DAY
+
+        def fail_fsync(_handle):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(events_mod, "fsync_handle", fail_fsync)
+        failed = client.post(
+            "/api/recall?lesson_id=5&source=1&card=1",
+            data={"choice": "beta"},
+            follow_redirects=False,
+        )
+        assert failed.status_code == 500
+        assert failed.json() == {
+            "recorded": False,
+            "reason": "event log sync failed: disk full",
+        }
+
+    # In legacy mode, an event-log OSError propagates without rewriting as "event log sync failed".
+    legacy_dir = tmp_path / "legacy_err"
+    _seed_completed(legacy_dir, (1,))
+    legacy_now = [1_700_000_000.0]
+    legacy_app = create_app(
+        pack_dir=pack_dir,
+        data_dir=legacy_dir,
+        probe=lambda: RadioProbe(present=False, reason="test"),
+        clock=lambda: legacy_now[0],
+        managed=False,
+    )
+    with TestClient(legacy_app, raise_server_exceptions=False) as client:
+        assert client.get("/lesson/5").status_code == 200
+        legacy_now[0] += DAY
+
+        def boom(*_args, **_kwargs):
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr("sigint101.app.log_event", boom)
+        res = client.post(
+            "/api/recall?lesson_id=5&source=1&card=1",
+            data={"choice": "beta"},
+            follow_redirects=False,
+        )
+        assert res.status_code == 500
+        assert "event log sync failed" not in res.text
 
 
 def test_retrieval_module_is_pure_no_sqlite_or_exam_imports():

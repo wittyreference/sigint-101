@@ -291,10 +291,15 @@ def _dump_tables(db_path: Path, tables: tuple[str, ...]) -> dict[str, list[tuple
 
     conn = sqlite3.connect(str(db_path))
     try:
-        return {
-            table: conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
-            for table in tables
-        }
+        out: dict[str, list[tuple]] = {}
+        for table in tables:
+            cols = [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
+            quote_sql = ", ".join(f'quote("{c}")' for c in cols)
+            order_sql = ", ".join(f'"{c}"' for c in cols)
+            out[table] = conn.execute(
+                f'SELECT {quote_sql} FROM "{table}" ORDER BY {order_sql}, {quote_sql}'
+            ).fetchall()
+        return out
     finally:
         conn.close()
 

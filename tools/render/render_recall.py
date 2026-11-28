@@ -20,6 +20,7 @@ if str(REPO) not in sys.path:
 from render_scroll import connect  # noqa: E402
 
 from sigint101.app import PACK_DIR, create_app  # noqa: E402
+from sigint101.hardware import RadioProbe  # noqa: E402
 from sigint101.lessons import load_lessons  # noqa: E402
 from sigint101.progress import Progress  # noqa: E402
 from sigint101.retrieval import DAY_S  # noqa: E402
@@ -114,7 +115,12 @@ def _post_choice(base_url: str, lesson_id: int, source_id: int, card: int, choic
 
 def _run_server(data_dir: Path, clock_fn):
     port = _free_port()
-    app = create_app(pack_dir=PACK_DIR, data_dir=data_dir, clock=clock_fn)
+    app = create_app(
+        pack_dir=PACK_DIR,
+        data_dir=data_dir,
+        clock=clock_fn,
+        probe=lambda: RadioProbe(False, "lsusb", "render check"),
+    )
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
