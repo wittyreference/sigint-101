@@ -377,15 +377,40 @@ def _foreign_reapers(source, *, childproc_source=False):
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.update((alias.asname or alias.name, f"{node.module}.{alias.name}")
                          for alias in node.names)
+
+    def resolve(node):
+        first, dot, rest = ast.unparse(node).partition(".")
+        return names.get(first, first) + dot + rest
+
+    def is_sigchld(node):
+        return (resolve(node) == "signal.SIGCHLD"
+                or isinstance(node, ast.Name) and node.id in child_signals
+                or isinstance(node, ast.Constant) and node.value == signal.SIGCHLD)
+
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.extend((target.id, node.value) for target in node.targets
+                               if isinstance(target, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
+            assignments.append((node.target.id, node.value))
+
+    child_signals = set()
+    while True:
+        known = {name for name, value in assignments if is_sigchld(value)}
+        if known <= child_signals:
+            break
+        child_signals.update(known)
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and node not in allowed:
-            name, dot, suffix = ast.unparse(node.func).partition(".")
-            call = names.get(name, name) + dot + suffix
-            arguments = (*node.args, *(keyword.value for keyword in node.keywords))
+            call = resolve(node.func)
+            signals = [node.args[0]] if node.args else [
+                keyword.value for keyword in node.keywords if keyword.arg in {"signalnum", "sig"}
+            ]
             if (call in forbidden or call.endswith((".set_child_watcher", ".get_child_watcher"))
-                    or (call == "signal.signal" and any(
-                        isinstance(arg, (ast.Name, ast.Attribute))
-                        and ast.unparse(arg).split(".")[-1] == "SIGCHLD" for arg in arguments))):
+                    or (call == "signal.signal" or call.endswith(".add_signal_handler"))
+                    and any(is_sigchld(value) for value in signals)):
                 yield node.lineno
 
 
@@ -407,6 +432,9 @@ def test_sigint101_has_no_reaper_outside_group_popen():
     "import asyncio; asyncio.get_event_loop_policy().set_child_watcher(watcher)",
     "import signal; signal.signal(signal.SIGCHLD, signal.SIG_IGN)",
     "import signal; signal.signal(signalnum=signal.SIGCHLD, handler=signal.SIG_IGN)",
+    "import signal; sig = signal.SIGCHLD; signal.signal(sig, handler)",
+    "from signal import SIGCHLD as child; sig = child; loop.add_signal_handler(sig, callback)",
+    "import signal; loop.add_signal_handler(signal.SIGCHLD, callback)",
     "class GroupPopen:\n def poll(self): return os.waitpid(-1, 0)",
     "class GroupPopen:\n def _exit_pending(self): return os.waitid(os.P_PID, self.pid, os.WEXITED)",
 ])

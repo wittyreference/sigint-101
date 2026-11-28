@@ -212,7 +212,8 @@ def test_an_apt_pass_that_times_out_cleanly_is_not_a_death(tmp_path):
 # the next poll showed the new run. The retune cancels the run that died, so its death, its error
 # and its back-off end with it; the next start launches at the new frequency.
 
-RETUNABLE = {"acars": 131_725_000, "aprs": 144_800_000, "dmr": 451_000_000,
+RETUNABLE = {"acars": 131_725_000, "aprs": 144_800_000, "decode": 315_000_000,
+             "dmr": 451_000_000,
              "pocsag": 929_662_500, "rds": 94_700_000}
 
 
@@ -221,8 +222,10 @@ def _build_tuned(name, tmp_path):
     build, unavailable, _ = DECODERS[name]
     spawned, tuned = [], []
 
-    def spawn_child(freq_hz, _device):
-        spawned.append(Child(["rtl_fm", "-f", str(freq_hz)]))
+    def spawn_child(*args):
+        argv = args[0] if name == "decode" else ["rtl_fm", "-f", str(args[0])]
+        freq_hz = int(argv[argv.index("-f") + 1])
+        spawned.append(Child(argv))
         tuned.append(freq_hz)
         return spawned[-1]
 
@@ -296,7 +299,11 @@ def test_a_tool_that_survived_kill_still_refuses_after_a_retune(tmp_path, name, 
     build, unavailable, _ = DECODERS[name]
     stages = []
 
-    def spawn_pipeline(*_args):
+    def spawn_pipeline(*args):
+        if name == "decode":
+            proc = Child(args[0], unkillable=True)
+            stages.append((proc,))
+            return proc
         stages.append((Child(["rtl_fm"]), Child(["multimon-ng"], unkillable=True)))
         return Pipeline(*stages[-1])
 
@@ -305,15 +312,23 @@ def test_a_tool_that_survived_kill_still_refuses_after_a_retune(tmp_path, name, 
     dec.EOF_WAIT_S = 0.01
     dec.start()
     run = dec._run
-    stages[0][0].kill()                         # rtl_fm is killed; multimon-ng cannot be
-    assert run.physical.wait(5)
-    assert "survived kill" in run.failure
+    if name == "decode":
+        dec.stop()
+        assert "survived kill" in dec.release_failure()
+    else:
+        stages[0][0].kill()                     # rtl_fm is killed; multimon-ng cannot be
+        assert run.physical.wait(5)
+        assert "survived kill" in run.failure
     dec.retune(RETUNABLE[name])
     with pytest.raises(unavailable, match="survived kill; the dongle may still be held"):
         dec.start()
     assert len(stages) == 1
-    stages[0][1].unkillable = False             # let the supervisor's retry reap it
-    assert run.complete.wait(5)
+    stages[0][-1].unkillable = False            # let the supervisor's retry reap it
+    if hasattr(dec, "_runs"):
+        assert run.complete.wait(5)
+    else:
+        dec.stop()
+        assert dec.release_failure() is None
 
 
 def test_rtl_433_that_survived_kill_still_refuses_after_a_retune(tmp_path):
@@ -331,7 +346,7 @@ def test_rtl_433_that_survived_kill_still_refuses_after_a_retune(tmp_path):
 # second quick death in a row the back-off has grown (childproc's FIRST_RETRY_S doubles), and
 # that wait survives the retune, with a reason that names the frequency the next try is at.
 
-LATE_TUNED = {**RETUNABLE, "decode": 315_000_000}
+LATE_TUNED = RETUNABLE
 OTHER_HZ = {"acars": 131_550_000, "aprs": 145_010_000, "dmr": 452_000_000,
             "pocsag": 152_840_000, "rds": 101_100_000, "decode": 868_000_000}
 
@@ -421,7 +436,8 @@ def _unseen_by_the_supervisor(child, run):
     real = child.poll
 
     def poll():
-        if threading.current_thread().name.endswith("-supervisor") and not run.cancel.is_set():
+        if (threading.current_thread().name.endswith("-supervisor")
+                and hasattr(run, "cancel") and not run.cancel.is_set()):
             return None
         return real()
 
@@ -464,6 +480,17 @@ def test_a_death_the_supervisor_recorded_is_not_counted_again_by_the_retune(tmp_
     # The other order: the supervisor has recorded the death and is held before it fences the
     # run when the retune looks for a visible exit. One death, one count: its wait is lifted.
     dec, _, spawned, tuned = _build_tuned(name, tmp_path)
+    if not hasattr(dec, "_runs"):
+        dec.start()
+        spawned[0].kill()
+        dec.drain()
+        assert dec.watch.stopped
+        dec.retune(RETUNABLE[name])
+        assert dec.watch.retry_in() is None and dec.watch.reason is None
+        dec.start()
+        assert tuned[-1] == RETUNABLE[name] and len(spawned) == 2
+        dec.stop()
+        return
     needs_diagnostics = dec._needs_diagnostics
     recorded, go_on = threading.Event(), threading.Event()
 
@@ -495,11 +522,13 @@ def test_rtl_433_deaths_its_reader_has_not_recorded_yet_still_count_at_a_retune(
     dec, unavailable, procs, tuned, clock = late_tuned("decode")
     dec.STOP_WAIT_S = 0.01
     dec.start()
+    _unseen_by_the_supervisor(procs[0], dec._run)
     procs[0].die(-signal.SIGKILL)
     dec.retune(LATE_TUNED["decode"])
     assert dec.watch.retry_in() is None
     dec.start()
     assert len(procs) == 2
+    _unseen_by_the_supervisor(procs[1], dec._run)
     procs[1].die(-signal.SIGKILL)
     dec.retune(OTHER_HZ["decode"])
     assert dec.watch.retry_in() == 2 * childproc.FIRST_RETRY_S
@@ -508,6 +537,7 @@ def test_rtl_433_deaths_its_reader_has_not_recorded_yet_still_count_at_a_retune(
     assert len(procs) == 2
     clock.now += dec.watch.retry_in()
     dec.start()
+    _unseen_by_the_supervisor(procs[2], dec._run)
     procs[2].die(-signal.SIGKILL)
     dec.retune(LATE_TUNED["decode"])
     assert dec.watch.retry_in() == 4 * childproc.FIRST_RETRY_S
@@ -529,7 +559,9 @@ def test_rtl_433_that_survived_kill_refuses_every_start_until_it_is_reaped(tmp_p
     assert len(spawned) == 1                    # nothing spawned beside the live child
     assert dec.release_failure() == decode.SURVIVED_KILL     # and the handoff check says so
     assert dec.release_failure(pending=True) == decode.SURVIVED_KILL
+    run = dec._run
     spawned[0].code = -signal.SIGKILL           # the kill lands once it leaves the kernel
+    assert run.complete.wait(5) and run.reaped
     assert dec.release_failure() is None
     dec.start()                                 # reaped: the radio is free again
     assert len(spawned) == 2 and dec.error is None
@@ -563,10 +595,12 @@ def test_rtl_433_retune_counts_a_status_exit_without_waiting_on_its_diagnostic(
 
     try:
         dec.start()
+        _unseen_by_the_supervisor(procs[0], dec._run)
         procs[0].die(1)                         # pipe still open: the reader has seen nothing
         retune_unheld(LATE_TUNED["decode"])
         assert dec.watch.retry_in() is None     # one death, counted, its wait lifted
         dec.start()
+        _unseen_by_the_supervisor(procs[1], dec._run)
         procs[1].die(1)
         retune_unheld(OTHER_HZ["decode"])
         assert dec.watch.retry_in() == 2 * childproc.FIRST_RETRY_S    # the count advanced
@@ -595,14 +629,19 @@ def test_rtl_433_whose_stop_wait_fails_is_kept_until_its_exit_is_confirmed(tmp_p
     dec, unavailable, spawned, _ = _build("decode", tmp_path, _WaitFails)
     dec.start()
     dec.retune(315_000_000)                     # the error is the stop's, not the caller's
-    for _ in range(3):
-        with pytest.raises(unavailable, match="could not be confirmed stopped"):
-            dec.start()
-    assert len(spawned) == 1
-    reason = dec.release_failure()
-    assert reason == dec.release_failure(pending=True)
-    assert "wait failed" in reason and "the dongle may still be held" in reason
-    spawned[0].code = -signal.SIGKILL           # its exit shows at last
+    run = dec._run
+    try:
+        for _ in range(3):
+            with pytest.raises(unavailable, match="could not be confirmed stopped"):
+                dec.start()
+        assert len(spawned) == 1 and spawned[0].poll() is None
+        reason = dec.release_failure()
+        assert reason == dec.release_failure(pending=True)
+        assert reason == ("rtl_433 could not be confirmed stopped (wait failed); "
+                          "the dongle may still be held")
+    finally:
+        spawned[0].code = -signal.SIGKILL       # its exit shows at last
+    assert run.complete.wait(5) and run.reaped
     assert dec.release_failure(pending=True) is None
     dec.start()
     assert len(spawned) == 2 and dec.error is None
@@ -639,8 +678,10 @@ def test_rtl_433_stop_escalates_to_kill_after_a_wait_error(tmp_path):
 
 
 @pytest.mark.parametrize("again", ["stop", "release", "retune"])
-def test_a_later_stop_signals_a_kept_rtl_433_again_and_retries_its_reap(tmp_path, again):
+def test_a_later_stop_signals_a_kept_rtl_433_again_and_retries_its_reap(
+        tmp_path, again, monkeypatch):
     # Codex D-096 F1: a child the first stop could not confirm was never signalled again.
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
     dec, unavailable, spawned, _ = _build("decode", tmp_path,
                                           lambda: _OneWaitFails(unkillable=True))
     dec.start()

@@ -21,18 +21,29 @@ from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _rows, _StubSweeper
 from tests.test_apt_retirement import _decoder as apt_decoder
 from tests.test_spectrum import FedProc, SignalledProc, SlowStopProc
-from tests.test_stale_readers import APRS_1
+from tests.test_stale_readers import APRS_1, DECODE_1, DECODE_2
 
 
 def _aprs(proc):
     return aprs.AprsDecoder(spawn=lambda *_: proc, radio_present=lambda: True, which=lambda t: t)
 
 
-def test_two_failed_teardown_claims_refuse_without_retrying_under_reservation(tmp_path):
+def _receiver_for(kind, spawn):
+    cls = decode.Decoder if kind == "decode" else aprs.AprsDecoder
+    return cls(spawn=spawn, radio_present=lambda: True, which=lambda tool: tool)
+
+
+def _receiver_factory(kind, decoder):
+    key = "decoder_factory" if kind == "decode" else "aprs_factory"
+    return {key: lambda: decoder}
+
+
+@pytest.mark.parametrize("kind", ["aprs", "decode"])
+def test_two_failed_teardown_claims_refuse_without_retrying_under_reservation(tmp_path, kind):
     proc = Child(["aprs"], unkillable=True)
-    decoder = _aprs(proc)
-    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
-                 sweeper_factory=lambda: _StubSweeper([])) as client:
+    decoder = _receiver_for(kind, lambda *_: proc)
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: _StubSweeper([]),
+                 **_receiver_factory(kind, decoder)) as client:
         decoder.start()
         first = client.get("/api/spectrum")
         second = client.post("/api/ppm/measure")
@@ -65,7 +76,9 @@ def test_an_rtl_433_that_survived_kill_holds_the_radio_until_it_is_reaped(tmp_pa
         refused = [client.get("/api/aprs") for _ in range(3)]   # the stand-down cannot kill it
         refused += [client.get("/api/decode") for _ in range(2)]
         assert not aprs_children                               # nothing spawned beside it
+        run = sensors._run
         rtl_433.code = -signal.SIGKILL                         # the kill lands at last
+        assert run.complete.wait(5) and run.reaped
         back = client.get("/api/aprs")
         client.app.state.aprs.stop()
     for resp in refused:
@@ -82,7 +95,7 @@ def test_a_legacy_retune_hands_the_radio_on_without_waiting_on_an_exit_diagnosti
         tmp_path, monkeypatch):
     # Codex D-093 F1: the retune read a status-1 exit's stderr under the decoder's life lock,
     # so a stalled diagnostic held the stand-down that a spectrum claim needs.
-    entered, resume, swept = (threading.Event() for _ in range(3))
+    resume, swept = threading.Event(), threading.Event()
     procs = []
 
     def spawn(*_):
@@ -90,7 +103,6 @@ def test_a_legacy_retune_hands_the_radio_on_without_waiting_on_an_exit_diagnosti
         return procs[-1]
 
     def stalled_tail(_stage):
-        entered.set()
         resume.wait(10)
         return []
 
@@ -114,7 +126,6 @@ def test_a_legacy_retune_hands_the_radio_on_without_waiting_on_an_exit_diagnosti
             assert not retune.is_alive(), "the retune waited on the exit diagnostic"
             successor.start()
             assert swept.wait(5), "a stalled exit diagnostic still held the radio"
-            assert not entered.is_set()
         finally:
             resume.set()
             retune.join(6)
@@ -141,10 +152,14 @@ def test_an_rtl_433_whose_reap_wait_fails_holds_the_radio_until_its_exit_shows(t
     with _client(tmp_path, probe=_present, decoder_factory=lambda: _sensors(lambda *_: rtl_433),
                  sweeper_factory=lambda: _StubSweeper([])) as client:
         assert client.get("/api/decode").status_code == 200
-        refused = [client.get("/api/spectrum") for _ in range(3)]
-        assert not client.app.state.sweeper.running
-        hardware = client.get("/api/hardware").json()["state"]
-        rtl_433.code = -signal.SIGKILL                        # its exit is confirmed at last
+        run = client.app.state.decoder._run
+        try:
+            refused = [client.get("/api/spectrum") for _ in range(3)]
+            assert not client.app.state.sweeper.running and rtl_433.poll() is None
+            hardware = client.get("/api/hardware").json()["state"]
+        finally:
+            rtl_433.code = -signal.SIGKILL                    # its exit is confirmed at last
+        assert run.complete.wait(5) and run.reaped
         back = client.get("/api/spectrum")
     for resp in refused:
         assert resp.status_code == 503
@@ -271,7 +286,9 @@ def test_hardware_reads_busy_while_a_sweep_stop_waits_on_its_reap(tmp_path):
     assert after == "present"
 
 
-def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["aprs", "decode"])
+def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(
+        tmp_path, monkeypatch, kind):
     monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.05)
     can_reap, stop_polls, polled, retried = (threading.Event() for _ in range(4))
     claims, launches = [], []
@@ -284,15 +301,15 @@ def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_pat
                 retried.set()
 
     proc = RecoveringChild(["aprs"], unkillable=True)
-    decoder = _aprs(proc)
+    decoder = _receiver_for(kind, lambda *_: proc)
 
     class Sweep(_StubSweeper):
         def start(self):
             launches.append(proc.poll())
             super().start()
 
-    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
-                 sweeper_factory=lambda: Sweep([])) as client:
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: Sweep([]),
+                 **_receiver_factory(kind, decoder)) as client:
         decoder.start()
         ticket = decoder._run
 
@@ -509,9 +526,10 @@ def test_provenance_lazy_start_checks_other_receivers_for_failed_reap(tmp_path):
             proc.code = -signal.SIGKILL
 
 
-def test_late_diagnostic_failure_cannot_hold_or_clear_a_new_claim(tmp_path, monkeypatch):
-    proc = Child(["aprs"])
-    decoder = _aprs(proc)
+@pytest.mark.parametrize("kind", ["aprs", "decode"])
+def test_late_diagnostic_failure_cannot_hold_or_clear_a_new_claim(tmp_path, monkeypatch, kind):
+    proc = LateProc(["rtl_433"]) if kind == "decode" else Child(["aprs"])
+    decoder = _receiver_for(kind, lambda *_: proc)
     entered, open_gate, start_sweep = (threading.Event() for _ in range(3))
 
     def diagnostic(stage):
@@ -527,11 +545,14 @@ def test_late_diagnostic_failure_cannot_hold_or_clear_a_new_claim(tmp_path, monk
             start_sweep.set()
 
     monkeypatch.setattr(childproc, "stderr_tail", diagnostic)
-    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
-                 sweeper_factory=lambda: Sweep([])) as client:
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: Sweep([]),
+                 **_receiver_factory(kind, decoder)) as client:
         decoder.start()
-        proc.code = 7
-        first = threading.Thread(target=lambda: client.get("/api/aprs"), daemon=True)
+        if isinstance(proc, LateProc):
+            proc.die(7)
+        else:
+            proc.code = 7
+        first = threading.Thread(target=lambda: client.get(f"/api/{kind}"), daemon=True)
         second = threading.Thread(target=lambda: client.get("/api/spectrum"), daemon=True)
         first.start()
         try:
@@ -542,14 +563,52 @@ def test_late_diagnostic_failure_cannot_hold_or_clear_a_new_claim(tmp_path, monk
         finally:
             open_gate.set()
             first.join(6)
+            if isinstance(proc, LateProc):
+                proc.close_pipe()
             if second.ident is not None:
                 second.join(6)
         assert client.app.state.sweeper.running
 
 
-def test_arbiter_release_can_finish_while_the_same_run_retires(tmp_path, monkeypatch):
-    proc = Child(["aprs"])
-    decoder = _aprs(proc)
+def test_decode_poll_reports_status_before_enriching_a_parked_diagnostic(tmp_path, monkeypatch):
+    proc = LateProc(["rtl_433"])
+    decoder = _sensors(lambda *_: proc)
+    # Keep the back-off active throughout both requests, regardless of test scheduling.
+    decoder.watch = childproc.ChildWatch("rtl_433", clock=lambda: 0)
+    entered, resume = threading.Event(), threading.Event()
+
+    def diagnostic(stage):
+        assert stage is proc
+        entered.set()
+        resume.wait(5)
+        return ["USB read failed"]
+
+    monkeypatch.setattr(childproc, "stderr_tail", diagnostic)
+    with _client(tmp_path, probe=_present, decoder_factory=lambda: decoder) as client:
+        assert client.get("/api/decode").status_code == 200
+        run = decoder._run
+        proc.die(1)
+        proc.close_pipe()
+        with ThreadPoolExecutor(1) as workers:
+            try:
+                assert entered.wait(3)
+                response = workers.submit(client.get, "/api/decode").result(timeout=2)
+                assert response.status_code == 503
+                assert response.json()["reason"] == "rtl_433 stopped (exit status 1)"
+                assert response.json()["state"] == "stopped"
+            finally:
+                resume.set()
+        assert run.diagnosed.wait(3)
+        response = client.get("/api/decode")
+        assert response.status_code == 503
+        assert "USB read failed" in response.json()["reason"]
+        assert response.json()["state"] == "stopped"
+
+
+@pytest.mark.parametrize("kind", ["aprs", "decode"])
+def test_arbiter_release_can_finish_while_the_same_run_retires(tmp_path, monkeypatch, kind):
+    proc = LateProc(["rtl_433"]) if kind == "decode" else Child(["aprs"])
+    decoder = _receiver_for(kind, lambda *_: proc)
     entered, resume, swept = (threading.Event() for _ in range(3))
 
     def tail(_stage):
@@ -560,7 +619,7 @@ def test_arbiter_release_can_finish_while_the_same_run_retires(tmp_path, monkeyp
     def start_again():
         try:
             decoder.start()
-        except aprs.AprsUnavailable:
+        except (aprs.AprsUnavailable, decode.DecodeUnavailable):
             pass
 
     class Sweep(_StubSweeper):
@@ -569,10 +628,13 @@ def test_arbiter_release_can_finish_while_the_same_run_retires(tmp_path, monkeyp
             swept.set()
 
     monkeypatch.setattr(childproc, "stderr_tail", tail)
-    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
-                 sweeper_factory=lambda: Sweep([])) as client:
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: Sweep([]),
+                 **_receiver_factory(kind, decoder)) as client:
         decoder.start()
-        proc.code = 7
+        if isinstance(proc, LateProc):
+            proc.die(7)
+        else:
+            proc.code = 7
         old = threading.Thread(target=start_again, daemon=True)
         successor = threading.Thread(target=lambda: client.get("/api/spectrum"), daemon=True)
         old.start()
@@ -584,12 +646,15 @@ def test_arbiter_release_can_finish_while_the_same_run_retires(tmp_path, monkeyp
         finally:
             resume.set()
             old.join(6)
+            if isinstance(proc, LateProc):
+                proc.close_pipe()
             if successor.ident is not None:
                 successor.join(6)
         assert not decoder.running
 
 
-def test_handoff_waits_for_reap_but_not_for_diagnostics_or_a_reader_hook(tmp_path):
+@pytest.mark.parametrize("kind", ["aprs", "decode"])
+def test_handoff_waits_for_reap_but_not_for_diagnostics_or_a_reader_hook(tmp_path, kind):
     entered, hooked, stopping, reaped, swept = (threading.Event() for _ in range(5))
 
     class Proc(LateProc):
@@ -607,10 +672,11 @@ def test_handoff_waits_for_reap_but_not_for_diagnostics_or_a_reader_hook(tmp_pat
             super().start()
             swept.set()
 
-    proc = Proc(["aprs", "--run-one"])
-    decoder = _aprs(proc)
-    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
-                 sweeper_factory=lambda: Sweep([])) as client:
+    command = "rtl_433" if kind == "decode" else kind
+    proc = Proc([command, "--run-one"])
+    decoder = _receiver_for(kind, lambda *_: proc)
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: Sweep([]),
+                 **_receiver_factory(kind, decoder)) as client:
         heard = decoder.on_reception
 
         def park(item, *, command=None, freq_hz=None, radio=None):
@@ -622,7 +688,7 @@ def test_handoff_waits_for_reap_but_not_for_diagnostics_or_a_reader_hook(tmp_pat
         decoder.start()
         runner = threading.Thread(target=lambda: client.get("/api/spectrum"), daemon=True)
         try:
-            proc.feed(APRS_1)
+            proc.feed(DECODE_1 if kind == "decode" else APRS_1)
             assert entered.wait(2)
             runner.start()
             assert stopping.wait(2)
@@ -639,44 +705,72 @@ def test_handoff_waits_for_reap_but_not_for_diagnostics_or_a_reader_hook(tmp_pat
             proc.reader.join(6)
         [record] = [row["payload"] for row in read_events(tmp_path / "events.jsonl")
                     if row["kind"] == "reception"]
-        assert record["command"] == "aprs --run-one"
-        assert record["freq_hz"] == aprs.DEFAULT_APRS_HZ
+        assert record["command"] == f"{command} --run-one"
+        assert record["freq_hz"] == decoder.home_hz
         assert record["radio"]["kind"] == "rtl-sdr"
 
 
-def test_shutdown_cancels_grace_and_releases_other_radios_while_reporting_is_blocked(tmp_path):
-    decoder, passes = apt_decoder(tmp_path)
+@pytest.mark.parametrize("kind", ["apt", "decode"])
+def test_shutdown_cancels_grace_and_releases_other_radios_while_reporting_is_blocked(
+        tmp_path, kind):
+    if kind == "decode":
+        proc = LateProc(["rtl_433"])
+        decoder = _sensors(lambda *_: proc)
+        factories = {"decoder_factory": lambda: decoder}
+    else:
+        decoder, passes = apt_decoder(tmp_path)
+        factories = {"apt_factory": lambda: decoder}
     entered, resume, flock_stopped = (threading.Event() for _ in range(3))
 
     class Flock:
         def stop(self):
             flock_stopped.set()
 
-    def hold(_item):
-        entered.set()
-        assert resume.wait(6)
-
-    console = _client(tmp_path, apt_factory=lambda: decoder, flock_factory=Flock).app
+    console = _client(tmp_path, flock_factory=Flock, **factories).app
 
     async def lifespan():
         async with console.router.lifespan_context(console):
+            report = decoder.on_reception
+
+            def hold(item, **provenance):
+                entered.set()
+                assert resume.wait(6)
+                if kind == "decode":
+                    report(item, **provenance)
+
             decoder.on_reception = hold
             decoder.start()
-            proc, output = passes[0]
-            (output / "last.png").touch()
-            proc.code = 0
+            if kind == "decode":
+                proc.feed(DECODE_1)
+                assert entered.wait(2)
+            else:
+                apt_proc, output = passes[0]
+                (output / "last.png").touch()
+                apt_proc.code = 0
 
     worker = threading.Thread(target=lambda: asyncio.run(lifespan()), daemon=True)
     worker.start()
     try:
         assert entered.wait(2)
-        assert flock_stopped.wait(1), "independent teardown waited for an APT hook"
+        if kind == "decode":
+            assert console.state.reception_sink.pending() == 1
+        assert flock_stopped.wait(1), "independent teardown waited for a reception hook"
         assert worker.is_alive()
+        if kind == "decode":
+            assert decoder._run.physical.wait(3) and proc.poll() is not None
+            proc.feed(DECODE_2)
     finally:
         resume.set()
+        if kind == "decode":
+            proc.close_pipe()
         worker.join(6)
     assert not worker.is_alive()
     assert console.state.shutdown_errors == []
+    if kind == "decode":
+        receptions = [row["payload"] for row in read_events(tmp_path / "events.jsonl")
+                      if row["kind"] == "reception"]
+        assert len(receptions) == 1
+        assert [item.readings["id"] for item in decoder.recent()] == [101]
 
 
 def test_shutdown_reports_an_unconfirmed_ppm_child(tmp_path, monkeypatch, caplog):
@@ -1690,3 +1784,162 @@ def test_shutdown_owner_probe_failure_does_not_hide_other_owners(broken, caplog)
     assert set(errors) == expected
     for lines in reports_at_close:
         assert all(f"console shutdown: {entry}" in lines for entry in expected)
+
+
+@pytest.mark.parametrize("reason", ["missing", "absent", "ambiguous"])
+def test_decode_preflight_refusal_preserves_running_sweep(tmp_path, reason):
+    from sigint101.hardware import RtlSdrDevice
+
+    release_calls = []
+
+    class Sweep(_StubSweeper):
+        def release(self):
+            release_calls.append(True)
+            super().release()
+
+    sweep = Sweep([])
+    launches = []
+    receiver = decode.Decoder(
+        spawn=lambda argv: launches.append(argv),
+        radio_present=lambda: reason != "absent",
+        which=lambda tool: None if reason == "missing" else tool,
+        list_devices=lambda: (RtlSdrDevice(0, "one"), RtlSdrDevice(1, "two")),
+    )
+    with _client(tmp_path, probe=_present, decoder_factory=lambda: receiver,
+                 sweeper_factory=lambda: sweep) as client:
+        assert client.get("/api/spectrum").status_code == 200
+        refused = client.get("/api/decode")
+        assert refused.status_code == 503 and not launches
+        text = refused.json()["reason"]
+        assert {"missing": "is not installed", "absent": "no RTL-SDR",
+                "ambiguous": "more than one RTL-SDR"}[reason] in text
+        assert sweep.running and not release_calls
+
+
+def test_decode_retune_cancels_inflight_preflight_before_standdown(tmp_path):
+    from sigint101.hardware import RtlSdrDevice
+
+    entered, resume = threading.Event(), threading.Event()
+    launched = []
+    sweep = _StubSweeper([])
+
+    def census():
+        entered.set()
+        assert resume.wait(5)
+        return (RtlSdrDevice(1, "pinned"),)
+
+    def spawn(argv):
+        launched.append(argv)
+        return Child(argv)
+
+    decoder = _sensors(spawn)
+    decoder._list_devices = census
+    with (_client(tmp_path, probe=_present, decoder_factory=lambda: decoder,
+                  sweeper_factory=lambda: sweep) as client,
+          ThreadPoolExecutor(max_workers=2) as workers):
+        assert client.get("/api/spectrum").status_code == 200
+        poll = workers.submit(client.get, "/api/decode")
+        assert entered.wait(2)
+        tune = workers.submit(decoder.retune, 315_000_000)
+        try:
+            tune.result(timeout=1)
+            assert sweep.running
+        finally:
+            resume.set()
+        result = poll.result(timeout=4)
+        assert result.status_code == 503
+        assert result.json()["reason"] == "receiver start was cancelled"
+        assert not launched and sweep.running
+        assert client.get("/api/decode").status_code == 200
+        assert launched[0][2] == "315000000"
+
+
+def test_decode_cancelled_spawn_is_tracked_and_refuses_start(tmp_path, monkeypatch):
+    entered, return_child, reap = (threading.Event() for _ in range(3))
+    monkeypatch.setattr(receiver_lifecycle, "PHYSICAL_WAIT_S", 0.25)
+
+    class Proc(Child):
+        def kill(self):
+            self.unkillable = not reap.is_set()
+            super().kill()
+
+    proc = Proc(["rtl_433"], unkillable=True)
+
+    def spawn(_argv):
+        entered.set()
+        assert return_child.wait(5)
+        return proc
+
+    decoder = _sensors(spawn)
+    with (_client(tmp_path, probe=_present, decoder_factory=lambda: decoder,
+                  sweeper_factory=lambda: _StubSweeper([])) as client,
+          ThreadPoolExecutor(max_workers=2) as workers):
+        poll = workers.submit(client.get, "/api/decode")
+        assert entered.wait(2)
+        release = workers.submit(decoder.release)
+        try:
+            release.result(timeout=1)
+            assert decoder.release_failure(pending=True) == "rtl_433 is still opening the radio"
+            assert client.get("/api/hardware").json()["state"] == "busy"
+        finally:
+            return_child.set()
+        try:
+            refused = poll.result(timeout=4)
+            assert refused.status_code == 503
+            assert refused.json()["reason"] == "receiver start was cancelled"
+            assert proc.poll() is None and decoder._run.proc is proc
+            assert client.get("/api/spectrum").status_code == 503
+        finally:
+            reap.set()
+            proc.unkillable = False
+            decoder.stop()
+        assert decoder._run.reaped
+        assert client.get("/api/spectrum").status_code == 200
+
+
+def test_shutdown_during_ticketed_retry_gets_a_bounded_attempt(monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    short, release_short, closing = (threading.Event() for _ in range(3))
+    proc = Child(unkillable=True)
+    receiver = _aprs(proc)
+    receiver.start()
+    receiver.stop()
+    run = receiver._run
+    retry = receiver._retry_reap
+    budgets = []
+    old_wait = receiver._wait_physical
+
+    def attempt(ticket, timeout):
+        budgets.append(timeout)
+        if len(budgets) == 1:
+            short.set()
+            assert release_short.wait(4)
+        else:
+            proc.unkillable = False
+        retry(ticket, timeout)
+
+    def wait(*args):
+        if receiver._closing:
+            closing.set()
+        return old_wait(*args)
+
+    monkeypatch.setattr(receiver, "_retry_reap", attempt)
+    monkeypatch.setattr(receiver, "_wait_physical", wait)
+    try:
+        with ThreadPoolExecutor(2) as workers:
+            stopped = workers.submit(receiver.stop)
+            try:
+                assert short.wait(2)
+                shutdown = workers.submit(receiver.shutdown)
+                assert closing.wait(2)
+            finally:
+                release_short.set()
+            stopped.result(timeout=5)
+            shutdown.result(timeout=5)
+        assert budgets == [receiver_lifecycle.REAP_RETRY_WAIT_S, receiver.STOP_WAIT_S]
+        assert proc.sent == ["TERM", "KILL", "KILL", "KILL"]
+        assert run.reaped and run.complete.wait(1)
+    finally:
+        release_short.set()
+        proc.code = -9
+        _finish_fault_fake(receiver)

@@ -17,7 +17,6 @@ from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _StubSweeper
 from tests.test_stale_readers import (
     APRS_1,
-    APRS_2,
     SPEC_BY_NAME,
     late_factory,  # noqa: F401
 )
@@ -34,36 +33,44 @@ def _decoder(proc):
     return aprs.AprsDecoder(spawn=lambda *_: proc, radio_present=lambda: True, which=lambda t: t)
 
 
-def test_child_exit_retires_reader_without_a_follow_up_request():
-    proc = LateProc(["aprs"])
-    decoder = _decoder(proc)
+def _fence(decoder):
+    return decoder._runs.current if hasattr(decoder, "_runs") else decoder._run
+
+
+@pytest.mark.parametrize("name", ["aprs", "decode"])
+def test_child_exit_retires_reader_without_a_follow_up_request(name):
+    spec = SPEC_BY_NAME[name]
+    proc = LateProc([spec.tool])
+    decoder = spec.build(lambda *_: proc)
     decoder.STOP_WAIT_S = 0.05
     heard = []
     decoder.on_reception = heard.append
     try:
         decoder.start()
-        run = decoder._runs.current
-        proc.feed(APRS_1)
+        run = _fence(decoder)
+        proc.feed(spec.line1)
         assert until(lambda: len(heard) == 1)
         proc.die(7)
         assert not decoder.running
-        assert until(lambda: decoder._runs.current != run, seconds=2), (
+        assert until(lambda: _fence(decoder) != run, seconds=2), (
             "the dead child never retired while no route asked it to start")
-        proc.feed(APRS_2)
+        proc.feed(spec.line2)
         proc.break_pipe(OSError("a retired reader's error"))
         assert until(lambda: not proc.reader.is_alive())
-        assert [item["source"] for item in heard] == ["KD2ABC-9"]
+        assert [spec.item_key(item) for item in heard] == [spec.key1]
         assert "status 7" in decoder.watch.reason
         assert decoder.error != "a retired reader's error"
-        assert len(decoder.stations()) == 1
+        assert spec.listed(decoder) == [spec.key1]
     finally:
         proc.close_pipe()
         decoder.stop()
 
 
-def test_idle_retirement_closes_the_captured_diagnostic_file():
-    proc = Child(["aprs"], said="the decoder could not read the radio")
-    decoder = _decoder(proc)
+@pytest.mark.parametrize("name", ["aprs", "decode"])
+def test_idle_retirement_closes_the_captured_diagnostic_file(name):
+    spec = SPEC_BY_NAME[name]
+    proc = Child([spec.tool], said="the decoder could not read the radio")
+    decoder = spec.build(lambda *_: proc)
     decoder.start()
     try:
         proc.code = 7
@@ -73,18 +80,18 @@ def test_idle_retirement_closes_the_captured_diagnostic_file():
         decoder.stop()
 
 
-@pytest.mark.parametrize("name", ["pocsag", "rds", "acars", "dmr", "flock"])
+@pytest.mark.parametrize("name", ["pocsag", "rds", "acars", "dmr", "flock", "decode"])
 def test_other_pipe_readers_retire_after_an_idle_exit(late_factory, name):  # noqa: F811
     spec = SPEC_BY_NAME[name]
     decoder, children, heard, _clock = late_factory(spec)
     decoder.start()
     try:
-        run = decoder._runs.current
+        run = _fence(decoder)
         child = children[0]
         child.feed(spec.line1)
         heard.wait_for(1)
         child.die(7)
-        assert until(lambda: decoder._runs.current != run, seconds=2), (
+        assert until(lambda: _fence(decoder) != run, seconds=2), (
             "a later request is still needed to retire the dead reader")
         child.feed(spec.line2)
         child.close_pipe()
