@@ -1,0 +1,16 @@
+# ABOUTME: Managed systemd user unit template invoking the stable updater dispatcher with -B.
+# ABOUTME: Isolated under deploy/managed/; never installed by legacy deploy/install.sh.
+[Unit]
+Description=SIGINT 101 lesson server (managed)
+After=network.target
+
+[Service]
+WorkingDirectory=%h/.local/state/sigint101-updater
+ExecStart=/usr/bin/python3 -B %h/.local/state/sigint101-updater/bin/dispatcher.py serve
+KillMode=control-group
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
