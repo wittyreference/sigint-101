@@ -65,6 +65,7 @@ from .kiosk import request_exit
 from .law import LAW_CAUTION, LAW_SECTIONS
 from .lessons import CHECK_STAGE, COMMIT_STAGE, SORT_ANSWERS, load_lessons
 from .lora import LoRaListener, LoRaSendLost, LoRaTxDisabled, LoRaUnavailable
+from .meteor import MeteorDecoder, MeteorUnavailable
 from .operate import (
     DEFAULT_INSTRUMENT,
     INSTRUMENTS,
@@ -305,7 +306,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
-               apt_factory=None, sstv_factory=None,
+               apt_factory=None, sstv_factory=None, meteor_factory=None,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
@@ -509,6 +510,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_sstv = sstv_factory
 
+    if meteor_factory is None:
+        def build_meteor():
+            return MeteorDecoder(
+                data_dir=data_dir, radio_present=lambda: probe().present,
+                list_devices=enumerate_radios, sync_assets=managed,
+            )
+    else:
+        build_meteor = meteor_factory
+
     # The Flock detector runs tcpdump on wlan1 in monitor mode, or reads the Flipper's Marauder
     # devboard over its USB-UART bridge when the site sets SIGINT101_FLOCK_SOURCE=marauder — a
     # separate radio from the RTL-SDR either way, like the LoRa listener, so it needs no
@@ -566,6 +576,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.dmr = build_dmr()
         app.state.apt = build_apt()
         app.state.sstv = build_sstv()
+        app.state.meteor = build_meteor()
         app.state.flock = build_flock()
         app.state.rayhunter = build_rayhunter()
         app.state.flipper = build_flipper()
@@ -1518,13 +1529,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # clears any prior stand-down on the caller (resume). LoRa (meshtasticd) and Flock (wlan1
     # monitor) ride their own radios and are deliberately absent from this set.
     sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
-                     "apt", "sstv")
+                     "apt", "sstv", "meteor")
 
     unavailable = {
         "ppm": PpmUnavailable, "sweeper": SpectrumUnavailable, "decoder": DecodeUnavailable,
         "rds": RDSUnavailable, "adsb": AdsbUnavailable, "aprs": AprsUnavailable,
         "pocsag": PocsagUnavailable, "acars": AcarsUnavailable, "ais": AisUnavailable,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
+        "meteor": MeteorUnavailable,
     }
 
     def _claim_sdr(target: str, start=None):
@@ -2080,6 +2092,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": decoder.freq_hz,
             "images": decoder.images(limit),
         }
+
+    @app.get("/api/meteor")
+    def meteor_status():
+        return app.state.meteor.snapshot()
+
+    @app.post("/api/meteor/listen")
+    def meteor_listen():
+        decoder = app.state.meteor
+        try:
+            _claim_sdr("meteor")
+        except MeteorUnavailable as exc:
+            empty = decoder.snapshot()
+            for key in ("available", "reason", "command", "retry_in"):
+                empty.pop(key, None)
+            return _refused("meteor", exc, empty, decoder.watch)
+        status = decoder.snapshot()
+        _started("meteor", {"freq_hz": status["freq_hz"], "mode": status["mode"]})
+        return status
 
     # The image decoders (APT, SSTV) write their decoded PNGs under data/apt and data/sstv; this
     # serves those files to the panels and nothing else. The path is confined to those two folders
