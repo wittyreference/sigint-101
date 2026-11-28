@@ -3135,7 +3135,7 @@ body {
   overflow-wrap: anywhere;
 }
 .field-lesson {
-  margin-top: 12px;
+  margin: 0 0 10px;
   padding: 10px 12px;
   border: 2px solid var(--border-strong);
   background: var(--surface);

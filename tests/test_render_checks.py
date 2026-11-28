@@ -1110,13 +1110,14 @@ CLOSING_PREDICT_FITS = {
     "back": True,
     "chipsFit": True,
     "commitFit": True,
-    "commitBottom": 468,
+    "commitBottom": 477,
 }
 CLOSING_UNSEALED_FITS = {
     "doc": [800, 480],
     "back": True,
     "codePx": 18,
     "noOverflow": True,
+    "cmdVisibleAtTop": True,
     "noSplitHyphens": True,
     "operateFoot": True,
     "observeFoot": True,
@@ -1155,6 +1156,7 @@ def test_closing_render_checks_all_stages_in_all_three_themes(devtools):
 @pytest.mark.parametrize("kind, defect", [
     ("predict", {"chipsFit": False}),
     ("predict", {"commitFit": False}),
+    ("stages", {"cmdVisibleAtTop": False}),
     ("stages", {"noSplitHyphens": False}),
     ("stages", {"noOverflow": False}),
     ("stages", {"codePx": 17}),

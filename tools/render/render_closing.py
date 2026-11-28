@@ -123,6 +123,18 @@ function measureClosingUnsealed(expectedTheme, expectedCmd) {
   const noOverflow = !!opBody && !!box &&
                      opBody.scrollWidth <= opBody.clientWidth + 1 &&
                      box.scrollWidth <= box.clientWidth + 1;
+  let cmdVisibleAtTop = false;
+  if (opBody && box && code) {
+    opBody.scrollTop = 0;
+    const bodyRect = opBody.getBoundingClientRect();
+    const boxRect = box.getBoundingClientRect();
+    const codeRect = code.getBoundingClientRect();
+    cmdVisibleAtTop =
+      boxRect.top >= bodyRect.top - 0.5 &&
+      codeRect.top >= bodyRect.top - 0.5 &&
+      codeRect.bottom <= bodyRect.bottom + 0.5 &&
+      codeRect.bottom <= innerHeight + 0.5;
+  }
   let noSplitHyphens = !!code && code.textContent === expectedCmd;
   if (code) {
     const rowWidth = code.parentElement.clientWidth;
@@ -151,6 +163,7 @@ function measureClosingUnsealed(expectedTheme, expectedCmd) {
     back: backOk,
     codePx,
     noOverflow,
+    cmdVisibleAtTop,
     noSplitHyphens,
     operateFoot,
     observeFoot,
@@ -224,6 +237,7 @@ def main(console):
                 and unsealed.get("back") is True
                 and unsealed.get("codePx", 0) >= 18
                 and unsealed.get("noOverflow") is True
+                and unsealed.get("cmdVisibleAtTop") is True
                 and unsealed.get("noSplitHyphens") is True
                 and unsealed.get("operateFoot") is True
                 and unsealed.get("observeFoot") is True

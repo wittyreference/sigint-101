@@ -20,30 +20,30 @@ stages:
   operate: >-
     Exit the course from Home (Exit SIGINT 101) and open Terminal from the desktop menu. On the
     physical keyboard, free the radio first with systemctl --user stop sigint101, then type and run
-    Lesson 10's command shown below. Wait for a 433 MHz sensor to chirp and press Ctrl-C when done.
-    Restart the server with systemctl --user restart sigint101, then reopen SIGINT 101 from the
-    desktop.
+    Lesson 10's command shown above. Wait for a sensor on that band to chirp and press Ctrl-C when
+    done. Restart the server with systemctl --user restart sigint101, then reopen SIGINT 101 from
+    the desktop.
   observe: >-
-    Compare what your own Terminal printed with what the rack's ISM panel showed. When a 433 MHz
-    sensor chirped, check the fields — model, readings, modulation, frequency. If the band stayed
-    quiet while you waited, an empty terminal is the honest answer too; this page cannot see what
-    your terminal printed.
+    Compare what your own Terminal printed with what the rack's ISM panel showed. When a sensor
+    chirped, check the fields — model, readings, modulation, frequency. If the band stayed quiet
+    while you waited, an empty terminal is the honest answer too; this page cannot see what your
+    terminal printed.
   explain: >-
-    The radio is busy until you free it: only one process can open the RTL-SDR dongle at a time, so
-    systemctl --user stop sigint101 hands the radio over to your Terminal. The output you saw there
-    comes from the exact command the rack runs — there is no hidden wrapper or mock layer between
-    you and the receiver. When you finish, systemctl --user restart sigint101 brings the server back.
-    Whenever you want to work outside the course, open the field card in Operator mode for the real
-    command each instrument ran. Tap Complete lesson once you have done it yourself.
+    The radio can be busy until you free it: only one process can open the RTL-SDR dongle at a time,
+    so systemctl --user stop sigint101 hands the radio over to your Terminal. Whatever your Terminal
+    printed comes from the exact command the rack runs — there is no hidden wrapper or mock layer
+    between you and the receiver. When you finish, systemctl --user restart sigint101 brings the
+    server back. Whenever you want to work outside the course, open the field card in Operator mode
+    for the real command each instrument ran. Tap Complete lesson once you have tried it yourself.
 
 # Keyboard-free predict chips: {key, label}. Lengths stay within 2x and none are YAML booleans.
 choices:
   - {key: "shares-radio", label: "Both share the radio"}
-  - {key: "radio-busy", label: "The radio is busy"}
+  - {key: "radio-busy", label: "The radio may be busy"}
   - {key: "server-stops", label: "The server stops itself"}
 
 predict_kind: knowledge
 answer: ["radio-busy"]
 verdict: >-
-  The radio is busy: only one process can open the RTL-SDR dongle at a time, so stop the course
-  server first.
+  The radio may be busy: only one program at a time can open the RTL-SDR dongle, so free the radio
+  first.

@@ -658,7 +658,6 @@
             <div class="scroll-frame">
               <div class="stage-panel__body">
                 <div class="scroll-copy">
-                  <p>{{ lesson.stages[stage] }}</p>
                   <div class="field-lesson" data-field-lesson="{{ field_row.key }}">
                     {% if field_error %}<p class="field__error" role="status">{{ field_error }}</p>{% endif %}
                     <div class="field__heading">
@@ -680,6 +679,7 @@
                     <p class="field__prompt">{{ field_lesson_prompt }}</p>
                     {% endif %}
                   </div>
+                  <p>{{ lesson.stages[stage] }}</p>
                 </div>
               </div>
             </div>

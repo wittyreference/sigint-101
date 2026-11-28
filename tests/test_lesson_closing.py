@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from sigint101.app import create_app
 from sigint101.childproc import command_line
-from sigint101.events import log_event
+from sigint101.events import log_event, read_events
 from sigint101.lessons import LessonError, load_lesson_file, load_lessons, parse_lesson
 from sigint101.progress import Progress
 from sigint101.spectrum import DEFAULT_BIN
@@ -63,9 +63,12 @@ CLI_FLAG_RE = re.compile(r"(?:^|\s)--?[a-zA-Z0-9][a-zA-Z0-9_-]*")
 FAKE_DECODE_CLAIM_RE = re.compile(
     r"\b(?:console|page|screen)\s+(?:sees|saw|confirms|confirmed|verified)\s+(?:your|the)\s+"
     r"(?:terminal|decode|sensor)\b"
-    r"|\byou\s+(?:will\s+see|saw)\s+an?\s+acurite\b",
+    r"|\byou\s+(?:will\s+see|saw)\s+an?\s+acurite\b"
+    r"|\b(?:output|reads?|decodes?)\s+you\s+saw\b",
     re.I,
 )
+HARDCODED_ISM_FREQ_RE = re.compile(r"\b(?:315|433|868|915)(?:\.\d+)?\s*MHz\b", re.I)
+CERTAIN_BUSY_RE = re.compile(r"\bthe\s+radio\s+is\s+busy\b", re.I)
 TRANSMIT_OR_LAW_RE = re.compile(
     r"\b(?:18\s+USC|47\s+CFR|federal\s+offen[cs]e|transmit\s+on|key\s+the\s+transmitter)\b",
     re.I,
@@ -120,7 +123,11 @@ def _check_closing_prose(text: str) -> list[str]:
     if "compare" not in lower or "rack" not in lower:
         issues.append("missing instruction to compare terminal output with what the rack showed")
     if FAKE_DECODE_CLAIM_RE.search(text):
-        issues.append("claims a decode the console cannot see")
+        issues.append("claims or presumes a terminal decode the console cannot see")
+    if HARDCODED_ISM_FREQ_RE.search(text):
+        issues.append("hard-codes an ISM frequency the retuned command may not carry")
+    if CERTAIN_BUSY_RE.search(text):
+        issues.append("presents 'the radio is busy' as certain instead of 'may/can be busy'")
     if TRANSMIT_OR_LAW_RE.search(text):
         issues.append("mentions transmit or legal claim outside scope")
     return issues
@@ -132,8 +139,9 @@ def _check_closing_prose(text: str) -> list[str]:
 def test_closing_prose_probe_rejects_defects_and_accepts_rewordings():
     good = (
         "Exit to the desktop and open Terminal on the physical keyboard. "
-        f"Free the radio with {STOP_CMD}, run the Lesson 10 command shown below, "
+        f"Free the radio with {STOP_CMD}, run the Lesson 10 command shown above, "
         "and compare what your Terminal shows with the rack. "
+        "The radio may be busy if the server still holds the dongle. "
         f"When done, bring the server back with {RESTART_CMD}."
     )
     assert _check_closing_prose(good) == []
@@ -149,6 +157,15 @@ def test_closing_prose_probe_rejects_defects_and_accepts_rewordings():
 
     claims_decode = good + " The page confirms your terminal decode automatically."
     assert any("cannot see" in i for i in _check_closing_prose(claims_decode))
+
+    presumes_output = good + " The output you saw came straight from the tool."
+    assert any("cannot see" in i for i in _check_closing_prose(presumes_output))
+
+    hardcoded_freq = good + " Wait for a 433 MHz sensor to chirp."
+    assert any("frequency" in i for i in _check_closing_prose(hardcoded_freq))
+
+    certain_busy = good + " The radio is busy whenever the server runs."
+    assert any("may/can be busy" in i for i in _check_closing_prose(certain_busy))
 
 
 # --- Loader, item lint, reading load, unit placement ------------------------------------------
@@ -366,3 +383,95 @@ def test_closing_lesson_stamp_fallback_and_replay_exclusion_match_field_card(tmp
     assert field_cmds == [badge_cmd]
     assert lesson_cmds == field_cmds
     assert "First heard" in _field_lesson_html(lesson_html)
+
+
+def test_operate_places_field_command_box_above_instructions(tmp_path):
+    # FIX 1: the field command box must lead the operate stage so the learner sees the command
+    # (or rack-first prompt) immediately at scrollTop=0 instead of hidden below the fold.
+    events_path = tmp_path / "events.jsonl"
+    log_event(
+        events_path,
+        "decode_start",
+        {"command": "rtl_433 -f 433920000 -F json -M level -d 0", "command_from": "process"},
+        clock=lambda: 1700000700.0,
+    )
+    with _closing_client(tmp_path) as client:
+        html = _open_unsealed_closing(client)
+
+    op_start = html.index('stage-panel" data-stage="operate"')
+    op_section = html[op_start:html.index("</section>", op_start)]
+    assert op_section.index('data-field-lesson="ism"') < op_section.index(STOP_CMD)
+
+
+def test_closing_lesson_ignores_other_instruments_wrong_tool_and_non_process_starts(tmp_path):
+    # FIX 2 (isolation): unrelated instruments, wrong tool names, non-process starts, and replays
+    # must never leak into L40's ISM command box.
+    events_path = tmp_path / "events.jsonl"
+    log_event(events_path, "reception", {
+        "instrument": "adsb", "tool": "dump1090", "command": "dump1090 --net",
+        "freq_hz": 1_090_000_000, "radio": {"kind": "rtl-sdr", "index": 0, "serial": None},
+        "item": {"icao": "abc123"},
+    }, clock=lambda: 1700000800.0)
+    log_event(events_path, "aprs_start", {
+        "command": "rtl_fm -f 144390000 | multimon-ng -a AFSK1200", "command_from": "process",
+    }, clock=lambda: 1700000810.0)
+    log_event(events_path, "reception", {
+        "instrument": "ism", "tool": "dump1090", "command": "dump1090 --wrong-tool",
+        "freq_hz": 433_920_000, "radio": {"kind": "rtl-sdr", "index": 0, "serial": None},
+        "item": {"model": "Wrong"},
+    }, clock=lambda: 1700000820.0)
+    log_event(events_path, "decode_start", {
+        "command": "rtl_433 --from-config", "command_from": "config",
+    }, clock=lambda: 1700000830.0)
+    log_event(events_path, "reception", {
+        "instrument": "ism", "tool": "rtl_433", "command": "rtl_433 -r replay.cu8",
+        "replay": True, "freq_hz": 433_920_000,
+        "radio": {"kind": "rtl-sdr", "index": 0, "serial": None},
+        "item": {"model": "Replay"},
+    }, clock=lambda: 1700000840.0)
+
+    with _closing_client(tmp_path) as client:
+        html = _open_unsealed_closing(client)
+
+    box = _field_lesson_html(html)
+    assert _codes(box) == []
+    assert "run it once in the rack first" in unescape(box).lower()
+
+
+def test_closing_lesson_get_adds_no_writes_beyond_shared_lesson_view_side_effects(tmp_path):
+    # FIX 2: GET /lesson/40 runs only the shared lesson_view side effects every lesson page runs
+    # (mark_opened, enroll_recall, and _restore_lesson_tuning) and adds zero extra writes, events,
+    # rack-place changes, or receiver starts from reading the field command.
+    prog = Progress(tmp_path / "progress.db")
+    prog.record_place("rack", "adsb")
+    prog.close()
+
+    def _sweeper():
+        stub = _LiveStub()
+        stub.bin_size = DEFAULT_BIN
+        return stub
+
+    stubs = {name: fn() for name, fn in _strict_factories({"sweeper_factory": _sweeper}).items()}
+    factories = {name: (lambda s=stub: s) for name, stub in stubs.items()}
+    app = create_app(
+        pack_dir=PACK_PATH.parent,
+        data_dir=tmp_path,
+        probe=_absent,
+        **factories,
+    )
+    with TestClient(app) as client:
+        _open_unsealed_closing(client)
+        events_before = read_events(tmp_path / "events.jsonl")
+        stamps_before = client.app.state.progress.stamps()
+        replays_before = client.app.state.progress.replays_seen()
+
+        for _ in range(3):
+            resp = client.get("/lesson/40")
+            assert resp.status_code == 200
+
+        assert read_events(tmp_path / "events.jsonl") == events_before
+        assert client.app.state.progress.stamps() == stamps_before
+        assert client.app.state.progress.replays_seen() == replays_before
+        assert client.app.state.progress.get_place("rack") == "adsb"
+        assert client.app.state.progress.get(40)["opened"] == 1
+        assert all(not stub.running for stub in stubs.values())
