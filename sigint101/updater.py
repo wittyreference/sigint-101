@@ -1003,6 +1003,15 @@ def recover(
         fsync_file(sel_path)
         fsync_dir(resolved_root)
 
+        if selector["mode"] == "legacy":
+            from .enrollment import ENROLLMENT_RECOVERY_FILENAME, recover_interrupted_enrollment
+
+            if (resolved_root / ENROLLMENT_RECOVERY_FILENAME).exists():
+                recover_interrupted_enrollment(
+                    resolved_root,
+                    reload_systemd=getattr(service, "daemon_reload", None),
+                )
+
         op_id = selector["operation_id"]
         incomplete = _list_incomplete_intents(resolved_root, active_op_id=op_id)
         active_state, _sub_state, main_pid = service.unit_state()

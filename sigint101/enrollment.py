@@ -7,6 +7,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
+import secrets
 import stat
 import subprocess
 from collections.abc import Callable
@@ -24,33 +26,80 @@ from .runtime import (
 )
 from .storage import fsync_dir, fsync_file, validate_updater_root
 
+ENROLLMENT_RECOVERY_FILENAME = "enrollment-recovery.json"
+
 
 class EnrollmentError(RuntimeError):
     """Raised when an enrollment prerequisite or ordering invariant fails."""
 
 
-def _atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o644) -> None:
+def _atomic_write_bytes(
+    path: Path,
+    data: bytes,
+    *,
+    mode: int = 0o644,
+    before_replace: Callable[[], None] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.tmp.{os.getpid()}"
+    tmp = path.parent / f".{path.name}.tmp.{os.getpid()}.{secrets.token_hex(4)}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     fd = os.open(os.fspath(tmp), flags, mode)
+    replaced = False
     try:
-        view = memoryview(data)
-        written = 0
-        while written < len(view):
-            written += os.write(fd, view[written:])
-        os.fsync(fd)
-    except BaseException:
-        os.close(fd)
         try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+            view = memoryview(data)
+            written = 0
+            while written < len(view):
+                written += os.write(fd, view[written:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(tmp, mode)
+        if before_replace is not None:
+            before_replace()
+        os.replace(tmp, path)
+        replaced = True
+    except BaseException:
+        if not replaced:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
         raise
-    os.close(fd)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
     fsync_dir(path.parent)
+
+
+def _cleanup_unpublished_temps(target: Path) -> None:
+    """Remove unpublished regular `.tmp.<pid>[.<hex>]` siblings for `target` without touching it."""
+    parent = target.parent
+    if parent.is_symlink() or not parent.is_dir():
+        return
+    pat = re.compile(rf"^\.{re.escape(target.name)}\.tmp\.\d+(?:\.[0-9a-f]+)?$")
+    removed = False
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return
+    for name in names:
+        if not pat.match(name):
+            continue
+        candidate = parent / name
+        try:
+            lst = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(lst.st_mode):
+            continue
+        try:
+            candidate.unlink()
+            removed = True
+        except OSError:
+            pass
+    if removed:
+        try:
+            fsync_dir(parent)
+        except OSError:
+            pass
 
 
 def _load_control_manifest_module(repo_root: Path):
@@ -367,18 +416,202 @@ def _preflight_install_targets(
     )
 
 
-def _save_original_once(originals_dir: Path, name: str, data: bytes) -> Path:
-    """Persist verified original bytes once (0400, fsynced) without overwriting on reruns (F4)."""
+def _save_digest_backup(
+    originals_dir: Path,
+    stem: str,
+    suffix: str,
+    data: bytes,
+) -> tuple[Path, str]:
+    """Persist verified immutable digest-keyed backup (0400, fsynced) and check bytes agree (F4)."""
+    originals_dir.mkdir(mode=0o700, exist_ok=True)
+    digest = hashlib.sha256(data).hexdigest()
+    dest = originals_dir / f"{stem}-{digest}{suffix}"
+    existing = _read_regular_bytes(dest)
+    if existing is not None:
+        if hashlib.sha256(existing).hexdigest() != digest:
+            raise EnrollmentError(
+                f"digest-keyed backup corrupted on disk: {dest} does not match {digest}"
+            )
+        return dest, digest
+    _atomic_write_bytes(dest, data, mode=0o400)
+    return dest, digest
+
+
+def _update_latest_original(originals_dir: Path, name: str, data: bytes) -> Path:
+    """Keep `originals/<name>` synced to the exact bytes of the file currently being replaced."""
     originals_dir.mkdir(mode=0o700, exist_ok=True)
     dest = originals_dir / name
-    try:
-        lst = os.lstat(dest)
-    except FileNotFoundError:
-        lst = None
-    if lst is not None and stat.S_ISREG(lst.st_mode):
+    existing = _read_regular_bytes(dest)
+    if existing == data:
         return dest
     _atomic_write_bytes(dest, data, mode=0o400)
     return dest
+
+
+def _find_verified_launcher_backup(
+    originals_dir: Path,
+    *,
+    expected_sha: str | None = None,
+) -> tuple[Path | None, str | None]:
+    """Locate a launcher backup whose on-disk SHA-256 matches `expected_sha` (or latest)."""
+    if expected_sha is not None and _is_valid_hex_sha256(expected_sha):
+        keyed = originals_dir / f"desktop-wrapper-{expected_sha}.sh"
+        raw = _read_regular_bytes(keyed)
+        if raw is not None and hashlib.sha256(raw).hexdigest() == expected_sha:
+            return keyed, expected_sha
+        latest = originals_dir / "desktop-wrapper.sh"
+        raw_latest = _read_regular_bytes(latest)
+        if raw_latest is not None and hashlib.sha256(raw_latest).hexdigest() == expected_sha:
+            return latest, expected_sha
+        return None, None
+
+    latest = originals_dir / "desktop-wrapper.sh"
+    raw_latest = _read_regular_bytes(latest)
+    if raw_latest is None:
+        return None, None
+    sha = hashlib.sha256(raw_latest).hexdigest()
+    keyed = originals_dir / f"desktop-wrapper-{sha}.sh"
+    raw_keyed = _read_regular_bytes(keyed)
+    if raw_keyed is not None and hashlib.sha256(raw_keyed).hexdigest() == sha:
+        return keyed, sha
+    return latest, sha
+
+
+def _refuse_if_managed_selected(root: Path) -> None:
+    """Refuse enrollment when current.json already selects a managed generation (F2)."""
+    cur_path = root / "current.json"
+    try:
+        lst = os.lstat(cur_path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(lst.st_mode):
+        raise EnrollmentError(
+            f"refusing enrollment: {cur_path} is not a regular file (no changes made)"
+        )
+    try:
+        selector = json.loads(cur_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise EnrollmentError(
+            f"refusing enrollment: {cur_path} is corrupt or unreadable: {exc} (no changes made)"
+        ) from exc
+    if not isinstance(selector, dict):
+        raise EnrollmentError(
+            f"refusing enrollment: {cur_path} is malformed (no changes made)"
+        )
+    mode = selector.get("mode")
+    if mode == "managed":
+        raise EnrollmentError(
+            f"refusing enrollment: managed generation is already selected in {cur_path} "
+            f"(release={selector.get('release_id')!r}, "
+            f"generation={selector.get('generation_id')!r}); no changes made"
+        )
+    if mode != "legacy":
+        raise EnrollmentError(
+            f"refusing enrollment: unsupported selector mode {mode!r} in {cur_path} "
+            "(no changes made)"
+        )
+
+
+def _destination_matches_original(path: Path, orig_bytes: bytes | None) -> bool:
+    """Return True iff `path` on disk currently matches its pre-enrollment state."""
+    if orig_bytes is None:
+        return not path.exists() and not path.is_symlink()
+    actual = _read_regular_bytes(path)
+    return actual == orig_bytes
+
+
+def recover_interrupted_enrollment(
+    updater_root: str | Path,
+    *,
+    reload_systemd: Callable[[], None] | None = None,
+) -> dict[str, object]:
+    """Restore destinations recorded in durable `enrollment-recovery.json` after a crash (F3)."""
+    root = Path(updater_root)
+    rec_path = root / ENROLLMENT_RECOVERY_FILENAME
+    raw = _read_regular_bytes(rec_path)
+    if raw is None:
+        return {"recovered": False, "had_recovery_state": False, "restored": []}
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise EnrollmentError(
+            f"corrupt durable enrollment recovery state at {rec_path}: {exc}"
+        ) from exc
+    if not isinstance(record, dict) or not isinstance(record.get("destinations"), list):
+        raise EnrollmentError(f"invalid durable enrollment recovery state at {rec_path}")
+
+    restored: list[str] = []
+    unrestored: list[str] = []
+    unit_restored = False
+
+    for entry in reversed(record["destinations"]):
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            unrestored.append("<invalid-entry>")
+            continue
+        label = str(entry.get("label") or entry["path"])
+        dest = Path(entry["path"])
+        _cleanup_unpublished_temps(dest)
+        existed = bool(entry.get("existed"))
+        if existed:
+            expected_sha = entry.get("original_sha256")
+            backup_str = entry.get("backup_path")
+            orig_mode = int(entry.get("original_mode", 0o644))
+            cur_bytes = _read_regular_bytes(dest)
+            if cur_bytes is not None and hashlib.sha256(cur_bytes).hexdigest() == expected_sha:
+                continue
+            backup_bytes = (
+                _read_regular_bytes(Path(backup_str)) if isinstance(backup_str, str) else None
+            )
+            if (
+                backup_bytes is None
+                or not _is_valid_hex_sha256(expected_sha)
+                or hashlib.sha256(backup_bytes).hexdigest() != expected_sha
+            ):
+                unrestored.append(f"{label} (missing or mismatched backup)")
+                continue
+            ok = _restore_file_best_effort(dest, backup_bytes, mode=orig_mode)
+            if not ok or not _destination_matches_original(dest, backup_bytes):
+                unrestored.append(label)
+                continue
+            restored.append(label)
+            if label == "unit_install":
+                unit_restored = True
+        else:
+            if dest.exists() or dest.is_symlink():
+                try:
+                    dest.unlink()
+                    fsync_dir(dest.parent)
+                except OSError:
+                    unrestored.append(label)
+                    continue
+                if dest.exists() or dest.is_symlink():
+                    unrestored.append(label)
+                    continue
+                restored.append(label)
+                if label == "unit_install":
+                    unit_restored = True
+
+    if unit_restored and reload_systemd is not None:
+        try:
+            reload_systemd()
+        except Exception as exc:
+            unrestored.append(f"reload_systemd ({exc})")
+
+    if unrestored:
+        raise EnrollmentError(
+            f"enrollment recovery incomplete for {', '.join(unrestored)}; "
+            f"durable recovery state kept at {rec_path}"
+        )
+
+    try:
+        rec_path.unlink(missing_ok=True)
+        fsync_dir(root)
+    except OSError as exc:
+        raise EnrollmentError(
+            f"recovered destinations but failed to clear recovery state {rec_path}: {exc}"
+        ) from exc
+
+    return {"recovered": True, "had_recovery_state": True, "restored": restored}
 
 
 def _read_regular_bytes(path: Path) -> bytes | None:
@@ -534,7 +767,16 @@ def enroll_legacy_fixture(
     with acquire_mutation_gate(
         root, blocking=False, inherited_gate_fd=inherited_gate_fd, home=home
     ):
-        # 2b) F5 & F1: Under the mutation gate, reclaim abandoned private staging siblings left by
+        # 2a) F2: Refuse rerun immediately under the mutation gate and BEFORE the first write
+        # if a managed generation is already selected in current.json.
+        _refuse_if_managed_selected(root)
+
+        # 2b) F3: If a prior interrupted enrollment left durable recovery state on disk, restore
+        # every out-of-step destination to its verified pre-enrollment bytes before proceeding.
+        if (root / ENROLLMENT_RECOVERY_FILENAME).exists():
+            recover_interrupted_enrollment(root, reload_systemd=reload_systemd)
+
+        # 2c) F5 & F1: Under the mutation gate, reclaim abandoned private staging siblings left by
         # killed attempts in runtimes/ and control/, never touching published or active entries.
         protected_runtimes, protected_controls = _collect_protected_ids(root)
         reclaim_abandoned_runtime_staging(root / "runtimes", protected_names=protected_runtimes)
@@ -652,7 +894,7 @@ def enroll_legacy_fixture(
             prior_shims = {}
 
         shim_records: dict[str, dict[str, str]] = {}
-        shim_writes: list[tuple[Path, bytes, bytes | None, int]] = []
+        shim_writes: list[tuple[Path, bytes, bytes | None, int, Path | None]] = []
         for legacy_name, shim_name in (
             ("install.sh", "install-shim.sh"),
             ("provision.sh", "provision-shim.sh"),
@@ -663,10 +905,12 @@ def enroll_legacy_fixture(
             cur_bytes = _read_regular_bytes(target)
             cur_mode = (os.lstat(target).st_mode & 0o7777) if cur_bytes is not None else 0o755
             cur_sha = hashlib.sha256(cur_bytes or b"").hexdigest()
+            backup_path: Path | None = None
 
             if cur_bytes is not None and cur_sha != shim_sha:
-                orig_sha = cur_sha
-                _save_original_once(originals_dir, legacy_name, cur_bytes)
+                stem, suffix = os.path.splitext(legacy_name)
+                backup_path, orig_sha = _save_digest_backup(originals_dir, stem, suffix, cur_bytes)
+                _update_latest_original(originals_dir, legacy_name, cur_bytes)
             elif cur_bytes is None:
                 orig_sha = cur_sha
             else:
@@ -700,13 +944,16 @@ def enroll_legacy_fixture(
                             f"refusing rerun: cannot determine original digest for already-"
                             f"shimmed deploy/{legacy_name}"
                         )
+                # Preserve exact pre-run bytes (even if already shimmed) for durable recovery.
+                stem, suffix = os.path.splitext(legacy_name)
+                backup_path, _ = _save_digest_backup(originals_dir, stem, suffix, cur_bytes)
 
             shim_records[legacy_name] = {
                 "original_sha256": orig_sha,
                 "shim_sha256": shim_sha,
             }
             if target.parent.is_dir():
-                shim_writes.append((target, shim_bytes, cur_bytes, cur_mode))
+                shim_writes.append((target, shim_bytes, cur_bytes, cur_mode, backup_path))
 
         reviewed_legacy_digests, _default_legacy_digest, reviewed_managed_digest = (
             _load_reviewed_launchers(repo)
@@ -730,33 +977,33 @@ def enroll_legacy_fixture(
             else None
         )
 
-        # F4: Preserve the verified original launcher bytes/digest BEFORE replacing the wrapper;
-        # if the prior launcher was already overwritten and cannot be recovered, record "unknown"
-        # with original_reviewed=False (never substitute the current checkout's launcher digest).
+        # F4: Preserve verified digest-keyed backup for the exact launcher being replaced (keeping
+        # earlier versions too) AND keep `originals/desktop-wrapper.sh` synced to that same digest.
+        # Recorded `original_backup_path` always matches `original_sha256`.
         wrapper_backup_path: Path | None = None
         if cur_wrapper_sha is not None and cur_wrapper_sha not in managed_wrapper_digests:
-            wrapper_backup_path = _save_original_once(
+            wrapper_backup_path, wrapper_orig_sha = _save_digest_backup(
+                originals_dir, "desktop-wrapper", ".sh", cur_wrapper_bytes or b""
+            )
+            _update_latest_original(
                 originals_dir, "desktop-wrapper.sh", cur_wrapper_bytes or b""
             )
-            wrapper_orig_sha = cur_wrapper_sha
-            wrapper_orig_reviewed = cur_wrapper_sha in reviewed_legacy_digests
-        else:
-            saved_wrapper_bytes = _read_regular_bytes(originals_dir / "desktop-wrapper.sh")
-            saved_wrapper_sha = (
-                hashlib.sha256(saved_wrapper_bytes).hexdigest()
-                if saved_wrapper_bytes is not None
-                else None
+            wrapper_orig_reviewed = wrapper_orig_sha in reviewed_legacy_digests
+        elif (
+            _is_valid_hex_sha256(prior_wrapper_orig)
+            and prior_wrapper_orig not in managed_wrapper_digests
+        ):
+            wrapper_orig_sha = str(prior_wrapper_orig)
+            wrapper_orig_reviewed = wrapper_orig_sha in reviewed_legacy_digests
+            wrapper_backup_path, _ = _find_verified_launcher_backup(
+                originals_dir, expected_sha=wrapper_orig_sha
             )
-            if saved_wrapper_sha and saved_wrapper_sha not in managed_wrapper_digests:
-                wrapper_backup_path = originals_dir / "desktop-wrapper.sh"
-                wrapper_orig_sha = saved_wrapper_sha
-                wrapper_orig_reviewed = saved_wrapper_sha in reviewed_legacy_digests
-            elif (
-                _is_valid_hex_sha256(prior_wrapper_orig)
-                and prior_wrapper_orig not in managed_wrapper_digests
-            ):
-                wrapper_orig_sha = str(prior_wrapper_orig)
-                wrapper_orig_reviewed = wrapper_orig_sha in reviewed_legacy_digests
+        else:
+            cand_path, cand_sha = _find_verified_launcher_backup(originals_dir)
+            if cand_sha and cand_sha not in managed_wrapper_digests:
+                wrapper_backup_path = cand_path
+                wrapper_orig_sha = cand_sha
+                wrapper_orig_reviewed = cand_sha in reviewed_legacy_digests
             else:
                 wrapper_orig_sha = "unknown"
                 wrapper_orig_reviewed = False
@@ -786,8 +1033,58 @@ def enroll_legacy_fixture(
         prior_unit_mode = (
             (os.lstat(unit_file).st_mode & 0o7777) if prior_unit_bytes is not None else 0o644
         )
-        if prior_unit_bytes is not None and b"dispatcher.py" not in prior_unit_bytes:
-            _save_original_once(originals_dir, "sigint101.service", prior_unit_bytes)
+        prior_unit_backup_path: Path | None = None
+        if prior_unit_bytes is not None:
+            prior_unit_backup_path, _ = _save_digest_backup(
+                originals_dir, "sigint101", ".service", prior_unit_bytes
+            )
+            if b"dispatcher.py" not in prior_unit_bytes:
+                _update_latest_original(originals_dir, "sigint101.service", prior_unit_bytes)
+
+        # F3: Write durable recovery state BEFORE modifying any shim or unit destination so a
+        # process crash or incomplete rollback leaves a verified restoration plan on disk.
+        recovery_path = root / ENROLLMENT_RECOVERY_FILENAME
+        recovery_destinations: list[dict[str, object]] = []
+        for target, _shim_bytes, orig_bytes, orig_mode, backup_path in shim_writes:
+            recovery_destinations.append(
+                {
+                    "label": f"deploy/{target.name}",
+                    "path": str(target),
+                    "existed": orig_bytes is not None,
+                    "original_sha256": (
+                        hashlib.sha256(orig_bytes).hexdigest() if orig_bytes is not None else None
+                    ),
+                    "original_mode": orig_mode,
+                    "backup_path": str(backup_path) if backup_path is not None else None,
+                }
+            )
+        recovery_destinations.append(
+            {
+                "label": "unit_install",
+                "path": str(unit_file),
+                "existed": prior_unit_bytes is not None,
+                "original_sha256": (
+                    hashlib.sha256(prior_unit_bytes).hexdigest()
+                    if prior_unit_bytes is not None
+                    else None
+                ),
+                "original_mode": prior_unit_mode,
+                "backup_path": (
+                    str(prior_unit_backup_path) if prior_unit_backup_path is not None else None
+                ),
+            }
+        )
+        recovery_payload: dict[str, object] = {
+            "format_version": 1,
+            "operation_id": operation_id,
+            "status": "in_progress",
+            "destinations": recovery_destinations,
+        }
+        _atomic_write_bytes(
+            recovery_path,
+            (json.dumps(recovery_payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            mode=0o600,
+        )
 
         enrollment_meta: dict[str, object] = {
             "status": "in_progress",
@@ -805,6 +1102,7 @@ def enroll_legacy_fixture(
             "skipped_pth_files": skipped_pth_files,
             "desktop_wrapper": desktop_wrapper_record,
             "shims": shim_records,
+            "recovery_state_path": str(recovery_path),
         }
         _atomic_write_bytes(
             enr_path,
@@ -812,13 +1110,20 @@ def enroll_legacy_fixture(
             mode=0o600,
         )
 
-        # 6b) Install checkout shims with defined rollback on any late write failure (F3).
-        written_shims: list[tuple[Path, bytes | None, int]] = []
-        unit_replaced = False
+        # 6b) Install checkout shims, unit, reload, drain, and final record inside one recovery
+        # scope (F3). Each replacement is recorded BEFORE os.replace, unpublished temp files are
+        # cleaned up, and rollback_ok is True ONLY after verifying every destination on disk.
+        attempted_shims: list[tuple[Path, bytes | None, int]] = []
+        unit_attempted = False
 
         def _rollback_late_writes(failed_step: str, exc: BaseException) -> EnrollmentError:
             rollback_ok = True
-            if unit_replaced:
+            _cleanup_unpublished_temps(unit_file)
+            _cleanup_unpublished_temps(enr_path)
+            for target, _sb, _ob, _om, _bp in shim_writes:
+                _cleanup_unpublished_temps(target)
+
+            if unit_attempted or not _destination_matches_original(unit_file, prior_unit_bytes):
                 if prior_unit_bytes is not None:
                     rollback_ok &= _restore_file_best_effort(
                         unit_file, prior_unit_bytes, mode=prior_unit_mode
@@ -834,7 +1139,18 @@ def enroll_legacy_fixture(
                         reload_systemd()
                     except Exception:
                         rollback_ok = False
-            for shim_target, orig_bytes, orig_mode in reversed(written_shims):
+
+            seen_targets: set[Path] = set()
+            restore_order: list[tuple[Path, bytes | None, int]] = list(reversed(attempted_shims))
+            for target, _sb, orig_bytes, orig_mode, _bp in reversed(shim_writes):
+                if target not in {t for t, _, _ in restore_order}:
+                    if not _destination_matches_original(target, orig_bytes):
+                        restore_order.append((target, orig_bytes, orig_mode))
+
+            for shim_target, orig_bytes, orig_mode in restore_order:
+                if shim_target in seen_targets:
+                    continue
+                seen_targets.add(shim_target)
                 if orig_bytes is not None:
                     rollback_ok &= _restore_file_best_effort(
                         shim_target, orig_bytes, mode=orig_mode
@@ -845,12 +1161,42 @@ def enroll_legacy_fixture(
                         fsync_dir(shim_target.parent)
                     except OSError:
                         rollback_ok = False
+
+            # Independently verify every single destination on disk: NEVER report rollback_ok=True
+            # if any destination is still changed!
+            unrestored: list[str] = []
+            if not _destination_matches_original(unit_file, prior_unit_bytes):
+                unrestored.append("unit_install")
+            for target, _sb, orig_bytes, _om, _bp in shim_writes:
+                if not _destination_matches_original(target, orig_bytes):
+                    unrestored.append(f"deploy/{target.name}")
+            if unrestored:
+                rollback_ok = False
+
+            if rollback_ok:
+                try:
+                    recovery_path.unlink(missing_ok=True)
+                    fsync_dir(root)
+                except OSError:
+                    pass
+            else:
+                incomplete_rec = {
+                    **recovery_payload,
+                    "status": "rollback_incomplete",
+                    "failed_step": failed_step,
+                    "unrestored": unrestored,
+                }
+                rec_bytes = (json.dumps(incomplete_rec, indent=2, sort_keys=True) + "\n").encode(
+                    "utf-8"
+                )
+                _restore_file_best_effort(recovery_path, rec_bytes, mode=0o600)
+
             recovery_cmd = (
                 "resolve the write error and rerun sigint101-updater --enroll"
                 if rollback_ok
                 else (
-                    f"restore originals from {originals_dir} (or git -C {checkout} checkout -- "
-                    "deploy/install.sh deploy/provision.sh), then rerun sigint101-updater --enroll"
+                    f"restore originals from {originals_dir} (durable state at {recovery_path}) "
+                    "and rerun sigint101-updater --enroll"
                 )
             )
             failed_meta = {
@@ -859,58 +1205,73 @@ def enroll_legacy_fixture(
                 "handoff_complete": False,
                 "failed_step": failed_step,
                 "rollback_ok": rollback_ok,
+                "unrestored_destinations": unrestored,
                 "recovery_command": recovery_cmd,
             }
-            try:
-                _atomic_write_bytes(
-                    enr_path,
-                    (json.dumps(failed_meta, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-                    mode=0o600,
-                )
-            except OSError:
-                pass
+            failed_bytes = (json.dumps(failed_meta, indent=2, sort_keys=True) + "\n").encode(
+                "utf-8"
+            )
+            _restore_file_best_effort(enr_path, failed_bytes, mode=0o600)
+            detail = ", ".join(unrestored) or "reload/sync failed"
             state_note = (
                 "earlier enrollment writes rolled back cleanly"
                 if rollback_ok
-                else "automatic rollback incomplete"
+                else f"automatic rollback incomplete ({detail})"
             )
             return EnrollmentError(
                 f"late enrollment write failed at {failed_step}: {exc} "
                 f"({state_note}; recovery: {recovery_cmd})"
             )
 
-        for target, shim_bytes, orig_bytes, orig_mode in shim_writes:
+        for target, shim_bytes, orig_bytes, orig_mode, _bp in shim_writes:
             try:
-                _atomic_write_bytes(target, shim_bytes, mode=0o755)
-            except OSError as exc:
+                _atomic_write_bytes(
+                    target,
+                    shim_bytes,
+                    mode=0o755,
+                    before_replace=lambda t=target, ob=orig_bytes, om=orig_mode: (
+                        attempted_shims.append((t, ob, om))
+                    ),
+                )
+            except Exception as exc:
                 raise _rollback_late_writes(f"deploy/{target.name}", exc) from exc
-            written_shims.append((target, orig_bytes, orig_mode))
 
         if on_boundary is not None:
             on_boundary("before_unit_install")
 
         # 7) Re-verify control generation, then atomically install the managed unit and reload.
-        ctrl_mod.verify_control_generation(control_dir, expected_control_id=control_id)
-        unit_text = _render_managed_unit(
-            template_path=managed_dir / "sigint101.service",
-            host_python=host_python,
-            dispatcher_path=dispatcher_dest,
-            updater_root=root,
-        )
+        def _mark_unit_attempted() -> None:
+            nonlocal unit_attempted
+            unit_attempted = True
+
         try:
-            _atomic_write_bytes(unit_file, unit_text.encode("utf-8"), mode=0o644)
-            unit_replaced = True
+            ctrl_mod.verify_control_generation(control_dir, expected_control_id=control_id)
+            unit_text = _render_managed_unit(
+                template_path=managed_dir / "sigint101.service",
+                host_python=host_python,
+                dispatcher_path=dispatcher_dest,
+                updater_root=root,
+            )
+            _atomic_write_bytes(
+                unit_file,
+                unit_text.encode("utf-8"),
+                mode=0o644,
+                before_replace=_mark_unit_attempted,
+            )
             fsync_file(unit_file)
             if reload_systemd is not None:
                 reload_systemd()
-        except OSError as exc:
+        except Exception as exc:
             raise _rollback_late_writes("unit_install", exc) from exc
 
         if on_boundary is not None:
             on_boundary("after_unit_install_before_drain")
 
-        if drain_old_service is not None:
-            drain_old_service()
+        try:
+            if drain_old_service is not None:
+                drain_old_service()
+        except Exception as exc:
+            raise _rollback_late_writes("drain_old_service", exc) from exc
 
         # 8) F3: Publish durable completed hand-over record BEFORE enabling the managed wrapper.
         final_wrapper_state = (
@@ -926,11 +1287,22 @@ def enroll_legacy_fixture(
             "handoff_complete": True,
             "desktop_wrapper": completed_wrapper_record,
         }
-        _atomic_write_bytes(
-            enr_path,
-            (json.dumps(completed_meta, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-            mode=0o600,
-        )
+        completed_meta.pop("recovery_state_path", None)
+        try:
+            _atomic_write_bytes(
+                enr_path,
+                (json.dumps(completed_meta, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                mode=0o600,
+            )
+        except Exception as exc:
+            raise _rollback_late_writes("completed_record", exc) from exc
+
+        # Completed hand-over record is durable; clear enrollment recovery journal.
+        try:
+            recovery_path.unlink(missing_ok=True)
+            fsync_dir(root)
+        except OSError:
+            pass
 
         if on_boundary is not None:
             on_boundary("before_wrapper_activation")

@@ -13,6 +13,11 @@ import stat
 from pathlib import Path
 
 CONTROL_MANIFEST_FILENAME = "control_manifest.json"
+CONTROL_PKG_INIT_REL = "sigint101/__init__.py"
+CONTROL_PKG_INIT_BYTES = (
+    "# ABOUTME: Package marker for staged managed-control support modules.\n"
+    "# ABOUTME: Keeps control runtime imports isolated from course releases.\n"
+).encode("utf-8")
 CONTROL_FORMAT_VERSION = 1
 SELECTOR_FORMAT_VERSION = 1
 DISPATCHER_PROTOCOL_VERSION = 1
@@ -282,7 +287,27 @@ def verify_control_generation(
                 if rel == CONTROL_MANIFEST_FILENAME:
                     has_manifest = True
                     continue
-                if rel == "sigint101/__init__.py":
+                if rel == CONTROL_PKG_INIT_REL:
+                    rfd = os.open(name, fflags, dir_fd=fd)
+                    try:
+                        rst = os.fstat(rfd)
+                        if not stat.S_ISREG(rst.st_mode):
+                            raise ControlGenerationError(
+                                f"non-regular file in control generation: {rel}"
+                            )
+                        ichunks: list[bytes] = []
+                        while True:
+                            part = os.read(rfd, 65536)
+                            if not part:
+                                break
+                            ichunks.append(part)
+                        init_payload = b"".join(ichunks)
+                    finally:
+                        os.close(rfd)
+                    if init_payload != CONTROL_PKG_INIT_BYTES:
+                        raise ControlGenerationError(
+                            f"control package marker drifted from canonical bytes: {rel}"
+                        )
                     has_pkg_init = True
                     continue
                 if rel not in expected_files:
@@ -354,17 +379,10 @@ def stage_control_generation(
 
         # Minimal package marker so staged sigint101/ support modules import cleanly without
         # pulling the full course tree into the control generation.
-        pkg_init = tmp_dst / "sigint101" / "__init__.py"
+        pkg_init = tmp_dst / CONTROL_PKG_INIT_REL
         pkg_init.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         created_dirs.add(pkg_init.parent)
-        _write_exclusive_synced(
-            pkg_init,
-            (
-                "# ABOUTME: Package marker for staged managed-control support modules.\n"
-                "# ABOUTME: Keeps control runtime imports isolated from course releases.\n"
-            ).encode("utf-8"),
-            mode=0o600,
-        )
+        _write_exclusive_synced(pkg_init, CONTROL_PKG_INIT_BYTES, mode=0o600)
         created_files.append(pkg_init)
 
         for rel in CONTROL_ALLOWLIST:
