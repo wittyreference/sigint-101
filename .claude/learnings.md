@@ -4,6 +4,12 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-11-28: Provision keeps its loaded recipes after pulling the course
+**Finding.** A running provision script pulls the checkout before building decoders, but its
+build functions still come from the script that started the run.
+**How to apply.** A decoder needed on that same run can be provisioned by the updated kiosk
+installer. Update the server unit so the old script sees a difference and invokes that installer.
+
 ## 2026-11-27: xdist workers still share loopback ports
 **Finding.** Worker processes isolate module patches and pytest gives each worker a temporary
 directory. Closing a socket after selecting a port leaves the port available to other workers.

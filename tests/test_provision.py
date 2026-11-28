@@ -17,7 +17,7 @@ BASH = shutil.which("bash")
 # never enters the test PATH.
 CORE_UTILS = (
     "awk", "basename", "cat", "cmp", "cut", "dirname", "grep", "mkdir", "paste", "readlink", "rm",
-    "sort", "timeout",
+    "sha256sum", "sort", "timeout",
 )
 
 
@@ -88,6 +88,7 @@ class ProvisionBox:
               'exit 0')
         for tool in ("dump1090-fa", "acarsdec", "redsea", "rtl_ais"):
             _stub(self.bin / tool, 'exit 0')
+        _stub(self.bin / "rtl_ais-sigint101", 'echo sigint101-ais-udp-v1')
         _stub(self.bin / "getcap", 'echo "/usr/bin/tcpdump cap_net_admin,cap_net_raw=eip"')
         _stub(self.bin / "fc-list", 'echo "DejaVu Sans Mono"')
         _stub(self.bin / "vcgencmd", 'exit 0')
@@ -135,8 +136,8 @@ class ProvisionBox:
               'esac')
         return state
 
-    def run(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run([BASH, str(PROVISION), *args], env=self.env,
+    def run(self, *args: str, script=PROVISION) -> subprocess.CompletedProcess:
+        return subprocess.run([BASH, str(script), *args], env=self.env,
                               capture_output=True, text=True, timeout=30)
 
     def calls(self) -> str:
@@ -147,6 +148,135 @@ class ProvisionBox:
 def box(tmp_path):
     assert BASH, "bash is needed to run deploy/provision.sh"
     return ProvisionBox(tmp_path)
+
+
+@pytest.fixture
+def ais_install(box):
+    """Redirect only installation paths and replace build commands at their boundaries."""
+    course = box.home / "sigint-101"
+    deploy = course / "deploy"
+    stamp_dir = box.home / "build-stamps"
+    stock = box.bin / "rtl_ais"
+    companion = box.bin / "rtl_ais-sigint101"
+    companion.unlink()
+    stamp_dir.mkdir()
+    stock_stamp = stamp_dir / "rtl_ais"
+    stock_stamp.write_text(
+        "https://github.com/dgiardini/rtl-ais@d84764bd20d93de68d3275e4914f897adfb353cc\n",
+        encoding="utf-8",
+    )
+    text = PROVISION.read_text(encoding="utf-8").replace(
+        "/usr/local/share/sigint101/builds", str(stamp_dir),
+    ).replace("/usr/local/bin/rtl_ais-sigint101", str(companion))
+    script = deploy / "provision.sh"
+    script.write_text(text, encoding="utf-8")
+    patch = deploy / "patches" / "rtl-ais-companion.patch"
+    patch.parent.mkdir()
+    patch.write_text("patch revision one\n", encoding="utf-8")
+
+    _stub(box.bin / "nproc", "echo 2")
+    _stub(box.bin / "patch",
+          f'echo "patch $*" >> "{box.log}"\n'
+          '[[ "${FAIL_PATCH:-0}" != 1 ]]')
+    _stub(box.bin / "make",
+          f'echo "make $*" >> "{box.log}"\n'
+          '[[ "$*" != *install* ]] || exit 1\n'
+          f'printf "%s\\n" "#!{BASH}" "echo ${{CAPABILITY:-sigint101-ais-udp-v1}}" > rtl_ais\n'
+          'chmod +x rtl_ais')
+    for tool in ("bash", "chmod", "cp"):
+        (box.bin / tool).symlink_to(shutil.which(tool))
+    _stub(box.bin / "sudo",
+          f'echo "sudo $*" >> "{box.log}"\n'
+          'case "$1" in\n'
+          f'  tee) if [[ "$2" == "{stamp_dir}/"* ]]; then cat >"$2"; else cat >/dev/null; fi ;;\n'
+          f'  install) if [[ "${{@: -1}}" == "{companion}" ]]; then\n'
+          f'    cp rtl_ais "{companion}"; fi ;;\n'
+          '  make) exit 1 ;;\n'
+          'esac\n'
+          'exit 0')
+    _stub(course / ".venv/bin/python", f'echo "venv-python $*" >> "{box.log}"')
+    return script, patch, stock, stock_stamp, companion, stamp_dir / companion.name
+
+
+def test_provision_builds_and_checks_the_ais_companion(box, ais_install):
+    script, patch, stock, stock_stamp, companion, stamp = ais_install
+    original = (stock.read_bytes(), stock_stamp.read_bytes())
+    check = box.run("--check", script=script)
+    assert check.returncode == 0, check.stdout + check.stderr
+    assert "would  build rtl_ais-sigint101" in check.stdout
+    assert not companion.exists() and not stamp.exists()
+    assert "patch " not in box.calls()
+
+    apply = box.run(script=script)
+    assert apply.returncode == 0, apply.stdout + apply.stderr
+    assert "built rtl_ais-sigint101" in apply.stdout
+    assert "test_rtl_ais_native.py" in box.calls()
+    assert companion.is_file() and stamp.is_file()
+    assert (stock.read_bytes(), stock_stamp.read_bytes()) == original
+    assert "sudo make install" not in box.calls()
+    old_stamp = stamp.read_text(encoding="utf-8")
+
+    check = box.run("--check", script=script)
+    assert "would  build rtl_ais-sigint101" not in check.stdout
+    assert "rtl_ais-sigint101:" in check.stdout
+    assert box.run(script=script).returncode == 0
+    assert box.calls().count("patch ") == 1
+
+    patch.write_text("patch revision two\n", encoding="utf-8")
+    rebuilt = box.run(script=script)
+    assert rebuilt.returncode == 0, rebuilt.stdout + rebuilt.stderr
+    assert box.calls().count("patch ") == 2
+    assert stamp.read_text(encoding="utf-8") != old_stamp
+
+
+@pytest.mark.parametrize("failure", [{"FAIL_PATCH": "1"}, {"CAPABILITY": "wrong-version"}])
+def test_provision_ais_build_failure_does_not_stamp(box, ais_install, failure):
+    script, _, _, _, companion, stamp = ais_install
+    box.env.update(failure)
+    result = box.run(script=script)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not companion.exists() and not stamp.exists()
+
+
+def test_provision_refuses_an_incompatible_unmanaged_companion(box, ais_install):
+    script, _, _, _, companion, stamp = ais_install
+    _stub(companion, "echo wrong-version")
+    before = companion.read_bytes()
+    checked = box.run("--check", script=script)
+    assert "incompatible" in checked.stdout and "rtl_ais-sigint101" in checked.stdout
+    applied = box.run(script=script)
+    assert applied.returncode != 0 and "rtl_ais-sigint101" in applied.stderr
+    assert companion.read_bytes() == before and not stamp.exists()
+    assert "patch " not in box.calls()
+
+
+def test_existing_provision_run_installs_companion_after_fast_forward(box, ais_install):
+    script, _, _, _, companion, stamp = ais_install
+    deploy = script.parent
+    legacy = box.home / "provision-before-update.sh"
+    legacy.write_text(script.read_text(encoding="utf-8").replace(
+        "\n  ensure_ais_companion\n", "\n"), encoding="utf-8")
+    # The legacy process keeps its parsed build recipes, then invokes install.sh
+    # from the updated checkout because its installed server unit differs.
+    install = deploy / "install.sh"
+    updated = deploy / "install-after-update.sh"
+    shutil.copyfile(PROVISION.with_name("install.sh"), updated)
+    updated.chmod(0o755)
+    for folder in ("desktop", "kiosk"):
+        (deploy / folder).mkdir()
+    (deploy / "desktop/apply-theme.sh").write_text("exit 0\n", encoding="utf-8")
+    _stub(box.bin / "install", "exit 0")
+    git = box.bin / "git"
+    original_git = git.read_text(encoding="utf-8")
+    git.write_text(original_git.replace('case "$*" in\n',
+        'case "$*" in\n'
+        f'  *"pull --ff-only"*) cp "{updated}" "{install}"; chmod +x "{install}" ;;\n'
+        '  *"ls-remote"*) printf "updated\\trefs/heads/main\\n" ;;\n', 1), encoding="utf-8")
+    result = box.run(script=legacy)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "pull --ff-only" in box.calls()
+    assert "built rtl_ais-sigint101" in result.stdout
+    assert companion.is_file() and stamp.is_file()
 
 
 def _node_section(stdout: str) -> list[str]:

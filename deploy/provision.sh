@@ -26,6 +26,7 @@ COURSE_DIR="$HOME/sigint-101"
 COURSE_BRANCH="main"
 SRC_DIR="$HOME/.cache/sigint101-src"
 STAMP_DIR="/usr/local/share/sigint101/builds"
+PROVISION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK=0
 OPTIONAL=0
 FLOCK_ADAPTER=0
@@ -373,6 +374,58 @@ recipe_rtl_ais() {
   sudo make install PREFIX=/usr/local
 }
 
+ais_companion_capable() {
+  local reply
+  reply="$(timeout -k 1 2 "$1" --sigint101-capability </dev/null 2>/dev/null)" &&
+    [ "$reply" = "sigint101-ais-udp-v1" ]
+}
+
+ensure_ais_companion() {
+  local name="rtl_ais-sigint101" target="/usr/local/bin/rtl_ais-sigint101"
+  local patch_file="$PROVISION_DIR/patches/rtl-ais-companion.patch"
+  local stamp="$STAMP_DIR/$name" have digest revision
+  have="$(command -v "$name" || true)"
+  if [ -z "$have" ] && { [ -e "$target" ] || [ -L "$target" ]; }; then
+    have="$target"
+  fi
+  if [ -n "$have" ] && { [ ! -f "$stamp" ] || [ "$have" != "$target" ] || [ -L "$target" ]; }; then
+    if ais_companion_capable "$have"; then
+      ok "$name: $have (unmanaged, compatible; left as is)"
+      return 0
+    fi
+    local reason="$name: incompatible unmanaged executable at $have; move it aside and rerun deploy/provision.sh"
+    if [ "$CHECK" = 1 ]; then
+      warn "$reason"
+      return 0
+    fi
+    die "$reason"
+  fi
+  digest="$(sha256sum "$patch_file")"
+  revision="$RTL_AIS_REPO@$RTL_AIS_PIN+${digest%% *}"
+  if [ -n "$have" ] && [ "$(cat "$stamp")" = "$revision" ] && ais_companion_capable "$have"; then
+    ok "$name: $have @ ${RTL_AIS_PIN:0:10}, patch ${digest:0:12}"
+    return 0
+  fi
+  if [ "$CHECK" = 1 ]; then
+    would "build $name @ ${RTL_AIS_PIN:0:10}, patch ${digest:0:12} (missing, outdated or incompatible)"
+    return 0
+  fi
+  fetch_source "$name" "$RTL_AIS_REPO" "$RTL_AIS_PIN"
+  (
+    cd "$SRC_DIR/$name"
+    patch --batch --forward -p1 -i "$patch_file"
+    SIGINT101_RTL_AIS_SOURCE="$PWD" "$COURSE_DIR/.venv/bin/python" -m pytest -q \
+      -o cache_dir="$SRC_DIR/$name/.pytest_cache" "$PROVISION_DIR/../tests/test_rtl_ais_native.py"
+    make -j"$(nproc)"
+    ais_companion_capable ./rtl_ais || die "$name build failed its capability query"
+    sudo install -m 0755 rtl_ais "$target"
+  )
+  ais_companion_capable "$target" || die "$name installation failed its capability query"
+  sudo mkdir -p "$STAMP_DIR"
+  printf '%s\n' "$revision" | sudo tee "$stamp" >/dev/null
+  did "built $name @ ${RTL_AIS_PIN:0:10}, patch ${digest:0:12}"
+}
+
 recipe_mbelib() {
   cmake -B build
   make -C build -j"$(nproc)"
@@ -412,6 +465,7 @@ step_builds() {
   ensure_build acarsdec acarsdec "$ACARSDEC_REPO" "$ACARSDEC_PIN" recipe_acarsdec
   ensure_build redsea redsea "$REDSEA_REPO" "$REDSEA_PIN" recipe_redsea
   ensure_build rtl_ais rtl_ais "$RTL_AIS_REPO" "$RTL_AIS_PIN" recipe_rtl_ais
+  ensure_ais_companion
 }
 
 step_optional_builds() {
@@ -761,4 +815,6 @@ main() {
   fi
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

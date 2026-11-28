@@ -1,0 +1,384 @@
+--- a/main.c
++++ b/main.c
+@@ -27,6 +27,9 @@
+ #include "rtl_ais.h"
+ #include "aisdecoder/aisdecoder.h"
+ 
++#define SIGINT101_MODE "--sigint101-udp-stdout"
++#define SIGINT101_CAPABILITY "--sigint101-capability"
++
+ void usage(void)
+ {
+ 	fprintf(stderr,
+@@ -60,6 +63,8 @@
+ 		"\t[-n log NMEA sentences to console (stderr) (default off)]\n"
+ 		"\t[-I add sample index to NMEA messages (default off)]\n"
+ 		"\t[-L log sound levels to console (stderr) (default off)]\n\n"
++		"\t[" SIGINT101_MODE " use a connected UDP socket inherited on stdout; first argument]\n"
++		"\t[" SIGINT101_CAPABILITY " print the companion protocol version and exit]\n"
+ 		"\t[-S seconds_for_decoder_stats (default 0=off)]\n\n"
+ 		"\tWhen the built-in AIS decoder is disabled the samples are sent to\n"
+ 		"\tto [outputfile] (a '-' dumps samples to stdout)\n"
+@@ -75,16 +80,32 @@
+ 	exit(1);
+ }
+ 
+-static volatile int do_exit = 0;
++static volatile sig_atomic_t do_exit = 0;
+ static void sighandler(int signum)
+ {
+         signum = signum;
+-	fprintf(stderr, "Signal caught, exiting!\n");
+ 	do_exit = 1;
+ }
+ 
+ int main(int argc, char **argv)
+ {
++	for (int i = 1; i < argc; i++) {
++		if (strcmp(argv[i], SIGINT101_CAPABILITY) == 0) {
++			puts("sigint101-ais-udp-v1");
++			return 0;
++		}
++	}
++
++	int private_output = argc > 1 && strcmp(argv[1], SIGINT101_MODE) == 0;
++	const char *device_arg = NULL;
++	if (private_output) {
++		if (!aisdecoder_use_udp_stdout()) {
++			fprintf(stderr, "%s requires a connected IPv4 loopback UDP socket on stdout\n",
++				SIGINT101_MODE);
++			return 2;
++		}
++		optind = 2;
++	}
+ #ifndef WIN32
+ 	struct sigaction sigact;
+ 
+@@ -109,6 +130,10 @@
+         
+ 	while ((opt = getopt(argc, argv, "l:r:s:o:EODd:g:p:RATIt:P:h:nLS:U:?")) != -1)
+ 	{
++		if (private_output && strchr("ATtPhU", opt)) {
++			fprintf(stderr, "%s conflicts with -%c\n", SIGINT101_MODE, opt);
++			return 2;
++		}
+ 		switch (opt) {
+ 		case 'l':
+                         config.left_freq = (int)atofs(optarg);
+@@ -132,8 +157,12 @@
+ 			config.oversample = !config.oversample;
+ 			break;
+ 		case 'd':
+-			config.dev_index = verbose_device_search(optarg);
+-			config.dev_given = 1;
++			if (private_output) {
++				device_arg = optarg;
++			} else {
++				config.dev_index = verbose_device_search(optarg);
++				config.dev_given = 1;
++			}
+ 			break;
+ 		case 'g':
+ 			config.gain = (int)(atof(optarg) * 10);
+@@ -183,6 +212,15 @@
+ 		}
+ 	}
+ 
++	if (private_output && argc > optind) {
++		fprintf(stderr, "%s conflicts with an output file\n", SIGINT101_MODE);
++		return 2;
++	}
++	if (device_arg) {
++		config.dev_index = verbose_device_search(device_arg);
++		config.dev_given = 1;
++	}
++
+ 	if (argc <= optind) {
+ 		config.filename = "-";
+ 	} else {
+@@ -222,7 +260,7 @@
+ 	  commented out. If the -n parameter is used the messages are printed from 
+ 	  nmea_sentence_received() in aidecoder.c 
+ 	  */
+-	while(!do_exit && rtl_ais_isactive(ctx)) {
++	while(!do_exit && !aisdecoder_udp_failed() && rtl_ais_isactive(ctx)) {
+ 	#if _POSIX_C_SOURCE >= 199309L // nanosleep available()
+ 		struct timespec five = { 0, 50 * 1000 * 1000};
+ 	#endif
+@@ -241,6 +279,8 @@
+ 		usleep(50000);
+ 	#endif
+         }
++        if (do_exit)
++                fprintf(stderr, "Signal caught, exiting!\n");
+         rtl_ais_cleanup(ctx);
+-        return 0;
++        return aisdecoder_udp_failed() ? 1 : 0;
+ }
+--- a/rtl_ais.c
++++ b/rtl_ais.c
+@@ -33,6 +33,8 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <math.h>
++#include <stdatomic.h>
++#include <unistd.h>
+ #ifdef WIN32
+ 	#include <fcntl.h>
+ #endif
+@@ -49,10 +51,6 @@
+ #define DEFAULT_BUF_LENGTH		(16 * 16384)
+ #define AUTO_GAIN			-100
+ 
+-/* signals are not threadsafe by default */
+-#define safe_cond_signal(n, m) pthread_mutex_lock(m); pthread_cond_signal(n); pthread_mutex_unlock(m)
+-#define safe_cond_wait(n, m) pthread_mutex_lock(m); pthread_cond_wait(n, m); pthread_mutex_unlock(m)
+-
+ struct downsample_state
+ {
+ 	int16_t  *buf;
+@@ -326,7 +324,8 @@
+ 
+ struct rtl_ais_context
+ {
+-        int active, dc_filter, use_internal_aisdecoder;
++        atomic_int active;
++        int dc_filter, use_internal_aisdecoder, samples_ready;
+ 
+         pthread_t demod_thread;
+         pthread_t rtlsdr_thread;
+@@ -359,7 +358,10 @@
+ 		ctx->both.buf[i] = ((int16_t)buf[i]) - 127;
+ 
+ 	pthread_rwlock_unlock(&ctx->both.rw);
+-	safe_cond_signal(&ctx->ready, &ctx->ready_m);
++	pthread_mutex_lock(&ctx->ready_m);
++	ctx->samples_ready = 1;
++	pthread_cond_signal(&ctx->ready);
++	pthread_mutex_unlock(&ctx->ready_m);
+ }
+ 
+ static void *rtlsdr_thread_fn(void *arg)
+@@ -385,8 +387,15 @@
+ static void *demod_thread_fn(void *arg)
+ {
+         struct rtl_ais_context *ctx = arg;
+-        while (ctx->active) {
+-                safe_cond_wait(&ctx->ready, &ctx->ready_m);
++        for (;;) {
++                pthread_mutex_lock(&ctx->ready_m);
++                while (ctx->active && !ctx->samples_ready)
++                        pthread_cond_wait(&ctx->ready, &ctx->ready_m);
++                int active = ctx->active;
++                ctx->samples_ready = 0;
++                pthread_mutex_unlock(&ctx->ready_m);
++                if (!active)
++                        break;
+                 pthread_rwlock_wrlock(&ctx->both.rw);
+ 		downsample(&ctx->both);
+ 		memcpy(ctx->left.buf,  ctx->both.buf, 2*ctx->both.len_out);
+@@ -422,7 +431,6 @@
+ 		}
+ 	}
+ 
+-        free_ais_decoder();
+ 	return 0;
+ }
+ 
+@@ -491,7 +499,9 @@
+ 		return NULL;
+ 
+         struct rtl_ais_context *ctx = malloc(sizeof(struct rtl_ais_context));
+-        ctx->active = 1;
++        atomic_init(&ctx->active, 1);
++        ctx->file = NULL;
++        ctx->samples_ready = 0;
+ 
+         /* precompute rates */
+         int dongle_freq, dongle_rate, delta, i;
+@@ -635,8 +645,11 @@
+ 	pthread_mutex_init(&ctx->ready_m, NULL);
+ 
+         /* create two threads */
+-	pthread_create(&ctx->demod_thread, NULL, demod_thread_fn, ctx);
+-        pthread_create(&ctx->rtlsdr_thread, NULL, rtlsdr_thread_fn, ctx);
++	if (pthread_create(&ctx->demod_thread, NULL, demod_thread_fn, ctx) ||
++	    pthread_create(&ctx->rtlsdr_thread, NULL, rtlsdr_thread_fn, ctx)) {
++		fprintf(stderr, "Cannot start RTL-SDR worker threads\n");
++		exit(1);
++	}
+ 
+         return ctx;
+ }
+@@ -654,19 +667,19 @@
+ 
+ void rtl_ais_cleanup(struct rtl_ais_context *ctx)
+ {
+-	rtlsdr_cancel_async(ctx->dev);
+-        ctx->active = 0;
+-
+-        pthread_detach(ctx->demod_thread);
+-        pthread_detach(ctx->rtlsdr_thread);
+-
+-	if (ctx->file != stdout) {
+-		if(ctx->file)
+-			fclose(ctx->file);
+-	}
+-
+-	rtlsdr_cancel_async(ctx->dev);
+-	safe_cond_signal(&ctx->ready, &ctx->ready_m);
++	/* Cancellation can precede rtlsdr_read_async during an immediate stop. */
++	while (ctx->active && rtlsdr_cancel_async(ctx->dev) != 0)
++		usleep(1000);
++	pthread_join(ctx->rtlsdr_thread, NULL);
++	pthread_mutex_lock(&ctx->ready_m);
++	pthread_cond_signal(&ctx->ready);
++	pthread_mutex_unlock(&ctx->ready_m);
++	pthread_join(ctx->demod_thread, NULL);
++
++	if (ctx->use_internal_aisdecoder)
++		free_ais_decoder();
++	if (ctx->file && ctx->file != stdout)
++		fclose(ctx->file);
+ 	pthread_cond_destroy(&ctx->ready);
+ 	pthread_mutex_destroy(&ctx->ready_m);
+ 
+--- a/aisdecoder/aisdecoder.c
++++ b/aisdecoder/aisdecoder.c
+@@ -18,6 +18,7 @@
+ #include <netdb.h>
+ #include <sys/socket.h>
+ #include <netinet/in.h>
++#include <unistd.h>
+ #else
+ // Horrible hack for compiling freeaddrinfo() and getaddrinfo() with MSys, fix this please
+ #define WIN32_VER_TMP _WIN32_WINNT
+@@ -35,6 +36,7 @@
+ #include <errno.h>
+ #include <stdio.h>
+ #include <pthread.h>
++#include <stdatomic.h>
+ //#include "config.h"
+ #include "sounddecoder.h"
+ #include "lib/callbacks.h"
+@@ -51,6 +53,8 @@
+ static int debug_nmea;
+ static int sock;
+ static int use_tcp = 0;
++static int udp_stdout = 0;
++static atomic_int udp_failed;
+ 
+ static struct addrinfo* addr=NULL;
+ 
+@@ -118,6 +122,46 @@
+ int send_nmea( const char *sentence, unsigned int length);
+ int isBroadcastAddress(const char *ipAddress);
+ 
++#ifndef WIN32
++static int loopback_endpoint(const struct sockaddr_in *addr, socklen_t length)
++{
++    return length == sizeof(*addr) && addr->sin_family == AF_INET &&
++           addr->sin_port != 0 && addr->sin_addr.s_addr == htonl(INADDR_LOOPBACK);
++}
++#endif
++
++int aisdecoder_use_udp_stdout(void)
++{
++#ifndef WIN32
++    int fd = STDOUT_FILENO;
++    int value;
++    socklen_t length = sizeof(value);
++    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &value, &length) || value != SOCK_DGRAM)
++        return 0;
++#ifdef SO_PROTOCOL
++    length = sizeof(value);
++    if (getsockopt(fd, SOL_SOCKET, SO_PROTOCOL, &value, &length) || value != IPPROTO_UDP)
++        return 0;
++#endif
++    struct sockaddr_in endpoint;
++    length = sizeof(endpoint);
++    if (getsockname(fd, (struct sockaddr *)&endpoint, &length) ||
++        !loopback_endpoint(&endpoint, length))
++        return 0;
++    length = sizeof(endpoint);
++    if (getpeername(fd, (struct sockaddr *)&endpoint, &length) ||
++        !loopback_endpoint(&endpoint, length))
++        return 0;
++    udp_stdout = 1;
++#endif
++    return udp_stdout;
++}
++
++int aisdecoder_udp_failed(void)
++{
++    return atomic_load(&udp_failed);
++}
++
+ // address is resolved later, in init_ais_decoder()
+ int aisdecoder_add_udp_destination(const char *hostport) {
+ 	const char *c = strrchr(hostport, ':');
+@@ -167,13 +211,28 @@
+ 				fprintf(stderr,"Error sending UDP packet with NMEA message (buffer_count=%d):%s\n",buffer_count, strerror(errno));
+ 				abort();
+ 			}
+-            if (debug_nmea) fprintf(stderr, "%s", buffer);
++            if (debug_nmea) fprintf(stderr, "%.*s", (int)buffer_count, buffer);
+             buffer_count=0;
+         };
+     }
+ }
+ 
+ int send_nmea( const char *sentence, unsigned int length) {
++#ifndef WIN32
++	if (udp_stdout) {
++		/* The receiver can close first during handoff, leaving an ICMP error
++		 * on this connected socket. A dropped packet does not stop the radio. */
++		if (!aisdecoder_udp_failed() &&
++		    send(STDOUT_FILENO, sentence, length, MSG_DONTWAIT | MSG_NOSIGNAL) < 0) {
++			int error = errno;
++			if (error == EBADF || error == ENOTSOCK || error == EPIPE) {
++				fprintf(stderr, "AIS output socket failed: %s\n", strerror(error));
++				atomic_store(&udp_failed, 1);
++			}
++		}
++		return 0;
++	}
++#endif
+ 	if( use_tcp) {
+ 		return add_nmea_ais_message(sentence, length);
+ 	}
+@@ -196,12 +255,13 @@
+ 		fprintf(stderr,"Log NMEA sentences to console ON\n");
+ 	else
+ 		fprintf(stderr,"Log NMEA sentences to console OFF\n");
+-	if( !use_tcp_listener) {
++	/* In private output mode the console already connected the inherited socket. */
++	if (!udp_stdout && !use_tcp_listener) {
+ 		if (host && port && !initSocket(host, port)) {
+ 			return EXIT_FAILURE;
+ 		}
+ 	}
+-	else {
++	else if (use_tcp_listener) {
+ 		if (!initTcpSocket(port, debug_nmea, tcp_keep_ais_time)) {
+ 			return EXIT_FAILURE;
+ 		}
+@@ -250,7 +310,7 @@
+     }
+     
+     freeSoundDecoder();
+-    freeaddrinfo(addr);
++    if (addr) freeaddrinfo(addr);
+     {
+         int i;
+         for (i = 0; i < n_extra; i++) {
+--- a/aisdecoder/aisdecoder.h
++++ b/aisdecoder/aisdecoder.h
+@@ -5,5 +5,6 @@
+ void run_rtlais_decoder(short * buff, int len);
+ const char *aisdecoder_next_message();
+ int free_ais_decoder(void);
++int aisdecoder_use_udp_stdout(void);
++int aisdecoder_udp_failed(void);
+ #endif
+-
