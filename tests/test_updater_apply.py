@@ -996,7 +996,7 @@ def test_public_only_start_failure_aborts_to_exact_prior_pair_and_handles_crash_
     class _AbortCrash(RuntimeError):
         pass
 
-    with pytest.raises(_AbortCrash):
+    with pytest.raises(AbortError, match="console not ready.*--recover") as crash_exc:
         abort_unserved(
             root=root,
             operation_id=failed_op,
@@ -1004,10 +1004,12 @@ def test_public_only_start_failure_aborts_to_exact_prior_pair_and_handles_crash_
             home=fx["home"],
             kiosk_process_lister=lambda: [],
             bench_marker_checker=fx["bench_check"],
+            ready_timeout_s=0.2,
             on_boundary=lambda s: (_ for _ in ()).throw(_AbortCrash())
             if s == "after_abort_selector_tmp_fsync"
             else None,
         )
+    assert isinstance(crash_exc.value.__cause__, _AbortCrash)
     cur_after_crash = json.loads((root / "current.json").read_text(encoding="utf-8"))
     assert cur_after_crash["operation_id"] == failed_op
 

@@ -1777,10 +1777,16 @@ def test_saved_state_validates_stamps_retrieval_challenges_and_challenge_passes(
     assert "replays_seen references unknown instrument 'bogus_replay_inst'" in joined
 
 
-def test_trial_socket_peer_pid_check_rejects_mismatched_pid_and_accepts_match(tmp_path):
+def test_trial_socket_peer_pid_check_rejects_mismatched_pid_and_accepts_match():
+    import shutil
+    import tempfile
+
     from sigint101.trial import http_get_unix
 
-    sock_path = tmp_path / "peer.sock"
+    # R2-4: bind peer.sock in a short private directory so long pytest basetemp never hits 108B max.
+    sock_dir = Path(tempfile.mkdtemp(prefix="s101-", dir="/tmp"))
+    os.chmod(sock_dir, 0o700)
+    sock_path = sock_dir / "peer.sock"
     server_code = (
         "import os, socket\n"
         f"p = {str(sock_path)!r}\n"
@@ -1820,6 +1826,7 @@ def test_trial_socket_peer_pid_check_rejects_mismatched_pid_and_accepts_match(tm
         proc.wait(timeout=5)
         proc.stdout.close()
         proc.stderr.close()
+        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 def test_trial_uses_no_user_site_s_flag_and_filters_child_environment(tmp_path, monkeypatch):

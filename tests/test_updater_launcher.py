@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -416,10 +417,10 @@ def test_installed_unit_blocks_every_start_during_the_copy(tmp_path, sealed_host
     _make_stub_bin(stub_bin / "chromium", f'echo "chromium $*" >> "{managed_log}"')
 
     desk_home = tmp_path / "desk_home"
-    desk_rt = tmp_path / "desk_rt"
     desk_home.mkdir()
-    desk_rt.mkdir()
-    # Create a Unix socket placeholder for WAYLAND_DISPLAY so watch() enters its loop.
+    # R2-4: place Unix socket in a short private directory so long tmp_path never hits AF_UNIX max.
+    desk_rt = Path(tempfile.mkdtemp(prefix="s101-", dir="/tmp"))
+    os.chmod(desk_rt, 0o700)
     wayland_sock = desk_rt / "wayland-0"
     ws = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     ws.bind(str(wayland_sock))
@@ -473,7 +474,7 @@ def test_installed_unit_blocks_every_start_during_the_copy(tmp_path, sealed_host
             assert not served_marker.exists()
     finally:
         ws.close()
-        wayland_sock.unlink()
+        shutil.rmtree(desk_rt, ignore_errors=True)
 
     # After releasing the mutation gate, the real managed launcher starts, writes/fsyncs the
     # serving marker BEFORE listening, holds writer.lock, and serves /api/hardware HTTP 200!
@@ -1187,11 +1188,20 @@ def test_locks_process_and_runtime_edge_paths(tmp_path):
     with pytest.raises(RuntimeCompatibilityError, match="editable"):
         stage_sealed_runtime(ed_dir, tmp_path / "rt_ed", runtime_id="rt-ed", python_abi=abi)
 
+    # R2-1: .pth files are skipped when staging (-I -S never runs them) and recorded in manifest;
+    # any .pth file planted inside an already-staged runtime is still refused on verify.
     pth_dir = tmp_path / "pth_exec"
     pth_dir.mkdir()
+    (pth_dir / "ok_mod.py").write_text("X = 1\n", encoding="utf-8")
     (pth_dir / "evil.pth").write_text("import os\n", encoding="utf-8")
-    with pytest.raises(RuntimeCompatibilityError, match="executable .pth"):
-        stage_sealed_runtime(pth_dir, tmp_path / "rt_pth", runtime_id="rt-pth", python_abi=abi)
+    pth_rt = tmp_path / "rt_pth"
+    pth_manifest = stage_sealed_runtime(pth_dir, pth_rt, runtime_id="rt-pth", python_abi=abi)
+    assert pth_manifest["skipped_pth_files"] == ["evil.pth"]
+    assert not (pth_rt / "site-packages" / "evil.pth").exists()
+    os.chmod(pth_rt / "site-packages", 0o700)
+    (pth_rt / "site-packages" / "planted.pth").write_text("import os\n", encoding="utf-8")
+    with pytest.raises(RuntimeCompatibilityError, match=r"\.pth"):
+        verify_runtime_compatibility(pth_rt, current_abi=abi, verify_files=True)
 
 
 # --- Round 2 PR 3 build-review regression tests (F1-F13) ---------------------------------------

@@ -933,14 +933,23 @@ def abort_unserved(
                 raise
 
     if restart_needed and saved_exc is not None:
+        restarted_ready = False
         try:
             start_unit_with_reset(reset_failed=service.reset_failed, start_unit=service.start)
             if selector_for_restart is not None:
-                _wait_live_ready(
+                restarted_ready = _wait_live_ready(
                     resolved_root, selector_for_restart, service, timeout_s=ready_timeout_s
                 )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as restart_exc:  # noqa: BLE001
+            raise AbortError(
+                f"{saved_exc} (restart of selected pair after refusal failed: {restart_exc}; "
+                "console not ready; run sigint101-updater --recover)"
+            ) from saved_exc
+        if not restarted_ready:
+            raise AbortError(
+                f"{saved_exc} (selected pair restarted after refusal but console not ready; "
+                "run sigint101-updater --recover)"
+            ) from saved_exc
         raise saved_exc
 
     # 3) Locks released! Reset failed state, start restored prior pair, and await readiness.

@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import platform
+import secrets
+import shutil
 import stat
 import subprocess
 import sys
@@ -85,6 +87,38 @@ def _check_so_abi_tag(rel_path: str, expected_soabi: str) -> None:
             )
 
 
+def _check_pth_not_checkout_leak(
+    rel_path: str,
+    payload: bytes,
+    *,
+    source_root: Path,
+    forbidden_checkout_root: Path | None,
+) -> None:
+    """Verify a skipped .pth file does not point back into the legacy checkout (R2-1)."""
+    if forbidden_checkout_root is None:
+        return
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeCompatibilityError(f"unreadable .pth file: {rel_path}") from exc
+    resolved_checkout = forbidden_checkout_root.resolve()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if (
+            not line
+            or line.startswith("#")
+            or line.startswith("import ")
+            or line.startswith("import\t")
+        ):
+            continue
+        p = Path(line)
+        candidate = p.resolve() if p.is_absolute() else (source_root / p).resolve()
+        if candidate.is_relative_to(resolved_checkout):
+            raise RuntimeCompatibilityError(
+                f".pth resolves back into legacy checkout ({rel_path}): {line}"
+            )
+
+
 def _check_not_editable(
     rel_path: str,
     payload: bytes,
@@ -108,30 +142,34 @@ def _check_not_editable(
                     f"editable direct_url.json install refused in sealed runtime: {rel_path}"
                 )
     if name.endswith(".pth"):
-        try:
-            text = payload.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise RuntimeCompatibilityError(f"unreadable .pth file: {rel_path}") from exc
-        resolved_checkout = (
-            forbidden_checkout_root.resolve() if forbidden_checkout_root is not None else None
+        raise RuntimeCompatibilityError(
+            f"unexpected .pth file in sealed runtime: {rel_path}"
         )
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("import ") or line.startswith("import\t"):
-                raise RuntimeCompatibilityError(
-                    f"executable .pth hook refused in sealed runtime: {rel_path}"
-                )
-            p = Path(line)
-            if p.is_absolute() or ".." in p.parts:
-                raise RuntimeCompatibilityError(
-                    f"editable or external path in .pth refused ({rel_path}): {line}"
-                )
-            if resolved_checkout is not None and p.resolve().is_relative_to(resolved_checkout):
-                raise RuntimeCompatibilityError(
-                    f".pth resolves back into legacy checkout ({rel_path}): {line}"
-                )
+
+
+def _remove_staging_tree(path: Path) -> None:
+    """Remove an incomplete staging directory, resetting read-only permissions first."""
+    if not path.exists() and not path.is_symlink():
+        return
+    for cur, dirs, files in os.walk(path, topdown=True, followlinks=False):
+        cp = Path(cur)
+        try:
+            os.chmod(cp, 0o700)
+        except OSError:
+            pass
+        for d in dirs:
+            try:
+                os.chmod(cp / d, 0o700)
+            except OSError:
+                pass
+        for f in files:
+            fp = cp / f
+            if not fp.is_symlink():
+                try:
+                    os.chmod(fp, 0o600)
+                except OSError:
+                    pass
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _hash_manifest_files(files: dict[str, dict]) -> str:
@@ -148,7 +186,7 @@ def stage_sealed_runtime(
     forbidden_checkout_root: str | Path | None = None,
     mount_id_reader: MountIdReader | None = None,
 ) -> dict:
-    """Copy site-packages into an exclusive read-only runtime snapshot, excluding bytecode."""
+    """Atomically copy site-packages into a read-only runtime snapshot, skipping bytecode/.pth."""
     if not runtime_id or "/" in runtime_id or runtime_id in (".", ".."):
         raise ValueError(f"invalid runtime_id: {runtime_id!r}")
     src_sp = Path(source_site_packages)
@@ -168,16 +206,19 @@ def stage_sealed_runtime(
         raise RuntimeCompatibilityError(f"cannot open source site-packages: {exc}") from exc
 
     files_inventory: dict[str, dict] = {}
+    skipped_pth_files: list[str] = []
     created_dirs: list[Path] = []
     created_files: list[Path] = []
-    dst_sp = dst_rt / "site-packages"
+    tmp_rt: Path | None = None
 
     try:
         src_mnt = reader(src_root_fd, ".")
         dst_rt.parent.mkdir(parents=True, exist_ok=True)
-        os.mkdir(dst_rt, 0o700)
-        os.mkdir(dst_sp, 0o700)
-        created_dirs.extend([dst_rt, dst_sp])
+        tmp_rt = dst_rt.parent / f".{dst_rt.name}.staging.{os.getpid()}.{secrets.token_hex(4)}"
+        tmp_sp = tmp_rt / "site-packages"
+        os.mkdir(tmp_rt, 0o700)
+        os.mkdir(tmp_sp, 0o700)
+        created_dirs.extend([tmp_rt, tmp_sp])
 
         def copy_dir(src_fd: int, dst_dir: Path, prefix: str) -> None:
             for name in sorted(os.listdir(src_fd)):
@@ -229,6 +270,19 @@ def stage_sealed_runtime(
                     finally:
                         os.close(in_fd)
 
+                    # R2-1: sealed runtimes run under -I -S (site never runs .pth files).
+                    # Skip .pth files after checking they do not point back into the checkout,
+                    # and record each skipped filename in runtime.json and enrollment.json.
+                    if name.endswith(".pth"):
+                        _check_pth_not_checkout_leak(
+                            rel,
+                            payload,
+                            source_root=src_sp,
+                            forbidden_checkout_root=forbidden,
+                        )
+                        skipped_pth_files.append(rel)
+                        continue
+
                     _check_so_abi_tag(rel, str(abi["soabi"]))
                     _check_not_editable(rel, payload, forbidden_checkout_root=forbidden)
                     out_path = dst_dir / name
@@ -258,38 +312,48 @@ def stage_sealed_runtime(
                         f"non-regular file refused in site-packages: {rel}"
                     )
 
-        copy_dir(src_root_fd, dst_sp, "")
+        copy_dir(src_root_fd, tmp_sp, "")
+
+        manifest = {
+            "format_version": RUNTIME_FORMAT_VERSION,
+            "runtime_id": runtime_id,
+            "python_major_minor": str(abi["major_minor"]),
+            "soabi": str(abi["soabi"]),
+            "implementation": str(abi.get("implementation", "cpython")),
+            "platform_machine": str(abi.get("platform_machine", platform.machine())),
+            "manifest_digest": _hash_manifest_files(files_inventory),
+            "skipped_pth_files": sorted(skipped_pth_files),
+            "files": files_inventory,
+        }
+        manifest_path = tmp_rt / RUNTIME_MANIFEST_FILENAME
+        manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        m_flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        )
+        m_fd = os.open(os.fspath(manifest_path), m_flags, 0o600)
+        try:
+            os.write(m_fd, manifest_bytes)
+            os.fsync(m_fd)
+        finally:
+            os.close(m_fd)
+        created_files.append(manifest_path)
+
+        # Seal read-only (0444 files, 0555 directories) and fsync bottom-up before atomic rename.
+        for fpath in created_files:
+            os.chmod(fpath, 0o444)
+        for dpath in sorted(created_dirs, key=lambda p: len(p.parts), reverse=True):
+            fsync_dir(dpath)
+            os.chmod(dpath, 0o555)
+
+        os.rename(tmp_rt, dst_rt)
+        tmp_rt = None
+        fsync_dir(dst_rt.parent)
+    except BaseException:
+        if tmp_rt is not None:
+            _remove_staging_tree(tmp_rt)
+        raise
     finally:
         os.close(src_root_fd)
-
-    manifest = {
-        "format_version": RUNTIME_FORMAT_VERSION,
-        "runtime_id": runtime_id,
-        "python_major_minor": str(abi["major_minor"]),
-        "soabi": str(abi["soabi"]),
-        "implementation": str(abi.get("implementation", "cpython")),
-        "platform_machine": str(abi.get("platform_machine", platform.machine())),
-        "manifest_digest": _hash_manifest_files(files_inventory),
-        "files": files_inventory,
-    }
-    manifest_path = dst_rt / RUNTIME_MANIFEST_FILENAME
-    manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    m_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    m_fd = os.open(os.fspath(manifest_path), m_flags, 0o600)
-    try:
-        os.write(m_fd, manifest_bytes)
-        os.fsync(m_fd)
-    finally:
-        os.close(m_fd)
-    created_files.append(manifest_path)
-
-    # Seal read-only (0444 files, 0555 directories) and fsync bottom-up.
-    for fpath in created_files:
-        os.chmod(fpath, 0o444)
-    for dpath in sorted(created_dirs, key=lambda p: len(p.parts), reverse=True):
-        fsync_dir(dpath)
-        os.chmod(dpath, 0o555)
-    fsync_dir(dst_rt.parent)
 
     return manifest
 
