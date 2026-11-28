@@ -99,6 +99,9 @@ Exit the course and open **Terminal** from the desktop menu, or SSH in. The cour
 `~/sigint-101`.
 
 ## Updating
+Fit the antenna before provisioning a kit because the firmware may transmit briefly when the
+region is first set.
+
 Connect the box to a network first, then run:
 
 ```
@@ -113,14 +116,20 @@ The script can be re-run safely, and it skips anything already in place. Your pr
 Provisioning sets the US and Long Turbo defaults the first time it can configure the local
 Meshtastic service. You can change them afterward. Provisioning uses an 8 dBm ceiling for the
 500 kHz Long Turbo setup on the Ebyte E22-900M22S. The module's FCC grant lists 0.0076 W conducted.
-[FCC grant 2ALPH-E22900M22S](https://fccid.io/2ALPH-E22900M22S)
+Look up FCC ID 2ALPH-E22900M22S (grantee `2ALPH`, product `-E22900M22S`, granted October 29, 2021).
+[FCC Equipment Authorization records](https://apps.fcc.gov/oetcf/eas/reports/GenericSearch.cfm)
+
+If provisioning cannot confirm that it turned transmit back off, transmit may be on now.
+Rerun provisioning to turn it back off before using the radio.
 
 By default, provisioning caps automatic power (0) and values above the ceiling. It leaves lower
 settings alone. `--check` reports the configured power and any pending change. For a kit with a
 different module, use the conducted power listed in its own FCC grant to choose the ceiling
 `SIGINT101_MESHTASTIC_TX_POWER_MAX_DBM`. Set `SIGINT101_MESHTASTIC_TX_POWER_DBM` only to request an
 exact power at or below that ceiling. Both variables take nonzero whole numbers from -9 to 22 dBm,
-the SX1262 range.
+the SX1262 range. For a module with an amplifier, configure its gain in meshtasticd with
+`TX_GAIN_LORA` so the power setting accounts for that gain.
+[Meshtastic amplifier gain handling](https://github.com/meshtastic/firmware/blob/6d41e279f1f5/src/mesh/RadioInterface.cpp#L951-L973)
 
 Three decoders are not installed by default: digital voice (M27), NOAA APT (M24) and SSTV
 (M25). Until they are, those lessons say so. To build them, run

@@ -16,8 +16,8 @@ BASH = shutil.which("bash")
 # Standard read-only utilities provision.sh calls; linked by name so /usr/bin (and real node)
 # never enters the test PATH.
 CORE_UTILS = (
-    "awk", "basename", "cat", "cmp", "cut", "dirname", "grep", "mkdir", "paste", "readlink", "rm",
-    "sleep", "sort", "timeout",
+    "awk", "basename", "cat", "cmp", "cut", "date", "dirname", "grep", "mkdir", "paste",
+    "readlink", "rm", "sleep", "sort", "timeout",
 )
 
 
@@ -109,7 +109,7 @@ class ProvisionBox:
 
     def set_mesh(self, region, preset, use_preset=True, *, tx_power=8, tx_enabled=False,
                  active=True, writable=True, tx_writable=True, show_tx_enabled=True,
-                 profile_status=0, read_lag=False):
+                 profile_status=0, read_lag=False, restart=None):
         """Stub the local meshtasticd service and its CLI's LoRa preference read/write."""
         state = self.home / "mesh-state"
         state.write_text(f"{region} {preset} {use_preset} {tx_power} {tx_enabled}\n",
@@ -128,6 +128,14 @@ class ProvisionBox:
               '[[ "$1 $2" == "--host 127.0.0.1" ]] || exit 1\n'
               'shift 2\n'
               'if [[ "$1" == "--timeout" ]]; then shift 2; fi\n'
+              f'restart_boundary="{state}.restart-at"\n'
+              'restart_daemon() {\n'
+              '  echo "$(( $(date +%s%3N) + 3500 ))" > "$restart_boundary"\n'
+              '}\n'
+              'if [ -f "$restart_boundary" ]; then\n'
+              '  read -r down_until < "$restart_boundary"\n'
+              '  if (( $(date +%s%3N) < down_until )); then exit 1; fi\n'
+              'fi\n'
               f'read -r region preset use power enabled < "{state}"\n'
               'status=0\n'
               f'out="{state}"\n'
@@ -149,9 +157,14 @@ class ProvisionBox:
               '    if [[ "$region" == 0 ]]; then enabled=True; fi\n'
               '    region=1; preset=9; use=True\n'
               f'    status={profile_status}\n'
-              '    if [ "$#" -eq 12 ]; then power="${12}"; fi ;;\n'
+              '    if [ "$#" -eq 12 ]; then power="${12}"; fi\n'
+              f'    if [[ "{restart}" == after-region ]]; then restart_daemon; fi ;;\n'
               '  "--set lora.tx_power "*) power="$3" ;;\n'
               '  "--set lora.tx_enabled false")\n'
+              f'    if [[ "{restart}" == lost-restore && ! -f "$restart_boundary" ]]; then\n'
+              '      restart_daemon\n'
+              '      exit 0\n'
+              '    fi\n'
               f'    if [[ "{int(tx_writable)}" == 1 ]]; then enabled=False; fi ;;\n'
               '  *) exit 1 ;;\n'
               'esac\n'
@@ -161,9 +174,9 @@ class ProvisionBox:
               'exit "$status"')
         return state
 
-    def run(self, *args: str) -> subprocess.CompletedProcess:
+    def run(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
         return subprocess.run([BASH, str(PROVISION), *args], env=self.env,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=timeout)
 
     def calls(self) -> str:
         return self.log.read_text(encoding="utf-8")
@@ -365,31 +378,77 @@ def test_provision_waits_for_region_write_before_restoring_tx(box):
     assert state.read_text() == "1 9 True 8 False\n"
 
 
+@pytest.mark.parametrize("restart", ["after-region", "lost-restore"])
+def test_provision_restores_transmit_across_daemon_restart(box, restart):
+    state = box.set_mesh(0, 0, False, tx_power=30, restart=restart)
+    result = box.run(timeout=45)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert state.read_text() == "1 9 True 8 False\n"
+    calls = box.calls()
+    assert calls.count("--set lora.region") == 1
+    assert calls.count("--set lora.tx_enabled false") >= (2 if restart == "lost-restore" else 1)
+    marker = box.home / ".local/state/sigint101/meshtastic-defaults"
+    assert marker.is_dir() and not marker.with_name(marker.name + "-tx-off-pending").exists()
+
+
+@pytest.mark.parametrize("power", [0, 30])
+def test_provision_caps_power_in_the_first_region_write(box, power):
+    box.set_mesh(0, 0, False, tx_power=power)
+    result = box.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    [region_write] = [line for line in box.calls().splitlines() if "--set lora.region US" in line]
+    assert region_write.endswith("--set lora.tx_power 8")
+
+
+def test_check_previews_temporary_transmit_on_a_fresh_node_with_transmit_off(box):
+    state = box.set_mesh(0, 0, False, tx_power=30)
+    result = box.run("--check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "firmware may briefly enable transmit when setting the region" in result.stdout
+    assert "turn transmit back off" in result.stdout
+    assert "restore local meshtasticd LoRa tx_enabled to false" not in result.stdout
+    assert state.read_text() == "0 0 False 30 False\n"
+    assert "--set lora." not in box.calls()
+
+
 def test_provision_retries_unconfirmed_tx_restoration(box):
     state = box.set_mesh(0, 0, False, tx_writable=False)
     marker = box.home / ".local/state/sigint101/meshtastic-defaults"
-    first = box.run()
+    pending = marker.with_name(marker.name + "-tx-off-pending")
+    first = box.run(timeout=45)
     assert first.returncode != 0
     assert "could not confirm lora.tx_enabled False" in first.stderr
+    assert "Transmit may be on now" in first.stderr
+    assert "turn it back off" in first.stderr
     assert state.read_text() == "1 9 True 8 True\n"
-    assert not marker.exists()
+    assert box.calls().count("--set lora.tx_enabled false") > 1
+    assert not marker.exists() and pending.is_dir()
 
     # Another run must remember that the radio was off before the first region write.
-    box.set_mesh(1, 9, tx_enabled=True, active=False)
-    unavailable = box.run()
-    assert unavailable.returncode != 0
-    assert "TX restoration pending" in unavailable.stderr
-    assert not marker.exists()
-
     box.set_mesh(1, 9, tx_enabled=True)
     checked = box.run("--check")
     assert checked.returncode == 0, checked.stdout + checked.stderr
-    assert re.search(r"^  would  .*restore .*tx_enabled to false", checked.stdout, re.MULTILINE)
+    assert "transmit is on now" in checked.stdout
+    assert "turn transmit back off" in checked.stdout
     assert state.read_text() == "1 9 True 8 True\n"
     second = box.run()
     assert second.returncode == 0, second.stdout + second.stderr
     assert state.read_text() == "1 9 True 8 False\n"
-    assert marker.is_dir()
+    assert marker.is_dir() and not pending.exists()
+
+
+@pytest.mark.parametrize("args", [(), ("--check",)], ids=["apply", "check"])
+def test_stopped_meshtasticd_warns_and_keeps_pending_tx_restore(box, args):
+    state = box.set_mesh(1, 9, tx_enabled=True, active=False)
+    pending = box.home / ".local/state/sigint101/meshtastic-defaults-tx-off-pending"
+    pending.mkdir(parents=True)
+    result = box.run(*args)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert re.search(r"^  WARN   .*TX restoration pending", result.stdout, re.MULTILINE)
+    assert "Transmit may be on when meshtasticd starts" in result.stdout
+    assert "Hand-over hygiene" in result.stdout
+    assert pending.is_dir() and state.read_text() == "1 9 True 8 True\n"
+    assert "--set lora." not in box.calls()
 
 
 def test_provision_check_reports_current_mesh_preset_without_writing(box):

@@ -594,6 +594,7 @@ step_kiosk() {
 # FCC grant 2ALPH-E22900M22S (2021-10-29), Ebyte E22-900M22S: 0.0076 W conducted
 # (about 8.8 dBm). Use 8 dBm as the provisioning ceiling for US Long Turbo.
 readonly MESH_TX_POWER_CEILING_DBM=8
+readonly MESH_TX_RESTORE_S=30
 
 validate_mesh_tx_power() {
   local name="$1" value="$2"
@@ -623,38 +624,28 @@ read_mesh_lora() {
   ' <<< "$settings"
 }
 
-wait_for_mesh_lora() {
-  local pattern="$1" delay settings
-  shift
-  # The local CLI can return before the write is visible on the next connection.
-  for delay in 0 1 1; do
-    [ "$delay" = 0 ] || sleep "$delay"
-    settings="$(read_mesh_lora "$@" 2>/dev/null)" || continue
-    if [[ "$settings" == $pattern ]]; then
-      printf '%s\n' "$settings"
-      return 0
-    fi
-  done
-  return 1
-}
-
 step_meshtastic_defaults() {
   step "Meshtastic LoRa defaults (M11 LoRa, M28 Meshtastic)"
   local ceiling="$1" requested="$2"
   local mesh="$COURSE_DIR/.venv/bin/meshtastic"
   local marker="$HOME/.local/state/sigint101/meshtastic-defaults"
   local tx_pending="$marker-tx-off-pending"
-  local cli=(timeout 15 "$mesh" --host 127.0.0.1 --timeout 5)
+  local cli=("$mesh" --host 127.0.0.1 --timeout 5)
+  local restore_hint="Transmit may be on now. Rerun provisioning to turn it back off."
   local settings region preset use power enabled region_name preset_name power_name read_error=""
   if ! systemctl --quiet is-active meshtasticd 2>/dev/null; then
-    read_error="meshtasticd is not running; the LoRa lessons read its API on port 4403"
+    warn "meshtasticd is not running; the LoRa lessons read its API on port 4403"
+    if [ -d "$tx_pending" ]; then
+      warn "TX restoration pending. Transmit may be on when meshtasticd starts. Rerun provisioning then."
+    fi
+    return 0
   elif [ ! -x "$mesh" ]; then
     read_error="the course venv has no meshtastic CLI; LoRa settings not checked"
-  elif ! settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)"; then
+  elif ! settings="$(read_mesh_lora timeout 15 "${cli[@]}" 2>/dev/null)"; then
     read_error="could not read LoRa settings from local meshtasticd"
   fi
   if [ -n "$read_error" ]; then
-    [ ! -d "$tx_pending" ] || die "$read_error (TX restoration pending, rerun provisioning)"
+    [ ! -d "$tx_pending" ] || die "$read_error. TX restoration pending. $restore_hint"
     warn "$read_error"
     return 0
   fi
@@ -704,7 +695,13 @@ step_meshtastic_defaults() {
   fi
   if [ "$CHECK" = 1 ]; then
     [ "${#changes[@]}" -eq 0 ] || would "set local meshtasticd LoRa $action"
-    [ "$restore_tx" = 0 ] || would "restore local meshtasticd LoRa tx_enabled to false"
+    if [ "$restore_tx" = 1 ]; then
+      if [ "$enabled" = True ]; then
+        would "turn transmit back off (transmit is on now)"
+      else
+        would "turn transmit back off (firmware may briefly enable transmit when setting the region)"
+      fi
+    fi
     return 0
   fi
 
@@ -712,23 +709,38 @@ step_meshtastic_defaults() {
     mkdir -p "$tx_pending"
   fi
   if [ "${#changes[@]}" -ne 0 ]; then
-    "${cli[@]}" "${changes[@]}" >/dev/null 2>&1 || true
-    if [ "$restore_tx" = 1 ]; then
-      # Wait for the region to take effect. The restoring CLI writes the entire LoRa config.
-      settings="$(wait_for_mesh_lora '[1-9]*' "${cli[@]}")" ||
-        die "could not confirm the Meshtastic region write (TX restoration pending, rerun provisioning)"
-    else
-      settings="$(read_mesh_lora "${cli[@]}" 2>/dev/null)" || settings=""
-    fi
+    timeout 15 "${cli[@]}" "${changes[@]}" >/dev/null 2>&1 || true
   fi
-  if [ "$restore_tx" = 1 ] && [ "${settings##* }" = True ]; then
-    "${cli[@]}" --set lora.tx_enabled false >/dev/null 2>&1 || true
-    settings="$(wait_for_mesh_lora '[1-9]* False' "${cli[@]}")" ||
-      die "could not confirm lora.tx_enabled False on meshtasticd (check the node before use)"
-    did "restore local meshtasticd LoRa tx_enabled to false"
+  if [ "$restore_tx" = 1 ]; then
+    local deadline=$(( SECONDS + MESH_TX_RESTORE_S )) remaining attempted_restore=0
+    # The first region write can restart meshtasticd. Read a fresh, set region before each
+    # restore because the CLI writes the whole LoRa config. Keep trying within one time budget.
+    while (( (remaining = deadline - SECONDS) > 0 )); do
+      settings="$(read_mesh_lora timeout -k 1 "$remaining" "${cli[@]}" 2>/dev/null)" ||
+        settings=""
+      case "$settings" in
+        [1-9]*" False") break ;;
+        [1-9]*" True")
+          if (( (remaining = deadline - SECONDS) > 0 )); then
+            attempted_restore=1
+            timeout -k 1 "$remaining" "${cli[@]}" --set lora.tx_enabled false >/dev/null 2>&1 || true
+          fi ;;
+      esac
+      if (( SECONDS < deadline )); then
+        sleep 1
+      fi
+    done
+    [[ "$settings" == [1-9]*" False" ]] ||
+      die "could not confirm lora.tx_enabled False on meshtasticd. TX restoration pending. $restore_hint"
+    [ "$attempted_restore" = 0 ] || did "restore local meshtasticd LoRa tx_enabled to false"
+  elif [ "${#changes[@]}" -ne 0 ]; then
+    settings="$(read_mesh_lora timeout 15 "${cli[@]}" 2>/dev/null)" || settings=""
   fi
   if [ -n "$settings" ] && [ "${settings##* }" != "$target_enabled" ]; then
-    die "could not confirm lora.tx_enabled $target_enabled on meshtasticd (check the node before use)"
+    if [ "$target_enabled" = False ]; then
+      die "could not confirm lora.tx_enabled False on meshtasticd. Transmit may be on now. Check the node before use."
+    fi
+    die "could not confirm lora.tx_enabled $target_enabled on meshtasticd. Check the node before use."
   fi
 
   [ ! -d "$tx_pending" ] || rm -d -- "$tx_pending"
