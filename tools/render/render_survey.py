@@ -16,6 +16,13 @@ if str(REPO) not in sys.path:
 
 from sigint101.survey import SURVEY_COMMAND, channel_census, parse_nmcli_wifi  # noqa: E402
 
+RENDER_CHECK = {
+    "name": "survey",
+    "pages": ("/lesson/39",),
+    "scratch": False,
+    "order": 70,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 FIXTURE = REPO / "tests" / "fixtures" / "survey" / "dense_nmcli.txt"
 EXPECTED_BADGE = "CACHED"

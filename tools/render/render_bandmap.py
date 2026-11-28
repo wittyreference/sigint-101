@@ -7,6 +7,13 @@ import time
 
 from render_scroll import connect, fence, leave_page
 
+RENDER_CHECK = {
+    "name": "bandmap",
+    "pages": ("/", "/bands"),
+    "scratch": False,
+    "order": 110,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 
 HOME_MEASURE = """

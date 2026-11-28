@@ -1,5 +1,6 @@
 # ABOUTME: Render a page at a forced 800x480 over CDP and assert the scroll/layout is right.
 # ABOUTME: explain: body scrolls + Complete in view; home: tiles unclipped. CDP_PORT picks Chrome.
+
 import atexit
 import base64
 import json
@@ -13,6 +14,15 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from render_proxy import serve_in_thread  # noqa: E402
+
+RENDER_CHECK = {
+    "name": "scroll",
+    "pages": ("/",),
+    "scratch": False,
+    "order": 20,
+    "target": "/",
+    "args": ("home",),
+}
 
 # The DevTools endpoint comes from the environment, not argv, so other harness scripts can import
 # CDP/page_ws without this module misreading their arguments.

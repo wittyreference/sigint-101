@@ -1,5 +1,6 @@
 # ABOUTME: Serves the render check's scratch console on a loopback socket the check hands it.
 # ABOUTME: Its own data folder and no radio: the RTL-SDR probe reports none and ppm refuses.
+
 import socket
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ import uvicorn  # noqa: E402
 from sigint101.app import create_app  # noqa: E402
 from sigint101.hardware import RadioProbe  # noqa: E402
 from sigint101.ppm import PpmUnavailable  # noqa: E402
+
+RENDER_CHECK = None
 
 # The console has no switch that turns its hardware off, so the scratch one is built without it:
 # every RTL-SDR receiver, the tune and gain routes and the bus survey ask this probe first, and

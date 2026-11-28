@@ -7,6 +7,13 @@ import time
 
 from render_scroll import connect, fence, leave_page
 
+RENDER_CHECK = {
+    "name": "power-notice",
+    "pages": ("/", "/lesson/1", "/lesson/29", "/exam/review/T6C02"),
+    "scratch": False,
+    "order": 130,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 ROUTES = (
     ("home", "/"),

@@ -25,6 +25,14 @@ from sigint101.lessons import load_lessons  # noqa: E402
 from sigint101.progress import Progress  # noqa: E402
 from sigint101.retrieval import DAY_S  # noqa: E402
 
+# GET-walk samples for recall, which seeds and drives only its own consoles.
+RENDER_CHECK = {
+    "name": "recall",
+    "pages": ("/", "/lesson/1", "/lesson/1?recall=card&card=2"),
+    "scratch": True,
+    "order": 80,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 
 MEASURE_RECALL = """
