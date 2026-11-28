@@ -275,6 +275,12 @@ class Decoder:
                 "-M", "level",
                 "-d", str(self.device)]
 
+    def release_for_claim(self) -> None:
+        """Stand down without retrying a failed stop under a radio reservation."""
+        with self._life:
+            if self.release_failure() is None:
+                self.release()
+
     def release(self) -> None:
         """Hand the dongle to another program (the sweeper) and stay off it until resumed."""
         with self._life:

@@ -1,5 +1,5 @@
-// ABOUTME: Lesson-stage navigation: Next and Previous between the rendered panels,
-// ABOUTME: each step remembered server-side (POST /api/stage) so a reload resumes; Complete leads on.
+// ABOUTME: Lesson-stage navigation: the open posted once shown (POST /api/opened), Next and Previous
+// ABOUTME: between panels, each step remembered (POST /api/stage) so a reload resumes; Complete on.
 
 (function () {
   "use strict";
@@ -54,6 +54,14 @@
   var stageEl = document.querySelector(".stage");
   if (!stageEl) return;
   var lessonId = stageEl.getAttribute("data-lesson-id");
+  // The lesson records that it was opened from here, once, now the page is shown: the GET that
+  // served it writes nothing, so a render check or a prefetch never marks a lesson opened.
+  if (lessonId) {
+    fetch("/api/opened?lesson_id=" + encodeURIComponent(lessonId), {
+      method: "POST",
+      keepalive: true
+    }).catch(function () { /* only the opened mark is lost; the lesson still runs */ });
+  }
   // Only the panels the server rendered: sealed stages are absent until the commit.
   var panels = Array.prototype.slice.call(document.querySelectorAll(".stage-panel"));
   var pips = Array.prototype.slice.call(document.querySelectorAll(".rail-pip"));

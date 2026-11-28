@@ -7,7 +7,14 @@ import tempfile
 import time
 from pathlib import Path
 
-from render_scroll import connect
+from render_scroll import connect, fence, leave_page
+
+RENDER_CHECK = {
+    "name": "closing",
+    "pages": ("/lesson/40",),
+    "scratch": False,
+    "order": 120,
+}
 
 REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
@@ -175,7 +182,8 @@ function measureClosingUnsealed(expectedTheme, expectedCmd) {
 
 
 def load_page(browser, url):
-    nav = browser.call("Page.navigate", {"url": url})
+    # Through the render proxy, never the console itself (render_scroll.fence).
+    nav = browser.call("Page.navigate", {"url": fence(url)})
     if nav.get("errorText"):
         raise RuntimeError(nav["errorText"])
     for _ in range(25):
@@ -196,10 +204,9 @@ def verdict(ok, label, measures):
 def main(console):
     browser = connect()
     try:
+        # connect() has already blocked the whole of /api/* (render_scroll.block_console_api),
+        # /api/predict, /api/stage and /api/complete with the rest; the proxy refuses them too.
         browser.call("Page.enable")
-        browser.call("Network.enable")
-        browser.call("Network.setBlockedURLs",
-                     {"urls": ["*/api/predict*", "*/api/stage*", "*/api/complete*"]})
         browser.call("Emulation.setDeviceMetricsOverride",
                      {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False})
         lesson_url = f"{console}/lesson/40"
@@ -247,7 +254,7 @@ def main(console):
             failed |= verdict(unsealed_ok, f"closing-stages {theme}", unsealed)
         return int(failed)
     finally:
-        browser.s.close()
+        leave_page(browser)
 
 
 if __name__ == "__main__":

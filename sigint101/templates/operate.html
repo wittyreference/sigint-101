@@ -36,6 +36,7 @@
 <div class="rack">
   {# The instrument picker: one touch-sized button each, scrolling on its own when they outrun
      the screen. Picking one is a page of its own, so Back and a reload both land where you are.
+     A pick also posts the instrument as the rack's place (operate.js); showing a page does not.
      Flock names the tool of the source the site configured (tcpdump, or Marauder). #}
   <div class="scroll-frame rack__chooser">
     {% set picker_groups = {
@@ -53,7 +54,7 @@
         <h2 class="rack__group-title" id="{{ heading_id }}">{{ heading }}</h2>
         {% for key, detail in entries.items() %}
         {% set i = instruments|selectattr('key', 'equalto', key)|first %}
-        <a class="rack__pick{% if i.key == inst.key %} rack__pick--on{% endif %}" href="/operate/{{ i.key }}"{% if i.key == inst.key %} aria-current="page"{% endif %}>
+        <a class="rack__pick{% if i.key == inst.key %} rack__pick--on{% endif %}" href="/operate/{{ i.key }}"{% if i.key == inst.key %} aria-current="page"{% endif %} data-rack-pick="{{ i.key }}">
           <span class="rack__pick-label">{{ 'POCSAG' if i.key == 'pager' else i.label }}</span>
           <span class="rack__pick-tool">{{ flock_tool if i.key == 'flock' else i.tool }}</span>
           <span class="rack__pick-detail">{{ detail }}</span>
@@ -126,6 +127,7 @@
       </div>
       <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+<span class="rack__adjust-label">Freq</span></button>
       {{ step_key(inst.steps) }}
+      {% if inst.key == "ism" %}{{ panels.replay_controls() }}{% endif %}
     </div>
     {% elif inst.key == 'lora' %}
     <div class="rack-lora" data-lora-send-permit="{{ lora_send_permit }}">
