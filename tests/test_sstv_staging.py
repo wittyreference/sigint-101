@@ -465,6 +465,34 @@ def test_a_staging_folder_of_another_account_is_not_swept(tmp_path, consoles, mo
     assert any("staging" in record.message for record in caplog.records)
 
 
+def test_a_symlinked_gallery_still_starts_and_publishes_and_its_target_is_not_swept(
+        tmp_path, consoles):
+    # The pictures may live elsewhere (a USB stick) behind a gallery symlink, as on main. Only the
+    # gallery's identity is read, so it is followed; the staging folder and its subfolders are not.
+    target = tmp_path / "usb" / "sstv"
+    target.mkdir(parents=True)
+    (target / "published.png").write_bytes(PNG_BYTES)
+    bait = target / uuid.uuid4().hex
+    bait.mkdir(mode=0o700)
+    (bait / sstv._OWNER_LOCK).touch(mode=0o600)
+    (bait / "kept.png").write_bytes(PNG_BYTES)
+    _gallery(tmp_path).symlink_to(target, target_is_directory=True)
+    retired = _retired_owner(tmp_path, "staged.png")
+    before = _snapshot(target)
+    dec, launches, heard = consoles()
+    dec.start()
+    assert not retired.exists()
+    assert _snapshot(target) == before
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    _finish(child)
+    dec.stop()
+    [item] = heard
+    assert (target / staged.name).read_bytes() == PNG_BYTES
+    assert Path(item["path"]).name == staged.name
+    assert (bait / "kept.png").read_bytes() == PNG_BYTES
+
+
 @pytest.mark.parametrize("swap", ["symlink", "symlink-elsewhere", "gallery-moved-in"])
 def test_a_staging_folder_replaced_before_its_open_aborts_the_sweep(
         tmp_path, consoles, monkeypatch, caplog, swap):

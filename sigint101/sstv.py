@@ -96,13 +96,15 @@ def _require_private_dir(info: os.stat_result, what: str) -> None:
 def _open_staging(parent: Path, staging_name: str, gallery_name: str) -> int:
     """Open the staging folder by descriptor and prove it is this account's, not the gallery.
 
-    The data folder is the configured root and is opened as given. Below it nothing is followed:
-    the gallery and the staging folder are each opened relative to the root's descriptor, and the
-    staging folder is compared with the gallery by the descriptors' own fstat.
+    The data folder is the configured root and is opened as given. The gallery is opened relative
+    to it and may be a symlink (pictures kept elsewhere): it is only read for its identity, which is
+    its target's. The staging folder is opened relative to the root without following anything,
+    and is compared with the gallery by the descriptors' own fstat.
     """
     root = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        gallery_fd = os.open(gallery_name, _DIR_FLAGS, dir_fd=root)
+        gallery_fd = os.open(gallery_name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+                             dir_fd=root)
         try:
             gallery = os.fstat(gallery_fd)
         finally:
