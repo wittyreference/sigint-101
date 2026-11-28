@@ -151,13 +151,24 @@ class Progress:
     field: a half-written row must not cost the learner their progress.
     """
 
-    def __init__(self, db_path=DEFAULT_DB_PATH):
+    def __init__(self, db_path=DEFAULT_DB_PATH, *, managed: bool = False, read_only: bool = False):
         self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False + a lock: the FastAPI threadpool touches this from
         # a different thread than the one that opened it. The lock serializes access.
         self._lock = threading.Lock()
         self._closed = False
+        if managed:
+            from .migrations import PROGRESS_SCHEMA_VERSION, reviewed_signatures
+            from .storage import open_managed_sqlite
+
+            self._conn = open_managed_sqlite(
+                self.db_path,
+                expected_version=PROGRESS_SCHEMA_VERSION,
+                expected_signature=reviewed_signatures("progress")["v1"],
+                read_only=read_only,
+            )
+            return
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
@@ -437,14 +448,21 @@ class Progress:
             return True
 
     def challenge(self, unit_id: int) -> dict:
-        """Return a unit's current attempt, newest pass (from any attempt), and total pass count."""
+        """Return a unit's current attempt, its own pass, newest pass overall, and pass count."""
         with self._lock:
             if self._closed:
-                return {"attempt": None, "latest_pass": None, "passes": 0}
+                return {"attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0}
             attempt_row = self._conn.execute(
                 "SELECT unit_id, started_at, window_s FROM challenges WHERE unit_id=?",
                 (unit_id,),
             ).fetchone()
+            attempt_pass_row = None
+            if attempt_row is not None:
+                attempt_pass_row = self._conn.execute(
+                    "SELECT unit_id, started_at, passed_at, instrument, provenance, digest "
+                    "FROM challenge_passes WHERE unit_id=? AND started_at=?",
+                    (unit_id, attempt_row["started_at"]),
+                ).fetchone()
             pass_row = self._conn.execute(
                 "SELECT unit_id, started_at, passed_at, instrument, provenance, digest "
                 "FROM challenge_passes WHERE unit_id=? "
@@ -455,12 +473,17 @@ class Progress:
                 "SELECT COUNT(*) FROM challenge_passes WHERE unit_id=?",
                 (unit_id,),
             ).fetchone()[0]
+        attempt_pass = (
+            {**dict(attempt_pass_row), "provenance": json.loads(attempt_pass_row["provenance"])}
+            if attempt_pass_row else None
+        )
         latest = (
             {**dict(pass_row), "provenance": json.loads(pass_row["provenance"])}
             if pass_row else None
         )
         return {
             "attempt": dict(attempt_row) if attempt_row else None,
+            "attempt_pass": attempt_pass,
             "latest_pass": latest,
             "passes": count,
         }

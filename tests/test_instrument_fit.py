@@ -133,7 +133,8 @@ FIDELITY_PINS = [
     ("L26-demo-aivdm-sentences", 26, "demo", [r"AIVDM sentences"], [r"AIVDM lines"]),
     ("L26-try-nine-digit-mmsi", 26, "try", [r"the nine-digit MMSI"], [r"9-digit MMSI"]),
     ("L28-try-read-not-key-node-shares", 28, "try",
-     [r"not key", r"the node shares LongFast"], [r"text shares LongFast"]),
+     [r"not key", r"the node shares Long Turbo"],
+     [r"text shares Long Turbo", r"\blong[\s_-]?fast\b"]),
     ("L29-observe-glance-flipper-both-ways", 29, "observe",
      [r"at a glance", r"Flipper's command line", r"both ways"], []),
 ]

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from sigint101 import app as console
 from sigint101 import events
+from sigint101 import storage as storage_mod
 from sigint101.challenges import (
     CHALLENGES,
     Challenge,
@@ -23,6 +24,7 @@ from sigint101.challenges import (
     validate_catalog,
 )
 from sigint101.hardware import RadioProbe
+from sigint101.migrations import migrate_store_copy
 from sigint101.progress import Progress
 from sigint101.stamps import STAMP_INSTRUMENTS, mint
 from tests.test_operate_routes import _client
@@ -485,7 +487,9 @@ def test_existing_progress_db_without_challenge_tables_reopens_intact(tmp_path):
         assert reopened.stamps()[0]["instrument"] == "ism"
 
         # Both additive tables now exist and work.
-        assert reopened.challenge(4) == {"attempt": None, "latest_pass": None, "passes": 0}
+        assert reopened.challenge(4) == {
+            "attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0,
+        }
         assert reopened.start_challenge(4, 1000.0, 900) is True
         assert reopened.challenge(4)["attempt"]["started_at"] == 1000.0
     finally:
@@ -586,3 +590,243 @@ def test_evidence_and_frequency_formatting_cover_all_display_states():
 
     idle = {"state": "idle", "reason": None, "latest_pass": None, "error": None}
     assert format_evidence(idle) == ""
+
+
+# --- F1: managed mode migrates, starts, credits, and fsyncs live-find events -------------------
+
+
+def test_managed_mode_migrated_store_runs_live_find_and_syncs_log_writes(tmp_path, monkeypatch):
+    now = [1000.0]
+    _patch_log_clock(monkeypatch, now)
+    sync_calls: list[tuple[str, str]] = []
+    real_handle = storage_mod.fsync_handle
+    real_dir = storage_mod.fsync_dir
+
+    def spy_handle(handle):
+        sync_calls.append(("file", Path(handle.name).name))
+        real_handle(handle)
+
+    def spy_dir(path):
+        sync_calls.append(("dir", Path(path).name))
+        real_dir(path)
+
+    monkeypatch.setattr(events, "fsync_handle", spy_handle)
+    monkeypatch.setattr(events, "fsync_dir", spy_dir)
+
+    gen = tmp_path / "managed_gen"
+    gen.mkdir()
+    migrate_store_copy(
+        tmp_path / "missing_p.db", gen / "progress.db",
+        store="progress", allow_missing_source=True, scratch_dir=tmp_path / "scratch_p",
+    )
+    migrate_store_copy(
+        tmp_path / "missing_e.db", gen / "exam.db",
+        store="exam", allow_missing_source=True, scratch_dir=tmp_path / "scratch_e",
+    )
+
+    with TestClient(console.create_app(
+        pack_dir=Path(__file__).resolve().parent / "fixtures" / "lesson_packs",
+        data_dir=gen, probe=_absent, clock=lambda: now[0], managed=True,
+    )) as client:
+        sync_calls.clear()
+        started = client.post("/api/challenges/4/start")
+        assert started.status_code == 200, started.text
+        body = started.json()
+        assert body["state"] == "active"
+        assert body["error"] is None
+        assert ("file", "events.jsonl") in sync_calls
+        assert ("dir", "managed_gen") in sync_calls
+
+        sync_calls.clear()
+        now[0] = 1020.0
+        _hear(client)
+        passed = client.get("/api/challenges/4").json()
+        assert passed["state"] == "passed"
+        assert passed["passes"] == 1
+        assert passed["error"] is None
+        # Both the reception line and the challenge_pass line were fsynced in managed mode.
+        assert sync_calls.count(("file", "events.jsonl")) >= 2
+
+
+# --- F2: backfill only credits receptions logged after the attempt's challenge_start -----------
+
+
+def test_backfill_never_credits_pre_start_reception_after_clock_step_restart_or_rotation(
+    tmp_path, monkeypatch
+):
+    now = [2000.0]
+    _patch_log_clock(monkeypatch, now)
+
+    # Probe P1 (restart): reception heard at ts=2000 BEFORE Start; clock steps back to 1500;
+    # learner starts Unit 4 (window [1500, 2400], which contains 2000!). Startup backfill on
+    # restart MUST NOT credit the pre-Start reception.
+    with _challenge_client(tmp_path, now) as client:
+        _hear(client)
+        now[0] = 1500.0
+        assert client.post("/api/challenges/4/start").status_code == 200
+        assert client.get("/api/challenges/4").json()["state"] == "active"
+
+    with _challenge_client(tmp_path, now) as client:
+        after_restart = client.get("/api/challenges/4").json()
+        assert after_restart["state"] == "active"
+        assert after_restart["passes"] == 0
+        assert after_restart["latest_pass"] is None
+
+        # A real post-Start reception passes Unit 4 at ts=1510.
+        now[0] = 1510.0
+        _hear(client)
+        u4 = client.get("/api/challenges/4").json()
+        assert u4["state"] == "passed" and u4["latest_pass"]["passed_at"] == 1510.0
+
+        # Probe P1b (rotation in same run): Unit 9 hears LoRa at ts=2000 before Start, clock
+        # steps back to 1500, Unit 9 starts, log rotates so next reception triggers _backfill_stamps
+        # under reception_lock. Unit 9 MUST NOT pass from the pre-Start LoRa reception.
+        now[0] = 2000.0
+        _hear_lora(client)
+        now[0] = 1500.0
+        assert client.post("/api/challenges/9/start").status_code == 200
+
+        # Force rotation on events.jsonl so the next minted reception triggers _backfill_stamps.
+        events.log_event(tmp_path / "events.jsonl", "tick", {}, max_bytes=1, clock=lambda: 1505.0)
+        now[0] = 1520.0
+        _hear(client)  # ISM reception triggers rotation backfill; must not credit pre-Start LoRa.
+        u9 = client.get("/api/challenges/9").json()
+        assert u9["state"] == "active" and u9["passes"] == 0
+
+
+# --- F3: current attempt's pass stays passed even after a backward clock step ------------------
+
+
+def test_passed_state_keys_on_current_attempt_pass_after_backward_clock_step(
+    tmp_path, monkeypatch
+):
+    now = [5000.0]
+    _patch_log_clock(monkeypatch, now)
+
+    # Probe P2: Attempt A starts at 5000, passes at 5100. Clock steps back to 3000; learner
+    # taps Try again (Attempt B starts at 3000) and a real reception passes Attempt B at 3050.
+    with _challenge_client(tmp_path, now) as client:
+        assert client.post("/api/challenges/4/start").status_code == 200
+        now[0] = 5100.0
+        _hear(client)
+        a = client.get("/api/challenges/4").json()
+        assert a["state"] == "passed" and a["passes"] == 1
+
+        now[0] = 3000.0
+        assert client.post("/api/challenges/4/start").json()["state"] == "active"
+        now[0] = 3050.0
+        _hear(client)
+
+        b = client.get("/api/challenges/4").json()
+        assert b["state"] == "passed"
+        assert b["passes"] == 2
+        assert b["latest_pass"]["started_at"] == 3000.0
+        assert b["latest_pass"]["passed_at"] == 3050.0
+
+        # Even after Attempt B's window elapses, it remains passed (never TIME UP).
+        now[0] = 4500.0
+        b_later = client.get("/api/challenges/4").json()
+        assert b_later["state"] == "passed"
+        assert b_later["latest_pass"]["passed_at"] == 3050.0
+
+
+# --- F6: Start returns JSON error on DB/log failure and logs challenge_start only when saved ---
+
+
+def test_start_handles_db_error_and_closed_store_without_logging_challenge_start(
+    tmp_path, monkeypatch
+):
+    now = [1000.0]
+    _patch_log_clock(monkeypatch, now)
+
+    with _challenge_client(tmp_path, now) as client:
+        def boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(client.app.state.progress, "start_challenge", boom)
+        res = client.post("/api/challenges/4/start")
+        assert res.status_code == 500
+        body = res.json()
+        assert body["error"] and "database is locked" in body["error"]
+        assert body["state"] == "idle"
+        assert [
+            e for e in events.read_events(tmp_path / "events.jsonl")
+            if e["kind"] == "challenge_start"
+        ] == []
+
+        # Closed store returns False -> must NOT log challenge_start and must return JSON error.
+        monkeypatch.setattr(client.app.state.progress, "start_challenge", lambda *_a, **_k: False)
+        res2 = client.post("/api/challenges/4/start")
+        assert res2.status_code == 500
+        assert res2.json()["error"]
+        assert [
+            e for e in events.read_events(tmp_path / "events.jsonl")
+            if e["kind"] == "challenge_start"
+        ] == []
+
+
+# --- F9: crediting twice adds one pass (idempotent across backfills and ON CONFLICT DO NOTHING)
+
+
+def test_credit_challenges_idempotent_across_double_calls_backfills_and_conflict(
+    tmp_path, monkeypatch
+):
+    # Direct Progress-level double credit + racing conflict check (kills removing ON CONFLICT).
+    db_path = tmp_path / "idemp.db"
+    prog = Progress(db_path)
+    try:
+        prog.start_challenge(4, 1000.0, 900)
+        stamp = mint(_event("ism", ts=1050.0))
+        assert stamp is not None
+        qual = lambda attempt, st: qualifies(challenge_for(4), attempt, st)  # noqa: E731
+
+        first = prog.credit_challenges((stamp,), qual)
+        second = prog.credit_challenges((stamp,), qual)
+        assert len(first) == 1
+        assert second == []
+        assert prog.challenge(4)["passes"] == 1
+
+        # Start a new attempt and simulate a concurrent insert before credit_challenges inserts:
+        # ON CONFLICT DO NOTHING must absorb the conflict cleanly instead of raising IntegrityError.
+        prog.start_challenge(4, 2000.0, 900)
+        stamp2 = mint(_event("ism", ts=2050.0))
+        assert stamp2 is not None
+
+        def racing_qual(attempt, st):
+            prog._conn.execute(
+                "INSERT INTO challenge_passes("
+                "unit_id, started_at, passed_at, instrument, provenance, digest"
+                ") VALUES(?, ?, ?, ?, ?, ?)",
+                (attempt["unit_id"], attempt["started_at"], st["first_ts"],
+                 st["instrument"], "{}", st["digest"]),
+            )
+            return True
+
+        raced = prog.credit_challenges((stamp2,), racing_qual)
+        assert raced == []
+        assert prog.challenge(4)["passes"] == 2
+    finally:
+        prog.close()
+
+    # Probe P3: live credit -> rotation backfill -> restart backfill = 1 pass, 1 challenge_pass.
+    now = [1000.0]
+    _patch_log_clock(monkeypatch, now)
+    run_dir = tmp_path / "p3"
+    run_dir.mkdir()
+    with _challenge_client(run_dir, now) as client:
+        assert client.post("/api/challenges/4/start").status_code == 200
+        now[0] = 1020.0
+        _hear(client)
+        # Rotate and hear again to force _backfill_stamps over retained events.
+        events.log_event(run_dir / "events.jsonl", "tick", {}, max_bytes=1, clock=lambda: 1025.0)
+        now[0] = 1030.0
+        _hear(client)
+    with _challenge_client(run_dir, now) as client:
+        state = client.get("/api/challenges/4").json()
+        assert state["state"] == "passed"
+        assert state["passes"] == 1
+    pass_events = [
+        e for e in events.read_events(run_dir / "events.jsonl")
+        if e["kind"] == "challenge_pass"
+    ]
+    assert len(pass_events) == 1

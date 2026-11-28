@@ -127,7 +127,7 @@ def evaluate(challenge: Challenge, attempt, event) -> dict | None:
 
 
 def status(challenge: Challenge, attempt: dict | None, latest_pass: dict | None,
-           now: float) -> dict:
+           now: float, *, attempt_pass: dict | None = None) -> dict:
     """Compute the challenge's current state, clamped remaining seconds, and expiry reason."""
     if attempt is None:
         return {
@@ -138,7 +138,8 @@ def status(challenge: Challenge, attempt: dict | None, latest_pass: dict | None,
             "reason": None,
         }
     started_at, window_s = _attempt_bounds(attempt)
-    if latest_pass is not None and latest_pass.get("started_at") == started_at:
+    own_pass = attempt_pass if attempt_pass is not None else latest_pass
+    if own_pass is not None and own_pass.get("started_at") == started_at:
         return {
             "state": "passed",
             "started_at": started_at,

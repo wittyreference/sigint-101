@@ -144,3 +144,63 @@ test("a poll answer sent before Start is dropped once Start has fired", async ()
   assert.equal(clockEl.textContent, "15:00");
   assert.equal(startBtn.textContent, "Restart");
 });
+
+test("Start renders JSON error reason from a 500 response on the screen", async () => {
+  const markEl = { textContent: "READY", className: "find-mark find-mark--idle" };
+  const clockEl = { textContent: "00:00", hidden: false };
+  const startBtn = {
+    textContent: "Start",
+    listeners: {},
+    addEventListener(type, fn) {
+      this.listeners[type] = fn;
+    },
+  };
+  const evidenceEl = { textContent: "" };
+  const screenEl = {
+    getAttribute(name) {
+      return name === "data-unit-id" ? "4" : null;
+    },
+    querySelector(sel) {
+      return {
+        "[data-find-mark]": markEl,
+        "[data-find-clock]": clockEl,
+        "[data-find-start]": startBtn,
+        "[data-find-evidence]": evidenceEl,
+      }[sel] || null;
+    },
+  };
+
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/find.js"), "utf8"), {
+    document: {
+      querySelector: (sel) => (sel === "[data-find-screen]" ? screenEl : null),
+      querySelectorAll: () => [],
+    },
+    window: {},
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    fetch: async (_url, init) => {
+      if (init && init.method === "POST") {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            unit_id: 4,
+            state: "idle",
+            remaining_s: 0,
+            error: "the live find could not be started: database is locked",
+          }),
+        };
+      }
+      return new Promise(() => {});
+    },
+  });
+
+  startBtn.listeners.click();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(
+    evidenceEl.textContent,
+    "the live find could not be started: database is locked"
+  );
+});

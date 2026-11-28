@@ -174,8 +174,8 @@
         var postGen = generation;
         fetch("/api/challenges/" + unitId + "/start", { method: "POST" })
           .then(function (resp) {
-            if (!resp || !resp.ok) return null;
-            return resp.json();
+            if (!resp) return null;
+            return resp.json().catch(function () { return null; });
           })
           .then(function (body) {
             if (postGen !== generation) return;
