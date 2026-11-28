@@ -27,6 +27,7 @@ const PANELS = [
 ];
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
+const TEXT = Symbol("a plain-text body");
 
 // An element that answers every lookup the panels make at load with another such element.
 function stub() {
@@ -78,7 +79,10 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
       return new Promise(resolve => {
         answer = (status, body) => {
           if (status === 200) server.hz = HOME_HZ;
-          resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
+          // A body of TEXT stands for a plain-text answer (the render proxy's), which is not JSON.
+          const json = body === TEXT ? async () => { throw new SyntaxError("not JSON"); }
+                                     : async () => body;
+          resolve({ ok: status >= 200 && status < 300, status, json });
         };
       });
     }
@@ -307,6 +311,17 @@ test("a restore refused as stale says the lesson changed", async () => {
   await page.answer(409, { tuned: false, lesson_id: 7, stale: true,
                            reason: "a newer lesson was opened" });
   assert.deepEqual(page.note.lines, ["Not retuned", "lesson changed"]);
+});
+
+test("under the render proxy the refused restore says so and the panels poll at once", async () => {
+  // tools/render/render_proxy.py answers every POST with a plain-text 405, so on a render check
+  // the restore never runs. The rail must say so, and no panel may wait out the timeout for it.
+  const page = lessonPage({ panels: ["decode", "waterfall"] });
+  await page.answer(405, TEXT);
+  assert.equal(page.note.hidden, false);
+  assert.deepEqual(page.note.lines, ["Not retuned", "error 405"]);
+  assert.equal(page.polls("/api/decode").length, 1);
+  assert.equal(page.polls("/api/spectrum").length, 1);
 });
 
 test("a page that names no lesson posts nothing and its panels poll at once", async () => {
