@@ -334,6 +334,7 @@ def check_list(console, output):
         ("render_live_find.py", console),
         ("render_field.py", console),
         ("render_bandmap.py", console),
+        ("render_closing.py", console),
     )
 
 

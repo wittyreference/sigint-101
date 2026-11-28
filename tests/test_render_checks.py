@@ -29,6 +29,7 @@ RECALL = REPO / "tools" / "render" / "render_recall.py"
 LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 FIELD = REPO / "tools" / "render" / "render_field.py"
 BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
+CLOSING = REPO / "tools" / "render" / "render_closing.py"
 EVAL = REPO / "tools" / "render" / "render_eval.py"
 CHECK = REPO / "tools" / "render" / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
@@ -648,12 +649,12 @@ def _proxy_url(proc):
     "failing",
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name, CLOSING.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails",
+        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails", "closing-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -674,6 +675,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {LIVE_FIND.name} {proxy}",
         f"ran {FIELD.name} {proxy}",
         f"ran {BANDMAP.name} {proxy}",
+        f"ran {CLOSING.name} {proxy}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -716,7 +718,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 11, proc.stdout
+    assert len(urls) == 12, proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -785,6 +787,7 @@ API_TOOLS = {
     "live-find": (LIVE_FIND, ["http://127.0.0.1:9"], {}),
     "field": (FIELD, ["http://127.0.0.1:9"], {}),
     "bandmap": (BANDMAP, ["http://127.0.0.1:9"], {}),
+    "closing": (CLOSING, ["http://127.0.0.1:9"], {}),
 }
 
 
@@ -844,7 +847,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 11, methods
+    assert len(marks) == 12, methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -1102,7 +1105,7 @@ def _runner_copy(render_make, edit):
 
 
 def _add_check(text, line):
-    old = '        ("render_bandmap.py", console),\n'
+    old = '        ("render_closing.py", console),\n'
     assert old in text
     return text.replace(old, old + line)
 
@@ -2300,5 +2303,75 @@ def test_bandmap_render_fails_on_layout_or_shape_defects(devtools, kind, defect)
         "VERDICT: FAIL - bandmap home red-night"
         if kind == "home"
         else "VERDICT: FAIL - bandmap red-night"
+    )
+    assert expected in _verdicts(proc)
+
+
+CLOSING_PREDICT_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "chipsFit": True,
+    "commitFit": True,
+    "commitBottom": 477,
+}
+CLOSING_UNSEALED_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "codePx": 18,
+    "noOverflow": True,
+    "cmdVisibleAtTop": True,
+    "noSplitHyphens": True,
+    "operateFoot": True,
+    "observeFoot": True,
+    "explainFoot": True,
+    "completeVisible": True,
+}
+
+
+def _closing_pages(*, predict_defect=None, stages_defect=None):
+    pages = {}
+    for theme in THEMES:
+        pred = {**CLOSING_PREDICT_FITS, "theme": theme}
+        stages = {**CLOSING_UNSEALED_FITS, "theme": theme}
+        if theme == "red-night":
+            pred.update(predict_defect or {})
+            stages.update(stages_defect or {})
+        pages[f"measureClosingPredict({json.dumps(theme)})"] = pred
+        pages[f"measureClosingUnsealed({json.dumps(theme)},"] = stages
+    return pages
+
+
+def test_closing_render_checks_all_stages_in_all_three_themes(devtools):
+    port = devtools(_closing_pages())
+    proc = run(CLOSING, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - closing-predict dark",
+        "VERDICT: PASS - closing-stages dark",
+        "VERDICT: PASS - closing-predict sunlight",
+        "VERDICT: PASS - closing-stages sunlight",
+        "VERDICT: PASS - closing-predict red-night",
+        "VERDICT: PASS - closing-stages red-night",
+    ]
+
+
+@pytest.mark.parametrize("kind, defect", [
+    ("predict", {"chipsFit": False}),
+    ("predict", {"commitFit": False}),
+    ("stages", {"cmdVisibleAtTop": False}),
+    ("stages", {"noSplitHyphens": False}),
+    ("stages", {"noOverflow": False}),
+    ("stages", {"codePx": 17}),
+    ("stages", {"completeVisible": False}),
+])
+def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devtools, kind, defect):
+    kwargs = {f"{kind}_defect": defect}
+    port = devtools(_closing_pages(**kwargs))
+    proc = run(CLOSING, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    expected = (
+        "VERDICT: FAIL - closing-predict red-night"
+        if kind == "predict"
+        else "VERDICT: FAIL - closing-stages red-night"
     )
     assert expected in _verdicts(proc)
