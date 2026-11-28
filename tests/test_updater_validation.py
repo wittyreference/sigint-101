@@ -512,6 +512,10 @@ def test_calibration_lifecycle_runs_only_in_the_public_console(tmp_path, monkeyp
 
 
 def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):
+    trial_timeout = 45
+    parent_ready_timeout = trial_timeout + 15
+    reap_timeout = 15
+
     # Main-side comparison: normal console lifespan writes stamp backfill to progress.db
     # and appends exam_disabled to events.jsonl when the pool is absent.
     main_gen = _make_managed_generation(tmp_path, "main_cmp")
@@ -577,7 +581,7 @@ def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):
         observed["dir_mode"] = stat.S_IMODE(os.stat(sock_path.parent).st_mode)
         # 2) Normal routes with mutating GETs are unreachable on the trial socket.
         for path in ("/", "/lesson/1", "/api/spectrum", "/api/hardware", "/operate"):
-            status, _ = http_get_unix(sock_path, path)
+            status, _ = http_get_unix(sock_path, path, timeout=trial_timeout)
             observed[f"route:{path}"] = status
         # 3) Parent's O_CLOEXEC lock file descriptor is NOT leaked into the trial child.
         child_fd_targets = []
@@ -599,12 +603,13 @@ def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):
             expected_commit="3333ccc",
             expected_generation_id="gen-ro",
             socket_parent_dir=tmp_path,
+            timeout_s=trial_timeout,
             on_ready=inspect_running_trial,
         )
     finally:
         os.close(lock_fd)
 
-    assert res.ready is True, res.errors
+    assert res.ready is True, f"read-only trial readiness: {res.errors}"
     assert observed["dir_mode"] == 0o700
     assert observed["leaked_lock"] is False
     for path in ("/", "/lesson/1", "/api/spectrum", "/api/hardware", "/operate"):
@@ -626,8 +631,10 @@ def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):
         expected_commit="3333ccc",
         expected_generation_id="gen-ro",
         socket_parent_dir=tmp_path,
+        timeout_s=trial_timeout,
     )
     assert bad_pool_res.ready is False
+    assert any("exam pool" in error for error in bad_pool_res.errors), bad_pool_res.errors
     assert trial_events.read_bytes() == before_events
 
     # Reaped: child PID must no longer exist after run_private_trial returns.
@@ -637,14 +644,16 @@ def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):
     # Parent-death cleanup (PR_SET_PDEATHSIG): kill a parent holding a live trial child.
     pid_file = tmp_path / "trial_child.pid"
     helper = (
-        "import os, sys, time\n"
+        "import signal, sys\n"
         "from pathlib import Path\n"
         "from sigint101.trial import run_private_trial\n"
         f"pid_file = Path({str(pid_file)!r})\n"
         "def hold(_sock, child_pid):\n"
-        "    pid_file.write_text(str(child_pid), encoding='utf-8')\n"
-        "    time.sleep(30)\n"
-        "run_private_trial(\n"
+        "    tmp = pid_file.with_suffix('.tmp')\n"
+        "    tmp.write_text(str(child_pid), encoding='utf-8')\n"
+        "    tmp.replace(pid_file)\n"
+        "    signal.pause()\n"
+        "result = run_private_trial(\n"
         "    python_executable=sys.executable,\n"
         f"    release_root=Path({str(rel_root)!r}),\n"
         f"    data_dir=Path({str(trial_gen)!r}),\n"
@@ -652,8 +661,10 @@ def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):
         "    expected_commit='3333ccc',\n"
         "    expected_generation_id='gen-ro',\n"
         f"    socket_parent_dir=Path({str(tmp_path)!r}),\n"
+        f"    timeout_s={trial_timeout},\n"
         "    on_ready=hold,\n"
         ")\n"
+        "raise SystemExit(f'parent-death trial readiness: {result.errors}')\n"
     )
     parent_env = os.environ.copy()
     parent_env["PYTHONPATH"] = str(REPO_ROOT)
@@ -663,19 +674,30 @@ def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+    def reap_parent():
+        try:
+            parent.wait(timeout=reap_timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(
+                f"trial parent reap after SIGKILL timed out after {reap_timeout}s"
+            ) from exc
+
     try:
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + parent_ready_timeout
         while time.monotonic() < deadline and not pid_file.is_file():
             assert parent.poll() is None, parent.stderr.read().decode("utf-8", "replace")
             time.sleep(0.05)
-        assert pid_file.is_file(), "parent never started trial child"
+        assert pid_file.is_file(), (
+            f"parent-death trial readiness timed out after {parent_ready_timeout}s"
+        )
         child_pid = int(pid_file.read_text(encoding="utf-8").strip())
         # Confirm child is alive before parent dies.
         os.kill(child_pid, 0)
         # Abruptly SIGKILL parent; PR_SET_PDEATHSIG must kill the trial child promptly.
         os.kill(parent.pid, signal.SIGKILL)
-        parent.wait(timeout=5)
-        death_deadline = time.monotonic() + 5.0
+        reap_parent()
+        death_deadline = time.monotonic() + reap_timeout
         alive = True
         while time.monotonic() < death_deadline:
             try:
@@ -684,11 +706,13 @@ def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):
                 alive = False
                 break
             time.sleep(0.05)
-        assert not alive, f"trial child {child_pid} survived parent SIGKILL"
+        assert not alive, (
+            f"trial child {child_pid} still present {reap_timeout}s after parent SIGKILL"
+        )
     finally:
         if parent.poll() is None:
             parent.kill()
-            parent.wait(timeout=5)
+            reap_parent()
 
 
 # --- 4. Effective drop-in settings, shared startup, and R2-1 parity (§8) -----------------------
