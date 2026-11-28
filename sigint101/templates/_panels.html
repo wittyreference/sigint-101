@@ -406,3 +406,20 @@
                 <div class="decoder__empty" data-flipper-empty>Checking receiver…</div>
               </div>
 {% endmacro %}
+
+{# ---- Wi-Fi survey census (M39): read-only nmcli scan grouped per channel — broadcast metadata
+   only (channel, SSID, BSSID, signal, security), with no payload field by construction. survey.js
+   polls /api/survey and lists each channel's census. No Wi-Fi radio / no nmcli shows an honest
+   empty state, never a fabricated network. Opts into .decoder--fits-refusal in a lesson. ---- #}
+{% macro survey(head_command=true) %}
+              <div class="decoder decoder--fits-refusal" data-survey-panel
+                   aria-label="Read-only Wi-Fi channel census (metadata only)">
+                <div class="decoder__head">
+                  <span class="decoder__title">nmcli &middot; Wi-Fi survey</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-survey-badge>CHECKING</span>
+                </div>
+                <ul class="decoder__list" data-survey-list></ul>
+                <div class="decoder__empty" data-survey-empty>Checking receiver…</div>
+              </div>
+{% endmacro %}

@@ -102,6 +102,7 @@ from .spectrum import (
 )
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
 from .stamps import STAMP_INSTRUMENTS, mint, stamps_from_log
+from .survey import SurveyUnavailable, WifiSurvey
 from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -302,7 +303,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
                apt_factory=None, sstv_factory=None,
-               flock_factory=None, rayhunter_factory=None, flipper_factory=None, pool_path=None,
+               flock_factory=None, rayhunter_factory=None, flipper_factory=None,
+               survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None) -> FastAPI:
     """Build the console with its collaborators injectable.
@@ -525,6 +527,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_flipper = flipper_factory
 
+    # The Wi-Fi survey runs one bounded read-only nmcli scan on the host's Wi-Fi radio — separate
+    # from the SDR, with no long-lived daemon to tear down on shutdown.
+    if survey_factory is None:
+        build_survey = WifiSurvey
+    else:
+        build_survey = survey_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -554,6 +563,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.flock = build_flock()
         app.state.rayhunter = build_rayhunter()
         app.state.flipper = build_flipper()
+        app.state.survey = build_survey()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way. The pool must pass its correctness guard to be
@@ -1348,6 +1358,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return {"cause": "no_radio", "next_step": "Connect the Flipper over USB."}
         if reason.startswith("no monitor radio:"):
             return {"cause": "no_radio"}  # This refusal already says how to seat the devboard.
+        if reason.startswith(("no Wi-Fi radio", "Wi-Fi radio is off", "no managed Wi-Fi device")):
+            return {"cause": "no_radio"}
 
         missing = re.match(r"(?:cannot survey the bus: )?([\w.+-]+) is not installed\b", reason)
         tool = missing[1] if missing else None
@@ -1601,6 +1613,23 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         last_refusal.pop("flipper", None)
         # Each read is one short CLI session, not a tool left running: no command line.
         return {"available": True, "command": None, "device": device}
+
+    @app.get("/api/survey")
+    def survey():
+        """One read-only Wi-Fi metadata census per channel via nmcli.
+
+        Reads SSID, BSSID, channel, signal and security only — never connects and carries no
+        payload field. Uses the host Wi-Fi radio, so it never disturbs an SDR sweep or decoder.
+        Missing nmcli, no Wi-Fi radio or a scan failure is a 503 with the reason, never an
+        invented network.
+        """
+        scanner = app.state.survey
+        try:
+            result = scanner.scan()
+        except SurveyUnavailable as exc:
+            return _refused("survey", exc, {"total": 0, "channels": [], "networks": []})
+        last_refusal.pop("survey", None)
+        return {"available": True, **result}
 
     @app.get("/api/rds")
     def rds():

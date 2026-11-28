@@ -15,14 +15,14 @@ LESSONS = load_lessons(PACK_DIR)
 # lines of why and one line to carry out the door fit in about 120.
 EXPLAIN_MAX_WORDS = 120
 
-# M5 and M15 teach the law, and their legal sentences stay word for word as corrected after the
-# audit (§5a X1, R1): the statute is the lesson there, so the explain gets room for it, not a trim.
-LAW_EXPLAIN_MAX_WORDS = {5: 165, 15: 185}
+# M5, M15, and M39 teach the law, and their legal sentences stay exact to the statute and opinion
+# rather than trimmed into overstatement, so their explains get room for the citations and limits.
+LAW_EXPLAIN_MAX_WORDS = {5: 165, 15: 185, 39: 175}
 
 # An instrument stage's narration reads in a thin band under the live panel while the learner is
 # told to watch it: split attention. About 60 words keeps the instruction and drops the lecture.
 NARRATION_MAX_WORDS = 60
-INSTRUMENT_STAGES = ("demo", "try", "observe")
+INSTRUMENT_STAGES = ("demo", "try", "operate", "observe")
 
 
 def _words(text: str) -> int:
@@ -41,6 +41,6 @@ def test_every_explain_fits_a_short_reveal(lesson_id):
 def test_every_instrument_narration_reads_while_watching(lesson_id):
     lesson = LESSONS[lesson_id]
     long = {stage: _words(lesson.stages[stage]) for stage in INSTRUMENT_STAGES
-            if _words(lesson.stages[stage]) > NARRATION_MAX_WORDS}
+            if stage in lesson.stages and _words(lesson.stages[stage]) > NARRATION_MAX_WORDS}
     assert not long, (
         f"lesson {lesson_id} narration over {NARRATION_MAX_WORDS} words: {long}")
