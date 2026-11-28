@@ -2068,9 +2068,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def decode(limit: int | None = None):
         """Recent rtl_433 decodes on the ISM band. No radio or no rtl_433 is a 503 with the reason.
 
-        The decoder holds the dongle rtl_power otherwise sweeps, so the sweep is released first and
-        stays released until a /api/spectrum poll takes it back. resume() clears any release left on
-        the decoder by that reclaim, so flipping between the two keeps working.
+        The decoder holds the dongle rtl_power otherwise sweeps, so _claim_sdr runs its supervised
+        preflight, stands the other consumers down, and starts it via a claimed launch that clears
+        any prior release, keeping turn-taking with the sweep working.
         """
         decoder = app.state.decoder
         if app.state.replay.running:

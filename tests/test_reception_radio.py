@@ -97,7 +97,7 @@ def test_delayed_reader_logs_the_radio_that_heard_its_item(tmp_path, monkeypatch
     app = _console(tmp_path, lambda: tuple(bus), **factories)
 
     with TestClient(app):
-        receiver = getattr(app.state, spec.name)
+        receiver = getattr(app.state, "decoder" if spec.name == "decode" else spec.name)
         receiver.STOP_WAIT_S = 0.05
         receiver._which = lambda tool: tool
         if name == "flock":

@@ -689,7 +689,11 @@ class SupervisedReceiver:
             except Exception as exc:
                 run.failure = f"{run.watch.tool} cleanup retry failed: {exc}"
             finally:
-                self._ack_retry(run, ticket)
+                with self._life:
+                    # Keep the ticket open if shutdown arrived mid-short-attempt so
+                    # shutdown gets its own bounded STOP_WAIT_S pass on the next cycle.
+                    if run.reaped or closing or not self._closing:
+                        self._ack_retry(run, ticket)
 
     def _report(self, run):
         """Streaming receivers already report each item from their reader."""
