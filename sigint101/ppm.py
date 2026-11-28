@@ -14,7 +14,8 @@ import time
 from array import array
 from contextlib import suppress
 
-from .childproc import spawn, stop_process
+from . import childproc
+from .childproc import spawn
 from .provenance import read_soc_temp_c
 
 # The reference tone. Every stereo FM broadcast carries a 19 kHz pilot, and 47 CFR 73.322 holds
@@ -221,8 +222,8 @@ class _CaptureStream:
     """rtl_fm's output, with an off switch and a deadline.
 
     rtl_fm holds the dongle until it is killed, so closing the pipe is not enough — the process
-    has to go, or the console cannot take the radio back. Closing is idempotent because the
-    caller closes in a finally block that also runs on the paths that already closed.
+    has to go, or the console cannot take the radio back. Closing again after an unconfirmed
+    stop retries the reap. Once the exit is confirmed, there is nothing left to signal.
 
     rtl_fm can also stay alive and write nothing, as it does when its USB stream stalls, and a
     pipe read waits for as long as its writer lives. So no read here waits past the capture's
@@ -233,7 +234,11 @@ class _CaptureStream:
         self._proc = proc
         self._deadline = time.monotonic() + seconds + CAPTURE_MARGIN_S
         self.stalled = False
-        self.stop_failed = False
+        self.stop_failure: str | None = None
+
+    @property
+    def stop_failed(self) -> bool:
+        return self.stop_failure is not None
 
     def read(self, n):
         """Read one chunk of raw samples from the running rtl_fm.
@@ -260,23 +265,49 @@ class _CaptureStream:
 
     def close(self):
         """Stop rtl_fm and release the dongle, whatever the measurement decided."""
-        reaped = False
+        failure = "could not be confirmed stopped"
         try:
-            reaped = self._proc.poll() is not None or stop_process(self._proc)
-        except (OSError, ValueError):
-            # A failed wait can skip escalation. Keep the hold unless the exit is visible.
-            with suppress(OSError, ValueError):
-                self._proc.kill()
-            reaped = self.reaped()
+            failure = self._stop(retry=self.stop_failed)
+        except Exception as exc:
+            failure = f"{failure} ({exc})"
         finally:
-            self.stop_failed = not reaped
+            self.stop_failure = failure
             if self._proc.stdout:
                 self._proc.stdout.close()
+
+    def _stop(self, *, retry: bool) -> str | None:
+        proc = self._proc
+        if not retry:
+            if proc.poll() is not None:
+                return None
+            with suppress(ProcessLookupError):
+                proc.terminate()
+            try:
+                proc.wait(timeout=childproc.STOP_WAIT_S)
+            except Exception:
+                # A timeout or wait error calls for the same guarded escalation.
+                pass
+            else:
+                return None
+
+        # A prior wait may already have reaped the child. A failed poll confirms nothing.
+        if proc.poll() is not None:
+            return None
+        with suppress(ProcessLookupError):
+            proc.kill()
+        try:
+            proc.wait(timeout=childproc.STOP_WAIT_S)
+        except subprocess.TimeoutExpired:
+            return "survived kill"
+        except Exception:
+            if not self.reaped():
+                raise
+        return None
 
     def reaped(self) -> bool:
         try:
             return self._proc.poll() is not None
-        except (OSError, ValueError):
+        except Exception:
             return False
 
 
@@ -304,6 +335,12 @@ class PpmCalibration:
             # The caller still holds the SDR reservation. Publish the failure before it wakes
             # any waiter, even if processing the measurement itself raised.
             self._unreaped = stream if stream is not None and stream.stop_failed else None
+
+    def stop(self):
+        """Retry a retained capture on console shutdown."""
+        stream = self._unreaped
+        if stream is not None:
+            stream.close()
 
     def release_failure(self) -> str | None:
         stream = self._unreaped
@@ -342,6 +379,8 @@ def measure_pilot_ppm(*, hz, seconds=DEFAULT_SECONDS, gain=DEFAULT_GAIN, device=
             prefix += f" stalled after {got:.1f} s of the {seconds:g} s capture and"
         if stop_failed:
             end = "would not stop cleanly and may still hold the radio"
+            if failure := getattr(stream, "stop_failure", None):
+                end += f" ({failure})"
         else:
             end = "was stopped — a stall is not a measurement"
         return {**base, "ppm": None, "seconds": got, "reason": f"{prefix} {end}"}

@@ -77,6 +77,34 @@ _PROGRESS_TABLE_DDL: tuple[tuple[str, str], ...] = (
         "updated REAL, "
         "PRIMARY KEY (lesson_id, card_key))",
     ),
+    (
+        "retrieval",
+        "CREATE TABLE retrieval ("
+        "lesson_id INTEGER PRIMARY KEY, "
+        "box INTEGER NOT NULL DEFAULT 1, "
+        "last_seen REAL NOT NULL, "
+        "seen INTEGER NOT NULL DEFAULT 0, "
+        "correct INTEGER NOT NULL DEFAULT 0, "
+        "last_choice TEXT)",
+    ),
+    (
+        "challenges",
+        "CREATE TABLE challenges ("
+        "unit_id INTEGER PRIMARY KEY, "
+        "started_at REAL NOT NULL, "
+        "window_s INTEGER NOT NULL)",
+    ),
+    (
+        "challenge_passes",
+        "CREATE TABLE challenge_passes ("
+        "unit_id INTEGER NOT NULL, "
+        "started_at REAL NOT NULL, "
+        "passed_at REAL NOT NULL, "
+        "instrument TEXT NOT NULL, "
+        "provenance TEXT NOT NULL, "
+        "digest TEXT NOT NULL, "
+        "PRIMARY KEY (unit_id, started_at))",
+    ),
 )
 
 _EXAM_TABLE_DDL: tuple[tuple[str, str], ...] = (
