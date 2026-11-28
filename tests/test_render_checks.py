@@ -25,6 +25,7 @@ LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
 LORA = REPO / "tools" / "render" / "render_lora.py"
 CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
 SURVEY = REPO / "tools" / "render" / "render_survey.py"
+RECALL = REPO / "tools" / "render" / "render_recall.py"
 EVAL = REPO / "tools" / "render" / "render_eval.py"
 CHECK = REPO / "tools" / "render" / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
@@ -487,7 +488,7 @@ def render_make(tmp_path, console_url, devtools, strays):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -557,10 +558,11 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
 
 @pytest.mark.parametrize(
     "failing",
-    ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name, SURVEY.name],
+    ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name, SURVEY.name,
+     RECALL.name],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
-        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
+        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails", "recall-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -573,6 +575,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {LORA.name} {console_url}",
         f"ran {CARD_SORT.name} {console_url}",
         f"ran {SURVEY.name} {console_url}",
+        f"ran {RECALL.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -615,7 +618,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 7, proc.stdout
+    assert len(urls) == 8, proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -740,7 +743,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 7, methods
+    assert len(marks) == 8, methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -1417,3 +1420,44 @@ globalThis.window = {{ fetch: origFetch }};
 """
     node_proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
     assert node_proc.returncode == 0, node_proc.stdout + node_proc.stderr
+
+
+def test_recall_render_console_uses_no_radio_probe(tmp_path, monkeypatch):
+    # F5: render_recall.py must pass a no-radio probe so it never touches a live SDR bus.
+    sys.path.insert(0, str(RECALL.parent))
+    try:
+        import render_recall  # noqa: PLC0415
+    finally:
+        sys.path.remove(str(RECALL.parent))
+
+    captured: dict = {}
+
+    def fake_create_app(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    class FakeServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        def run(self):
+            return None
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(render_recall, "create_app", fake_create_app)
+    monkeypatch.setattr(render_recall.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(render_recall, "urlopen", lambda *_a, **_kw: FakeResp())
+
+    server, thread, _base = render_recall._run_server(tmp_path, lambda: 1_700_000_000.0)
+    render_recall._stop_server(server, thread)
+
+    probe_fn = captured["kwargs"].get("probe")
+    assert callable(probe_fn), "render_recall._run_server must pass a no-radio probe"
+    probe = probe_fn()
+    assert probe.present is False

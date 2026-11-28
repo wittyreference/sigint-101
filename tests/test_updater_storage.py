@@ -168,7 +168,27 @@ def _build_progress_v0(path: Path, variant: str) -> dict:
         "VALUES(5, 'aircraft-am', 'legal', 1, 104.0)"
     )
     expected["sort_answers"] = [(5, "aircraft-am", "legal", 1, 104.0)]
-    assert variant == "v0_1a35a1a"
+    if variant == "v0_1a35a1a":
+        conn.commit()
+        conn.close()
+        return expected
+
+    conn.executescript("""
+        CREATE TABLE retrieval (
+            lesson_id   INTEGER PRIMARY KEY,
+            box         INTEGER NOT NULL DEFAULT 1,
+            last_seen   REAL NOT NULL,
+            seen        INTEGER NOT NULL DEFAULT 0,
+            correct     INTEGER NOT NULL DEFAULT 0,
+            last_choice TEXT
+        );
+    """)
+    conn.execute(
+        "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
+        "VALUES(1, 2, 105.0, 3, 2, 'a')"
+    )
+    expected["retrieval"] = [(1, 2, 105.0, 3, 2, "a")]
+    assert variant == "v0_retrieval"
     conn.commit()
     conn.close()
     return expected
@@ -283,7 +303,7 @@ def _counting_write_authorizer(counter: list[str]):
 
 @pytest.mark.parametrize(
     "p_variant",
-    ["empty", "v0_72ddf9c", "v0_02c2095", "v0_e72c706", "v0_1a35a1a"],
+    ["empty", "v0_72ddf9c", "v0_02c2095", "v0_e72c706", "v0_1a35a1a", "v0_retrieval"],
 )
 @pytest.mark.parametrize(
     "e_variant",
@@ -341,7 +361,7 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     prog = Progress(dst_p, managed=True)
     prog._conn.set_authorizer(_counting_write_authorizer(writes_p))
     assert prog.get(1) is not None or p_variant == "empty"
-    if p_variant in ("v0_e72c706", "v0_1a35a1a"):
+    if p_variant in ("v0_e72c706", "v0_1a35a1a", "v0_retrieval"):
         assert len(prog.stamps()) == 1
         assert prog.stamps()[0]["count"] == 3
     prog.close()
@@ -743,15 +763,12 @@ def test_current_legacy_constructor_signatures_are_in_reviewed_set(tmp_path):
         "Review and add its migration before shipping."
     )
 
-    # Prove the CI guard catches dropping either stamp table or adding an unreviewed table.
+    # Prove the CI guard catches dropping any stamp/sort table (leaving an unreviewed partial
+    # schema) or adding an unreviewed table.
     for drop_table in ("stamps", "stamp_events", "sort_answers"):
         mutated = copy.deepcopy(p_sig)
         del mutated["tables"][drop_table]
-        if drop_table == "stamps":
-            # Missing stamps while keeping stamp_events is an unreviewed partial schema.
-            assert match_v0_signature("progress", mutated) is None
-        elif drop_table == "stamp_events":
-            assert match_v0_signature("progress", mutated) is None
+        assert match_v0_signature("progress", mutated) is None
 
     unreviewed = copy.deepcopy(p_sig)
     unreviewed["tables"]["unreviewed_feature"] = {
