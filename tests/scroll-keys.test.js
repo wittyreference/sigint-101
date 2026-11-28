@@ -158,3 +158,27 @@ test("opening a tile grid centres the active tile within view before refreshing 
   assert.deepEqual(events[0], ["scroll", "center", "nearest"]);
   assert.ok(events.some(e => e[0] === "attr"), "scroll-frame cues still refreshed");
 });
+
+test("keys scroll the /law reference list when it overflows", () => {
+  let onKey;
+  let prevented = 0;
+  const moves = [];
+  const entries = {
+    scrollHeight: 980,
+    clientHeight: 320,
+    scrollBy: (x, y) => moves.push(["by", x, y]),
+    scrollTo: (x, y) => moves.push(["to", x, y]),
+  };
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/scroll-keys.js"), "utf8"), {
+    document: {
+      querySelectorAll: () => [],
+      querySelector: s => s === ".law__entries" ? entries : null,
+      addEventListener: (event, handler) => { if (event === "keydown") onKey = handler; },
+    },
+  });
+
+  onKey({ key: "PageDown", preventDefault: () => { prevented++; } });
+  onKey({ key: "End", preventDefault: () => { prevented++; } });
+  assert.deepEqual(moves, [["by", 0, 272], ["to", 0, 980]]);
+  assert.equal(prevented, 2);
+});
