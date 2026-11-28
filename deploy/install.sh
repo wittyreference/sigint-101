@@ -11,19 +11,93 @@ COURSE_BIN="/usr/local/bin/sigint101-course"
 # The running course watchdog holds a flock on this (deploy/kiosk/start-kiosk.sh).
 WATCH_LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sigint101-kiosk-watch.lock"
 
-# The processes holding the watchdog's flock, one PID a line: those with an fd on the lock file
-# whose fdinfo lists the lock. A process that has merely opened the file holds nothing.
+# One install at a time: two at once raced in their `install -D` steps (the user's files and the
+# desktop theme), and the loser stopped half done. The lock is one file per user, under the home
+# directory the files go to, so every install of the same files takes the same lock whatever
+# XDG_RUNTIME_DIR says (it appears only once a session has one, and a caller can override it).
+# It is apart from the watchdog's lock, which belongs to a desktop session. It is taken before
+# anything is installed and held to the end by this shell alone: sudo closes inherited fds, and
+# each child that may leave something running gets it closed (7>&-), so it never outlives this
+# run. Another install waits for it, up to INSTALL_WAIT_S.
+INSTALL_LOCK_DIR="$HOME/.cache/sigint101"
+INSTALL_LOCK="$INSTALL_LOCK_DIR/install.lock"
+INSTALL_WAIT_S=300
+# Tests only: the wait can be cut short, and only when SIGINT101_TESTING=1 says this is a test.
+if [ "${SIGINT101_TESTING:-}" = 1 ] && [[ "${SIGINT101_TEST_INSTALL_WAIT_S:-}" =~ ^[1-9][0-9]*$ ]]
+then
+  INSTALL_WAIT_S="$SIGINT101_TEST_INSTALL_WAIT_S"
+fi
+# The lock's directory is this user's own, 0700, and neither ~/.cache, the directory nor the lock
+# is a symlink, so nothing is made or opened through a link to somewhere else.
+INSTALL_CACHE_DIR="${INSTALL_LOCK_DIR%/*}"
+lock_path_refused() {
+  echo "install: stopped: $INSTALL_LOCK must be a plain file of yours, in a directory of yours" \
+    "(0700), with no symlink on the way ($1); nothing was changed" >&2
+  exit 1
+}
+# ~/.cache itself first, before anything is made under it: a symlink there would put the lock
+# directory, and the lock, wherever it points.
+if [ -L "$INSTALL_CACHE_DIR" ] || { [ -e "$INSTALL_CACHE_DIR" ] && [ ! -d "$INSTALL_CACHE_DIR" ]; }
+then
+  lock_path_refused "$INSTALL_CACHE_DIR is a symlink or not a directory"
+fi
+# Two installs may get here at once, so "already there" is no error; the checks below decide.
+mkdir -p "$INSTALL_CACHE_DIR"
+mkdir -m 0700 "$INSTALL_LOCK_DIR" 2>/dev/null || true
+if [ -L "$INSTALL_CACHE_DIR" ] || [ -L "$INSTALL_LOCK_DIR" ] || [ ! -d "$INSTALL_LOCK_DIR" ] ||
+  [ ! -O "$INSTALL_LOCK_DIR" ]; then
+  lock_path_refused "$INSTALL_LOCK_DIR is a symlink, not a directory, or not yours"
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo "install: stopped: flock (from util-linux) is missing, and it keeps two installs from" \
+    "running at once; nothing was changed" >&2
+  exit 1
+fi
+# From here the work is done inside the lock's directory: the shell's working directory pins the
+# directory just checked, so the chmod, the mode check and the lock's open all act on that one
+# directory, whatever later happens to the path. A directory of the user's that is already there
+# may be open to others (made under another umask, say); it is set to 0700 (the leading zeros
+# clear a directory's setgid bit too) before the lock is looked at or opened. From then on no
+# other account can add or replace anything in it, and whatever is in it already must still pass
+# the lock's checks. After the open, the path must still name the pinned directory and its lock,
+# or another install would take a different lock: the install stops.
+INSTALL_LOCK_DIR_P="$(cd -P -- "$HOME" 2>/dev/null && pwd -P)/.cache/sigint101" ||
+  lock_path_refused "cannot read where your home directory is"
+INSTALL_START_DIR="$PWD"
+cd -P -- "$INSTALL_LOCK_DIR" 2>/dev/null || lock_path_refused "cannot enter $INSTALL_LOCK_DIR"
+if [ "$(pwd -P)" != "$INSTALL_LOCK_DIR_P" ] || [ ! -O . ]; then
+  lock_path_refused "$INSTALL_LOCK_DIR changed while it was being checked"
+fi
+chmod 00700 . 2>/dev/null || lock_path_refused "cannot set it to 0700"
+lock_dir_mode="$(ls -ld . 2>/dev/null)" || lock_path_refused "cannot read its mode"
+case "${lock_dir_mode%% *}" in
+  drwx------ | drwx------.) ;;  # 0700; a trailing "." is only an SELinux label, "+" an ACL
+  *) lock_path_refused "it is not 0700 (${lock_dir_mode%% *})" ;;
+esac
+if [ -L ./install.lock ] || { [ -e ./install.lock ] && { [ ! -f ./install.lock ] ||
+  [ ! -O ./install.lock ]; }; }; then
+  lock_path_refused "the lock is a symlink, not a plain file, or not yours"
+fi
+exec 7>>./install.lock
+if [ "$(pwd -P)" != "$INSTALL_LOCK_DIR_P" ] || [ ! /dev/fd/7 -ef "$INSTALL_LOCK" ]; then
+  exec 7>&-
+  lock_path_refused "$INSTALL_LOCK_DIR was replaced while the lock was being opened"
+fi
+# Nothing below depends on the working directory (HERE is absolute), but it goes back anyway.
+cd -- "$INSTALL_START_DIR" 2>/dev/null || cd /
+if ! flock -n 7; then
+  echo "install: another install.sh is running; waiting for it (up to ${INSTALL_WAIT_S} s)" >&2
+  if ! flock -w "$INSTALL_WAIT_S" 7; then
+    echo "install: stopped: another install.sh still holds $INSTALL_LOCK after" \
+      "${INSTALL_WAIT_S} s; nothing was changed. Run it again once that one has finished." >&2
+    exit 1
+  fi
+fi
+
+# The processes holding the watchdog's flock, one PID a line (the helper's HOLDERS scan).
 lock_holders() {
   [ -e "$WATCH_LOCK" ] || return 0
-  local fd pid seen=" "
-  while IFS= read -r fd; do
-    pid="${fd#/proc/}"
-    pid="${pid%%/*}"
-    case "$seen" in *" $pid "*) continue ;; esac
-    grep -q '^lock:.*FLOCK' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null || continue
-    seen+="$pid "
-    printf '%s\n' "$pid"
-  done < <(within_scan_limit find /proc/[0-9]*/fd -maxdepth 1 -lname "$WATCH_LOCK" 2>/dev/null)
+  watchdog_helper HOLDERS
 }
 
 # Run a command, cut off after SCAN_LIMIT seconds when that is set (wait_for_lock's time left).
@@ -49,12 +123,11 @@ watchdog_helper() {
 
 NO_PIDFD="the course watchdog could not be pinned (no pidfd: Linux 5.3+ and Python 3.9+ are needed)"
 
-# The running watchdogs, as "PID:START", from the lock's holders.
+# The running watchdogs, as "PID:START", from the lock's holders: one helper process for the
+# whole scan, holders and their fdinfo included, so one SCAN_LIMIT bounds all of it.
 watchdogs() {
-  local -a holders
-  mapfile -t holders < <(lock_holders)
-  [ "${#holders[@]}" -gt 0 ] || return 0
-  watchdog_helper FIND "${holders[@]}"
+  [ -e "$WATCH_LOCK" ] || return 0
+  watchdog_helper FIND
 }
 
 # Does PID descend from one of the watchdogs given (as "PID:START"), or has it already exited?
@@ -111,6 +184,8 @@ wait_for_lock() {
     SCAN_LIMIT="$(cs_to_s "$left")"
     mapfile -t now < <(watchdogs)
     SCAN_LIMIT=""
+    # A scan that ended at or after the deadline counts for nothing: the time ran out first.
+    [ "$(uptime_cs)" -lt "$deadline" ] || return 1
     for w in "${now[@]}"; do
       [[ " ${found[*]} " == *" $w "* ]] || return 2
     done
@@ -141,23 +216,52 @@ a_new_watchdog() {
 
 HANDED_OVER="install: another install has already started the new course watchdog"
 
+# started_since CS PID:START...: did every one of these watchdogs start after CS (hundredths of a
+# second since boot, as uptime_cs gives)? Start times count clock ticks since boot. A start in
+# the same hundredth as CS proves nothing either way, so only a strictly later one counts.
+started_since() {
+  local since="$1" w ticks
+  shift
+  ticks="$(getconf CLK_TCK 2>/dev/null)" || ticks=100
+  [[ "$ticks" =~ ^[1-9][0-9]*$ ]] || ticks=100
+  for w in "$@"; do
+    (( ${w#*:} * 100 / ticks > since )) || return 1
+  done
+  return 0
+}
+
 # A running watchdog keeps the launcher it started with in memory, so without this a launcher
 # change (the window bounds, say) waits for the next login. Stop it through a pidfd and start the
 # installed launcher's watchdog in the same desktop session, with that session's environment
 # (install.sh is often run over SSH, which has no WAYLAND_DISPLAY). The kiosk browser is never
 # touched: a learner may be mid-lesson, so new browser flags apply at its next launch.
 restart_watchdog() {
-  local pid w
+  local pid w scan_began
   local -a found holders session_env run
+  scan_began="$(uptime_cs)"
   mapfile -t found < <(watchdogs)
   if [ "${#found[@]}" -eq 0 ]; then
-    # Held, yet no watchdog holds it: a lookalike, or a kernel whose fdinfo lists no locks. Say
-    # so, or the launcher change would go unapplied without a word.
-    if [ -e "$WATCH_LOCK" ] && ! flock -n "$WATCH_LOCK" true; then
+    # The scan found no watchdog. The lock is probed once, and that one answer decides: free,
+    # and no watchdog runs (one that starts from here on runs the launcher just installed).
+    if [ ! -e "$WATCH_LOCK" ] || flock -n "$WATCH_LOCK" true; then
+      return 0
+    fi
+    # Held: look once more before anything is said. The old watchdog may have exited during the
+    # scan with a new one just started (by another install, or the session's autostart). One that
+    # started strictly after the scan began is that new one, the hand-over done; one that is not
+    # (older, or in the same hundredth, which proves nothing) is restarted as usual.
+    mapfile -t found < <(watchdogs)
+    if [ "${#found[@]}" -gt 0 ] && started_since "$scan_began" "${found[@]}"; then
+      echo "$HANDED_OVER"
+      return 0
+    fi
+    if [ "${#found[@]}" -eq 0 ]; then
+      # Held, yet no watchdog holds it: a lookalike, or a kernel whose fdinfo lists no locks. Say
+      # so, or the launcher change would go unapplied without a word.
       echo "install: WARN the course watchdog's lock is held, but no watchdog holding it was" \
         "found; it was not restarted, and the new launcher applies at the next login" >&2
+      return 0
     fi
-    return 0
   fi
   # Anything else holding the lock for good (a kiosk browser an older launcher started without
   # closing fd 9) would keep any new watchdog out, so the working one is left as it is.
@@ -223,16 +327,18 @@ restart_watchdog() {
   if command -v systemd-cat >/dev/null 2>&1; then
     run=(systemd-cat -t sigint101-course "${run[@]}")
   fi
-  setsid -f env -i "${session_env[@]}" "${run[@]}" </dev/null >/dev/null 2>&1
+  # The new watchdog outlives this run, so it must not keep the install lock (fd 7).
+  setsid -f env -i "${session_env[@]}" "${run[@]}" </dev/null >/dev/null 2>&1 7>&-
 }
 
 # A provision run can pull this checkout and keep its loaded build recipes. It invokes
 # this installer from the course checkout when the server unit changes.
 if [[ "$HERE" -ef "$HOME/sigint-101/deploy" && -x "$HERE/../.venv/bin/python" ]]; then
+  # Without the install lock's fd 7, like every step that runs other programs at length.
   (
     . "$HERE/provision.sh"
     ensure_ais_companion
-  )
+  ) 7>&-
 fi
 
 # 1) Lesson server: a user unit plus lingering, so it runs from boot with nobody logged in.
@@ -268,8 +374,10 @@ sudo mkdir -p /var/log/journal
 sudo systemctl restart systemd-journald
 
 # 5) The desktop itself in the course's phosphor-terminal look: fonts, bar, frames, wallpaper,
-#    labels and terminal (MC's call, 2026-11-03). Per-user; reloads whatever is running.
-bash "$HERE/desktop/apply-theme.sh"
+#    labels and terminal (MC's call, 2026-11-03). Per-user; reloads whatever is running. Its
+#    reloads (pcmanfm --reconfigure, the bar) may leave a process running, so it runs without
+#    the install lock's fd 7: nothing it starts can keep the lock after this install.
+bash "$HERE/desktop/apply-theme.sh" 7>&-
 
 # 6) Hand the course watchdog over to the launcher just installed. The open kiosk stays open.
 restart_watchdog
