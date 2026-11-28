@@ -77,7 +77,7 @@ from .operate import (
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
 from .ppm import PpmUnavailable, measure_pilot_ppm
-from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress
+from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress, RecallNotDue
 from .provenance import (
     BaselineLog,
     compare_to_baseline,
@@ -88,6 +88,8 @@ from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, fini
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .receiver_socket import PortOccupied
+from .retrieval import MAX_CARDS
+from .retrieval import due as recall_due
 from .safety import notice_for, rack_lora_send
 from .spectrum import (
     DEFAULT_BIN,
@@ -308,7 +310,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None,
-               managed: bool = False) -> FastAPI:
+               clock=time.time, managed: bool = False) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -734,6 +736,123 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 or getattr(sweeper, "target", None) is not None):
             sweeper.retune(DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_BIN)
 
+    def _recall_sources() -> list[int]:
+        """Loaded lessons that carry a check block and have been completed."""
+        sources = []
+        for lid, item in app.state.lessons.items():
+            if not item.check:
+                continue
+            row = app.state.progress.get(lid)
+            if row and row["completed"]:
+                sources.append(lid)
+        return sources
+
+    def _parse_int_param(value: str | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _recall_response(request: Request, lesson, unit, sources: list[int], now: float):
+        """Render a pre-lesson recall card or feedback when applicable, else None."""
+        recall_mode = request.query_params.get("recall")
+        if recall_mode in ("skip", "done"):
+            return None
+
+        back_href = f"/unit/{unit.id}" if unit else "/"
+        back_label = f"Unit {unit.id}" if unit else "Home"
+        skip_url = f"/lesson/{lesson.id}?recall=skip"
+        rows = app.state.progress.get_retrieval(sources)
+
+        if recall_mode is None:
+            due_ids = recall_due(rows, now=now, exclude=lesson.id)
+            if not due_ids:
+                return None
+            source = app.state.lessons[due_ids[0]]
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": source,
+                    "card_num": 1,
+                    "card_total": min(MAX_CARDS, len(due_ids)),
+                    "commit_url": f"/api/recall?lesson_id={lesson.id}&source={source.id}&card=1",
+                    "skip_url": skip_url,
+                    "recall_choice": None,
+                    "recall_feedback": None,
+                },
+            )
+
+        if recall_mode == "answered":
+            src_id = _parse_int_param(request.query_params.get("source"))
+            card = _parse_int_param(request.query_params.get("card"))
+            if card not in (1, 2) or src_id not in sources or src_id == lesson.id:
+                return None
+            ret_row = rows.get(src_id)
+            src_lesson = app.state.lessons[src_id]
+            choice = ret_row["last_choice"] if ret_row else None
+            valid_choices = [c["key"] for c in src_lesson.check["choices"]]
+            if choice not in valid_choices:
+                return None
+            remaining = recall_due(rows, now=now, exclude=lesson.id)
+            if card == 1 and remaining:
+                card_total = MAX_CARDS
+                next_label = "Next card"
+                next_url = f"/lesson/{lesson.id}?recall=card&card=2"
+            else:
+                card_total = card
+                next_label = "Start lesson"
+                next_url = f"/lesson/{lesson.id}?recall=done"
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": src_lesson,
+                    "card_num": card,
+                    "card_total": card_total,
+                    "skip_url": skip_url,
+                    "recall_choice": choice,
+                    "recall_feedback": src_lesson.check_feedback(choice),
+                    "next_label": next_label,
+                    "next_url": next_url,
+                },
+            )
+
+        if recall_mode == "card":
+            card = _parse_int_param(request.query_params.get("card"))
+            if card != 2:
+                return None
+            due_ids = recall_due(rows, now=now, exclude=lesson.id)
+            if not due_ids:
+                return None
+            source = app.state.lessons[due_ids[0]]
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": source,
+                    "card_num": 2,
+                    "card_total": MAX_CARDS,
+                    "commit_url": f"/api/recall?lesson_id={lesson.id}&source={source.id}&card=2",
+                    "skip_url": skip_url,
+                    "recall_choice": None,
+                    "recall_feedback": None,
+                },
+            )
+
+        return None
+
     @app.get("/lesson/{lesson_id}", response_class=HTMLResponse)
     def lesson_view(request: Request, lesson_id: int):
         """Render one lesson, sealing every post-predict stage until a prediction exists.
@@ -751,12 +870,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         lesson = app.state.lessons[lesson_id]
         _restore_lesson_tuning(lesson)
         app.state.progress.mark_opened(lesson_id)
+        saved_stage = app.state.progress.get_stage(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
+        unit = unit_for_lesson(lesson_id)
+        sources = _recall_sources()
+        now = clock()
+        app.state.progress.enroll_recall(sources, now=now)
+        if saved_stage is None and prediction is None:
+            recall_page = _recall_response(request, lesson, unit, sources, now)
+            if recall_page is not None:
+                return recall_page
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
-        current, reached = _resume_stage(lesson, app.state.progress.get_stage(lesson_id),
-                                         committed)
-        unit = unit_for_lesson(lesson_id)
+        current, reached = _resume_stage(lesson, saved_stage, committed)
         context = {
             "title": lesson.title,
             "back_href": f"/unit/{unit.id}" if unit else "/",
@@ -873,6 +999,47 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.progress.record_stage(lesson_id, CHECK_STAGE,
                                         lesson.stage_order.index(CHECK_STAGE))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    @app.post("/api/recall")
+    async def recall_answer(lesson_id: int, source: int, card: int, request: Request):
+        """Record one pre-lesson retrieval-card answer into the retrieval table only."""
+        _require_lesson(lesson_id)
+        if card not in (1, 2):
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"recall card must be 1 or 2, got {card}"})
+        src_lesson = app.state.lessons.get(source)
+        src_progress = app.state.progress.get(source) if src_lesson is not None else None
+        if (src_lesson is None or not src_lesson.check or source == lesson_id
+                or not src_progress or not src_progress["completed"]):
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"lesson {source} is not a recall source"})
+        choice = (await _field(request, "choice")).strip()
+        if choice not in [c["key"] for c in src_lesson.check["choices"]]:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"'{choice}' is not one of the check's choices"})
+        correct = choice == src_lesson.check["answer"]
+        try:
+            new_box = app.state.progress.record_recall(
+                source, choice, correct=correct, now=clock()
+            )
+        except RecallNotDue as exc:
+            return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
+        try:
+            log_event(
+                app.state.events_path,
+                "recall",
+                {"lesson": lesson_id, "source": source, "correct": correct, "box": new_box},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
+        return RedirectResponse(
+            f"/lesson/{lesson_id}?recall=answered&source={source}&card={card}",
+            status_code=303,
+        )
 
     @app.post("/api/sort")
     async def sort_answer(lesson_id: int, request: Request):

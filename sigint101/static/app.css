@@ -1044,6 +1044,36 @@ body {
   box-shadow: inset 0 0 0 1px var(--warn);
 }
 
+/* ===== Pre-lesson retrieval card ========================================= */
+/* Sits outside .stage (so lesson-nav.js wires only the chip form) and matches the check stage's
+   tight 800x480 no-scroll budget and 20 px mono prompt without glow. */
+.stage-panel[data-stage="recall"] {
+  position: static;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 2px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+.stage-panel[data-stage="recall"] .stage-panel__title {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  line-height: 1.25;
+  text-wrap: normal;
+  text-shadow: none;
+}
+.stage-panel[data-stage="recall"] .predict {
+  gap: 4px;
+}
+.recall__skip {
+  flex: none;
+  min-width: var(--touch);
+  text-decoration: none;
+}
+.stage-panel[data-stage="recall"] .predict__actions > .btn {
+  text-decoration: none;
+}
+
 /* ===== Instrument (waterfall + tune) ===================================== */
 .instrument {
   display: flex;
