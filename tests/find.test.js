@@ -204,3 +204,65 @@ test("Start renders JSON error reason from a 500 response on the screen", async 
     "the live find could not be started: database is locked"
   );
 });
+
+test("unreadable state renders UNREADABLE from markFor and 503 poll without resetting to READY", async () => {
+  const mark = find.markFor("unreadable");
+  assert.equal(mark.word, "UNREADABLE");
+  assert.equal(mark.cls, "find-mark find-mark--unreadable");
+  assert.equal(find.startLabel("unreadable"), "Unavailable");
+
+  const markEl = { textContent: "FOUND", className: "find-mark find-mark--passed" };
+  const clockEl = { textContent: "00:00", hidden: false };
+  const startBtn = {
+    textContent: "Try again",
+    disabled: false,
+    addEventListener() {},
+  };
+  const evidenceEl = { textContent: "Found: LoRa" };
+  const screenEl = {
+    getAttribute(name) {
+      return name === "data-unit-id" ? "4" : null;
+    },
+    querySelector(sel) {
+      return {
+        "[data-find-mark]": markEl,
+        "[data-find-clock]": clockEl,
+        "[data-find-start]": startBtn,
+        "[data-find-evidence]": evidenceEl,
+      }[sel] || null;
+    },
+  };
+
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/find.js"), "utf8"), {
+    document: {
+      querySelector: (sel) => (sel === "[data-find-screen]" ? screenEl : null),
+      querySelectorAll: () => [],
+    },
+    window: {},
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    fetch: async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        unit_id: 4,
+        state: "unreadable",
+        remaining_s: 0,
+        passes: null,
+        error: "the live find state could not be read: progress store quarantined",
+      }),
+    }),
+  });
+
+  await new Promise((r) => setImmediate(r));
+  assert.equal(markEl.textContent, "UNREADABLE");
+  assert.equal(markEl.className, "find-mark find-mark--unreadable");
+  assert.equal(startBtn.textContent, "Unavailable");
+  assert.equal(startBtn.disabled, true);
+  assert.equal(
+    evidenceEl.textContent,
+    "the live find state could not be read: progress store quarantined"
+  );
+});

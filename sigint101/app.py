@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -10,8 +11,9 @@ import re
 import sqlite3
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from secrets import token_hex, token_urlsafe
@@ -41,6 +43,9 @@ from .bandmap import build_map as build_band_map
 from .battery import BatteryGauge
 from .capture import Capture, CaptureUnavailable
 from .challenges import (
+    CHALLENGE_KIND,
+    RESERVED_EVENT_FLAGS,
+    AttemptKind,
     challenge_for,
     format_evidence,
     format_pass_summary,
@@ -113,6 +118,7 @@ from .radio_control import (
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
+from .receiver_lifecycle import OwnedRun, owned_run_scope, register_owned_run
 from .receiver_socket import PortOccupied
 from .replay import (
     RECORDINGS_DIR,
@@ -458,6 +464,13 @@ def build_receiver_factories(
     return factories, radio_census
 
 
+@dataclass(frozen=True)
+class _RegisteredAttemptKind:
+    kind: AttemptKind
+    qualifies: object = None
+    backfill_gate: object = None
+
+
 def initialize_console_state(
     state,
     *,
@@ -544,6 +557,10 @@ def initialize_console_state(
         state.stamp_error = None
         state.challenge_error = None
         state.challenge_start_errors = {}
+        state.attempt_errors = {}
+        state.attempt_start_errors = {}
+        if not hasattr(state, "attempt_registry"):
+            state.attempt_registry = {}
         state.stamp_window = None
         state.stamp_retry_at = 0.0
         if not trial and backfill_stamps is not None:
@@ -825,6 +842,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             await shutdown_console_state(app.state, trial=False)
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
+    app.state.attempt_registry = {}
     app.add_middleware(_Arrival)
     app.add_middleware(_UncachedPages)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -1871,9 +1889,59 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
         "meteor": MeteorUnavailable, "capture": CaptureUnavailable,
     }
+    claim_receipt_lock = threading.Lock()
+    claim_receipts: OrderedDict[str, OwnedRun] = OrderedDict()
+    request_claim_var: contextvars.ContextVar[list[tuple[str, OwnedRun]] | None] = (
+        contextvars.ContextVar("sigint101_request_claims", default=None)
+    )
 
-    def _claim_sdr(target: str, start=None, *, reclaim=True, explicit=False):
-        """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
+    @app.middleware("http")
+    async def _attach_claim_receipt_header(request: Request, call_next):
+        box: list[tuple[str, OwnedRun]] = []
+        tok = request_claim_var.set(box)
+        try:
+            with owned_run_scope(None):
+                response = await call_next(request)
+        finally:
+            request_claim_var.reset(tok)
+        if box:
+            response.headers["X-Sigint-Claim"] = box[-1][0]
+        return response
+
+    def _record_owned_claim(handle: OwnedRun | None) -> OwnedRun | None:
+        if handle is None:
+            return None
+        register_owned_run(handle)
+        req_box = request_claim_var.get()
+        if req_box is not None:
+            claim_id = uuid4().hex
+            with claim_receipt_lock:
+                claim_receipts[claim_id] = handle
+                while len(claim_receipts) > 256:
+                    claim_receipts.popitem(last=False)
+            req_box.append((claim_id, handle))
+        return handle
+
+    def _owned_run_for_response(response) -> OwnedRun | None:
+        """Return the OwnedRun attached to an HTTP claim response, or None if borrowed."""
+        headers = getattr(response, "headers", None)
+        if not headers:
+            return None
+        receipt_id = headers.get("x-sigint-claim")
+        if not receipt_id:
+            return None
+        with claim_receipt_lock:
+            return claim_receipts.get(receipt_id)
+
+    def _claim_sdr_owned(
+        target: str, start=None, *, reclaim=True, explicit=False
+    ) -> tuple[object, OwnedRun | None]:
+        """Reserve the radio through stand-down and start, without holding the arbiter mutex.
+
+        Returns (result, owned_run) where owned_run is an OwnedRun iff this claim actually
+        spawned a new receiver run, or None when it borrowed an already-running receiver or
+        ran a synchronous one-shot action.
+        """
         refusal = unavailable[target]
         consumers = {name: getattr(app.state, name) for name in SDR_CONSUMERS}
         receiver = consumers.get(target)
@@ -1946,15 +2014,89 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                     if failure and (reason := failure(pending=True)):
                                         raise refusal(reason)
                             if prepare is not None:
-                                return receiver.launch_start(intent, claimed=True)
+                                launched = receiver.launch_start(intent, claimed=True)
+                                if intent is None or intent.run is None:
+                                    return launched, None
+                                exact_run = intent.run
+                                handle = OwnedRun(
+                                    name=target,
+                                    run_id=exact_run,
+                                    stop=lambda rx=receiver, r=exact_run: rx.stop_owned_run(r),
+                                    result=launched,
+                                )
+                                _record_owned_claim(handle)
+                                return launched, handle
                             if receiver is not None and reclaim:
                                 receiver.resume()
-                            return start() if start is not None else None
+                            if (
+                                receiver is not None
+                                and hasattr(receiver, "start_owned")
+                                and (start is None or start == getattr(receiver, "start", None))
+                            ):
+                                handle = receiver.start_owned(name=target)
+                                _record_owned_claim(handle)
+                                return (
+                                    handle.result if handle is not None else None,
+                                    handle,
+                                )
+                            if start is None:
+                                return None, None
+                            if receiver is not None:
+                                was_running = bool(getattr(receiver, "running", False))
+                                prev_proc = getattr(receiver, "_proc", None)
+                                result = start()
+                                cur_proc = getattr(receiver, "_proc", None)
+                                if (
+                                    not was_running
+                                    and getattr(receiver, "running", False)
+                                    and cur_proc is not None
+                                    and cur_proc is not prev_proc
+                                ):
+                                    def _stop_stub(
+                                        rx=receiver,
+                                        expected_proc=cur_proc,
+                                        label=target,
+                                    ) -> str | None:
+                                        if (
+                                            not getattr(rx, "running", False)
+                                            or getattr(rx, "_proc", None) is not expected_proc
+                                        ):
+                                            return None
+                                        stop_fn = (
+                                            getattr(rx, "stop", None)
+                                            or getattr(rx, "release", None)
+                                        )
+                                        if stop_fn is not None:
+                                            stop_fn()
+                                        failure = getattr(rx, "release_failure", None)
+                                        if failure and (reason := failure(pending=True)):
+                                            return reason
+                                        if (
+                                            getattr(rx, "running", False)
+                                            and getattr(rx, "_proc", None) is expected_proc
+                                        ):
+                                            return f"{label} did not stop after Start failed"
+                                        return None
+
+                                    handle = OwnedRun(
+                                        name=target,
+                                        run_id=cur_proc,
+                                        stop=_stop_stub,
+                                        result=result,
+                                    )
+                                    _record_owned_claim(handle)
+                                    return result, handle
+                                return result, None
+                            return start(), None
                         finally:
                             gate.end_claim(target)
             finally:
                 if intent is not None:
                     receiver.discard_start(intent)
+
+    def _claim_sdr(target: str, start=None, *, reclaim=True, explicit=False):
+        """Reserve the radio through stand-down and start, returning the start result."""
+        return _claim_sdr_owned(target, start, reclaim=reclaim, explicit=explicit)[0]
 
     # The last refusal logged per route. A route that cannot start answers every poll, and logging
     # every identical refusal is how events.jsonl grew by 42 lines a minute behind a dead Flock. A
@@ -2761,45 +2903,469 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.stamp_error = f"a reception badge could not be saved: {exc}"
         app.state.stamp_retry_at = monotonic() + STAMP_RETRY_S
 
+    def _set_attempt_error(kind: AttemptKind, message: str | None) -> None:
+        if message is None:
+            app.state.attempt_errors.pop(kind.kind, None)
+        else:
+            app.state.attempt_errors[kind.kind] = message
+        if kind.kind == CHALLENGE_KIND.kind:
+            app.state.challenge_error = message
+
+    def _set_attempt_start_error(kind: AttemptKind, key, message: str | None) -> None:
+        if message is None:
+            app.state.attempt_start_errors.pop((kind.kind, key), None)
+        else:
+            app.state.attempt_start_errors[(kind.kind, key)] = message
+        if kind.kind == CHALLENGE_KIND.kind:
+            if message is None:
+                app.state.challenge_start_errors.pop(key, None)
+            else:
+                app.state.challenge_start_errors[key] = message
+
+    def _register_attempt_kind(
+        kind: AttemptKind,
+        *,
+        qualifies=None,
+        backfill_gate=None,
+    ) -> None:
+        if kind.credit == "live_reception" and qualifies is None:
+            raise ValueError(
+                f"live_reception attempt kind {kind.kind!r} requires a qualifies callback"
+            )
+        app.state.attempt_registry[kind.kind] = _RegisteredAttemptKind(
+            kind=kind,
+            qualifies=qualifies,
+            backfill_gate=backfill_gate,
+        )
+
+    _reserved_event_flags = RESERVED_EVENT_FLAGS
+
+    def _finalize_event_payload(kind: AttemptKind, payload: dict) -> dict:
+        """Reserve replay/source across every payload source and derive them strictly from kind."""
+        for flag in _reserved_event_flags:
+            payload.pop(flag, None)
+        payload.update(kind.replay_flags())
+        return payload
+
+    def _start_event_payload(
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        window_s: int,
+        extra_cols: dict,
+        *,
+        attempt_id: str | None = None,
+        event_fields: dict | None = None,
+    ) -> dict:
+        payload: dict = {
+            kind.payload_key: key,
+            "started_at": started_at,
+            "window_s": window_s,
+        }
+        if kind.identity_column is not None and attempt_id is not None:
+            payload[kind.identity_column] = attempt_id
+        for col, val in extra_cols.items():
+            if col not in _reserved_event_flags and col not in payload:
+                payload[col] = val
+        if event_fields:
+            reserved = set(payload.keys()) | _reserved_event_flags
+            for field_key, field_val in event_fields.items():
+                if field_key not in reserved:
+                    payload[field_key] = field_val
+        return _finalize_event_payload(kind, payload)
+
+    def _pass_event_payload(
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+        *,
+        attempt_id: str | None = None,
+        event_fields: dict | None = None,
+    ) -> dict:
+        payload: dict = {
+            kind.payload_key: key,
+            "started_at": started_at,
+        }
+        if kind.identity_column is not None:
+            resolved_id = (
+                attempt_id if attempt_id is not None else pass_row.get(kind.identity_column)
+            )
+            if resolved_id is not None:
+                payload[kind.identity_column] = resolved_id
+        if kind.slot_column is not None and kind.slot_column not in _reserved_event_flags:
+            payload[kind.slot_column] = slot
+        json_cols = set(kind.json_pass_columns)
+        for col in kind.pass_columns:
+            if col == "passed_at" or col in json_cols or col in _reserved_event_flags:
+                continue
+            payload[col] = pass_row[col]
+        if kind.credit == "live_reception":
+            payload["event_id"] = pass_row.get("event_id")
+        if event_fields:
+            reserved = set(payload.keys()) | _reserved_event_flags
+            for field_key, field_val in event_fields.items():
+                if field_key not in reserved:
+                    payload[field_key] = field_val
+        return _finalize_event_payload(kind, payload)
+
     def _challenge_qualifies(attempt: dict, stamp: dict) -> bool:
         ch = challenge_for(attempt["unit_id"])
         return ch is not None and challenge_qualifies(ch, attempt, stamp)
 
-    def _credit_challenges(progress, stamps, *, qualifies_fn=None) -> None:
-        check = qualifies_fn or _challenge_qualifies
+    def _credit_attempts(kind: AttemptKind, progress, stamps, *, qualifies_fn) -> None:
+        if kind.credit != "live_reception":
+            raise ValueError(
+                f"_credit_attempts only accepts live_reception kinds, got {kind.credit!r}"
+            )
+        label = kind.display_label
         try:
-            credited = progress.credit_challenges(stamps, check)
+            if kind == CHALLENGE_KIND:
+                credited = progress.credit_challenges(stamps, qualifies_fn)
+            else:
+                credited = progress.credit_attempts(kind, stamps, qualifies_fn)
         except (OSError, sqlite3.Error) as exc:
-            app.state.challenge_error = f"a live find pass could not be saved: {exc}"
+            _set_attempt_error(kind, f"a {label} pass could not be saved: {exc}")
             return
-        app.state.challenge_error = None
+        _set_attempt_error(kind, None)
         for passed in credited:
+            slot = passed.get(kind.slot_column) if kind.slot_column is not None else None
+            aid = (
+                passed.get(kind.identity_column)
+                if kind.identity_column is not None
+                else None
+            )
+            payload = _pass_event_payload(
+                kind,
+                passed[kind.key_column],
+                passed["started_at"],
+                slot,
+                passed,
+                attempt_id=aid,
+            )
             try:
                 log_event(
                     app.state.events_path,
-                    "challenge_pass",
-                    {
-                        "unit": passed["unit_id"],
-                        "started_at": passed["started_at"],
-                        "instrument": passed["instrument"],
-                        "digest": passed["digest"],
-                        "event_id": passed.get("event_id"),
-                    },
+                    kind.pass_event,
+                    payload,
                     sync=managed,
                 )
             except OSError as exc:
-                app.state.challenge_error = f"a live find pass could not be logged: {exc}"
+                _set_attempt_error(kind, f"a {label} pass could not be logged: {exc}")
+
+    def _credit_live_attempts(progress, stamps) -> None:
+        for entry in tuple(app.state.attempt_registry.values()):
+            if entry.kind.credit != "live_reception" or entry.qualifies is None:
+                continue
+            _credit_attempts(entry.kind, progress, stamps, qualifies_fn=entry.qualifies)
+
+    def _claim_sdr_run(
+        target: str, start=None, *, reclaim: bool = True, explicit: bool = False
+    ) -> OwnedRun | None:
+        """Claim an SDR receiver and return its OwnedRun handle, or None if borrowed."""
+        return _claim_sdr_owned(target, start, reclaim=reclaim, explicit=explicit)[1]
+
+    app.state.claim_sdr = _claim_sdr_run
+    app.state.owned_run_for_response = _owned_run_for_response
+
+    def _start_attempt(
+        kind: AttemptKind,
+        key,
+        window_s: int,
+        *,
+        extra: dict | None = None,
+        event_fields: dict | None = None,
+        pre_start=None,
+        launch=None,
+        cleanup=None,
+    ) -> tuple[float, str | None]:
+        label = kind.display_label
+        start_error = None
+        extra_cols = dict(extra or {})
+        Progress._validate_attempt_extra(kind, extra_cols)
+        # Run pre_start and launch before acquiring reception_lock so standing down or claiming a
+        # receiver (which joins reader threads via release_for_claim) cannot deadlock an in-flight
+        # _heard callback, and a failed launch never writes an eligible attempt row to SQLite.
+        if pre_start is not None:
+            pre_start()
+        if reason := app.state.progress.quarantined_reason:
+            started_at = round(clock(), 3)
+            start_error = f"the {label} could not be started: {reason}"
+            with reception_lock:
+                _set_attempt_start_error(kind, key, start_error)
+            return started_at, start_error
+        if app.state.progress.closed:
+            started_at = round(clock(), 3)
+            start_error = f"the {label} store is closed"
+            with reception_lock:
+                _set_attempt_start_error(kind, key, start_error)
+            return started_at, start_error
+
+        # Install the owned-run cleanup boundary BEFORE invoking launch so every run acquired
+        # during launch registers immediately, and every later failure (hook exception, handle
+        # check, clock exception, INSERT/event/COMMIT error, or any BaseException) unwinds both
+        # locks and atomically compare-and-stops only the runs owned by this Start.
+        owned_handles: list[OwnedRun] = []
+        extra_cleanups: list = []
+        if cleanup is not None:
+            extra_cleanups.append(cleanup)
+
+        def _register_handle(handle: OwnedRun) -> None:
+            if not any(
+                existing.name == handle.name and existing.run_id == handle.run_id
+                for existing in owned_handles
+            ):
+                owned_handles.append(handle)
+
+        def _collect_returned(launched) -> None:
+            if launched is None:
+                return
+            if isinstance(launched, OwnedRun):
+                _register_handle(launched)
+                return
+            if (
+                isinstance(launched, (list, tuple))
+                and all(isinstance(item, OwnedRun) for item in launched)
+            ):
+                for item in launched:
+                    _register_handle(item)
+                return
+            if hasattr(launched, "headers"):
+                receipt = _owned_run_for_response(launched)
+                if receipt is not None:
+                    _register_handle(receipt)
+                return
+            if callable(launched):
+                extra_cleanups.append(launched)
+                return
+            raise TypeError(
+                f"launch hook returned unsupported handle {type(launched).__name__}; "
+                "return an OwnedRun, HTTP response receipt, cleanup callable, or None"
+            )
+
+        def _run_owned_cleanup() -> str | None:
+            failures: list[str] = []
+            for cb in extra_cleanups:
+                try:
+                    res = cb()
+                    if isinstance(res, str) and res.strip():
+                        failures.append(res.strip())
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(str(exc) or exc.__class__.__name__)
+            for handle in owned_handles:
+                try:
+                    err = handle.stop()
+                    if isinstance(err, str) and err.strip():
+                        failures.append(err.strip())
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(str(exc) or exc.__class__.__name__)
+            return "; ".join(failures) if failures else None
+
+        succeeded = False
+        caught_exc: BaseException | None = None
+        launch_failed_msg: str | None = None
+        started_at = 0.0
+        try:
+            if launch is not None:
+                with owned_run_scope(_register_handle):
+                    try:
+                        launched = launch()
+                    except Exception as exc:  # noqa: BLE001
+                        launch_failed_msg = f"the {label} could not be launched: {exc}"
+                if launch_failed_msg is None:
+                    _collect_returned(launched)
+
+            if launch_failed_msg is not None:
+                start_error = launch_failed_msg
+                started_at = round(clock(), 3)
+                with reception_lock:
+                    _set_attempt_start_error(kind, key, start_error)
+            else:
+                # Hold reception_lock across reading the clock, staging the attempt, and appending
+                # the start event so log order matches what live receptions see, while preserving
+                # lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
+                with reception_lock:
+                    started_at = round(clock(), 3)
+
+                    def _log_start(issued_id: str | None = None) -> None:
+                        payload = _start_event_payload(
+                            kind,
+                            key,
+                            started_at,
+                            window_s,
+                            extra_cols,
+                            attempt_id=issued_id,
+                            event_fields=event_fields,
+                        )
+                        log_event(
+                            app.state.events_path,
+                            kind.start_event,
+                            payload,
+                            sync=managed,
+                        )
+
+                    if kind == CHALLENGE_KIND and "start_challenge" in app.state.progress.__dict__:
+                        # Preserve monkeypatch hook used by existing Tier B unit tests.
+                        previous = None
+                        try:
+                            previous = app.state.progress.challenge(key)["attempt"]
+                            saved = app.state.progress.start_challenge(key, started_at, window_s)
+                        except (OSError, sqlite3.Error) as exc:
+                            saved = False
+                            start_error = f"the {label} could not be started: {exc}"
+                        if saved:
+                            try:
+                                _log_start()
+                            except OSError as exc:
+                                start_error = f"the {label} start could not be logged: {exc}"
+                                try:
+                                    app.state.progress.restore_challenge(key, previous)
+                                except (OSError, sqlite3.Error):
+                                    pass
+                            except BaseException:
+                                try:
+                                    app.state.progress.restore_challenge(key, previous)
+                                except (OSError, sqlite3.Error):
+                                    pass
+                                raise
+                        elif start_error is None:
+                            start_error = f"the {label} store is closed"
+                    else:
+                        try:
+                            saved = app.state.progress.stage_attempt(
+                                kind,
+                                key,
+                                started_at,
+                                window_s,
+                                extra=extra_cols,
+                                on_staged=_log_start,
+                            )
+                        except OSError as exc:
+                            start_error = f"the {label} start could not be logged: {exc}"
+                        except sqlite3.Error as exc:
+                            start_error = f"the {label} could not be started: {exc}"
+                        else:
+                            if not saved:
+                                start_error = f"the {label} store is closed"
+                    _set_attempt_start_error(kind, key, start_error)
+                    succeeded = start_error is None
+        except BaseException as exc:
+            caught_exc = exc
+        # Both reception_lock and Progress._lock are released before running owned cleanup so
+        # stopping a receiver that joins its reader thread cannot deadlock _heard.
+        if not succeeded and (extra_cleanups or owned_handles):
+            cleanup_err = _run_owned_cleanup()
+            if caught_exc is not None:
+                if isinstance(caught_exc, Exception) and cleanup_err:
+                    if caught_exc.args and isinstance(caught_exc.args[0], str):
+                        caught_exc.args = (
+                            f"{caught_exc.args[0]}; {cleanup_err}",
+                            *caught_exc.args[1:],
+                        )
+                    else:
+                        caught_exc.args = (*caught_exc.args, cleanup_err)
+                    if hasattr(caught_exc, "add_note"):
+                        caught_exc.add_note(cleanup_err)
+            elif cleanup_err:
+                start_error = f"{start_error}; {cleanup_err}"
+                with reception_lock:
+                    _set_attempt_start_error(kind, key, start_error)
+        if caught_exc is not None:
+            with reception_lock:
+                _set_attempt_start_error(
+                    kind, key, f"the {label} start failed: {caught_exc}",
+                )
+            raise caught_exc
+        return started_at, start_error
+
+    def _record_attempt_pass(
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+        *,
+        attempt_id: str | None = None,
+        event_fields: dict | None = None,
+    ) -> tuple[bool, str | None]:
+        if kind.credit != "replay_answer":
+            raise ValueError(
+                f"_record_attempt_pass only accepts replay_answer kinds, got {kind.credit!r}"
+            )
+        label = kind.display_label
+        with reception_lock:
+            try:
+                inserted = app.state.progress.record_attempt_pass(
+                    kind, key, started_at, slot, pass_row, attempt_id=attempt_id,
+                )
+            except (OSError, sqlite3.Error) as exc:
+                err = f"a {label} pass could not be saved: {exc}"
+                _set_attempt_error(kind, err)
+                return False, err
+            _set_attempt_error(kind, None)
+            if not inserted:
+                return False, None
+            payload = _pass_event_payload(
+                kind,
+                key,
+                started_at,
+                slot,
+                pass_row,
+                attempt_id=attempt_id,
+                event_fields=event_fields,
+            )
+            try:
+                log_event(app.state.events_path, kind.pass_event, payload, sync=managed)
+            except OSError as exc:
+                err = f"a {label} pass could not be logged: {exc}"
+                _set_attempt_error(kind, err)
+                return True, err
+            return True, None
+
+    _register_attempt_kind(CHALLENGE_KIND, qualifies=_challenge_qualifies)
+    app.state.register_attempt_kind = _register_attempt_kind
+    app.state.start_attempt = _start_attempt
+    app.state.record_attempt_pass = _record_attempt_pass
 
     def _challenge_payload(unit_id: int) -> dict:
         ch = challenge_for(unit_id)
         if ch is None or get_unit(unit_id) is None:
             raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        allowed = [
+            {"key": key, "label": rack_label(key),
+             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
+            for key in ch.allowed
+        ]
         read_error = None
-        try:
-            saved = app.state.progress.challenge(unit_id)
-        except (OSError, sqlite3.Error) as exc:
-            saved = {"attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0}
-            read_error = f"the live find state could not be read: {exc}"
+        saved = None
+        if (reason := app.state.progress.quarantined_reason) is not None:
+            read_error = f"the live find state could not be read: {reason}"
+        elif app.state.progress.closed:
+            read_error = "the live find state could not be read: progress store is closed"
+        else:
+            try:
+                saved = app.state.progress.challenge(unit_id)
+            except (OSError, sqlite3.Error) as exc:
+                read_error = f"the live find state could not be read: {exc}"
+        if saved is None:
+            return {
+                "unit_id": unit_id,
+                "state": "unreadable",
+                "prompt": ch.prompt,
+                "allowed": allowed,
+                "window_s": ch.window_s,
+                "started_at": None,
+                "remaining_s": 0,
+                "reason": "store_unreadable",
+                "latest_pass": None,
+                "passes": None,
+                "error": (
+                    read_error
+                    or app.state.challenge_start_errors.get(unit_id)
+                    or app.state.challenge_error
+                ),
+            }
         now = round(clock(), 3)
         st = challenge_status(
             ch, saved["attempt"], saved["latest_pass"], now,
@@ -2810,11 +3376,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if st["state"] == "passed" and saved["attempt_pass"] is not None
             else saved["latest_pass"]
         )
-        allowed = [
-            {"key": key, "label": rack_label(key),
-             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
-            for key in ch.allowed
-        ]
         return {
             "unit_id": unit_id,
             "state": st["state"],
@@ -2836,18 +3397,28 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def _backfill_stamps(progress, window, appended=()):
         # In append order, including rotations. Remembering each credited event tolerates a
         # clock reset. Compact the watermark when the log rolls without removing earned badges.
+        live_entries = [
+            entry for entry in app.state.attempt_registry.values()
+            if entry.kind.credit == "live_reception" and entry.qualifies is not None
+        ]
+        start_events: dict[str, list[AttemptKind]] = {}
+        for entry in live_entries:
+            start_events.setdefault(entry.kind.start_event, []).append(entry.kind)
         events_list = read_events(app.state.events_path)
-        start_pos: dict[tuple[int, float], int] = {}
+        start_pos: dict[tuple[str, int | str, float], int] = {}
         legacy: Counter[str] = Counter()
         stamps_list = []
-        challenge_stamps = []
+        live_stamps = []
         for idx, event in enumerate(events_list):
-            if isinstance(event, dict) and event.get("kind") == "challenge_start":
-                pl = event.get("payload")
-                if (isinstance(pl, dict)
-                        and type(pl.get("unit")) is int
-                        and type(pl.get("started_at")) in (int, float)):
-                    start_pos[(pl["unit"], float(pl["started_at"]))] = idx
+            if isinstance(event, dict):
+                ev_kind = event.get("kind")
+                if isinstance(ev_kind, str) and ev_kind in start_events:
+                    pl = event.get("payload")
+                    if isinstance(pl, dict) and type(pl.get("started_at")) in (int, float):
+                        for kind in start_events[ev_kind]:
+                            key_val = pl.get(kind.payload_key)
+                            if isinstance(key_val, (int, str)) and type(key_val) is not bool:
+                                start_pos[(kind.kind, key_val, float(pl["started_at"]))] = idx
             if (stamp := mint(event)) is None:
                 continue
             if "event_id" not in event:
@@ -2857,26 +3428,46 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     # Occurrence belongs in the watermark only; the evidence hash stays canonical.
                     stamp["watermark"] = f"{digest}{legacy[digest]:016x}"
             stamps_list.append(stamp)
-            challenge_stamps.append(
+            live_stamps.append(
                 {**stamp, "event_id": event.get("event_id"), "_log_pos": idx}
             )
         tail_pos = len(events_list)
         for s in appended:
             stamps_list.append(s)
-            challenge_stamps.append({**s, "_log_pos": tail_pos})
+            live_stamps.append({**s, "_log_pos": tail_pos})
 
-        def _backfill_qualifies(attempt: dict, stamp: dict) -> bool:
-            if not _challenge_qualifies(attempt, stamp):
-                return False
-            # Only receptions logged after the attempt's own challenge_start line can satisfy
-            # it during backfill, so a backward clock step cannot credit a pre-Start reception.
-            # If the start line has already rotated out of the retained log, every retained event
-            # arrived after it and stays eligible.
-            pos = start_pos.get((attempt["unit_id"], float(attempt["started_at"])))
-            log_pos = stamp.get("_log_pos")
-            return pos is None or log_pos is None or log_pos > pos
+        for entry in live_entries:
+            kind = entry.kind
+            qualifies = entry.qualifies
+            extra_gate = entry.backfill_gate
 
-        _credit_challenges(progress, challenge_stamps, qualifies_fn=_backfill_qualifies)
+            def _make_backfill_qualifies(k=kind, q=qualifies, gate=extra_gate):
+                reject = None if k.slot_column is not None else False
+
+                def _backfill_qualifies(attempt: dict, stamp: dict):
+                    match = q(attempt, stamp)
+                    if k.slot_column is not None:
+                        if match is None or match is False:
+                            return None
+                    elif not match:
+                        return False
+                    # Only receptions logged after the attempt's own start line can satisfy it
+                    # during backfill, so a backward clock step cannot credit a pre-Start
+                    # reception. If the start line has rotated out of the retained log, every
+                    # retained event arrived after it and stays eligible.
+                    pos = start_pos.get(
+                        (k.kind, attempt[k.key_column], float(attempt["started_at"]))
+                    )
+                    log_pos = stamp.get("_log_pos")
+                    if pos is not None and log_pos is not None and not (log_pos > pos):
+                        return reject
+                    if gate is not None and not gate(attempt, stamp, events_list, start_pos):
+                        return reject
+                    return match
+
+                return _backfill_qualifies
+
+            _credit_attempts(kind, progress, live_stamps, qualifies_fn=_make_backfill_qualifies())
         # A different log writer may already have rotated out the event this hook just appended.
         # When it is still in the snapshot its event ID makes the second credit a no-op.
         if progress.record_stamps(stamps_list, backfill=True):
@@ -2941,7 +3532,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     app.state.receptions.append(without_page_words(event))
                 stamp = mint(event)
                 if stamp is not None:
-                    _credit_challenges(
+                    _credit_live_attempts(
                         progress, ({**stamp, "event_id": event.get("event_id")},)
                     )
                 if monotonic() < app.state.stamp_retry_at:
@@ -3052,7 +3643,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.get("/api/challenges/{unit_id}")
     def challenge_get(unit_id: int):
         """Return one unit's live-find challenge state, countdown, rack links, and pass history."""
-        return _challenge_payload(unit_id)
+        payload = _challenge_payload(unit_id)
+        if payload["state"] == "unreadable":
+            return JSONResponse(status_code=503, content=payload)
+        return payload
 
     @app.post("/api/challenges/{unit_id}/start")
     def challenge_start(unit_id: int):
@@ -3060,46 +3654,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         ch = challenge_for(unit_id)
         if ch is None or get_unit(unit_id) is None:
             raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
-        start_error = None
-        # Hold reception_lock across reading the clock, storing the attempt, and appending
-        # challenge_start so the log order matches what live receptions see, while preserving
-        # the console's lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
-        with reception_lock:
-            started_at = round(clock(), 3)
-            previous = None
-            try:
-                previous = app.state.progress.challenge(unit_id)["attempt"]
-                saved = app.state.progress.start_challenge(unit_id, started_at, ch.window_s)
-            except (OSError, sqlite3.Error) as exc:
-                saved = False
-                start_error = f"the live find could not be started: {exc}"
-            if saved:
-                try:
-                    log_event(
-                        app.state.events_path,
-                        "challenge_start",
-                        {
-                            "unit": unit_id,
-                            "started_at": started_at,
-                            "window_s": ch.window_s,
-                            "allowed": list(ch.allowed),
-                        },
-                        sync=managed,
-                    )
-                except OSError as exc:
-                    start_error = f"the live find start could not be logged: {exc}"
-                    # Undo the saved attempt so a restart after a clock step cannot credit
-                    # a pre-Start reception without a challenge_start line to order against.
-                    try:
-                        app.state.progress.restore_challenge(unit_id, previous)
-                    except (OSError, sqlite3.Error):
-                        pass
-            elif start_error is None:
-                start_error = "the live find store is closed"
-            if start_error is None:
-                app.state.challenge_start_errors.pop(unit_id, None)
-            else:
-                app.state.challenge_start_errors[unit_id] = start_error
+        _, start_error = _start_attempt(
+            CHALLENGE_KIND,
+            unit_id,
+            ch.window_s,
+            event_fields={"allowed": list(ch.allowed)},
+        )
         payload = _challenge_payload(unit_id)
         if start_error is not None:
             payload["error"] = start_error
@@ -3116,6 +3676,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return templates.TemplateResponse(
             request=request,
             name="challenge.html",
+            status_code=503 if payload["state"] == "unreadable" else 200,
             context={
                 "title": f"Unit {unit.id} · Live find",
                 "back_href": f"/unit/{unit.id}",

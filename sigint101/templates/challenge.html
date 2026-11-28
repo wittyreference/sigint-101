@@ -5,18 +5,18 @@
 {% block title %}Unit {{ unit.id }} &middot; Live find{% endblock %}
 
 {% block content %}
-{% set MARKS = {'idle': 'READY', 'active': 'HUNTING', 'passed': 'FOUND', 'expired': 'TIME UP'} %}
-{% set START_LABELS = {'idle': 'Start', 'active': 'Restart', 'passed': 'Try again', 'expired': 'Start again'} %}
+{% set MARKS = {'idle': 'READY', 'active': 'HUNTING', 'passed': 'FOUND', 'expired': 'TIME UP', 'unreadable': 'UNREADABLE'} %}
+{% set START_LABELS = {'idle': 'Start', 'active': 'Restart', 'passed': 'Try again', 'expired': 'Start again', 'unreadable': 'Unavailable'} %}
 {% set rem = challenge.remaining_s|int %}
 <section class="find-screen" data-find-screen data-unit-id="{{ unit.id }}">
   <p class="find-screen__prompt" data-find-prompt>{{ challenge.prompt }}</p>
 
   <div class="find-screen__row">
     <div class="find-screen__status">
-      <span class="find-mark find-mark--{{ challenge.state }}" data-find-mark>{{ MARKS.get(challenge.state, 'READY') }}</span>
+      <span class="find-mark find-mark--{{ challenge.state }}" data-find-mark>{{ MARKS.get(challenge.state, 'UNREADABLE') }}</span>
       <span class="find-screen__clock" data-find-clock>{{ "%02d:%02d"|format(rem // 60, rem % 60) }}</span>
     </div>
-    <button class="btn btn--primary find-screen__start" type="button" data-find-start>{{ START_LABELS.get(challenge.state, 'Start') }}</button>
+    <button class="btn btn--primary find-screen__start" type="button" data-find-start{% if challenge.state == 'unreadable' %} disabled{% endif %}>{{ START_LABELS.get(challenge.state, 'Start') }}</button>
   </div>
 
   <div class="find-screen__links" aria-label="Allowed rack instruments">

@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Literal
 
 from . import operate, stamps
 from .stamps import STAMP_INSTRUMENTS
@@ -13,6 +15,167 @@ from .units import UNITS
 # Instruments that must never appear in a slice-1 live-find row: APT has no live NOAA signal,
 # and flock/rayhunter are heuristic counter-surveillance alerts that never mint reception stamps.
 FORBIDDEN_INSTRUMENTS = ("apt", "flock", "rayhunter")
+
+CREDIT_MODES = ("live_reception", "replay_answer")
+CreditMode = Literal["live_reception", "replay_answer"]
+RESERVED_EVENT_FLAGS = frozenset({"replay", "source"})
+_REPLAY_BINDING_COLUMNS = frozenset({"recording", "digest"})
+_IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_BASE_ATTEMPT_COLUMNS = frozenset({"started_at", "window_s"})
+
+
+@dataclass(frozen=True)
+class AttemptKind:
+    """Descriptor for a timed attempt kind shared by live finds, solos, and replay benches."""
+
+    kind: str
+    attempts_table: str
+    passes_table: str
+    key_column: str
+    slot_column: str | None
+    start_event: str
+    pass_event: str
+    credit: CreditMode
+    attempt_columns: tuple[str, ...] = ()
+    pass_columns: tuple[str, ...] = ("passed_at", "instrument", "provenance", "digest")
+    json_columns: tuple[str, ...] | None = None
+    event_key_field: str = ""
+    label: str = ""
+    identity_column: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not _IDENT_RE.match(self.kind):
+            raise ValueError(f"invalid attempt kind {self.kind!r}")
+        if self.credit not in CREDIT_MODES:
+            raise ValueError(
+                f"attempt kind {self.kind!r} credit must be one of {CREDIT_MODES}, "
+                f"got {self.credit!r}"
+            )
+        for field_name in ("attempts_table", "passes_table", "key_column"):
+            val = getattr(self, field_name)
+            if not isinstance(val, str) or not _IDENT_RE.match(val):
+                raise ValueError(f"invalid SQL identifier for {field_name}: {val!r}")
+        if self.slot_column is not None:
+            if not isinstance(self.slot_column, str) or not _IDENT_RE.match(self.slot_column):
+                raise ValueError(f"invalid SQL identifier for slot_column: {self.slot_column!r}")
+            if self.slot_column == self.key_column or self.slot_column in _BASE_ATTEMPT_COLUMNS:
+                raise ValueError(f"slot_column {self.slot_column!r} collides with base columns")
+        if self.identity_column is not None:
+            if (not isinstance(self.identity_column, str)
+                    or not _IDENT_RE.match(self.identity_column)):
+                raise ValueError(
+                    f"invalid SQL identifier for identity_column: {self.identity_column!r}"
+                )
+            if (self.identity_column == self.key_column
+                    or self.identity_column == self.slot_column
+                    or self.identity_column in _BASE_ATTEMPT_COLUMNS
+                    or self.identity_column in RESERVED_EVENT_FLAGS):
+                raise ValueError(
+                    f"identity_column {self.identity_column!r} collides with reserved columns"
+                )
+        for field_name in ("start_event", "pass_event"):
+            val = getattr(self, field_name)
+            if not isinstance(val, str) or not _IDENT_RE.match(val):
+                raise ValueError(f"invalid event kind for {field_name}: {val!r}")
+        if self.event_key_field:
+            if not isinstance(self.event_key_field, str) or not _IDENT_RE.match(
+                self.event_key_field
+            ):
+                raise ValueError(f"invalid event_key_field: {self.event_key_field!r}")
+        effective_key = self.event_key_field or self.key_column
+        if (effective_key in RESERVED_EVENT_FLAGS
+                or effective_key in _BASE_ATTEMPT_COLUMNS
+                or (self.identity_column is not None and effective_key == self.identity_column)):
+            raise ValueError(
+                f"attempt kind {self.kind!r} event key {effective_key!r} is reserved; "
+                f"set a safe event_key_field"
+            )
+        reserved_attempt = _BASE_ATTEMPT_COLUMNS | {self.key_column}
+        if self.identity_column is not None:
+            reserved_attempt = reserved_attempt | {self.identity_column}
+        seen_attempt: set[str] = set()
+        for col in self.attempt_columns:
+            if not isinstance(col, str) or not _IDENT_RE.match(col):
+                raise ValueError(f"invalid attempt column {col!r}")
+            if col in reserved_attempt or col in seen_attempt:
+                raise ValueError(f"duplicate or reserved attempt column {col!r}")
+            seen_attempt.add(col)
+        if not self.pass_columns:
+            raise ValueError(f"attempt kind {self.kind!r} requires at least one pass_column")
+        reserved_pass = {self.key_column, "started_at"}
+        if self.slot_column is not None:
+            reserved_pass.add(self.slot_column)
+        if self.identity_column is not None:
+            reserved_pass.add(self.identity_column)
+        seen_pass: set[str] = set()
+        for col in self.pass_columns:
+            if not isinstance(col, str) or not _IDENT_RE.match(col):
+                raise ValueError(f"invalid pass column {col!r}")
+            if col in reserved_pass or col in seen_pass:
+                raise ValueError(f"duplicate or reserved pass column {col!r}")
+            seen_pass.add(col)
+        if "passed_at" not in seen_pass:
+            raise ValueError(f"attempt kind {self.kind!r} pass_columns must include 'passed_at'")
+        if self.json_columns is not None:
+            for col in self.json_columns:
+                if col not in seen_pass:
+                    raise ValueError(f"json_column {col!r} is not in pass_columns")
+        if self.credit == "replay_answer":
+            if self.identity_column is None:
+                raise ValueError(
+                    f"replay_answer attempt kind {self.kind!r} requires an identity_column"
+                )
+            if not (seen_attempt & seen_pass & _REPLAY_BINDING_COLUMNS):
+                raise ValueError(
+                    f"replay_answer attempt kind {self.kind!r} must bind 'recording' or "
+                    f"'digest' across attempt_columns and pass_columns"
+                )
+
+    @property
+    def replay_binding_columns(self) -> tuple[str, ...]:
+        """Attempt columns shared with pass_columns that bind a replay answer to its clip."""
+        if self.credit != "replay_answer":
+            return ()
+        pass_set = set(self.pass_columns)
+        return tuple(
+            col for col in self.attempt_columns
+            if col in pass_set and col in _REPLAY_BINDING_COLUMNS
+        )
+
+    @property
+    def payload_key(self) -> str:
+        """Event payload key name (defaults to key_column when event_key_field is unset)."""
+        return self.event_key_field or self.key_column
+
+    @property
+    def display_label(self) -> str:
+        """Human-readable label used in error messages for this attempt kind."""
+        return self.label or self.kind
+
+    @property
+    def json_pass_columns(self) -> tuple[str, ...]:
+        """Pass columns serialized as JSON text in SQLite."""
+        if self.json_columns is not None:
+            return self.json_columns
+        return ("provenance",) if "provenance" in self.pass_columns else ()
+
+    def replay_flags(self) -> dict:
+        """Return replay flags derived solely from `credit`; never passed by callers."""
+        return {"replay": True, "source": "replay"} if self.credit == "replay_answer" else {}
+
+
+CHALLENGE_KIND = AttemptKind(
+    kind="challenge",
+    attempts_table="challenges",
+    passes_table="challenge_passes",
+    key_column="unit_id",
+    slot_column=None,
+    start_event="challenge_start",
+    pass_event="challenge_pass",
+    credit="live_reception",
+    event_key_field="unit",
+    label="live find",
+)
 
 
 @dataclass(frozen=True)
@@ -104,17 +267,23 @@ def _attempt_bounds(attempt) -> tuple[float, int]:
     return attempt.started_at, attempt.window_s
 
 
-def qualifies(challenge: Challenge, attempt, stamp: dict | None) -> bool:
-    """True when a minted stamp matches an allowed instrument inside the inclusive window."""
+def in_window(attempt, stamp: dict | None) -> bool:
+    """True when a minted stamp's first_ts falls inside the attempt's inclusive window."""
     if not stamp or not attempt:
         return False
     started_at, window_s = _attempt_bounds(attempt)
     first_ts = stamp.get("first_ts")
     if type(first_ts) not in (int, float):
         return False
+    return started_at <= first_ts <= started_at + window_s
+
+
+def qualifies(challenge: Challenge, attempt, stamp: dict | None) -> bool:
+    """True when a minted stamp matches an allowed instrument inside the inclusive window."""
     return (
-        stamp.get("instrument") in challenge.allowed
-        and started_at <= first_ts <= started_at + window_s
+        bool(stamp)
+        and stamp.get("instrument") in challenge.allowed
+        and in_window(attempt, stamp)
     )
 
 
@@ -126,43 +295,61 @@ def evaluate(challenge: Challenge, attempt, event) -> dict | None:
     return stamp
 
 
-def status(challenge: Challenge, attempt: dict | None, latest_pass: dict | None,
-           now: float, *, attempt_pass: dict | None = None) -> dict:
-    """Compute the challenge's current state, clamped remaining seconds, and expiry reason."""
+def attempt_status(
+    window_s: int,
+    attempt: dict | None,
+    latest_pass: dict | None,
+    now: float,
+    *,
+    attempt_pass: dict | None = None,
+) -> dict:
+    """Compute an attempt's current state, clamped remaining seconds, and expiry reason."""
     if attempt is None:
         return {
             "state": "idle",
             "started_at": None,
-            "window_s": challenge.window_s,
+            "window_s": window_s,
             "remaining_s": 0,
             "reason": None,
         }
-    started_at, window_s = _attempt_bounds(attempt)
+    started_at, attempt_window_s = _attempt_bounds(attempt)
     own_pass = attempt_pass if attempt_pass is not None else latest_pass
-    if own_pass is not None and own_pass.get("started_at") == started_at:
+    identity_match = True
+    if (isinstance(attempt, dict) and isinstance(own_pass, dict)
+            and "attempt_id" in attempt and attempt["attempt_id"] is not None):
+        identity_match = own_pass.get("attempt_id") == attempt["attempt_id"]
+    if own_pass is not None and own_pass.get("started_at") == started_at and identity_match:
         return {
             "state": "passed",
             "started_at": started_at,
-            "window_s": window_s,
+            "window_s": attempt_window_s,
             "remaining_s": 0,
             "reason": None,
         }
-    if started_at <= now <= started_at + window_s:
-        remaining = min(max(started_at + window_s - now, 0.0), float(window_s))
+    if started_at <= now <= started_at + attempt_window_s:
+        remaining = min(max(started_at + attempt_window_s - now, 0.0), float(attempt_window_s))
         return {
             "state": "active",
             "started_at": started_at,
-            "window_s": window_s,
+            "window_s": attempt_window_s,
             "remaining_s": round(remaining, 3),
             "reason": None,
         }
     return {
         "state": "expired",
         "started_at": started_at,
-        "window_s": window_s,
+        "window_s": attempt_window_s,
         "remaining_s": 0,
         "reason": "clock_moved" if now < started_at else None,
     }
+
+
+def status(challenge: Challenge, attempt: dict | None, latest_pass: dict | None,
+           now: float, *, attempt_pass: dict | None = None) -> dict:
+    """Compute the challenge's current state, clamped remaining seconds, and expiry reason."""
+    return attempt_status(
+        challenge.window_s, attempt, latest_pass, now, attempt_pass=attempt_pass,
+    )
 
 
 def format_pass_summary(pass_row: dict | None) -> dict | None:
@@ -197,6 +384,8 @@ def format_evidence(payload: dict) -> str:
         return str(payload["error"])
     latest = payload.get("latest_pass")
     state = payload.get("state")
+    if state == "unreadable":
+        return "Progress store is unreadable."
     if state == "passed" and latest:
         return f"Found: {_pass_parts(latest)}"
     if payload.get("reason") == "clock_moved":
