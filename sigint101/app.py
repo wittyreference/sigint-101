@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -10,7 +11,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -175,6 +176,17 @@ def start_replay(state, recording: Recording) -> None:
             replay.start_replay(recording)
     finally:
         state.replay_start_lock.release()
+
+@dataclass(frozen=True)
+class LaunchedRun:
+    """Exact receiver run acquired by one claim, with cleanup bound only to that run."""
+
+    name: str
+    epoch: int
+    token: object
+    result: object = None
+    cleanup: object = None
+
 
 # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
 SDR_CONSUMERS = (
@@ -1855,10 +1867,52 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     }
     claim_state_lock = threading.Lock()
     claim_epoch: dict[str, int] = {}
+    claim_seq = 0
+    claim_log: deque[tuple[int, LaunchedRun]] = deque(maxlen=256)
+    claim_receipts: OrderedDict[str, LaunchedRun] = OrderedDict()
+    launch_claim_local = threading.local()
+    request_claim_var: contextvars.ContextVar[list[tuple[str, LaunchedRun]] | None] = (
+        contextvars.ContextVar("sigint101_request_claims", default=None)
+    )
 
-    def _bump_claim_epoch(target: str) -> None:
+    @app.middleware("http")
+    async def _attach_claim_receipt_header(request: Request, call_next):
+        box: list[tuple[str, LaunchedRun]] = []
+        tok = request_claim_var.set(box)
+        try:
+            response = await call_next(request)
+        finally:
+            request_claim_var.reset(tok)
+        if box:
+            response.headers["X-Sigint-Claim"] = box[-1][0]
+        return response
+
+    def _record_claim(target: str, rx, result=None) -> LaunchedRun:
+        nonlocal claim_seq
         with claim_state_lock:
-            claim_epoch[target] = claim_epoch.get(target, 0) + 1
+            epoch = claim_epoch.get(target, 0) + 1
+            claim_epoch[target] = epoch
+            token = _receiver_run_token(rx)
+            claim_seq += 1
+            run = LaunchedRun(
+                name=target,
+                epoch=epoch,
+                token=token,
+                result=result,
+                cleanup=lambda t=target, e=epoch, k=token: _stop_owned_receiver(t, e, k),
+            )
+            claim_log.append((claim_seq, run))
+            claim_id = uuid4().hex
+            claim_receipts[claim_id] = run
+            while len(claim_receipts) > 256:
+                claim_receipts.popitem(last=False)
+        local_box = getattr(launch_claim_local, "runs", None)
+        if local_box is not None:
+            local_box.append(run)
+        req_box = request_claim_var.get()
+        if req_box is not None:
+            req_box.append((claim_id, run))
+        return run
 
     def _claim_sdr(target: str, start=None, *, reclaim=True):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
@@ -1925,12 +1979,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                         raise refusal(reason)
                             if prepare is not None:
                                 launched = receiver.launch_start(intent, claimed=True)
-                                _bump_claim_epoch(target)
+                                _record_claim(target, receiver, launched)
                                 return launched
                             if receiver is not None and reclaim:
                                 receiver.resume()
                             result = start() if start is not None else None
-                            _bump_claim_epoch(target)
+                            _record_claim(target, receiver, result)
                             return result
                         finally:
                             gate.end_claim(target)
@@ -2911,31 +2965,103 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return f"{name} did not stop after Start failed"
         return None
 
-    def _build_launch_cleanup(before_snap, after_snap, *, launched, explicit_cleanup):
+    def _claim_sdr_run(target: str, start=None, *, reclaim: bool = True) -> LaunchedRun:
+        """Claim an SDR receiver and return the exact LaunchedRun and bound cleanup acquired."""
+        captured: list[LaunchedRun] = []
+        prev = getattr(launch_claim_local, "runs", None)
+        launch_claim_local.runs = captured
+        try:
+            res = _claim_sdr(target, start, reclaim=reclaim)
+        finally:
+            launch_claim_local.runs = prev
+        if captured:
+            run = captured[-1]
+            if prev is not None:
+                prev.append(run)
+            return run
+        rx = getattr(app.state, target, None)
+        with claim_state_lock:
+            epoch = claim_epoch.get(target, 0)
+            token = _receiver_run_token(rx)
+        return LaunchedRun(
+            name=target,
+            epoch=epoch,
+            token=token,
+            result=res,
+            cleanup=lambda t=target, e=epoch, k=token: _stop_owned_receiver(t, e, k),
+        )
+
+    app.state.claim_sdr = _claim_sdr_run
+
+    def _build_launch_cleanup(
+        before_snap,
+        after_snap,
+        *,
+        before_seq: int,
+        thread_runs: list[LaunchedRun],
+        launched,
+        explicit_cleanup,
+    ):
         owned: list[tuple[str, int, object]] = []
-        for name in _tracked_receivers:
-            if before_snap.get(name) == after_snap.get(name):
-                continue
-            rx = getattr(app.state, name, None)
-            if rx is None:
-                continue
-            epoch, token = after_snap[name]
-            is_active = bool(getattr(rx, "running", False)) or (
-                token is not None and token[0] == "supervised" and token[1] is not None
-            )
-            if is_active:
-                owned.append((name, epoch, token))
-        extra_cleanup = explicit_cleanup
-        if extra_cleanup is None and callable(launched):
-            extra_cleanup = launched
-        if extra_cleanup is None and not owned:
+        extra_cleanups: list = []
+        if explicit_cleanup is not None:
+            extra_cleanups.append(explicit_cleanup)
+
+        explicit_ownership = False
+        if isinstance(launched, LaunchedRun):
+            owned.append((launched.name, launched.epoch, launched.token))
+            explicit_ownership = True
+        elif (
+            isinstance(launched, (list, tuple))
+            and launched
+            and all(isinstance(item, LaunchedRun) for item in launched)
+        ):
+            owned.extend((item.name, item.epoch, item.token) for item in launched)
+            explicit_ownership = True
+        elif hasattr(launched, "headers") and "x-sigint-claim" in launched.headers:
+            receipt_id = launched.headers["x-sigint-claim"]
+            with claim_state_lock:
+                receipt = claim_receipts.get(receipt_id)
+            if receipt is not None:
+                owned.append((receipt.name, receipt.epoch, receipt.token))
+                explicit_ownership = True
+        elif callable(launched):
+            extra_cleanups.append(launched)
+            explicit_ownership = True
+
+        if not explicit_ownership:
+            if thread_runs:
+                owned.extend((r.name, r.epoch, r.token) for r in thread_runs)
+            else:
+                with claim_state_lock:
+                    new_claims = [run for seq, run in claim_log if seq > before_seq]
+                if new_claims:
+                    # A route claim made during the hook owns only the run it acquired (the
+                    # first claim in the window), never a replacement claim made while paused.
+                    first = new_claims[0]
+                    owned.append((first.name, first.epoch, first.token))
+                else:
+                    for name in _tracked_receivers:
+                        if before_snap.get(name) == after_snap.get(name):
+                            continue
+                        rx = getattr(app.state, name, None)
+                        if rx is None:
+                            continue
+                        epoch, token = after_snap[name]
+                        is_active = bool(getattr(rx, "running", False)) or (
+                            token is not None and token[0] == "supervised" and token[1] is not None
+                        )
+                        if is_active:
+                            owned.append((name, epoch, token))
+
+        if not extra_cleanups and not owned:
             return None
 
         def _cleanup_launched() -> str | None:
             failures: list[str] = []
-            if extra_cleanup is not None:
+            for cb in extra_cleanups:
                 try:
-                    res = extra_cleanup()
+                    res = cb()
                     if isinstance(res, str) and res.strip():
                         failures.append(res.strip())
                 except Exception as exc:  # noqa: BLE001
@@ -2985,7 +3111,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return started_at, start_error
         run_cleanup = None
         if launch is not None:
+            with claim_state_lock:
+                before_seq = claim_seq
             before_snap = _receiver_snapshot()
+            thread_runs: list[LaunchedRun] = []
+            prev_local = getattr(launch_claim_local, "runs", None)
+            launch_claim_local.runs = thread_runs
             try:
                 launched = launch()
             except Exception as exc:  # noqa: BLE001
@@ -2994,81 +3125,117 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 with reception_lock:
                     _set_attempt_start_error(kind, key, start_error)
                 return started_at, start_error
+            finally:
+                launch_claim_local.runs = prev_local
             after_snap = _receiver_snapshot()
             run_cleanup = _build_launch_cleanup(
-                before_snap, after_snap, launched=launched, explicit_cleanup=cleanup,
+                before_snap,
+                after_snap,
+                before_seq=before_seq,
+                thread_runs=thread_runs,
+                launched=launched,
+                explicit_cleanup=cleanup,
             )
         # Hold reception_lock across reading the clock, staging the attempt, and appending the
         # start event so log order matches what live receptions see, while preserving lock order
-        # (reception_lock -> Progress._lock -> events._WRITE_LOCK).
-        with reception_lock:
-            started_at = round(clock(), 3)
-            attempt_id = uuid4().hex if kind.identity_column is not None else None
-            payload = _start_event_payload(
-                kind,
-                key,
-                started_at,
-                window_s,
-                extra_cols,
-                attempt_id=attempt_id,
-                event_fields=event_fields,
-            )
+        # (reception_lock -> Progress._lock -> events._WRITE_LOCK). Once launch has returned,
+        # every non-success exit runs the owned cleanup after both locks have unwound.
+        succeeded = False
+        caught_exc: BaseException | None = None
+        started_at = round(clock(), 3)
+        try:
+            with reception_lock:
+                started_at = round(clock(), 3)
 
-            def _log_start() -> None:
-                log_event(
-                    app.state.events_path,
-                    kind.start_event,
-                    payload,
-                    sync=managed,
-                )
-
-            if kind == CHALLENGE_KIND and "start_challenge" in app.state.progress.__dict__:
-                # Preserve monkeypatch hook used by existing Tier B unit tests.
-                previous = None
-                try:
-                    previous = app.state.progress.challenge(key)["attempt"]
-                    saved = app.state.progress.start_challenge(key, started_at, window_s)
-                except (OSError, sqlite3.Error) as exc:
-                    saved = False
-                    start_error = f"the {label} could not be started: {exc}"
-                if saved:
-                    try:
-                        _log_start()
-                    except OSError as exc:
-                        start_error = f"the {label} start could not be logged: {exc}"
-                        try:
-                            app.state.progress.restore_challenge(key, previous)
-                        except (OSError, sqlite3.Error):
-                            pass
-                elif start_error is None:
-                    start_error = f"the {label} store is closed"
-            else:
-                try:
-                    saved = app.state.progress.stage_attempt(
+                def _log_start(issued_id: str | None = None) -> None:
+                    payload = _start_event_payload(
                         kind,
                         key,
                         started_at,
                         window_s,
-                        extra=extra_cols,
-                        on_staged=_log_start,
-                        attempt_id=attempt_id,
+                        extra_cols,
+                        attempt_id=issued_id,
+                        event_fields=event_fields,
                     )
-                except OSError as exc:
-                    start_error = f"the {label} start could not be logged: {exc}"
-                except sqlite3.Error as exc:
-                    start_error = f"the {label} could not be started: {exc}"
-                else:
-                    if not saved:
+                    log_event(
+                        app.state.events_path,
+                        kind.start_event,
+                        payload,
+                        sync=managed,
+                    )
+
+                if kind == CHALLENGE_KIND and "start_challenge" in app.state.progress.__dict__:
+                    # Preserve monkeypatch hook used by existing Tier B unit tests.
+                    previous = None
+                    try:
+                        previous = app.state.progress.challenge(key)["attempt"]
+                        saved = app.state.progress.start_challenge(key, started_at, window_s)
+                    except (OSError, sqlite3.Error) as exc:
+                        saved = False
+                        start_error = f"the {label} could not be started: {exc}"
+                    if saved:
+                        try:
+                            _log_start()
+                        except OSError as exc:
+                            start_error = f"the {label} start could not be logged: {exc}"
+                            try:
+                                app.state.progress.restore_challenge(key, previous)
+                            except (OSError, sqlite3.Error):
+                                pass
+                        except BaseException:
+                            try:
+                                app.state.progress.restore_challenge(key, previous)
+                            except (OSError, sqlite3.Error):
+                                pass
+                            raise
+                    elif start_error is None:
                         start_error = f"the {label} store is closed"
-            _set_attempt_start_error(kind, key, start_error)
+                else:
+                    try:
+                        saved = app.state.progress.stage_attempt(
+                            kind,
+                            key,
+                            started_at,
+                            window_s,
+                            extra=extra_cols,
+                            on_staged=_log_start,
+                        )
+                    except OSError as exc:
+                        start_error = f"the {label} start could not be logged: {exc}"
+                    except sqlite3.Error as exc:
+                        start_error = f"the {label} could not be started: {exc}"
+                    else:
+                        if not saved:
+                            start_error = f"the {label} store is closed"
+                _set_attempt_start_error(kind, key, start_error)
+                succeeded = start_error is None
+        except BaseException as exc:
+            caught_exc = exc
         # Both reception_lock and Progress._lock are released before running launch cleanup so
         # stopping a receiver that joins its reader thread cannot deadlock _heard.
-        if start_error is not None and run_cleanup is not None:
+        if not succeeded and run_cleanup is not None:
             cleanup_err = run_cleanup()
-            if cleanup_err:
+            if caught_exc is not None:
+                if isinstance(caught_exc, Exception) and cleanup_err:
+                    if caught_exc.args and isinstance(caught_exc.args[0], str):
+                        caught_exc.args = (
+                            f"{caught_exc.args[0]}; {cleanup_err}",
+                            *caught_exc.args[1:],
+                        )
+                    else:
+                        caught_exc.args = (*caught_exc.args, cleanup_err)
+                    if hasattr(caught_exc, "add_note"):
+                        caught_exc.add_note(cleanup_err)
+            elif cleanup_err:
                 start_error = f"{start_error}; {cleanup_err}"
                 with reception_lock:
                     _set_attempt_start_error(kind, key, start_error)
+        if caught_exc is not None:
+            with reception_lock:
+                _set_attempt_start_error(
+                    kind, key, f"the {label} start failed: {caught_exc}",
+                )
+            raise caught_exc
         return started_at, start_error
 
     def _record_attempt_pass(
@@ -3124,12 +3291,40 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         ch = challenge_for(unit_id)
         if ch is None or get_unit(unit_id) is None:
             raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        allowed = [
+            {"key": key, "label": rack_label(key),
+             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
+            for key in ch.allowed
+        ]
         read_error = None
-        try:
-            saved = app.state.progress.challenge(unit_id)
-        except (OSError, sqlite3.Error) as exc:
-            saved = {"attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0}
-            read_error = f"the live find state could not be read: {exc}"
+        saved = None
+        if (reason := app.state.progress.quarantined_reason) is not None:
+            read_error = f"the live find state could not be read: {reason}"
+        elif app.state.progress.closed:
+            read_error = "the live find state could not be read: progress store is closed"
+        else:
+            try:
+                saved = app.state.progress.challenge(unit_id)
+            except (OSError, sqlite3.Error) as exc:
+                read_error = f"the live find state could not be read: {exc}"
+        if saved is None:
+            return {
+                "unit_id": unit_id,
+                "state": "unreadable",
+                "prompt": ch.prompt,
+                "allowed": allowed,
+                "window_s": ch.window_s,
+                "started_at": None,
+                "remaining_s": 0,
+                "reason": "store_unreadable",
+                "latest_pass": None,
+                "passes": None,
+                "error": (
+                    read_error
+                    or app.state.challenge_start_errors.get(unit_id)
+                    or app.state.challenge_error
+                ),
+            }
         now = round(clock(), 3)
         st = challenge_status(
             ch, saved["attempt"], saved["latest_pass"], now,
@@ -3140,11 +3335,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if st["state"] == "passed" and saved["attempt_pass"] is not None
             else saved["latest_pass"]
         )
-        allowed = [
-            {"key": key, "label": rack_label(key),
-             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
-            for key in ch.allowed
-        ]
         return {
             "unit_id": unit_id,
             "state": st["state"],
@@ -3412,7 +3602,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.get("/api/challenges/{unit_id}")
     def challenge_get(unit_id: int):
         """Return one unit's live-find challenge state, countdown, rack links, and pass history."""
-        return _challenge_payload(unit_id)
+        payload = _challenge_payload(unit_id)
+        if payload["state"] == "unreadable":
+            return JSONResponse(status_code=503, content=payload)
+        return payload
 
     @app.post("/api/challenges/{unit_id}/start")
     def challenge_start(unit_id: int):
@@ -3442,6 +3635,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return templates.TemplateResponse(
             request=request,
             name="challenge.html",
+            status_code=503 if payload["state"] == "unreadable" else 200,
             context={
                 "title": f"Unit {unit.id} · Live find",
                 "back_href": f"/unit/{unit.id}",

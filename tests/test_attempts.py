@@ -1142,7 +1142,7 @@ def _deny_sqlite_action(conn: sqlite3.Connection, action_code: int, arg1_match: 
     conn.set_authorizer(auth)
 
 
-@pytest.mark.parametrize("fail_at", ["insert", "event", "commit"])
+@pytest.mark.parametrize("fail_at", ["insert", "event", "serialize", "commit"])
 @pytest.mark.parametrize("managed", [False, True], ids=["legacy", "managed"])
 def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
     tmp_path, monkeypatch, fail_at, managed
@@ -1164,7 +1164,8 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
     )
 
     with TestClient(app) as client:
-        # 1. Fail Start at INSERT, Start event append, or COMMIT after launch claims sweeper.
+        # 1. Fail Start at INSERT, Start event I/O, journal serialization (TypeError), or COMMIT
+        # after launch claims sweeper. Cleanup must always stop sweeper after both locks unwind.
         lock_state: dict[str, bool] = {}
 
         def launch_sweeper():
@@ -1178,15 +1179,19 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
             if db_free:
                 app.state.progress._lock.release()
             lock_state["db_free"] = db_free
-            if fail_at == "event":
+            if fail_at in ("event", "serialize"):
                 # Invoking _heard acquires reception_lock -> Progress._lock; would deadlock if held.
-                app.state.lora.on_reception(_lora_item(from_id="!cleanup-unlocked"))
+                app.state.lora.on_reception(_lora_item(from_id=f"!cleanup-{fail_at}"))
                 lock_state["reception_free"] = True
 
+        extra_event_fields = None
         if fail_at == "insert":
             _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_INSERT, "challenges")
         elif fail_at == "commit":
             _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_TRANSACTION, "COMMIT")
+        elif fail_at == "serialize":
+            # Reach the real journal serializer with a non-JSON value so json.dumps raises.
+            extra_event_fields = {"unserializable": object()}
         else:
             real_log = app_mod.log_event
 
@@ -1198,23 +1203,35 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
             monkeypatch.setattr(app_mod, "log_event", fail_start_log)
 
         try:
-            _, err = app.state.start_attempt(
-                challenges.CHALLENGE_KIND,
-                9,
-                900,
-                launch=launch_sweeper,
-                cleanup=check_locks_cleanup,
-            )
+            if fail_at == "serialize":
+                with pytest.raises(TypeError, match="not JSON serializable"):
+                    app.state.start_attempt(
+                        challenges.CHALLENGE_KIND,
+                        9,
+                        900,
+                        event_fields=extra_event_fields,
+                        launch=launch_sweeper,
+                        cleanup=check_locks_cleanup,
+                    )
+            else:
+                _, err = app.state.start_attempt(
+                    challenges.CHALLENGE_KIND,
+                    9,
+                    900,
+                    launch=launch_sweeper,
+                    cleanup=check_locks_cleanup,
+                )
+                assert err is not None
         finally:
             app.state.progress._conn.set_authorizer(None)
 
-        assert err is not None
         assert not app.state.sweeper.running
+        assert app.state.progress.challenge(9)["attempt"] is None
         assert lock_state.get("db_free") is True
-        if fail_at == "event":
+        if fail_at in ("event", "serialize"):
             assert lock_state.get("reception_free") is True
 
-        # 2. A newer claim taking over the sweeper before cleanup must keep running.
+        # 2a. A newer claim taking over the sweeper AFTER launch returns must keep running.
         def launch_then_superseded():
             resp = client.get("/api/spectrum")
             assert resp.status_code == 200
@@ -1239,7 +1256,95 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
         assert app.state.sweeper.running
         app.state.sweeper.stop()
 
-    # 3. Unresolved reap on a decoder preserves the lifecycle's failure reason.
+        # 2b (F3a.2): A newer claim taking over the sweeper DURING the launch hook (after the
+        # first spectrum claim returned 200, before the hook returns) must ALSO keep running.
+        if fail_at == "event":
+            replacement_proc: list = []
+
+            def launch_paused_while_superseded():
+                resp = client.get("/api/spectrum")
+                assert resp.status_code == 200
+                first_proc = app.state.sweeper._proc
+                # While this hook is paused, a separate claim stops the first child and launches
+                # a replacement fixture child before this hook returns.
+                app.state.sweeper.stop()
+                assert client.get("/api/spectrum").status_code == 200
+                assert app.state.sweeper._proc is not first_proc
+                replacement_proc.append(app.state.sweeper._proc)
+
+            monkeypatch.setattr(
+                app_mod,
+                "log_event",
+                lambda path, kind, payload, **kw: (
+                    (_ for _ in ()).throw(OSError("event fail after mid-hook claim"))
+                    if kind == "challenge_start"
+                    else events.log_event(path, kind, payload, **kw)
+                ),
+            )
+            _, err_mid = app.state.start_attempt(
+                challenges.CHALLENGE_KIND,
+                9,
+                900,
+                launch=launch_paused_while_superseded,
+            )
+            assert err_mid is not None
+            assert app.state.sweeper.running
+            assert app.state.sweeper._proc is replacement_proc[0]
+            app.state.sweeper.stop()
+
+            # 2c (F3a.2): Explicit LaunchedRun returned by app.state.claim_sdr and explicit
+            # HTTP response carrying X-Sigint-Claim each bind cleanup strictly to their own run,
+            # even when a separate claim replaces the child during the paused launch hook.
+            replacement_proc_2: list = []
+
+            def launch_with_explicit_run():
+                run = app.state.claim_sdr("sweeper", app.state.sweeper.start)
+                assert run.name == "sweeper"
+                assert callable(run.cleanup)
+                first_proc = app.state.sweeper._proc
+                app.state.sweeper.stop()
+                assert client.get("/api/spectrum").status_code == 200
+                assert app.state.sweeper._proc is not first_proc
+                replacement_proc_2.append(app.state.sweeper._proc)
+                return run
+
+            _, err_run = app.state.start_attempt(
+                challenges.CHALLENGE_KIND,
+                9,
+                900,
+                launch=launch_with_explicit_run,
+            )
+            assert err_run is not None
+            assert app.state.sweeper.running
+            assert app.state.sweeper._proc is replacement_proc_2[0]
+            app.state.sweeper.stop()
+
+            replacement_proc_3: list = []
+
+            def launch_returning_response():
+                resp = client.get("/api/spectrum")
+                assert resp.status_code == 200
+                assert "x-sigint-claim" in resp.headers
+                first_proc = app.state.sweeper._proc
+                app.state.sweeper.stop()
+                assert client.get("/api/spectrum").status_code == 200
+                assert app.state.sweeper._proc is not first_proc
+                replacement_proc_3.append(app.state.sweeper._proc)
+                return resp
+
+            _, err_resp = app.state.start_attempt(
+                challenges.CHALLENGE_KIND,
+                9,
+                900,
+                launch=launch_returning_response,
+            )
+            assert err_resp is not None
+            assert app.state.sweeper.running
+            assert app.state.sweeper._proc is replacement_proc_3[0]
+            app.state.sweeper.stop()
+
+    # 3. Unresolved reap on a decoder preserves the lifecycle's failure reason (both OSError and
+    # journal serialization TypeError).
     child = Child(["rtl_433"], unkillable=True)
     rtl = Decoder(spawn=lambda *_: child, which=lambda n: n, radio_present=lambda: True)
     data_dir2 = _prepare_managed_dir(tmp_path / "reap") if managed else (tmp_path / "reap")
@@ -1254,20 +1359,35 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
     )
     try:
         with TestClient(app2):
-            monkeypatch.setattr(
-                app_mod,
-                "log_event",
-                lambda *_a, **_kw: (_ for _ in ()).throw(OSError("event fail")),
-            )
-            _, err_reap = app2.state.start_attempt(
-                challenges.CHALLENGE_KIND,
-                4,
-                900,
-                launch=rtl.start,
-            )
-            assert err_reap is not None
-            assert "rtl_433" in err_reap
-            assert rtl.release_failure(pending=True) is not None
+            if fail_at == "serialize":
+                _patch_log_clock(monkeypatch, now)
+                with pytest.raises(TypeError) as exc_info:
+                    app2.state.start_attempt(
+                        challenges.CHALLENGE_KIND,
+                        4,
+                        900,
+                        event_fields={"bad": object()},
+                        launch=rtl.start,
+                    )
+                msg = str(exc_info.value)
+                assert "not JSON serializable" in msg
+                assert "rtl_433" in msg
+                assert rtl.release_failure(pending=True) is not None
+            else:
+                monkeypatch.setattr(
+                    app_mod,
+                    "log_event",
+                    lambda *_a, **_kw: (_ for _ in ()).throw(OSError("event fail")),
+                )
+                _, err_reap = app2.state.start_attempt(
+                    challenges.CHALLENGE_KIND,
+                    4,
+                    900,
+                    launch=rtl.start,
+                )
+                assert err_reap is not None
+                assert "rtl_433" in err_reap
+                assert rtl.release_failure(pending=True) is not None
             child.unkillable = False
     finally:
         child.unkillable = False
@@ -1278,13 +1398,24 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
 def test_f3b_unconfirmed_rollback_quarantines_connection_against_reception_and_next_start(
     tmp_path, monkeypatch, managed
 ):
-    """F3b: unconfirmed rollback quarantines the connection against reads, credit, and Starts."""
+    """F3b: quarantined or closed store reads unreadable and never resets passes to READY."""
     data_dir = _prepare_managed_dir(tmp_path) if managed else tmp_path
     now = [3000.0]
     _patch_log_clock(monkeypatch, now)
     app = app_mod.create_app(data_dir=data_dir, clock=lambda: now[0], managed=managed)
 
     with TestClient(app) as client:
+        # 1. Earn a real Tier B pass on Unit 4 first so preexisting progress is on disk.
+        assert client.post("/api/challenges/4/start").status_code == 200
+        now[0] = 3005.0
+        app.state.lora.on_reception(_lora_item(from_id="!f3b-earned-u4"))
+        earned = client.get("/api/challenges/4")
+        assert earned.status_code == 200
+        assert earned.json()["state"] == "passed"
+        assert earned.json()["passes"] == 1
+        assert "FOUND" in client.get("/unit/4/challenge").text
+
+        # 2. Now fail a Start on Unit 9 with ROLLBACK denied, quarantining the connection.
         real_log = app_mod.log_event
 
         def fail_start_log(path, kind, payload, **kw):
@@ -1296,18 +1427,37 @@ def test_f3b_unconfirmed_rollback_quarantines_connection_against_reception_and_n
         _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_TRANSACTION, "ROLLBACK")
         r1 = client.post("/api/challenges/9/start")
         assert r1.status_code == 500
+        assert r1.json()["state"] == "unreadable"
         assert "quarantined" in (r1.json().get("error") or "").lower()
 
-        # Restore normal log_event; quarantined connection must still refuse reads and commits.
+        # Restore normal log_event; quarantined connection must report unreadable on BOTH units.
         monkeypatch.setattr(app_mod, "log_event", real_log)
 
-        # Eligibility read via GET must not see the rejected attempt.
-        g = client.get("/api/challenges/9").json()
-        assert g["state"] == "idle"
-        assert g["passes"] == 0
-        assert g["error"] is not None
+        # Unit 4 (which has a preexisting earned pass) MUST read as unreadable, NEVER idle/READY!
+        g4 = client.get("/api/challenges/4")
+        assert g4.status_code == 503
+        g4_body = g4.json()
+        assert g4_body["state"] == "unreadable"
+        assert g4_body["passes"] is None
+        assert g4_body["error"] is not None
+        page4 = client.get("/unit/4/challenge")
+        assert page4.status_code == 503
+        assert "UNREADABLE" in page4.text
+        assert "READY" not in page4.text
 
-        # A subsequent qualifying reception must NOT credit the rejected Start or log a pass.
+        # Unit 9 also reads as unreadable (never idle/READY) and must not see the rejected attempt.
+        g9 = client.get("/api/challenges/9")
+        assert g9.status_code == 503
+        g9_body = g9.json()
+        assert g9_body["state"] == "unreadable"
+        assert g9_body["passes"] is None
+        assert g9_body["error"] is not None
+        page9 = client.get("/unit/9/challenge")
+        assert page9.status_code == 503
+        assert "UNREADABLE" in page9.text
+        assert "READY" not in page9.text
+
+        # A subsequent qualifying reception must NOT credit the rejected Start or log a pass for 9.
         now[0] = 3010.0
         app.state.lora.on_reception(_lora_item(from_id="!f3b-lora"))
 
@@ -1315,17 +1465,39 @@ def test_f3b_unconfirmed_rollback_quarantines_connection_against_reception_and_n
         now[0] = 3020.0
         r2 = client.post("/api/challenges/9/start")
         assert r2.status_code == 500
+        assert r2.json()["state"] == "unreadable"
 
-    # Independent connection confirms zero attempts and zero passes were ever committed.
+    # Independent connection confirms Unit 4's earned pass survived intact, and Unit 9 has zero
+    # attempts and zero passes.
     check_prog = Progress(data_dir / "progress.db", managed=managed)
     try:
-        saved = check_prog.challenge(9)
-        assert saved["attempt"] is None
-        assert saved["passes"] == 0
+        saved4 = check_prog.challenge(4)
+        assert saved4["passes"] == 1
+        assert saved4["attempt_pass"] is not None
+        saved9 = check_prog.challenge(9)
+        assert saved9["attempt"] is None
+        assert saved9["passes"] == 0
     finally:
         check_prog.close()
     evts = events.read_events(data_dir / "events.jsonl")
-    assert [e for e in evts if e.get("kind") == "challenge_pass"] == []
+    u9_passes = [
+        e for e in evts if e.get("kind") == "challenge_pass" and e["payload"]["unit"] == 9
+    ]
+    assert u9_passes == []
+
+    # 3. A cleanly closed (non-quarantined) store also reports unreadable, never idle/READY.
+    app_closed = app_mod.create_app(data_dir=data_dir, clock=lambda: now[0], managed=managed)
+    with TestClient(app_closed) as client_c:
+        app_closed.state.progress.close()
+        gc = client_c.get("/api/challenges/4")
+        assert gc.status_code == 503
+        assert gc.json()["state"] == "unreadable"
+        assert gc.json()["passes"] is None
+        assert gc.json()["error"] is not None
+        pc = client_c.get("/unit/4/challenge")
+        assert pc.status_code == 503
+        assert "UNREADABLE" in pc.text
+        assert "READY" not in pc.text
 
 
 def test_f2a_replay_attempts_bind_durable_identity_and_clip_across_identical_timestamps(
@@ -1537,6 +1709,60 @@ def test_f2a_replay_attempts_bind_durable_identity_and_clip_across_identical_tim
         assert stale_same_clip is False
         assert app.state.progress.attempt(bench, "b1")["passes"] == 1
 
+    # 5 (F2a): Shared store API — stage clip A, supersede with clip B before A earns credit,
+    # reopen the store, and verify A's identity can NEVER be reused via stage_attempt/start_attempt
+    # and a later Start gets a strictly monotonic durable identity that rejects A's old answer.
+    prog_reopen_1 = Progress(tmp_path / "progress.db")
+    try:
+        assert prog_reopen_1.stage_attempt(
+            bench, "b-reopen", 2000.0, 600,
+            extra={"recording": "clip-a.sigmf", "digest": "dig-a"},
+        ) is True
+        aid_superseded = prog_reopen_1.attempt(bench, "b-reopen")["attempt"]["attempt_id"]
+        assert prog_reopen_1.stage_attempt(
+            bench, "b-reopen", 2000.0, 600,
+            extra={"recording": "clip-b.sigmf", "digest": "dig-b"},
+        ) is True
+        aid_b_reopen = prog_reopen_1.attempt(bench, "b-reopen")["attempt"]["attempt_id"]
+        assert aid_b_reopen > aid_superseded
+    finally:
+        prog_reopen_1.close()
+
+    prog_reopen_2 = Progress(tmp_path / "progress.db")
+    try:
+        # Caller-supplied attempt_id (reusing superseded unpassed aid_superseded) MUST be refused.
+        with pytest.raises((ValueError, TypeError)):
+            prog_reopen_2.stage_attempt(
+                bench, "b-reopen", 2000.0, 600,
+                extra={"recording": "clip-a.sigmf", "digest": "dig-a"},
+                attempt_id=aid_superseded,
+            )
+        with pytest.raises((ValueError, TypeError)):
+            prog_reopen_2.start_attempt(
+                bench, "b-reopen", 2000.0, 600,
+                attempt_id=aid_superseded,
+                recording="clip-a.sigmf",
+                digest="dig-a",
+            )
+        # Store-issued restart for clip A at identical t=2000.0 produces a strictly newer identity.
+        assert prog_reopen_2.start_attempt(
+            bench, "b-reopen", 2000.0, 600,
+            recording="clip-a.sigmf",
+            digest="dig-a",
+        ) is True
+        aid_after_reopen = prog_reopen_2.attempt(bench, "b-reopen")["attempt"]["attempt_id"]
+        assert aid_after_reopen > aid_b_reopen
+        assert aid_after_reopen != aid_superseded
+        # Old answer carrying aid_superseded MUST NOT credit the new attempt.
+        assert prog_reopen_2.record_attempt_pass(
+            bench, "b-reopen", 2000.0, None,
+            {"passed_at": 2010.0, "recording": "clip-a.sigmf", "digest": "dig-a", "answer": "old"},
+            attempt_id=aid_superseded,
+        ) is False
+        assert prog_reopen_2.attempt(bench, "b-reopen")["passes"] == 0
+    finally:
+        prog_reopen_2.close()
+
 
 def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_path):
     """F2b: live credit refuses to insert a pass if a 2nd connection superseded the attempt."""
@@ -1546,7 +1772,7 @@ def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_p
     _create_slotted_tables(db_path)
     prog2 = Progress(db_path)
     try:
-        # 1. Tier B (single-slot CHALLENGE_KIND)
+        # 1a. Tier B (single-slot CHALLENGE_KIND) — distinct timestamp replacement.
         assert prog1.start_challenge(9, 1000.0, 900) is True
         superseded_tier_b = [False]
 
@@ -1563,13 +1789,29 @@ def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_p
         assert prog2.challenge(9)["passes"] == 0
         assert prog2.challenge(9)["attempt"]["started_at"] == 1100.0
 
-        # Normal credit against the current 1100.0 attempt still inserts once.
-        stamp2 = _make_stamp("lora", 1110.0, "d-f2b-2", event_id="ev-f2b-2")
-        assert len(prog1.credit_challenges([stamp2], lambda a, s: True)) == 1
-        assert prog1.credit_challenges([stamp2], lambda a, s: True) == []
+        # 1b. Tier B — SAME timestamp replacement with a shorter window (F2b round 4).
+        # Evidence at t=1150 qualifies under the old 900 s window, but NOT the replacement 10 s
+        # window; guarded insert must compare durable attempt identity, not just started_at.
+        superseded_same_ts_b = [False]
+
+        def tier_b_same_ts_qualifies(attempt, s):
+            if not superseded_same_ts_b[0]:
+                superseded_same_ts_b[0] = True
+                assert prog2.start_challenge(9, 1100.0, 10) is True
+            return challenges.in_window(attempt, s)
+
+        stamp_late = _make_stamp("lora", 1150.0, "d-f2b-same-ts", event_id="ev-f2b-same-ts")
+        assert prog1.credit_challenges([stamp_late], tier_b_same_ts_qualifies) == []
+        assert prog2.challenge(9)["passes"] == 0
+        assert prog2.challenge(9)["attempt"]["window_s"] == 10
+
+        # Normal credit against the current (1100.0, 10 s) attempt still inserts once.
+        stamp2 = _make_stamp("lora", 1105.0, "d-f2b-2", event_id="ev-f2b-2")
+        assert len(prog1.credit_challenges([stamp2], lambda a, s: challenges.in_window(a, s))) == 1
+        assert prog1.credit_challenges([stamp2], lambda a, s: challenges.in_window(a, s)) == []
         assert prog2.challenge(9)["passes"] == 1
 
-        # 2. Slotted live_reception kind
+        # 2a. Slotted live_reception kind — distinct timestamp replacement.
         assert prog1.start_attempt(slotted, "hunt-r", 1000.0, 900) is True
         superseded_slot = [False]
 
@@ -1584,9 +1826,28 @@ def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_p
         assert prog2.attempt(slotted, "hunt-r")["passes"] == 0
         assert prog2.attempt(slotted, "hunt-r")["attempt"]["started_at"] == 1100.0
 
-        # Normal slotted credit against current 1100.0 attempt inserts once per slot.
-        assert len(prog1.credit_attempts(slotted, [stamp2], lambda a, s: 0)) == 1
-        assert prog1.credit_attempts(slotted, [stamp2], lambda a, s: 0) == []
+        # 2b. Slotted live_reception kind — SAME timestamp replacement with a shorter window.
+        superseded_same_ts_slot = [False]
+
+        def slot_same_ts_qualifies(attempt, s):
+            if not superseded_same_ts_slot[0]:
+                superseded_same_ts_slot[0] = True
+                assert prog2.start_attempt(slotted, "hunt-r", 1100.0, 10) is True
+            return 0 if challenges.in_window(attempt, s) else None
+
+        assert prog1.credit_attempts(slotted, [stamp_late], slot_same_ts_qualifies) == []
+        assert prog2.attempt(slotted, "hunt-r")["passes"] == 0
+        assert prog2.attempt(slotted, "hunt-r")["attempt"]["window_s"] == 10
+
+        # Normal slotted credit against current (1100.0, 10 s) attempt inserts once per slot.
+        assert len(
+            prog1.credit_attempts(
+                slotted, [stamp2], lambda a, s: 0 if challenges.in_window(a, s) else None
+            )
+        ) == 1
+        assert prog1.credit_attempts(
+            slotted, [stamp2], lambda a, s: 0 if challenges.in_window(a, s) else None
+        ) == []
         assert prog2.attempt(slotted, "hunt-r")["passes"] == 1
     finally:
         prog1.close()
