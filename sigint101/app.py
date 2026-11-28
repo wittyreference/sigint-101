@@ -623,6 +623,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             stores = [("progress", app.state.progress.close), ("exam", app.state.exam_store.close)]
             app.state.shutdown_errors = await finish_console(
                 receivers, stores, app.state.reception_sink, SHUTDOWN_TOTAL_S)
+            if ppm_failure := app.state.ppm_calibration.release_failure():
+                app.state.shutdown_errors.append(f"ppm: {ppm_failure}")
             for reason in app.state.shutdown_errors:
                 logging.getLogger(__name__).error("console shutdown: %s", reason)
 

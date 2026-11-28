@@ -12,6 +12,7 @@ import select
 import subprocess
 import time
 from array import array
+from contextlib import suppress
 
 from .childproc import spawn, stop_process
 from .provenance import read_soc_temp_c
@@ -263,8 +264,10 @@ class _CaptureStream:
         try:
             reaped = self._proc.poll() is not None or stop_process(self._proc)
         except (OSError, ValueError):
-            # A failed wait or status check leaves ownership unresolved just like a timeout.
-            pass
+            # A failed wait can skip escalation. Keep the hold unless the exit is visible.
+            with suppress(OSError, ValueError):
+                self._proc.kill()
+            reaped = self.reaped()
         finally:
             self.stop_failed = not reaped
             if self._proc.stdout:
