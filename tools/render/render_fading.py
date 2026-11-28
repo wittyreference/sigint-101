@@ -75,7 +75,9 @@ function measureFadingStage(stageName) {
   const badge = panel.querySelector('[data-ais-badge]');
   const empty = panel.querySelector('[data-ais-empty]');
   const freq = panel.querySelector('[data-faded-freq]');
+  const unit = freq ? freq.querySelector('span') : null;
   const strip = panel.querySelector('[data-faded-tune="ais"]');
+  const caption = strip ? strip.querySelector('.tune__caption') : null;
   const body = panel.querySelector('.scroll-frame > .stage-panel__body');
   const buttons = strip ? [...strip.querySelectorAll('button')] : [];
   const visibleButtons = buttons.filter(b => getComputedStyle(b).display !== 'none');
@@ -91,11 +93,13 @@ function measureFadingStage(stageName) {
   const maxRight = Math.max(0, ...rects.map(r => Math.round(r.right)));
   const maxBottom = Math.max(0, ...rects.map(r => Math.round(r.bottom)));
 
-  const head = panel.querySelector('.decoder__head');
-  const chromeText = [head, strip, body].map(el => el ? (el.innerText || '') : '').join(' ');
   const fullText = panel.innerText || '';
-  const chromeNamesDecoder = /rtl[_\\s-]?ais|aisdecoder/i.test(chromeText);
-  const namesDecoder = /rtl[_\\s-]?ais|aisdecoder/i.test(fullText);
+  const namesDecoder = /rtl[_\\s-]?ais|aisdecoder|provision\\.sh/i.test(fullText);
+  const captionFontPx = caption ? parseFloat(getComputedStyle(caption).fontSize) || 0 : 0;
+  const unitFontPx = unit ? parseFloat(getComputedStyle(unit).fontSize) || 0 : 0;
+  const badgeFontPx = badge ? parseFloat(getComputedStyle(badge).fontSize) || 0 : 0;
+  const captionClipped = Boolean(caption && caption.scrollWidth > caption.clientWidth + 1);
+  const dialClipped = Boolean(freq && freq.scrollWidth > freq.clientWidth + 1);
 
   return {
     theme: app.dataset.theme,
@@ -105,8 +109,13 @@ function measureFadingStage(stageName) {
     badge: badge ? badge.textContent.trim() : '',
     emptyText: empty ? empty.textContent.trim() : '',
     freqText: freq ? freq.textContent.trim() : '',
+    dialPending: Boolean(freq && freq.classList.contains('tune__freq--pending')),
     namesDecoder,
-    chromeNamesDecoder,
+    captionFontPx,
+    unitFontPx,
+    badgeFontPx,
+    captionClipped,
+    dialClipped,
     buttonsFit,
     buttonsOverlap,
     dialFits,
@@ -221,7 +230,12 @@ def _stage_layout_ok(m, theme) -> bool:
         m.get("theme") == theme
         and m.get("doc") == [800, 480]
         and bool(m.get("back"))
-        and not m.get("chromeNamesDecoder")
+        and not m.get("namesDecoder")
+        and m.get("captionFontPx", 0) >= 18
+        and m.get("unitFontPx", 0) >= 18
+        and m.get("badgeFontPx", 0) >= 18
+        and not m.get("captionClipped")
+        and not m.get("dialClipped")
         and bool(m.get("buttonsFit"))
         and not m.get("buttonsOverlap")
         and bool(m.get("dialFits"))
@@ -232,7 +246,7 @@ def _stage_layout_ok(m, theme) -> bool:
 def _untuned_ok(m, theme) -> bool:
     return (
         _stage_layout_ok(m, theme)
-        and not m.get("namesDecoder")
+        and bool(m.get("dialPending"))
         and m.get("badge") == "UNTUNED"
         and "Not tuned yet" in (m.get("emptyText") or "")
         and (m.get("freqText") or "").startswith("100.0")
@@ -242,7 +256,7 @@ def _untuned_ok(m, theme) -> bool:
 def _offband_ok(m, theme) -> bool:
     return (
         _stage_layout_ok(m, theme)
-        and not m.get("namesDecoder")
+        and bool(m.get("dialPending"))
         and m.get("badge") == "OFF BAND"
         and "100.0 MHz" in (m.get("emptyText") or "")
         and "162 MHz" in (m.get("emptyText") or "")
@@ -254,6 +268,18 @@ def _tuned_ok(m, theme) -> bool:
         _stage_layout_ok(m, theme)
         and (m.get("freqText") or "").startswith("162.0")
         and m.get("badge") not in ("", "UNTUNED", "OFF BAND", "LIVE")
+        and bool(m.get("dialPending"))
+        and "Tuned to" not in (m.get("emptyText") or "")
+    )
+
+
+def _stepped_off_ok(m, theme) -> bool:
+    return (
+        _stage_layout_ok(m, theme)
+        and bool(m.get("dialPending"))
+        and m.get("badge") == "UNTUNED"
+        and "Not tuned yet" in (m.get("emptyText") or "")
+        and (m.get("freqText") or "").startswith("164.0")
     )
 
 
@@ -337,6 +363,42 @@ def main(_console=None):
                     failed |= verdict(
                         _tuned_ok(tuned, theme), f"fading operate tuned {theme}", tuned
                     )
+
+                    # 4b) F1: step dial off-band (+2 MHz -> 164.0 MHz) after Tune -> drops to
+                    # UNTUNED and pending dial, never leaving a live roster beside an off-band dial.
+                    browser.ev(
+                        "(() => {"
+                        "  const s = document.querySelector("
+                        "    '.stage-panel[data-stage=\"operate\"] [data-faded-tune=\"ais\"]'"
+                        "  );"
+                        "  if (!s) return;"
+                        "  const up = s.querySelector('[data-faded-dir=\"1\"]');"
+                        "  up.click(); up.click();"
+                        "})()"
+                    )
+                    stepped_off = browser.ev(
+                        f"{MEASURE_FADING_STAGE}\n"
+                        f"measureFadingStage('operate') /* stepped_off {theme} */"
+                    ) or {}
+                    failed |= verdict(
+                        _stepped_off_ok(stepped_off, theme),
+                        f"fading operate stepped-off {theme}",
+                        stepped_off,
+                    )
+
+                    # Step back to 162.0 MHz and re-apply Tune before checking observe.
+                    browser.ev(
+                        "(() => {"
+                        "  const s = document.querySelector("
+                        "    '.stage-panel[data-stage=\"operate\"] [data-faded-tune=\"ais\"]'"
+                        "  );"
+                        "  if (!s) return;"
+                        "  const dn = s.querySelector('[data-faded-dir=\"-1\"]');"
+                        "  const apply = s.querySelector('[data-faded-apply]');"
+                        "  dn.click(); dn.click(); apply.click();"
+                        "})()"
+                    )
+                    time.sleep(0.4)
 
                     # 5) Advance to observe (tightest row: Prev + Next step beside tune controls).
                     browser.ev(

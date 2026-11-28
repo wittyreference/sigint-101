@@ -297,3 +297,25 @@ def test_m26_is_completable_and_honest_when_tuned(tmp_path):
         r_done = client.post("/api/complete?lesson_id=26")
         assert r_done.status_code == 200
         assert app.state.progress.get(26)["completed"] == 1
+
+
+def test_m26_faded_tune_strip_and_badge_fonts_are_at_least_18px():
+    css = (
+        Path(__file__).resolve().parent.parent / "sigint101" / "static" / "app.css"
+    ).read_text(encoding="utf-8")
+
+    def _font_px(selector: str) -> float | None:
+        pat = re.compile(re.escape(selector) + r"\s*\{([^}]*)\}", re.S)
+        m = pat.search(css)
+        if not m:
+            return None
+        fm = re.search(r"font-size:\s*([\d.]+)px", m.group(1))
+        return float(fm.group(1)) if fm else None
+
+    for selector in (
+        ".tune--faded .tune__caption",
+        ".tune--faded .tune__freq span",
+        "[data-ais-faded] .decoder__status",
+    ):
+        px = _font_px(selector)
+        assert px is not None and px >= 18.0, f"{selector} font-size is {px!r}px; expected >= 18px"

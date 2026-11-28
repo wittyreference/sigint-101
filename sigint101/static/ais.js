@@ -10,6 +10,7 @@
   var AIS_BAND_HIGH_HZ = 162100000;
   var TUNER_MIN_HZ = 24000000;
   var TUNER_MAX_HZ = 1766000000;
+  var DECODER_NAME_RE = /\brtl[_\s-]?ais(?:-sigint101)?\b|\baisdecoder\b/gi;
 
   // How a vessel reads as a line: its name once the static message arrives, else its MMSI.
   function ident(vessel) {
@@ -59,10 +60,14 @@
   }
 
   // Honest state for a faded AIS panel before and after the learner taps Tune.
+  // Never claims "Tuned" before the receiver confirms: AIS listens on fixed marine VHF channels,
+  // so the prompt names what the learner chose ("Set to ...") and keeps confirmed false until
+  // /api/ais confirms a live receiver.
   function fadedTuneState(freqHz, attempted) {
     if (!attempted) {
       return {
         tuned: false,
+        confirmed: false,
         badge: "UNTUNED",
         cls: "decoder__status decoder__status--empty",
         message: "Not tuned yet — step to marine VHF (162 MHz) and tap Tune.",
@@ -71,17 +76,61 @@
     if (inAisBand(freqHz)) {
       return {
         tuned: true,
+        confirmed: false,
         badge: "CHECKING",
         cls: "decoder__status",
-        message: "Tuned to " + formatFreqMHz(freqHz) + " MHz — checking receiver…",
+        message: "Set to " + formatFreqMHz(freqHz) + " MHz (marine VHF) — checking receiver…",
       };
     }
     return {
       tuned: false,
+      confirmed: false,
       badge: "OFF BAND",
       cls: "decoder__status decoder__status--empty",
       message: formatFreqMHz(freqHz) + " MHz is outside the marine VHF band (~162 MHz). Step to ~162 MHz and tap Tune.",
     };
+  }
+
+  // F1: moving the dial after Tune drops back to UNTUNED and unconfirmed so the roster can never
+  // stay live beside an uncommitted or off-band dial.
+  function onFadedDialMove(freqHz, wasActive) {
+    if (wasActive) {
+      return {
+        active: false,
+        confirmed: false,
+        state: fadedTuneState(freqHz, false),
+      };
+    }
+    return { active: false, confirmed: false, state: null };
+  }
+
+  function scrubDecoderText(text) {
+    if (typeof text !== "string") return text;
+    return text.replace(DECODER_NAME_RE, function (_match, offset) {
+      return offset === 0 ? "The AIS decoder" : "the AIS decoder";
+    });
+  }
+
+  // F2: keep refusal badges honest (TOOL MISSING, NO RADIO, STOPPED) while keeping decoder binary
+  // names and operator provisioning hints off the faded lesson panel.
+  function scrubFadedRefusal(body) {
+    var src = body || {};
+    var out = {};
+    Object.keys(src).forEach(function (k) { out[k] = src[k]; });
+    if (out.cause === "missing_tool") {
+      out.message = "The AIS decoder is not installed on this unit.";
+      out.reason = out.message;
+      out.next_step = "See the Field card for receiver setup.";
+      return out;
+    }
+    if (typeof out.reason === "string") out.reason = scrubDecoderText(out.reason);
+    if (typeof out.message === "string") out.message = scrubDecoderText(out.message);
+    if (typeof out.next_step === "string") {
+      out.next_step = /provision\.sh/i.test(out.next_step)
+        ? "See the Field card for receiver setup."
+        : scrubDecoderText(out.next_step);
+    }
+    return out;
   }
 
   // Under node's test runner the file is loaded for its pure helpers and there is no document.
@@ -94,6 +143,8 @@
       motion: motion,
       inAisBand: inAisBand,
       fadedTuneState: fadedTuneState,
+      onFadedDialMove: onFadedDialMove,
+      scrubFadedRefusal: scrubFadedRefusal,
       stepFadedFreq: stepFadedFreq,
       nextFadedStep: nextFadedStep,
     };
@@ -176,6 +227,7 @@
   }
 
   // Faded consolidation lesson: stay quiet and honest until the learner tunes to marine VHF.
+  // Note (N1): polling is gated client-side here; GET /api/ais itself remains the live endpoint.
   if (fadedPanels.length) {
     var strips = Array.prototype.slice.call(document.querySelectorAll('[data-faded-tune="ais"]'));
     var first = strips[0];
@@ -185,6 +237,7 @@
     var freqHz = first && first.dataset.freqHz ? parseInt(first.dataset.freqHz, 10) : 100000000;
     var stepHz = first && first.dataset.stepHz ? parseInt(first.dataset.stepHz, 10) : steps[0];
     var tunedInBand = false;
+    var receiverConfirmed = false;
     var pollTimer = null;
     var pollGen = 0;
 
@@ -195,7 +248,7 @@
         var freqEl = strip.querySelector("[data-faded-freq]");
         if (freqEl) {
           freqEl.innerHTML = formatFreqMHz(freqHz) + "<span>MHz</span>";
-          freqEl.classList.toggle("tune__freq--pending", !tunedInBand);
+          freqEl.classList.toggle("tune__freq--pending", !receiverConfirmed);
         }
         var stepEl = strip.querySelector("[data-faded-step-val]");
         if (stepEl) stepEl.textContent = formatStepLabel(stepHz);
@@ -238,9 +291,14 @@
             if (stopped || !tunedInBand || gen !== pollGen) return;
             var waiting = false;
             if (!res.ok || res.body.available === false) {
-              fadedPanels.forEach(function (p) { showEmpty(p, res.body); });
+              receiverConfirmed = false;
+              syncStrips();
+              var scrubbed = scrubFadedRefusal(res.body);
+              fadedPanels.forEach(function (p) { showEmpty(p, scrubbed); });
               waiting = true;
             } else {
+              receiverConfirmed = true;
+              syncStrips();
               fadedPanels.forEach(function (p) { render(p, res.body); });
             }
             if (!stopped && tunedInBand && gen === pollGen) {
@@ -249,7 +307,11 @@
           })
           .catch(function () {
             if (stopped || !tunedInBand || gen !== pollGen) return;
-            fadedPanels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
+            receiverConfirmed = false;
+            syncStrips();
+            fadedPanels.forEach(function (p) {
+              showEmpty(p, { reason: "Lost contact with the console." });
+            });
             pollTimer = setTimeout(tickFaded, RETRY_MS);
           });
       }
@@ -261,7 +323,12 @@
         btn.addEventListener("click", function () {
           var dir = parseInt(btn.dataset.fadedDir, 10) || 0;
           freqHz = stepFadedFreq(freqHz, dir, stepHz);
+          var moved = onFadedDialMove(freqHz, tunedInBand);
+          if (tunedInBand) stopFadedPoll();
+          tunedInBand = moved.active;
+          receiverConfirmed = moved.confirmed;
           syncStrips();
+          if (moved.state) applyFadedState(moved.state);
         });
       });
       var stepBtn = strip.querySelector("[data-faded-step]");
@@ -277,11 +344,13 @@
           var state = fadedTuneState(freqHz, true);
           if (state.tuned) {
             tunedInBand = true;
+            receiverConfirmed = Boolean(state.confirmed);
             syncStrips();
             applyFadedState(state);
             startFadedPoll();
           } else {
             tunedInBand = false;
+            receiverConfirmed = false;
             stopFadedPoll();
             syncStrips();
             applyFadedState(state);

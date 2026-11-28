@@ -82,14 +82,19 @@ def test_real_packs_frequencies_separate_rows_sorting_and_tools():
     band_map = build_map(lessons)
 
     by_id = {row.lesson_id: row for row in band_map.dial_rows}
+    inst_by_key = {inst.key: inst for inst in INSTRUMENTS}
     for row in band_map.dial_rows:
         lesson = lessons[row.lesson_id]
         if row.kind == "tuned":
-            expected = (
-                lesson.tune["center_hz"]
-                if lesson.tune is not None
-                else sum(row.fixed_hz) // len(row.fixed_hz)
-            )
+            if lesson.tune is not None:
+                expected = lesson.tune["center_hz"]
+            else:
+                # F3: pin tune-less rows to operate.INSTRUMENTS (independent of row.fixed_hz).
+                panel_inst = next(
+                    (inst_by_key[p] for p in lesson.panels if p in inst_by_key), None
+                )
+                assert panel_inst is not None and panel_inst.fixed_hz
+                expected = sum(panel_inst.fixed_hz) // len(panel_inst.fixed_hz)
             assert row.center_hz == expected
             assert row.low_hz == expected
             assert row.high_hz == expected
@@ -97,6 +102,11 @@ def test_real_packs_frequencies_separate_rows_sorting_and_tools():
             assert row.kind == "default_sweep"
             assert (row.low_hz, row.high_hz) == (DEFAULT_LOW, DEFAULT_HIGH)
             assert row.center_hz is None
+
+    # F3: explicit pin for faded M26 (no tune:, derived from AIS fixed channels -> 162.0 MHz).
+    assert by_id[26].kind == "tuned"
+    assert by_id[26].center_hz == 162_000_000
+    assert by_id[26].between_channels is True
 
     # Shared frequencies stay separate rows (never merged).
     assert [r.lesson_id for r in band_map.dial_rows if r.center_hz == 433_920_000] == [9, 10]
@@ -118,7 +128,6 @@ def test_real_packs_frequencies_separate_rows_sorting_and_tools():
             assert row.status is None
 
     # Fixed frequencies come from operate.INSTRUMENTS.
-    inst_by_key = {inst.key: inst for inst in INSTRUMENTS}
     assert by_id[26].fixed_hz == inst_by_key["ais"].fixed_hz == (161_975_000, 162_025_000)
     assert by_id[26].tool == inst_by_key["ais"].tool == "rtl_ais"
     assert by_id[13].fixed_hz == inst_by_key["adsb"].fixed_hz == (1_090_000_000,)

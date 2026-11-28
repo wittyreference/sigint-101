@@ -38,10 +38,15 @@ test("faded AIS tuning refuses off-band, prompts before tuning, and opens on mar
   assert.match(offBand.message, /150\.0 MHz/);
   assert.match(offBand.message, /162 MHz/);
 
-  for (const hz of [161_975_000, 162_000_000, 162_025_000]) {
+  // Honest dial (N2 fix): never claims "Tuned to <freq>" before the receiver confirms;
+  // words it as what the learner chose ("Set to ...").
+  for (const hz of [161_900_000, 161_975_000, 162_000_000, 162_025_000, 162_100_000]) {
     const ok = panel.fadedTuneState(hz, true);
     assert.equal(ok.tuned, true);
+    assert.equal(ok.confirmed, false);
     assert.equal(ok.badge, "CHECKING");
+    assert.match(ok.message, /^Set to 16[12]\.\d MHz/);
+    assert.doesNotMatch(ok.message, /\bTuned\b/i);
   }
   assert.equal(panel.inAisBand(161_800_000), false);
   assert.equal(panel.inAisBand(162_200_000), false);
@@ -50,4 +55,38 @@ test("faded AIS tuning refuses off-band, prompts before tuning, and opens on mar
   assert.equal(panel.stepFadedFreq(24_000_000, -1, 10_000_000), 24_000_000);
   assert.equal(panel.nextFadedStep([10_000_000, 1_000_000, 100_000], 10_000_000), 1_000_000);
   assert.equal(panel.nextFadedStep([10_000_000, 1_000_000, 100_000], 100_000), 10_000_000);
+});
+
+test("F1: moving the faded dial after Tune drops back to UNTUNED and unconfirmed", () => {
+  const movedOff = panel.onFadedDialMove(164_000_000, true);
+  assert.equal(movedOff.active, false);
+  assert.equal(movedOff.confirmed, false);
+  assert.equal(movedOff.state.badge, "UNTUNED");
+  assert.match(movedOff.state.message, /Not tuned yet/);
+
+  const movedIdle = panel.onFadedDialMove(110_000_000, false);
+  assert.equal(movedIdle.active, false);
+  assert.equal(movedIdle.confirmed, false);
+  assert.equal(movedIdle.state, null);
+});
+
+test("F2: faded panel scrubs decoder binary name and operator provision hint from refusals", () => {
+  const missing = panel.scrubFadedRefusal({
+    cause: "missing_tool",
+    message: "rtl_ais-sigint101 is not installed.",
+    next_step: "Run deploy/provision.sh",
+  });
+  assert.equal(missing.cause, "missing_tool");
+  assert.doesNotMatch(missing.message, /rtl[_\s-]?ais|aisdecoder/i);
+  assert.doesNotMatch(missing.next_step, /rtl[_\s-]?ais|provision\.sh/i);
+  assert.match(missing.next_step, /Field card/i);
+
+  const stopped = panel.scrubFadedRefusal({
+    cause: "stopped",
+    reason: "rtl_ais exited unexpectedly",
+    retry_in: 4,
+  });
+  assert.equal(stopped.cause, "stopped");
+  assert.equal(stopped.retry_in, 4);
+  assert.doesNotMatch(stopped.reason, /rtl[_\s-]?ais|aisdecoder/i);
 });

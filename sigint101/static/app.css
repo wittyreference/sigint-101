@@ -2108,11 +2108,19 @@ body {
   font-size: 24px;
 }
 .tune--faded .tune__freq span {
-  font-size: 14px;
+  font-size: 18px;
   margin-left: 4px;
 }
 .tune--faded .tune__caption {
-  font-size: 13px;
+  font-size: 18px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+[data-ais-faded] .decoder__title {
+  font-size: 18px;
+}
+[data-ais-faded] .decoder__status {
+  font-size: 18px;
 }
 .tune__apply {
   flex: none;

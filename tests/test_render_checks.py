@@ -1231,15 +1231,20 @@ FADING_UNTUNED_FITS = {
     "badge": "UNTUNED",
     "emptyText": "Not tuned yet — step to marine VHF (162 MHz) and tap Tune.",
     "freqText": "100.0MHz",
+    "dialPending": True,
     "namesDecoder": False,
-    "chromeNamesDecoder": False,
+    "captionFontPx": 18,
+    "unitFontPx": 18,
+    "badgeFontPx": 18,
+    "captionClipped": False,
+    "dialClipped": False,
     "buttonsFit": True,
     "buttonsOverlap": False,
     "dialFits": True,
-    "dialWidth": 220,
-    "narrationH": 82,
-    "maxRight": 784,
-    "maxBottom": 360,
+    "dialWidth": 155,
+    "narrationH": 95,
+    "maxRight": 782,
+    "maxBottom": 368,
 }
 FADING_OFFBAND_FITS = {
     **FADING_UNTUNED_FITS,
@@ -1253,16 +1258,22 @@ FADING_TUNED_FITS = {
     "badge": "NO RADIO",
     "emptyText": "No RTL-SDR radio detected.",
     "freqText": "162.0MHz",
+    "dialPending": True,
+}
+FADING_STEPPED_OFF_FITS = {
+    **FADING_UNTUNED_FITS,
+    "freqText": "164.0MHz",
+    "dialPending": True,
 }
 FADING_OBSERVE_FITS = {
     **FADING_TUNED_FITS,
     "stage": "observe",
-    "dialWidth": 192,
+    "dialWidth": 155,
 }
 FADING_EXPLAIN_FITS = {
     "doc": [800, 480],
     "completeFits": True,
-    "completeBottom": 464,
+    "completeBottom": 473,
 }
 
 
@@ -1273,15 +1284,24 @@ def _fading_pages(*, kind=None, defect=None):
         untuned = {**FADING_UNTUNED_FITS, "theme": theme}
         offband = {**FADING_OFFBAND_FITS, "theme": theme}
         tuned = {**FADING_TUNED_FITS, "theme": theme}
+        stepped_off = {**FADING_STEPPED_OFF_FITS, "theme": theme}
         obs = {**FADING_OBSERVE_FITS, "theme": theme}
         exp = {**FADING_EXPLAIN_FITS, "theme": theme}
         if theme == "red-night" and kind and defect:
-            {"predict": pred, "untuned": untuned, "offband": offband,
-             "tuned": tuned, "observe": obs, "explain": exp}[kind].update(defect)
+            {
+                "predict": pred,
+                "untuned": untuned,
+                "offband": offband,
+                "tuned": tuned,
+                "stepped_off": stepped_off,
+                "observe": obs,
+                "explain": exp,
+            }[kind].update(defect)
         pages[f"measureFadingPredict({json.dumps(theme)})"] = pred
         pages[f"measureFadingStage('operate') /* untuned {theme} */"] = untuned
         pages[f"measureFadingStage('operate') /* offband {theme} */"] = offband
         pages[f"measureFadingStage('operate') /* tuned {theme} */"] = tuned
+        pages[f"measureFadingStage('operate') /* stepped_off {theme} */"] = stepped_off
         pages[f"measureFadingStage('observe') /* observe {theme} */"] = obs
         pages[f"measureFadingExplain({json.dumps(theme)})"] = exp
     return pages
@@ -1298,6 +1318,7 @@ def test_fading_render_checks_all_stages_in_all_three_themes(devtools):
             f"VERDICT: PASS - fading operate untuned {theme}",
             f"VERDICT: PASS - fading operate offband {theme}",
             f"VERDICT: PASS - fading operate tuned {theme}",
+            f"VERDICT: PASS - fading operate stepped-off {theme}",
             f"VERDICT: PASS - fading observe {theme}",
             f"VERDICT: PASS - fading explain {theme}",
         ])
@@ -1310,9 +1331,18 @@ def test_fading_render_checks_all_stages_in_all_three_themes(devtools):
     ("untuned", "fading operate untuned red-night", {"badge": "LIVE"}),
     ("untuned", "fading operate untuned red-night", {"freqText": "162.0MHz"}),
     ("untuned", "fading operate untuned red-night", {"narrationH": 50}),
+    ("untuned", "fading operate untuned red-night", {"captionFontPx": 13}),
+    ("untuned", "fading operate untuned red-night", {"unitFontPx": 14}),
+    ("untuned", "fading operate untuned red-night", {"badgeFontPx": 13}),
+    ("untuned", "fading operate untuned red-night", {"captionClipped": True}),
     ("offband", "fading operate offband red-night", {"badge": "LIVE"}),
     ("tuned", "fading operate tuned red-night", {"badge": "UNTUNED"}),
+    ("tuned", "fading operate tuned red-night", {"namesDecoder": True}),
+    ("tuned", "fading operate tuned red-night", {"dialPending": False}),
+    ("stepped_off", "fading operate stepped-off red-night", {"badge": "LIVE"}),
+    ("stepped_off", "fading operate stepped-off red-night", {"dialPending": False}),
     ("observe", "fading observe red-night", {"buttonsOverlap": True}),
+    ("observe", "fading observe red-night", {"namesDecoder": True}),
     ("explain", "fading explain red-night", {"completeFits": False}),
 ])
 def test_fading_render_fails_on_decoder_leak_dishonest_badge_or_clip(devtools, kind, label, defect):
