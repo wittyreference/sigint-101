@@ -29,6 +29,7 @@ LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 FIELD = REPO / "tools" / "render" / "render_field.py"
 BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
 CLOSING = REPO / "tools" / "render" / "render_closing.py"
+REPLAY = REPO / "tools" / "render" / "render_replay.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -440,7 +441,7 @@ def render_make(tmp_path, console_url, devtools):
     chromium.chmod(0o755)
     for script in (
         FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD,
-        BANDMAP, CLOSING,
+        BANDMAP, CLOSING, REPLAY,
     ):
         (screen / script.name).write_text(
             "import os, sys\n"
@@ -485,11 +486,13 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
         SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name, CLOSING.name,
+        REPLAY.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
         "recall-fails", "live-find-fails", "field-fails", "bandmap-fails", "closing-fails",
+        "replay-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -507,6 +510,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {FIELD.name} {console_url}",
         f"ran {BANDMAP.name} {console_url}",
         f"ran {CLOSING.name} {console_url}",
+        f"ran {REPLAY.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0

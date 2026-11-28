@@ -1197,6 +1197,9 @@ body {
   color: var(--fg);
   border: 2px solid currentColor;
 }
+.decoder__status--replay {
+  border: 4px double currentColor;
+}
 .decoder__status--live {
   color: var(--ok);
 }
@@ -1282,6 +1285,18 @@ body {
   border-bottom: 1px solid var(--border);
   font-size: 15px;
 }
+.decoder__item--replay {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "mark model mod" "mark read tone";
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.decoder__item--replay .logbook-mark {
+  grid-area: mark;
+  align-self: center;
+  font-size: 18px;
+}
+.decoder__item--replay :is(.decoder__mod, .decoder__tone) { font-size: 18px; }
 .decoder__model { grid-area: model; color: var(--accent); font-weight: 600; }
 .decoder__mod { grid-area: mod; font-family: var(--font-mono); font-size: 13px; color: var(--fg); }
 .decoder__item--fsk .decoder__mod { color: var(--ok); }
@@ -2866,6 +2881,22 @@ body {
   gap: 2px;
   line-height: 1;
 }
+.tune .tune-btn--replay {
+  width: 132px;
+  height: var(--touch);
+  font-size: 18px;
+}
+.tune-btn--replay:disabled { cursor: default; }
+.tune:not(.tune--replay) .tune__dial--replay,
+.tune--replay > :is(.tune__dial:not(.tune__dial--replay), [data-tune-step], [data-step-cycle]) {
+  display: none;
+}
+.tune__dial--replay .tune__caption {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .rack__adjust-label {
   font-size: 18px;
   color: var(--fg-dim);
@@ -3031,6 +3062,10 @@ body {
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
+}
+.logbook__marks {
+  display: inline-flex;
+  gap: 8px;
 }
 .logbook__entry p {
   margin: 5px 0 0;

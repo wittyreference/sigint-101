@@ -127,15 +127,25 @@
    two tones do not resolve on a 125 kHz-bin waterfall, so the honest instrument here is the
    decoder, not the eye. decode.js polls /api/decode and fills the list; no radio / no rtl_433 shows
    an honest empty state, never a fabricated read. Opts into .decoder--fits-refusal in a lesson. ---- #}
+{% macro replay_controls() %}
+  <div class="tune__dial tune__dial--replay" data-replay-dial>
+    <div class="tune__freq" data-replay-freq>— MHz</div>
+    <div class="tune__caption" data-replay-caption>REPLAY</div>
+  </div>
+  <button class="tune-btn tune-btn--replay" type="button" data-replay-toggle disabled
+          title="No recording on this kit yet">No recording</button>
+{% endmacro %}
+
 {% macro decode(mhz, head_command=true) %}
               <div class="decoder decoder--fits-refusal" data-decode-panel
-                   aria-label="Live rtl_433 sensor decodes on the ISM band">
+                   aria-label="rtl_433 sensor decodes on the ISM band">
                 <div class="decoder__head">
                   <span class="decoder__title">rtl_433 &middot; DECODE</span>
                   {% if head_command %}{{ command_strip() }}{% endif %}
                   <span class="decoder__status" data-decode-badge>CHECKING</span>
                 </div>
                 <ul class="decoder__list" data-decode-list></ul>
+                <template data-replay-mark>{{ replay_mark() }}</template>
                 <div class="decoder__empty" data-decode-empty>Checking receiver…</div>
               </div>
 {% endmacro %}

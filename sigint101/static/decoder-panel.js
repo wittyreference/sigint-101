@@ -44,6 +44,9 @@
   // The badge for an answering tool. A fresh one reads STARTING until it has held on a moment —
   // a tool retried on a busy dongle dies a few hundred ms in, and must not flash LIVE first.
   function liveBadge(body) {
+    if (body && (body.mode === "replay" || body.replay === true)) {
+      return { text: "REPLAY", cls: "decoder__status decoder__status--replay" };
+    }
     if (body && body.state === "starting") {
       return { text: "STARTING", cls: "decoder__status" };
     }
