@@ -753,6 +753,9 @@
 {% endblock %}
 
 {% block scripts %}
+<!-- First, ahead of every panel: put the radios on this lesson's frequencies (POST /api/tuning),
+     so the panels' first polls find them there. The page's GET retunes nothing. -->
+<script src="/static/lesson-tuning.js" data-lesson-id="{{ lesson.id }}"></script>
 <!-- The live waterfall: polls /api/spectrum and draws one pixel per rtl_power bin, replacing the
      SAMPLE badge with the live (or clearly-labelled no-radio) state. It never invents a signal. -->
 {# Shared by the panels below: the STOPPED state of a tool that died, and the command strip. #}

@@ -1,29 +1,85 @@
 # ABOUTME: Check M26's faded consolidation pilot at 800x480 over Chromium DevTools in 3 themes.
-# ABOUTME: Uses a scratch console so live progress stays untouched across all M26 stages.
+# ABOUTME: Loads /lesson/26 through the render proxy and renders unsealed stages in isolation.
 
 import json
-import socket
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
-import uvicorn
+from render_scroll import connect, fence, leave_page
 
-REPO = Path(__file__).resolve().parent.parent.parent
+REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from render_scroll import connect  # noqa: E402
-
-from sigint101.app import PACK_DIR, create_app  # noqa: E402
-from sigint101.hardware import RadioProbe  # noqa: E402
-
 THEMES = ("dark", "sunlight", "red-night")
 LESSON_ID = 26
+
+TOOL_MISSING_PAYLOAD = {
+    "available": False,
+    "cause": "missing_tool",
+    "message": "rtl_ais-sigint101 is not installed.",
+    "next_step": "Run deploy/provision.sh",
+}
+
+
+def fetch_shim(payload: dict) -> str:
+    """Stub /api/ais with the refusal fixture and block state-writing POSTs."""
+    body = json.dumps(payload)
+    return f"""
+(function () {{
+  const origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {{
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const method = ((init && init.method) || 'GET').toUpperCase();
+    if (url.indexOf('/api/ais') !== -1) {{
+      return Promise.resolve(new Response({json.dumps(body)}, {{
+        status: 503,
+        headers: {{ 'content-type': 'application/json' }},
+      }}));
+    }}
+    if (method !== 'GET' ||
+        url.indexOf('/api/predict') !== -1 ||
+        url.indexOf('/api/stage') !== -1 ||
+        url.indexOf('/api/opened') !== -1 ||
+        url.indexOf('/api/tuning') !== -1 ||
+        url.indexOf('/api/complete') !== -1) {{
+      return Promise.resolve(new Response('{{"stubbed":true}}', {{
+        status: 200,
+        headers: {{ 'content-type': 'application/json' }},
+      }}));
+    }}
+    return origFetch(input, init);
+  }};
+}})();
+"""
+
+
+def _render_unsealed_m26_html(shim: str) -> str:
+    """Render real unsealed /lesson/26 HTML in an isolated temp app (zero console writes)."""
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import PACK_DIR, create_app
+    from sigint101.hardware import RadioProbe
+
+    with tempfile.TemporaryDirectory(prefix="sigint101-fading-html-") as tmp:
+        app = create_app(
+            pack_dir=PACK_DIR,
+            data_dir=Path(tmp),
+            probe=lambda: RadioProbe(present=False, known=True, method="lsusb",
+                                     detail="render check"),
+        )
+        with TestClient(app) as client:
+            client.post(
+                f"/api/predict?lesson_id={LESSON_ID}",
+                data={"prediction": "mmsi"},
+                follow_redirects=False,
+            )
+            html = client.get(f"/lesson/{LESSON_ID}").text
+    inject = f"<script>{shim}</script>"
+    return html.replace("<head>", f"<head>\n{inject}", 1) if "<head>" in html else inject + html
+
 
 MEASURE_FADING_PREDICT = """
 function measureFadingPredict(expectedTheme) {
@@ -146,14 +202,9 @@ function measureFadingExplain(expectedTheme) {
 """
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 def load_page(browser, url):
-    nav = browser.call("Page.navigate", {"url": url})
+    # Through the render proxy, never the console itself (render_scroll.fence).
+    nav = browser.call("Page.navigate", {"url": fence(url)})
     if nav.get("errorText"):
         raise RuntimeError(nav["errorText"])
     for _ in range(25):
@@ -165,47 +216,6 @@ def load_page(browser, url):
             return
         time.sleep(0.2)
     raise RuntimeError("page did not finish loading")
-
-
-def _post_predict(base_url: str, lesson_id: int, choice: str) -> None:
-    url = f"{base_url}/api/predict?lesson_id={lesson_id}"
-    data = urlencode({"prediction": choice}).encode("utf-8")
-    req = Request(
-        url,
-        data=data,
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    with urlopen(req, timeout=5):
-        pass
-
-
-def _run_server(data_dir: Path):
-    port = _free_port()
-    app = create_app(
-        pack_dir=PACK_DIR,
-        data_dir=data_dir,
-        probe=lambda: RadioProbe(present=False, known=True, method="lsusb", detail="render check"),
-    )
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    base = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 10.0
-    wait = threading.Event()
-    while time.monotonic() < deadline:
-        try:
-            with urlopen(f"{base}/", timeout=1):
-                return server, thread, base
-        except OSError:
-            wait.wait(0.05)
-    raise RuntimeError("scratch fading console did not start")
-
-
-def _stop_server(server, thread):
-    server.should_exit = True
-    thread.join(timeout=5)
 
 
 def verdict(ok, label, measures):
@@ -291,145 +301,142 @@ def _explain_ok(m, theme) -> bool:
     )
 
 
-def main(_console=None):
+def main(console):
     browser = connect()
     failed = False
     try:
+        # connect() has already blocked the whole of /api/* (render_scroll.block_console_api);
+        # the proxy refuses /api/* and every write too.
         browser.call("Page.enable")
         browser.call(
             "Emulation.setDeviceMetricsOverride",
             {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False},
         )
+        lesson_url = f"{console}/lesson/{LESSON_ID}"
+        load_page(browser, lesson_url)
+        unsealed_html = _render_unsealed_m26_html(fetch_shim(TOOL_MISSING_PAYLOAD))
 
         for theme in THEMES:
-            with tempfile.TemporaryDirectory(prefix="sigint101-fading-render-") as tmp:
-                server, thread, base = _run_server(Path(tmp))
-                try:
-                    load_page(browser, f"{base}/")
-                    browser.ev(f"localStorage.setItem('sigint101.theme', {json.dumps(theme)})")
+            browser.ev(f"localStorage.setItem('sigint101.theme', {json.dumps(theme)})")
 
-                    # 1) Pre-predict screen: names only the band, hides decoder, fits 800x480.
-                    load_page(browser, f"{base}/lesson/{LESSON_ID}")
-                    pred = browser.ev(
-                        f"{MEASURE_FADING_PREDICT}\nmeasureFadingPredict({json.dumps(theme)})"
-                    ) or {}
-                    failed |= verdict(_predict_ok(pred, theme), f"fading predict {theme}", pred)
+            # 1) Pre-predict screen loaded from the proxied console: names only the band, fits.
+            load_page(browser, lesson_url)
+            pred = browser.ev(
+                f"{MEASURE_FADING_PREDICT}\nmeasureFadingPredict({json.dumps(theme)})"
+            ) or {}
+            failed |= verdict(_predict_ok(pred, theme), f"fading predict {theme}", pred)
 
-                    # 2) Commit prediction and load operate stage (initially UNTUNED at 100.0 MHz).
-                    _post_predict(base, LESSON_ID, "mmsi")
-                    load_page(browser, f"{base}/lesson/{LESSON_ID}")
-                    untuned = browser.ev(
-                        f"{MEASURE_FADING_STAGE}\n"
-                        f"measureFadingStage('operate') /* untuned {theme} */"
-                    ) or {}
-                    failed |= verdict(
-                        _untuned_ok(untuned, theme), f"fading operate untuned {theme}", untuned
-                    )
+            # 2) Unsealed stages rendered offline with shimmed /api/ais (zero writes to console).
+            browser.ev(
+                f"document.open(); document.write({json.dumps(unsealed_html)}); document.close();"
+            )
+            browser.call(
+                "Runtime.evaluate",
+                {"expression": "document.fonts.ready", "awaitPromise": True},
+            )
+            untuned = browser.ev(
+                f"{MEASURE_FADING_STAGE}\n"
+                f"measureFadingStage('operate') /* untuned {theme} */"
+            ) or {}
+            failed |= verdict(
+                _untuned_ok(untuned, theme), f"fading operate untuned {theme}", untuned
+            )
 
-                    # 3) Tap Tune while off-band (100.0 MHz) -> honest OFF BAND refusal.
-                    browser.ev(
-                        "document.querySelector('.stage-panel[data-stage=\"operate\"] "
-                        "[data-faded-apply]')?.click()"
-                    )
-                    offband = browser.ev(
-                        f"{MEASURE_FADING_STAGE}\n"
-                        f"measureFadingStage('operate') /* offband {theme} */"
-                    ) or {}
-                    failed |= verdict(
-                        _offband_ok(offband, theme), f"fading operate offband {theme}", offband
-                    )
+            # 3) Tap Tune while off-band (100.0 MHz) -> honest OFF BAND refusal.
+            browser.ev(
+                "document.querySelector('.stage-panel[data-stage=\"operate\"] "
+                "[data-faded-apply]')?.click()"
+            )
+            offband = browser.ev(
+                f"{MEASURE_FADING_STAGE}\n"
+                f"measureFadingStage('operate') /* offband {theme} */"
+            ) or {}
+            failed |= verdict(
+                _offband_ok(offband, theme), f"fading operate offband {theme}", offband
+            )
 
-                    # 4) Step to 162.0 MHz (6 x 10 MHz + STEP -> 1 MHz + 2 x 1 MHz) and tap Tune.
-                    browser.ev(
-                        "(() => {"
-                        "  const s = document.querySelector("
-                        "    '.stage-panel[data-stage=\"operate\"] [data-faded-tune=\"ais\"]'"
-                        "  );"
-                        "  if (!s) return;"
-                        "  const up = s.querySelector('[data-faded-dir=\"1\"]');"
-                        "  const step = s.querySelector('[data-faded-step]');"
-                        "  const apply = s.querySelector('[data-faded-apply]');"
-                        "  for (let i = 0; i < 6; i++) up.click();"
-                        "  step.click();"
-                        "  for (let i = 0; i < 2; i++) up.click();"
-                        "  apply.click();"
-                        "})()"
-                    )
-                    time.sleep(0.4)
-                    tuned = browser.ev(
-                        f"{MEASURE_FADING_STAGE}\n"
-                        f"measureFadingStage('operate') /* tuned {theme} */"
-                    ) or {}
-                    failed |= verdict(
-                        _tuned_ok(tuned, theme), f"fading operate tuned {theme}", tuned
-                    )
+            # 4) Step to 162.0 MHz (6 x 10 MHz + STEP -> 1 MHz + 2 x 1 MHz) and tap Tune.
+            browser.ev(
+                "(() => {"
+                "  const s = document.querySelector("
+                "    '.stage-panel[data-stage=\"operate\"] [data-faded-tune=\"ais\"]'"
+                "  );"
+                "  if (!s) return;"
+                "  const up = s.querySelector('[data-faded-dir=\"1\"]');"
+                "  const step = s.querySelector('[data-faded-step]');"
+                "  const apply = s.querySelector('[data-faded-apply]');"
+                "  for (let i = 0; i < 6; i++) up.click();"
+                "  step.click();"
+                "  for (let i = 0; i < 2; i++) up.click();"
+                "  apply.click();"
+                "})()"
+            )
+            time.sleep(0.2)
+            tuned = browser.ev(
+                f"{MEASURE_FADING_STAGE}\n"
+                f"measureFadingStage('operate') /* tuned {theme} */"
+            ) or {}
+            failed |= verdict(_tuned_ok(tuned, theme), f"fading operate tuned {theme}", tuned)
 
-                    # 4b) F1: step dial off-band (+2 MHz -> 164.0 MHz) after Tune -> drops to
-                    # UNTUNED and pending dial, never leaving a live roster beside an off-band dial.
-                    browser.ev(
-                        "(() => {"
-                        "  const s = document.querySelector("
-                        "    '.stage-panel[data-stage=\"operate\"] [data-faded-tune=\"ais\"]'"
-                        "  );"
-                        "  if (!s) return;"
-                        "  const up = s.querySelector('[data-faded-dir=\"1\"]');"
-                        "  up.click(); up.click();"
-                        "})()"
-                    )
-                    stepped_off = browser.ev(
-                        f"{MEASURE_FADING_STAGE}\n"
-                        f"measureFadingStage('operate') /* stepped_off {theme} */"
-                    ) or {}
-                    failed |= verdict(
-                        _stepped_off_ok(stepped_off, theme),
-                        f"fading operate stepped-off {theme}",
-                        stepped_off,
-                    )
+            # 4b) F1: step dial off-band (+2 MHz -> 164.0 MHz) after Tune -> drops to UNTUNED.
+            browser.ev(
+                "(() => {"
+                "  const s = document.querySelector("
+                "    '.stage-panel[data-stage=\"operate\"] [data-faded-tune=\"ais\"]'"
+                "  );"
+                "  if (!s) return;"
+                "  const up = s.querySelector('[data-faded-dir=\"1\"]');"
+                "  up.click(); up.click();"
+                "})()"
+            )
+            stepped_off = browser.ev(
+                f"{MEASURE_FADING_STAGE}\n"
+                f"measureFadingStage('operate') /* stepped_off {theme} */"
+            ) or {}
+            failed |= verdict(
+                _stepped_off_ok(stepped_off, theme),
+                f"fading operate stepped-off {theme}",
+                stepped_off,
+            )
 
-                    # Step back to 162.0 MHz and re-apply Tune before checking observe.
-                    browser.ev(
-                        "(() => {"
-                        "  const s = document.querySelector("
-                        "    '.stage-panel[data-stage=\"operate\"] [data-faded-tune=\"ais\"]'"
-                        "  );"
-                        "  if (!s) return;"
-                        "  const dn = s.querySelector('[data-faded-dir=\"-1\"]');"
-                        "  const apply = s.querySelector('[data-faded-apply]');"
-                        "  dn.click(); dn.click(); apply.click();"
-                        "})()"
-                    )
-                    time.sleep(0.4)
+            # Step back to 162.0 MHz and re-apply Tune before checking observe.
+            browser.ev(
+                "(() => {"
+                "  const s = document.querySelector("
+                "    '.stage-panel[data-stage=\"operate\"] [data-faded-tune=\"ais\"]'"
+                "  );"
+                "  if (!s) return;"
+                "  const dn = s.querySelector('[data-faded-dir=\"-1\"]');"
+                "  const apply = s.querySelector('[data-faded-apply]');"
+                "  dn.click(); dn.click(); apply.click();"
+                "})()"
+            )
+            time.sleep(0.2)
 
-                    # 5) Advance to observe (tightest row: Prev + Next step beside tune controls).
-                    browser.ev(
-                        "document.querySelector('.stage-panel[data-stage=\"operate\"] "
-                        "[data-nav=\"next\"]')?.click()"
-                    )
-                    observe = browser.ev(
-                        f"{MEASURE_FADING_STAGE}\n"
-                        f"measureFadingStage('observe') /* observe {theme} */"
-                    ) or {}
-                    failed |= verdict(
-                        _stage_layout_ok(observe, theme), f"fading observe {theme}", observe
-                    )
+            # 5) Advance to observe (tightest row: Prev + Next step beside tune controls).
+            browser.ev(
+                "document.querySelector('.stage-panel[data-stage=\"operate\"] "
+                "[data-nav=\"next\"]')?.click()"
+            )
+            observe = browser.ev(
+                f"{MEASURE_FADING_STAGE}\n"
+                f"measureFadingStage('observe') /* observe {theme} */"
+            ) or {}
+            failed |= verdict(_stage_layout_ok(observe, theme), f"fading observe {theme}", observe)
 
-                    # 6) Advance to explain and check Complete lesson button fits 800x480.
-                    browser.ev(
-                        "document.querySelector('.stage-panel[data-stage=\"observe\"] "
-                        "[data-nav=\"next\"]')?.click()"
-                    )
-                    explain = browser.ev(
-                        f"{MEASURE_FADING_EXPLAIN}\nmeasureFadingExplain({json.dumps(theme)})"
-                    ) or {}
-                    failed |= verdict(
-                        _explain_ok(explain, theme), f"fading explain {theme}", explain
-                    )
-                finally:
-                    _stop_server(server, thread)
+            # 6) Advance to explain and check Complete lesson button fits 800x480.
+            browser.ev(
+                "document.querySelector('.stage-panel[data-stage=\"observe\"] "
+                "[data-nav=\"next\"]')?.click()"
+            )
+            explain = browser.ev(
+                f"{MEASURE_FADING_EXPLAIN}\nmeasureFadingExplain({json.dumps(theme)})"
+            ) or {}
+            failed |= verdict(_explain_ok(explain, theme), f"fading explain {theme}", explain)
+        return int(failed)
     finally:
-        browser.s.close()
-    return 1 if failed else 0
+        leave_page(browser)
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else None))
+    sys.exit(main(sys.argv[1]))

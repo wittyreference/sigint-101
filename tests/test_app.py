@@ -1046,6 +1046,201 @@ def _stage(client, lesson_id, stage):
                        headers={"content-type": "application/x-www-form-urlencoded"})
 
 
+def test_showing_a_lesson_page_leaves_its_opened_state_unchanged(tmp_path):
+    # A GET has no side effect: a render check, a prefetch or a crawler that loads a lesson must
+    # not mark it opened. The page records the open itself (lesson-nav.js, POST /api/opened).
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        assert client.get("/lesson/1").status_code == 200
+        assert client.app.state.progress.get(1) is None
+
+
+def test_the_lesson_page_posting_its_open_marks_the_lesson_opened(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        resp = client.post("/api/opened?lesson_id=1")
+        assert resp.status_code == 200
+        assert resp.json() == {"opened": True, "lesson_id": 1}
+        row = client.app.state.progress.get(1)
+        assert row["opened"] == 1 and row["completed"] == 0
+
+
+def test_an_open_of_a_lesson_the_course_lacks_is_refused_and_records_nothing(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        assert client.post("/api/opened?lesson_id=99").status_code == 404
+        assert client.app.state.progress.get(99) is None
+
+
+RACK_APRS_HZ = 144_800_000   # where the rack's tune keys left the 2 m decoder
+RACK_ISM_HZ = 434_000_000    # and the ISM decoder
+
+
+def _tuned_away(client):
+    """Leave two decoders where the rack retuned them, away from their lesson frequency."""
+    client.app.state.aprs.retune(RACK_APRS_HZ)
+    client.app.state.decoder.retune(RACK_ISM_HZ)
+    return client.app.state.aprs.home_hz, client.app.state.decoder.home_hz
+
+
+def test_showing_a_lesson_page_changes_no_receiver(tmp_path):
+    # A GET has no side effect: loading a lesson (a render check, a prefetch) must not retune a
+    # receiver, which can stop a running one and drop what it had decoded.
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        _tuned_away(client)
+        assert client.get("/lesson/1").status_code == 200
+        assert client.app.state.aprs.freq_hz == RACK_APRS_HZ
+        assert client.app.state.decoder.freq_hz == RACK_ISM_HZ
+
+
+def test_the_lesson_page_posting_its_tuning_puts_the_receivers_on_the_lessons_frequencies(
+        tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        aprs_home, ism_home = _tuned_away(client)
+        resp = client.post("/api/tuning?lesson_id=1")
+        assert resp.status_code == 200
+        assert resp.json() == {"tuned": True, "lesson_id": 1}
+        assert client.app.state.aprs.freq_hz == aprs_home
+        assert client.app.state.decoder.freq_hz == ism_home
+
+
+def test_a_tuning_post_for_a_lesson_the_course_lacks_is_refused_and_changes_nothing(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        _tuned_away(client)
+        assert client.post("/api/tuning?lesson_id=99").status_code == 404
+        assert client.app.state.aprs.freq_hz == RACK_APRS_HZ
+
+
+def test_the_lesson_page_restores_its_tuning_before_any_panel_starts_polling(tmp_path):
+    # lesson-tuning.js posts synchronously, so it must load ahead of every panel script.
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        html = client.get("/lesson/1").text
+    tag = re.search(r'<script src="/static/lesson-tuning\.js"([^>]*)>', html)
+    assert tag, "the lesson page does not load lesson-tuning.js"
+    assert 'data-lesson-id="1"' in tag.group(1)
+    first_panel = min(html.index(f'src="/static/{name}.js"')
+                      for name in ("decoder-panel", "waterfall", "decode", "aprs"))
+    assert tag.start() < first_panel
+
+
+# Every page the render checks load, walked below. tests/render_routes.py holds the list, and
+# test_render_checks.py compares it with the pages the real checks navigate to under the runner.
+from tests.render_routes import RENDER_CHECK_PAGES  # noqa: E402
+
+
+def _stored_state(data_dir):
+    """Every row of the console's two databases, and the event log's bytes."""
+    import sqlite3
+    from contextlib import closing
+    state = {}
+    for name in ("progress.db", "exam.db"):
+        path = data_dir / name
+        if path.exists():
+            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
+                state[name] = list(db.iterdump())
+    events = data_dir / "events.jsonl"
+    state["events.jsonl"] = events.read_bytes() if events.exists() else None
+    return state
+
+
+def _check_lesson(app):
+    """A lesson with a check (a retrieval source once completed), and one choice of its predict."""
+    lesson = next(item for _, item in sorted(app.state.lessons.items()) if item.check)
+    return lesson.id, lesson.choices[0]["key"]
+
+
+def test_a_render_check_walk_against_a_live_console_changes_none_of_its_state(tmp_path):
+    # With /api/* blocked, a check's page loads are plain GETs. Against a console whose rack has
+    # retuned two decoders and holds a place, and with a completed check lesson that has no
+    # retrieval row yet, none of them may move a receiver or write a row or an event: the next
+    # GET that writes fails here.
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        _tuned_away(client)
+        client.post("/api/rack/place", json={"instrument": "pager"})
+        source, _ = _check_lesson(app)
+        app.state.progress.mark_completed(source)
+        assert app.state.progress.get_retrieval([source]) == {}
+        before = _stored_state(tmp_path)
+        for page in RENDER_CHECK_PAGES:
+            assert client.get(page).status_code == 200, page
+        assert app.state.aprs.freq_hz == RACK_APRS_HZ
+        assert app.state.decoder.freq_hz == RACK_ISM_HZ
+        assert app.state.progress.get_retrieval([source]) == {}
+        assert _stored_state(tmp_path) == before
+
+
+def test_a_lesson_get_enrols_no_completed_check_lesson_for_recall(tmp_path):
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        source, _ = _check_lesson(app)
+        app.state.progress.mark_completed(source)
+        other = next(lid for lid in sorted(app.state.lessons) if lid != source)
+        assert client.get(f"/lesson/{other}").status_code == 200
+        assert app.state.progress.get_retrieval([source]) == {}
+
+
+def test_completing_a_check_lesson_enrols_it_for_recall(tmp_path):
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        source, choice = _check_lesson(app)
+        client.post(f"/api/predict?lesson_id={source}", data={"prediction": choice},
+                    follow_redirects=False)
+        assert client.post(f"/api/complete?lesson_id={source}").status_code == 200
+        row = app.state.progress.get_retrieval([source])[source]
+        assert row["box"] == 1 and row["seen"] == 0
+
+
+def test_a_completion_without_a_check_enrols_nothing(tmp_path):
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        plain = next(item for _, item in sorted(app.state.lessons.items()) if not item.check)
+        client.post(f"/api/predict?lesson_id={plain.id}",
+                    data={"prediction": plain.choices[0]["key"]}, follow_redirects=False)
+        assert client.post(f"/api/complete?lesson_id={plain.id}").status_code == 200
+        assert app.state.progress.get_retrieval([plain.id]) == {}
+
+
+def test_the_read_only_trial_starts_without_the_recall_backfill_and_writes_nothing(tmp_path):
+    # The updater's private trial opens a saved generation read-only. Its startup must not run
+    # the public console's startup writes: a completed check lesson with no recall row keeps
+    # none, and neither store changes by a byte.
+    from sigint101.app import PACK_DIR
+    from sigint101.exam import POOL_PATH
+    from sigint101.lessons import load_lessons
+    from sigint101.progress import Progress
+    from sigint101.trial import TRIAL_READY_PATH, create_trial_app
+    from tests.test_updater_validation import _make_managed_generation
+    generation = _make_managed_generation(tmp_path, "gen1")
+    source = next(lid for lid, item in sorted(load_lessons(PACK_DIR).items()) if item.check)
+    seeded = Progress(generation / "progress.db", managed=True)
+    seeded.mark_completed(source)
+    seeded.close()
+    stores = {name: (generation / name).read_bytes() for name in ("progress.db", "exam.db")}
+    trial = create_trial_app(pack_dir=PACK_DIR, data_dir=generation, pool_path=POOL_PATH,
+                             release_root=Path(__file__).resolve().parent.parent,
+                             require_release_manifest=False, probe=_absent)
+    with TestClient(trial) as client:
+        assert client.get(TRIAL_READY_PATH).status_code == 200
+        assert client.app.state.progress.get_retrieval([source]) == {}
+    assert {name: (generation / name).read_bytes() for name in stores} == stores
+
+
+def test_completions_from_before_recall_are_enrolled_when_the_console_starts(tmp_path):
+    # A check lesson completed before enrolment moved to the completion post has no row; the
+    # console enrols it once, at startup, beside the stamp backfill, never on a page load.
+    from sigint101.app import PACK_DIR
+    from sigint101.lessons import load_lessons
+    from sigint101.progress import Progress
+    source = next(lid for lid, item in sorted(load_lessons(PACK_DIR).items()) if item.check)
+    plain = next(lid for lid, item in sorted(load_lessons(PACK_DIR).items()) if not item.check)
+    seeded = Progress(tmp_path / "progress.db")
+    seeded.mark_completed(plain)
+    seeded.mark_completed(source)
+    assert seeded.get_retrieval([source]) == {}
+    seeded.close()
+    with TestClient(create_app(data_dir=tmp_path, probe=_absent)) as client:
+        assert source in client.app.state.progress.get_retrieval([source])
+        assert client.app.state.progress.get_retrieval([plain]) == {}
+
+
 def test_reopening_a_lesson_resumes_the_stage_the_learner_left(tmp_path):
     with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
         assert _shown_stage(client.get("/lesson/1").text) == "frame"
