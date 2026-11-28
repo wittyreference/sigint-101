@@ -11,6 +11,13 @@ signed byte before interpreting zero as automatic power. For example, a value of
 **How to apply.** Validate the representable range and reject zero before comparing a requested
 power against a module ceiling. Keep the configured value's readback separate from RF measurement.
 
+## 2026-11-27: xdist workers still share loopback ports
+**Finding.** Worker processes isolate module patches and pytest gives each worker a temporary
+directory. Closing a socket after selecting a port leaves the port available to other workers.
+**How to apply.** Keep a refused-connection test's socket bound without listening. For SBS, where
+the decoder and its child must bind the port themselves, take a shared file lock before probing
+the candidate and hold the lock through test teardown.
+
 ## 2026-10-27: M12 decodes RDS (PSK) with rtl_fm|redsea — but the reference Recon's FM antenna can't hear it
 **Finding.** RDS is the data on an FM station's 57 kHz subcarrier (PSK — phase, which the waterfall
 can never show). M12 decodes it with `rtl_fm -M fm -l 0 -A std -s 171k -F 9 -f <hz> | redsea -r
