@@ -27,6 +27,7 @@ SURVEY = REPO / "tools" / "render" / "render_survey.py"
 RECALL = REPO / "tools" / "render" / "render_recall.py"
 LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 FIELD = REPO / "tools" / "render" / "render_field.py"
+CLOSING = REPO / "tools" / "render" / "render_closing.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -436,7 +437,9 @@ def render_make(tmp_path, console_url, devtools):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD):
+    for script in (
+        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD, CLOSING
+    ):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -479,12 +482,12 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     "failing",
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, CLOSING.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails", "field-fails",
+        "recall-fails", "live-find-fails", "field-fails", "closing-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -500,6 +503,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {RECALL.name} {console_url}",
         f"ran {LIVE_FIND.name} {console_url}",
         f"ran {FIELD.name} {console_url}",
+        f"ran {CLOSING.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -1099,3 +1103,71 @@ def test_field_render_fails_on_split_hyphen_overflow_or_small_font(devtools, def
     proc = run(FIELD, "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - field red-night"
+
+
+CLOSING_PREDICT_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "chipsFit": True,
+    "commitFit": True,
+    "commitBottom": 468,
+}
+CLOSING_UNSEALED_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "codePx": 18,
+    "noOverflow": True,
+    "noSplitHyphens": True,
+    "operateFoot": True,
+    "observeFoot": True,
+    "explainFoot": True,
+    "completeVisible": True,
+}
+
+
+def _closing_pages(*, predict_defect=None, stages_defect=None):
+    pages = {}
+    for theme in THEMES:
+        pred = {**CLOSING_PREDICT_FITS, "theme": theme}
+        stages = {**CLOSING_UNSEALED_FITS, "theme": theme}
+        if theme == "red-night":
+            pred.update(predict_defect or {})
+            stages.update(stages_defect or {})
+        pages[f"measureClosingPredict({json.dumps(theme)})"] = pred
+        pages[f"measureClosingUnsealed({json.dumps(theme)},"] = stages
+    return pages
+
+
+def test_closing_render_checks_all_stages_in_all_three_themes(devtools):
+    port = devtools(_closing_pages())
+    proc = run(CLOSING, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - closing-predict dark",
+        "VERDICT: PASS - closing-stages dark",
+        "VERDICT: PASS - closing-predict sunlight",
+        "VERDICT: PASS - closing-stages sunlight",
+        "VERDICT: PASS - closing-predict red-night",
+        "VERDICT: PASS - closing-stages red-night",
+    ]
+
+
+@pytest.mark.parametrize("kind, defect", [
+    ("predict", {"chipsFit": False}),
+    ("predict", {"commitFit": False}),
+    ("stages", {"noSplitHyphens": False}),
+    ("stages", {"noOverflow": False}),
+    ("stages", {"codePx": 17}),
+    ("stages", {"completeVisible": False}),
+])
+def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devtools, kind, defect):
+    kwargs = {f"{kind}_defect": defect}
+    port = devtools(_closing_pages(**kwargs))
+    proc = run(CLOSING, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    expected = (
+        "VERDICT: FAIL - closing-predict red-night"
+        if kind == "predict"
+        else "VERDICT: FAIL - closing-stages red-night"
+    )
+    assert expected in _verdicts(proc)
