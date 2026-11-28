@@ -59,6 +59,27 @@ function measureLogbook(expectedTheme) {
     return (levels[0] + 0.05) / (levels[1] + 0.05);
   }
 
+  const meteorRow = list?.querySelector('[data-logbook-instrument="meteor"]');
+  const aptRow = list?.querySelector('[data-logbook-instrument="apt"]');
+  let meteorBadge = false;
+  if (meteorRow && aptRow) {
+    const meteorLabel = meteorRow.querySelector('strong')?.textContent?.trim();
+    const aptLabel = aptRow.querySelector('strong')?.textContent?.trim();
+    const saved = meteorRow.innerHTML;
+    meteorRow.innerHTML =
+      '<div class="logbook__heading"><strong>Meteor</strong>' +
+      '<span class="logbook-mark logbook-mark--stamp">STAMP</span></div>' +
+      '<p><time datetime="2026-11-28T12:00:00+00:00">2026-11-28 12:00:00 UTC</time>' +
+      ' · satdump · 137.9 MHz</p>' +
+      '<p>RTL-SDR rx01</p>' +
+      '<p><code>satdump live meteor_m2-x_lrpt /var/lib/sigint101/data/meteor/work/pass ' +
+      '--source rtlsdr --frequency 137900000 --finish_processing</code></p>';
+    const rowPx = parseFloat(getComputedStyle(meteorRow).fontSize);
+    meteorBadge = meteorLabel === 'Meteor' && aptLabel === 'APT' &&
+                  rowPx >= 18 && meteorRow.scrollWidth <= meteorRow.clientWidth + 1;
+    meteorRow.innerHTML = saved;
+  }
+
   const stampStyle = getComputedStyle(stamp);
   const replayStyle = getComputedStyle(replay);
   const scrolls = getComputedStyle(list).overflowY === 'auto' &&
@@ -80,6 +101,7 @@ function measureLogbook(expectedTheme) {
                     stampStyle.backgroundColor !== 'rgba(0, 0, 0, 0)' &&
                     replayStyle.backgroundColor === 'rgba(0, 0, 0, 0)' &&
                     replayStyle.borderTopStyle === 'solid',
+    meteorBadge,
   };
 }
 """
@@ -127,7 +149,8 @@ def main(console):
             measures = browser.ev(f"{LOGBOOK}\nmeasureLogbook({json.dumps(theme)})") or {}
             ok = (measures.get("theme") == theme and measures.get("doc") == [800, 480]
                   and measures["back"] and measures["scrolls"] and measures["lastVisible"]
-                  and min(measures["contrast"]) >= 4.5 and measures["differentMarks"])
+                  and min(measures["contrast"]) >= 4.5 and measures["differentMarks"]
+                  and measures.get("meteorBadge") is True)
             failed |= verdict(ok, f"logbook {theme}", measures)
         return int(failed)
     finally:
