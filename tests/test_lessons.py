@@ -626,3 +626,50 @@ def test_a_lesson_badges_the_hardware_it_needs_beyond_the_built_in_radio(hardwar
 def test_hardware_with_no_badge_label_is_named_as_written_never_hidden():
     # A pack naming kit the console has no label for still shows it, so a need is never invisible.
     assert parse_lesson(_consolidation(hardware=["hackrf"])).hardware_badges == ["hackrf"]
+
+
+# --- optional card-sort block (M5's 12-card law sort) -----------------------------------------
+
+_SORT_CARD = {
+    "key": "airband",
+    "text": "Listen to unencrypted VHF aircraft traffic.",
+    "answer": "legal",
+    "why": "Aviation broadcasts are open to listen to.",
+    "cite": "18 USC 2511(2)(g)(ii)(IV)",
+}
+
+
+def test_a_pack_without_a_sort_block_leaves_sort_none():
+    assert parse_lesson(_intro()).sort is None
+
+
+def test_a_valid_sort_block_parses_onto_the_lesson_and_scores_feedback():
+    cards = [
+        _SORT_CARD,
+        {**_SORT_CARD, "key": "jam", "answer": "illegal"},
+        {**_SORT_CARD, "key": "mesh", "answer": "depends"},
+    ]
+    lesson = parse_lesson(_intro(sort=cards))
+    assert lesson.sort == cards
+    assert lesson.sort_feedback("airband", "legal")["correct"] is True
+    fb = lesson.sort_feedback("mesh", "legal")
+    assert fb["correct"] is False
+    assert fb["answer"] == "depends"
+    assert fb["cite"] == _SORT_CARD["cite"]
+
+
+@pytest.mark.parametrize("bad_sort, complaint", [
+    ("not-a-list", "list"),
+    ([{**_SORT_CARD, "answer": "maybe"}], "answer"),
+    ([{**_SORT_CARD, "why": ""}], "why"),
+    ([{**_SORT_CARD, "why": "line one\nline two"}], "one line"),
+    ([{**_SORT_CARD, "cite": ""}], "cite"),
+    ([{**_SORT_CARD, "cite": "18 USC\n2511"}], "one line"),
+    ([{**_SORT_CARD, "text": ""}], "text"),
+    ([{**_SORT_CARD, "key": ""}], "key"),
+    ([{**_SORT_CARD, "key": True}], "quote"),
+    ([_SORT_CARD, _SORT_CARD], "duplicate"),
+])
+def test_a_malformed_sort_block_is_refused(bad_sort, complaint):
+    with pytest.raises(LessonError, match=complaint):
+        parse_lesson(_intro(sort=bad_sort))
