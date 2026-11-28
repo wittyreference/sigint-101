@@ -2678,3 +2678,9 @@ def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devto
         else "VERDICT: FAIL - closing-stages red-night"
     )
     assert expected in _verdicts(proc)
+
+
+def test_capture_check_is_discovered_and_covers_the_capture_screen():
+    check, = [check for check in CHECKS if check.name == "capture"]
+    assert check.pages == ("/capture", "/operate/waterfall")
+    assert "/capture" in RENDER_CHECK_PAGES

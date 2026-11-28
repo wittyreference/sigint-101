@@ -510,6 +510,7 @@ class Sweeper:
         # the reader while the reader is trying to append a row.
         self._lock = threading.Lock()
         self._life = threading.RLock()
+        self._settings_lock = threading.Lock()
         self._proc = None
         self._thread = None
         # The rtl_power a stop is retiring, kept from the moment the stop takes it until its exit
@@ -983,7 +984,8 @@ class Sweeper:
         gain = validate_gain(gain)
         with self._life:
             self.stop()
-            self.gain = gain
+            with self._settings_lock:
+                self.gain = gain
 
     def retry_in(self) -> float | None:
         """Seconds until a sweep that died on its own may be launched again, or None if it may."""
@@ -1003,10 +1005,16 @@ class Sweeper:
         low, high, bin_size = validate_span(low, high, bin_size)
         with self._life:
             self.stop()
-            self.low, self.high, self.bin_size = low, high, bin_size
-            self.target = None if target is None else int(target)
+            with self._settings_lock:
+                self.low, self.high, self.bin_size = low, high, bin_size
+                self.target = None if target is None else int(target)
             with self._lock:
                 self._rows.clear()
+
+    def capture_settings(self) -> dict:
+        with self._settings_lock:
+            hz = self.target if self.target is not None else (self.low + self.high) // 2
+            return {"hz": hz, "gain": str(self.gain) if self.gain is not None else None}
 
     def retune_to(self, center, width, bin_size=None) -> None:
         """Tune to a frequency: a span `width` wide, offset so the target lands on measured bins.
