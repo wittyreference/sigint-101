@@ -127,9 +127,14 @@ def test_meteor_claim_after_marker_sends_no_signal_and_finishes(rig, tmp_path):
         proc.die(0)
         proc.close_pipe()
         assert decoder._run.complete.wait(2)
-        assert client.get(STATUS).json()["state"] == "done"
-        assert client.get("/api/receptions?instrument=meteor").json()["receptions"] == []
-        assert not any(e["kind"] == "reception" for e in read_events(tmp_path / "events.jsonl"))
+        body = client.get(STATUS).json()
+        assert body["state"] == "done"
+        assert len(body["passes"]) == 1
+        receptions = client.get("/api/receptions?instrument=meteor").json()["receptions"]
+        assert len(receptions) == 1
+        assert receptions[0]["payload"]["item"]["path"].endswith("/MSU-MR-1.png")
+        stamps = {row["instrument"]: row for row in client.get("/api/stamps").json()["stamps"]}
+        assert stamps["meteor"]["count"] == 1
 
 
 def test_meteor_hardware_reads_present_during_finishing(rig, tmp_path):

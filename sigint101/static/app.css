@@ -3834,3 +3834,173 @@ body {
   text-overflow: ellipsis;
   text-shadow: none;
 }
+
+/* ===== Meteor-M LRPT panel and passive APT replay notice ================== */
+/* Keep Listen now, status/refusal, and past pictures visible even on a refusal or stop badge. */
+.decoder.meteor:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) > .meteor__bar,
+.decoder.meteor:has(> .decoder__head > :is(.decoder__status--empty, .decoder__status--stopped)) > .meteor__gallery {
+  display: flex;
+}
+.meteor__bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.meteor__listen {
+  flex: none;
+  height: 72px;
+  min-height: 72px;
+  padding: 0 14px;
+  font-size: 20px;
+  white-space: nowrap;
+}
+.app .meteor__listen:disabled {
+  opacity: 1;
+  background: var(--surface-2);
+  color: var(--fg-dim);
+  border: 2px dashed var(--border-strong);
+  text-shadow: none;
+}
+.meteor__status {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.meteor__phase {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.22;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.meteor__note {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.22;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+.meteor__note[hidden] {
+  display: none;
+}
+.meteor__gallery {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px 10px;
+}
+.meteor__gallery-head {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.2;
+  color: var(--accent);
+}
+.meteor__empty {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg-dim);
+}
+.meteor__empty[hidden] {
+  display: none;
+}
+.meteor__passes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.meteor__pass {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.meteor__figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.meteor__img {
+  max-width: 100%;
+  max-height: 180px;
+  align-self: flex-start;
+}
+.meteor__caption {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.meteor__details {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg-dim);
+}
+.meteor__summary {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--accent);
+  cursor: pointer;
+}
+.meteor__meta {
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+.meteor__command {
+  display: block;
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.apt-replay {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
+}
+.apt-replay__note {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.3;
+  color: var(--fg);
+}
+.apt-replay__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.apt-replay__link {
+  font-size: 18px;
+  text-decoration: none;
+}

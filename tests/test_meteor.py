@@ -3,9 +3,11 @@
 
 import io
 import os
+import struct
 import subprocess
 import threading
 import time
+import zlib
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,20 @@ from sigint101.hardware import RtlSdrDevice
 from tests.child_fakes import LateProc
 
 MARKER = "[12:00:00 - 28/11/2026] (I) Stop processing"
+
+
+def _make_valid_png(width=2, height=2, rgb=(12, 180, 90)):
+    def chunk(ctype, data):
+        crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = (b"\x00" + bytes(rgb) * width) * height
+    idat = zlib.compress(raw)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+VALID_PNG = _make_valid_png()
 
 
 class MeteorChild(LateProc):
@@ -62,7 +78,7 @@ class MeteorChild(LateProc):
     def picture(self, name="MSU-MR-1.png"):
         output = Path(self.args[3]) / "MSU-MR"
         output.mkdir(exist_ok=True)
-        (output / name).write_bytes(b"\x89PNG\r\n\x1a\n" + b"fake fixture data")
+        (output / name).write_bytes(VALID_PNG)
 
 
 def eventually(predicate, timeout=3):
