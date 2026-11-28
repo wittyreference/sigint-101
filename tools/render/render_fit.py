@@ -18,6 +18,19 @@ from render_scroll import (  # noqa: E402
     fence,
 )
 
+RENDER_CHECK = {
+    "name": "fit",
+    "pages": ("/lesson/29", "/lesson/39"),
+    "scratch": False,
+    "order": 10,
+    # M29 uses the default demo and predict. M39 opens on predict, which fits by 3 px;
+    # its later stages are sealed on a fresh console and measured by render_survey.py.
+    "runs": (
+        ("/lesson/29", ("{output}/predict.png",)),
+        ("/lesson/39", ("{output}/survey-predict.png", "predict")),
+    ),
+}
+
 HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "9222"))
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8008/lesson/29"
 SHOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/flipper_m29_predict.png"
