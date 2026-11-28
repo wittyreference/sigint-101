@@ -16,7 +16,7 @@ panels: [survey]
 stages:
   predict: >-
     An open Wi-Fi network has no encryption. Under Joffe v. Google (9th Cir.), does that make its
-    payload exempt radio — and where does this panel stop? Lock it in.
+    payload exempt "radio" — and where does this panel stop? Lock it in.
   operate: >-
     Read NetworkManager's cached Wi-Fi list (--rescan no): band, channel, SSID, BSSID, signal and
     security. No scan request, no connection, and no payload column.

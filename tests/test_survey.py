@@ -768,10 +768,61 @@ def _unquoted_radio_chips(labels) -> list[str]:
 
 def test_m39_chips_that_use_the_statutory_term_all_quote_it():
     # Quote marks on the statute's term must not single out the scored chip: every chip that says
-    # "radio" quotes it, the distractors as much as the answer.
+    # "radio" quotes it, the distractors as much as the answer, and so does the predict's question.
     lesson = load_lesson_file(PACK_M39)
     labels = [c["label"] for c in lesson.choices]
-    assert _unquoted_radio_chips(labels) == []
+    assert _unquoted_radio_chips([*labels, lesson.stages["predict"]]) == []
+
+
+_NOT_RADIO_COMMUNICATION = re.compile(r"\bnot\b[^;.]*radio\s+communication", re.I)
+# The scored chip scopes the panel to metadata; it must not say reading metadata is lawful,
+# which Joffe never decided.
+_LAWFUL_CLAIM = re.compile(
+    r"\b(?:lawful|legal(?:ly)?|allowed|permitted|permissible|authori[sz]ed|fair\s+game|ok(?:ay)?)\b",
+    re.I,
+)
+
+
+def _scored_chip_issues(choices, answer) -> list[str]:
+    """What is wrong with how a lesson-39 choice set scores the Joffe question."""
+    labels = {c["key"]: c["label"] for c in choices}
+    issues = []
+    if len(answer) != 1 or answer[0] not in labels:
+        return [f"expected one scored key among the chips, got {list(answer)}"]
+    scored = labels[answer[0]]
+    if not (_NOT_RADIO_COMMUNICATION.search(scored) and re.search(r"\bmetadata\b", scored, re.I)):
+        issues.append(f"scored chip is not the payload-is-not-radio-communication one: {scored}")
+    if _LAWFUL_CLAIM.search(scored):
+        issues.append(f"scored chip claims lawfulness: {scored}")
+    for key, label in labels.items():
+        if key != answer[0] and _NOT_RADIO_COMMUNICATION.search(label):
+            issues.append(f"a distractor carries the holding: {label}")
+    return issues
+
+
+def test_m39_scores_the_chip_that_puts_payload_outside_radio_communication():
+    lesson = load_lesson_file(PACK_M39)
+    assert _scored_chip_issues(lesson.choices, lesson.answer) == []
+
+
+def test_scored_chip_guard_rejects_a_flipped_answer_and_a_lawfulness_claim():
+    lesson = load_lesson_file(PACK_M39)
+    keys = [c["key"] for c in lesson.choices]
+    for other in keys:
+        if other not in lesson.answer:
+            assert _scored_chip_issues(lesson.choices, (other,)), other
+    for claim in ('Not "radio communication"; metadata is lawful',
+                  'Not "radio communication"; metadata is legal',
+                  'Not "radio communication"; metadata is fair game',
+                  'Not "radio communication"; metadata allowed'):
+        choices = [dict(c, label=claim) if c["key"] in lesson.answer else c
+                   for c in lesson.choices]
+        assert _scored_chip_issues(choices, lesson.answer), claim
+    for fair in ('Not "radio communication"; panel reads metadata',
+                 'Payload is not a "radio communication"; metadata only'):
+        choices = [dict(c, label=fair) if c["key"] in lesson.answer else c
+                   for c in lesson.choices]
+        assert _scored_chip_issues(choices, lesson.answer) == [], fair
 
 
 def test_joffe_claim_probe_rejects_round1_overstatements_and_accepts_accurate_rewordings():
