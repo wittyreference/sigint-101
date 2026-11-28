@@ -570,6 +570,51 @@ def test_receiver_shutdown_times_out_waiting_for_a_reaped_run_to_report(monkeypa
         assert ticket.complete.wait(2)
 
 
+def test_receiver_shutdown_gives_two_stalled_reports_one_shared_deadline(monkeypatch):
+    """Two older runs are still reporting; shutdown gives up on both within one budget.
+
+    A fake clock moves only while a report is waited on, so the budget is read from the clock
+    shutdown itself reads, not from wall time. The first report stalls but finishes inside the
+    budget, the second never does: with one shared deadline the second gets only what is left,
+    while a deadline reset per report would give it a whole budget of its own.
+    """
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(receiver_lifecycle, "time",
+                        SimpleNamespace(monotonic=lambda: clock.now))
+    budget = receiver_lifecycle.SHUTDOWN_REPORT_WAIT_S
+    waits = []
+
+    class Report:
+        def __init__(self, name, done_after):
+            self.name, self.done_after = name, done_after
+
+        def wait(self, timeout):
+            waits.append((self.name, clock.now, timeout))
+            if self.done_after is not None and self.done_after <= timeout:
+                clock.now += self.done_after
+                return True
+            clock.now += timeout
+            return False
+
+    late = SimpleNamespace(complete=Report("late", budget * 2 / 3))
+    stuck = SimpleNamespace(complete=Report("stuck", None))
+    decoder = _aprs(Child(["aprs"]))
+    # A list, not the set, so the report that finishes is waited on first, every time.
+    decoder._reports = [late, stuck]
+    start = clock.now
+
+    with pytest.raises(aprs.AprsUnavailable, match="rtl_fm shutdown reports still pending"):
+        decoder.shutdown()
+
+    assert [name for name, _, _ in waits] == ["late", "stuck"]
+    assert waits[0] == ("late", start, pytest.approx(budget))
+    # The second wait ends at the same deadline: it gets only what the first one left.
+    _, began, timeout = waits[1]
+    assert began == pytest.approx(start + budget * 2 / 3)
+    assert began + timeout == pytest.approx(start + budget)
+    assert clock.now == pytest.approx(start + budget)
+
+
 def test_retirement_bounds_diagnostic_wait_and_closes_stderr_when_safe(monkeypatch):
     monkeypatch.setattr(receiver_lifecycle, "DIAGNOSTIC_WAIT_S", 0.05, raising=False)
     entered, resume, closed = (threading.Event() for _ in range(3))
