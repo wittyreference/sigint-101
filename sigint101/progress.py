@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 from . import retrieval
+from .challenges import CHALLENGE_KIND, AttemptKind
 
 # The store lives under data/ by default, which .gitignore keeps out of the repo so a
 # learner's progress is never committed. Tests pass an explicit temp path instead, and so
@@ -466,130 +467,341 @@ class Progress:
             ).fetchall()
         return [{**dict(row), "provenance": json.loads(row["provenance"])} for row in rows]
 
-    def start_challenge(self, unit_id: int, started_at: float, window_s: int) -> bool:
-        """Upsert a unit's current live-find attempt without altering earned passes."""
+    @staticmethod
+    def _decode_pass_row(kind: AttemptKind, row) -> dict:
+        out = dict(row)
+        for col in kind.json_pass_columns:
+            if col in out and isinstance(out[col], str):
+                out[col] = json.loads(out[col])
+        return out
+
+    @staticmethod
+    def _prepare_pass_insert(
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+    ) -> tuple[str, tuple]:
+        if kind.slot_column is not None and slot is None:
+            raise ValueError(f"attempt kind {kind.kind!r} requires a slot value")
+        if kind.slot_column is None and slot is not None:
+            raise ValueError(f"attempt kind {kind.kind!r} does not accept a slot value")
+        missing = [col for col in kind.pass_columns if col not in pass_row]
+        if missing:
+            raise ValueError(
+                f"attempt kind {kind.kind!r} pass_row missing columns: {', '.join(missing)}"
+            )
+        cols = [kind.key_column, "started_at"]
+        vals = [key, started_at]
+        if kind.slot_column is not None:
+            cols.append(kind.slot_column)
+            vals.append(slot)
+        json_cols = set(kind.json_pass_columns)
+        for col in kind.pass_columns:
+            cols.append(col)
+            val = pass_row[col]
+            vals.append(json.dumps(val) if col in json_cols else val)
+        placeholders = ", ".join("?" for _ in cols)
+        sql = (
+            f"INSERT INTO {kind.passes_table}({', '.join(cols)}) "
+            f"VALUES({placeholders}) ON CONFLICT DO NOTHING"
+        )
+        return sql, tuple(vals)
+
+    def _insert_attempt_pass_unlocked(
+        self,
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+    ) -> bool:
+        sql, params = self._prepare_pass_insert(kind, key, started_at, slot, pass_row)
+        return bool(self._conn.execute(sql, params).rowcount)
+
+    def start_attempt(
+        self,
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        window_s: int,
+        **extra,
+    ) -> bool:
+        """Upsert one attempt row (including any kind.attempt_columns) without altering passes."""
+        expected = set(kind.attempt_columns)
+        provided = set(extra.keys())
+        if provided != expected:
+            missing = sorted(expected - provided)
+            unexpected = sorted(provided - expected)
+            raise ValueError(
+                f"attempt kind {kind.kind!r} attempt columns mismatch "
+                f"(missing={missing}, unexpected={unexpected})"
+            )
+        cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
+        update_cols = ["started_at", "window_s", *kind.attempt_columns]
+        placeholders = ", ".join("?" for _ in cols)
+        updates = ", ".join(f"{col}=excluded.{col}" for col in update_cols)
+        values = (key, started_at, window_s, *(extra[col] for col in kind.attempt_columns))
         with self._lock:
             if self._closed:
                 return False
             self._conn.execute(
-                "INSERT INTO challenges(unit_id, started_at, window_s) VALUES(?, ?, ?) "
-                "ON CONFLICT(unit_id) DO UPDATE SET "
-                "started_at=excluded.started_at, window_s=excluded.window_s",
-                (unit_id, started_at, window_s),
+                f"INSERT INTO {kind.attempts_table}({', '.join(cols)}) VALUES({placeholders}) "
+                f"ON CONFLICT({kind.key_column}) DO UPDATE SET {updates}",
+                values,
             )
             self._conn.commit()
             return True
 
-    def restore_challenge(self, unit_id: int, previous: dict | None) -> bool:
-        """Restore a unit's previous live-find attempt, or remove it if none existed."""
+    def restore_attempt(self, kind: AttemptKind, key, previous: dict | None) -> bool:
+        """Restore a key's previous attempt row (including extra columns), or delete if None."""
+        if previous is not None:
+            needed = ("started_at", "window_s", *kind.attempt_columns)
+            missing = [col for col in needed if col not in previous]
+            if missing:
+                raise ValueError(
+                    f"attempt kind {kind.kind!r} previous attempt missing columns: "
+                    f"{', '.join(missing)}"
+                )
         with self._lock:
             if self._closed:
                 return False
             if previous is None:
-                self._conn.execute("DELETE FROM challenges WHERE unit_id=?", (unit_id,))
-            else:
                 self._conn.execute(
-                    "INSERT INTO challenges(unit_id, started_at, window_s) VALUES(?, ?, ?) "
-                    "ON CONFLICT(unit_id) DO UPDATE SET "
-                    "started_at=excluded.started_at, window_s=excluded.window_s",
-                    (unit_id, previous["started_at"], previous["window_s"]),
+                    f"DELETE FROM {kind.attempts_table} WHERE {kind.key_column}=?",
+                    (key,),
+                )
+            else:
+                cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
+                update_cols = ["started_at", "window_s", *kind.attempt_columns]
+                placeholders = ", ".join("?" for _ in cols)
+                updates = ", ".join(f"{col}=excluded.{col}" for col in update_cols)
+                values = (
+                    key,
+                    previous["started_at"],
+                    previous["window_s"],
+                    *(previous[col] for col in kind.attempt_columns),
+                )
+                self._conn.execute(
+                    f"INSERT INTO {kind.attempts_table}({', '.join(cols)}) "
+                    f"VALUES({placeholders}) "
+                    f"ON CONFLICT({kind.key_column}) DO UPDATE SET {updates}",
+                    values,
                 )
             self._conn.commit()
             return True
 
-    def challenge(self, unit_id: int) -> dict:
-        """Return a unit's current attempt, its own pass, newest pass overall, and pass count."""
+    def attempt(self, kind: AttemptKind, key) -> dict:
+        """Return a key's current attempt, its own pass(es), newest pass overall, and pass count."""
+        attempt_cols = ", ".join(
+            [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
+        )
+        pass_cols_list = [kind.key_column, "started_at"]
+        if kind.slot_column is not None:
+            pass_cols_list.append(kind.slot_column)
+        pass_cols_list.extend(kind.pass_columns)
+        pass_cols = ", ".join(pass_cols_list)
         with self._lock:
             if self._closed:
-                return {"attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0}
+                return {
+                    "attempt": None,
+                    "attempt_pass": None,
+                    "attempt_passes": [],
+                    "latest_pass": None,
+                    "passes": 0,
+                }
             attempt_row = self._conn.execute(
-                "SELECT unit_id, started_at, window_s FROM challenges WHERE unit_id=?",
-                (unit_id,),
+                f"SELECT {attempt_cols} FROM {kind.attempts_table} WHERE {kind.key_column}=?",
+                (key,),
             ).fetchone()
-            attempt_pass_row = None
+            attempt_pass_rows = []
             if attempt_row is not None:
-                attempt_pass_row = self._conn.execute(
-                    "SELECT unit_id, started_at, passed_at, instrument, provenance, digest "
-                    "FROM challenge_passes WHERE unit_id=? AND started_at=?",
-                    (unit_id, attempt_row["started_at"]),
-                ).fetchone()
+                if kind.slot_column is not None:
+                    attempt_pass_rows = self._conn.execute(
+                        f"SELECT {pass_cols} FROM {kind.passes_table} "
+                        f"WHERE {kind.key_column}=? AND started_at=? "
+                        f"ORDER BY {kind.slot_column}",
+                        (key, attempt_row["started_at"]),
+                    ).fetchall()
+                else:
+                    row = self._conn.execute(
+                        f"SELECT {pass_cols} FROM {kind.passes_table} "
+                        f"WHERE {kind.key_column}=? AND started_at=?",
+                        (key, attempt_row["started_at"]),
+                    ).fetchone()
+                    if row is not None:
+                        attempt_pass_rows = [row]
             pass_row = self._conn.execute(
-                "SELECT unit_id, started_at, passed_at, instrument, provenance, digest "
-                "FROM challenge_passes WHERE unit_id=? "
-                "ORDER BY passed_at DESC, started_at DESC LIMIT 1",
-                (unit_id,),
+                f"SELECT {pass_cols} FROM {kind.passes_table} WHERE {kind.key_column}=? "
+                f"ORDER BY passed_at DESC, started_at DESC LIMIT 1",
+                (key,),
             ).fetchone()
             count = self._conn.execute(
-                "SELECT COUNT(*) FROM challenge_passes WHERE unit_id=?",
-                (unit_id,),
+                f"SELECT COUNT(*) FROM {kind.passes_table} WHERE {kind.key_column}=?",
+                (key,),
             ).fetchone()[0]
-        attempt_pass = (
-            {**dict(attempt_pass_row), "provenance": json.loads(attempt_pass_row["provenance"])}
-            if attempt_pass_row else None
-        )
-        latest = (
-            {**dict(pass_row), "provenance": json.loads(pass_row["provenance"])}
-            if pass_row else None
-        )
+        attempt_passes = [self._decode_pass_row(kind, r) for r in attempt_pass_rows]
+        attempt_pass = attempt_passes[0] if attempt_passes else None
+        latest = self._decode_pass_row(kind, pass_row) if pass_row else None
         return {
             "attempt": dict(attempt_row) if attempt_row else None,
             "attempt_pass": attempt_pass,
+            "attempt_passes": attempt_passes,
             "latest_pass": latest,
             "passes": count,
         }
 
-    def credit_challenges(self, stamps, qualifies) -> list[dict]:
-        """Credit open live-find attempts in one transaction using the first qualifying stamp."""
+    def record_attempt_pass(
+        self,
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+    ) -> bool:
+        """Insert one pass row (insert-once via ON CONFLICT DO NOTHING); True only if inserted."""
+        sql, params = self._prepare_pass_insert(kind, key, started_at, slot, pass_row)
+        with self._lock:
+            if self._closed:
+                return False
+            with self._conn:
+                return bool(self._conn.execute(sql, params).rowcount)
+
+    def credit_attempts(self, kind: AttemptKind, stamps, qualifies) -> list[dict]:
+        """Credit open live_reception attempts in one transaction using insert-once pass writes."""
+        if kind.credit != "live_reception":
+            raise ValueError(
+                f"credit_attempts only accepts live_reception kinds, got {kind.credit!r}"
+            )
+        attempt_cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
         with self._lock:
             if self._closed:
                 return []
             credited: list[dict] = []
             with self._conn:
-                open_attempts = [
-                    dict(row) for row in self._conn.execute(
-                        "SELECT c.unit_id, c.started_at, c.window_s "
-                        "FROM challenges c "
-                        "WHERE NOT EXISTS ("
-                        "  SELECT 1 FROM challenge_passes p "
-                        "  WHERE p.unit_id = c.unit_id AND p.started_at = c.started_at"
-                        ") ORDER BY c.unit_id"
-                    ).fetchall()
-                ]
-                if not open_attempts:
-                    return []
-                for stamp in stamps:
+                if kind.slot_column is None:
+                    col_sql = ", ".join(f"c.{col}" for col in attempt_cols)
+                    open_attempts = [
+                        dict(row) for row in self._conn.execute(
+                            f"SELECT {col_sql} "
+                            f"FROM {kind.attempts_table} c "
+                            f"WHERE NOT EXISTS ("
+                            f"  SELECT 1 FROM {kind.passes_table} p "
+                            f"  WHERE p.{kind.key_column} = c.{kind.key_column} "
+                            f"    AND p.started_at = c.started_at"
+                            f") ORDER BY c.{kind.key_column}"
+                        ).fetchall()
+                    ]
                     if not open_attempts:
-                        break
-                    remaining: list[dict] = []
-                    for attempt in open_attempts:
-                        if qualifies(attempt, stamp):
-                            inserted = self._conn.execute(
-                                "INSERT INTO challenge_passes("
-                                "unit_id, started_at, passed_at, instrument, provenance, digest"
-                                ") VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                                (
-                                    attempt["unit_id"],
-                                    attempt["started_at"],
-                                    stamp["first_ts"],
-                                    stamp["instrument"],
-                                    json.dumps(stamp["provenance"]),
-                                    stamp["digest"],
-                                ),
-                            )
-                            if inserted.rowcount:
-                                credited.append({
-                                    "unit_id": attempt["unit_id"],
-                                    "started_at": attempt["started_at"],
+                        return []
+                    for stamp in stamps:
+                        if not open_attempts:
+                            break
+                        remaining: list[dict] = []
+                        for attempt in open_attempts:
+                            if qualifies(attempt, stamp):
+                                pass_row = {
                                     "passed_at": stamp["first_ts"],
                                     "instrument": stamp["instrument"],
                                     "provenance": stamp["provenance"],
                                     "digest": stamp["digest"],
+                                }
+                                inserted = self._insert_attempt_pass_unlocked(
+                                    kind,
+                                    attempt[kind.key_column],
+                                    attempt["started_at"],
+                                    None,
+                                    pass_row,
+                                )
+                                if inserted:
+                                    credited.append({
+                                        kind.key_column: attempt[kind.key_column],
+                                        "started_at": attempt["started_at"],
+                                        **pass_row,
+                                        "event_id": stamp.get("event_id"),
+                                    })
+                            else:
+                                remaining.append(attempt)
+                        open_attempts = remaining
+                else:
+                    col_sql = ", ".join(attempt_cols)
+                    open_attempts = [
+                        dict(row) for row in self._conn.execute(
+                            f"SELECT {col_sql} FROM {kind.attempts_table} "
+                            f"ORDER BY {kind.key_column}"
+                        ).fetchall()
+                    ]
+                    if not open_attempts:
+                        return []
+                    passed_slots = {
+                        (row[0], row[1], row[2])
+                        for row in self._conn.execute(
+                            f"SELECT p.{kind.key_column}, p.started_at, p.{kind.slot_column} "
+                            f"FROM {kind.passes_table} p "
+                            f"JOIN {kind.attempts_table} c "
+                            f"  ON p.{kind.key_column} = c.{kind.key_column} "
+                            f" AND p.started_at = c.started_at"
+                        ).fetchall()
+                    }
+                    for stamp in stamps:
+                        for attempt in open_attempts:
+                            slot = qualifies(attempt, stamp)
+                            if slot is None or slot is False:
+                                continue
+                            if slot is True:
+                                raise TypeError(
+                                    f"slotted attempt kind {kind.kind!r} qualifies() "
+                                    f"must return a slot value or None, not True"
+                                )
+                            slot_key = (attempt[kind.key_column], attempt["started_at"], slot)
+                            if slot_key in passed_slots:
+                                continue
+                            pass_row = {
+                                "passed_at": stamp["first_ts"],
+                                "instrument": stamp["instrument"],
+                                "provenance": stamp["provenance"],
+                                "digest": stamp["digest"],
+                            }
+                            inserted = self._insert_attempt_pass_unlocked(
+                                kind,
+                                attempt[kind.key_column],
+                                attempt["started_at"],
+                                slot,
+                                pass_row,
+                            )
+                            passed_slots.add(slot_key)
+                            if inserted:
+                                credited.append({
+                                    kind.key_column: attempt[kind.key_column],
+                                    "started_at": attempt["started_at"],
+                                    kind.slot_column: slot,
+                                    **pass_row,
                                     "event_id": stamp.get("event_id"),
                                 })
-                        else:
-                            remaining.append(attempt)
-                    open_attempts = remaining
             return credited
+
+    def start_challenge(self, unit_id: int, started_at: float, window_s: int) -> bool:
+        """Upsert a unit's current live-find attempt without altering earned passes."""
+        return self.start_attempt(CHALLENGE_KIND, unit_id, started_at, window_s)
+
+    def restore_challenge(self, unit_id: int, previous: dict | None) -> bool:
+        """Restore a unit's previous live-find attempt, or remove it if none existed."""
+        return self.restore_attempt(CHALLENGE_KIND, unit_id, previous)
+
+    def challenge(self, unit_id: int) -> dict:
+        """Return a unit's current attempt, its own pass, newest pass overall, and pass count."""
+        saved = self.attempt(CHALLENGE_KIND, unit_id)
+        return {
+            "attempt": saved["attempt"],
+            "attempt_pass": saved["attempt_pass"],
+            "latest_pass": saved["latest_pass"],
+            "passes": saved["passes"],
+        }
+
+    def credit_challenges(self, stamps, qualifies) -> list[dict]:
+        """Credit open live-find attempts in one transaction using the first qualifying stamp."""
+        return self.credit_attempts(CHALLENGE_KIND, stamps, qualifies)
 
     def enroll_recall(self, lesson_ids, *, now: float) -> None:
         """Enrol newly eligible completed lessons into box 1 without overwriting existing rows."""

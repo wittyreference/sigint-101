@@ -12,6 +12,7 @@ import threading
 import time
 from collections import Counter, deque
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from secrets import token_hex, token_urlsafe
@@ -40,6 +41,8 @@ from .bandmap import KEY_LINE as BANDMAP_KEY_LINE
 from .bandmap import build_map as build_band_map
 from .battery import BatteryGauge
 from .challenges import (
+    CHALLENGE_KIND,
+    AttemptKind,
     challenge_for,
     format_evidence,
     format_pass_summary,
@@ -410,6 +413,13 @@ def build_receiver_factories(
     return factories, radio_census
 
 
+@dataclass(frozen=True)
+class _RegisteredAttemptKind:
+    kind: AttemptKind
+    qualifies: object = None
+    backfill_gate: object = None
+
+
 def initialize_console_state(
     state,
     *,
@@ -492,6 +502,10 @@ def initialize_console_state(
         state.stamp_error = None
         state.challenge_error = None
         state.challenge_start_errors = {}
+        state.attempt_errors = {}
+        state.attempt_start_errors = {}
+        if not hasattr(state, "attempt_registry"):
+            state.attempt_registry = {}
         state.stamp_window = None
         state.stamp_retry_at = 0.0
         if not trial and backfill_stamps is not None:
@@ -668,6 +682,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             await shutdown_console_state(app.state, trial=False)
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
+    app.state.attempt_registry = {}
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.exception_handler(StarletteHTTPException)
@@ -2330,34 +2345,236 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.stamp_error = f"a reception badge could not be saved: {exc}"
         app.state.stamp_retry_at = monotonic() + STAMP_RETRY_S
 
+    def _set_attempt_error(kind: AttemptKind, message: str | None) -> None:
+        if message is None:
+            app.state.attempt_errors.pop(kind.kind, None)
+        else:
+            app.state.attempt_errors[kind.kind] = message
+        if kind.kind == CHALLENGE_KIND.kind:
+            app.state.challenge_error = message
+
+    def _set_attempt_start_error(kind: AttemptKind, key, message: str | None) -> None:
+        if message is None:
+            app.state.attempt_start_errors.pop((kind.kind, key), None)
+        else:
+            app.state.attempt_start_errors[(kind.kind, key)] = message
+        if kind.kind == CHALLENGE_KIND.kind:
+            if message is None:
+                app.state.challenge_start_errors.pop(key, None)
+            else:
+                app.state.challenge_start_errors[key] = message
+
+    def _register_attempt_kind(
+        kind: AttemptKind,
+        *,
+        qualifies=None,
+        backfill_gate=None,
+    ) -> None:
+        if kind.credit == "live_reception" and qualifies is None:
+            raise ValueError(
+                f"live_reception attempt kind {kind.kind!r} requires a qualifies callback"
+            )
+        app.state.attempt_registry[kind.kind] = _RegisteredAttemptKind(
+            kind=kind,
+            qualifies=qualifies,
+            backfill_gate=backfill_gate,
+        )
+
+    def _pass_event_payload(
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+        *,
+        event_fields: dict | None = None,
+    ) -> dict:
+        payload: dict = {
+            kind.payload_key: key,
+            "started_at": started_at,
+        }
+        if kind.slot_column is not None:
+            payload[kind.slot_column] = slot
+        json_cols = set(kind.json_pass_columns)
+        for col in kind.pass_columns:
+            if col == "passed_at" or col in json_cols:
+                continue
+            payload[col] = pass_row[col]
+        if kind.credit == "live_reception":
+            payload["event_id"] = pass_row.get("event_id")
+        if event_fields:
+            reserved = set(payload.keys()) | {"replay", "source"}
+            for field_key, field_val in event_fields.items():
+                if field_key not in reserved:
+                    payload[field_key] = field_val
+        payload.update(kind.replay_flags())
+        return payload
+
     def _challenge_qualifies(attempt: dict, stamp: dict) -> bool:
         ch = challenge_for(attempt["unit_id"])
         return ch is not None and challenge_qualifies(ch, attempt, stamp)
 
-    def _credit_challenges(progress, stamps, *, qualifies_fn=None) -> None:
-        check = qualifies_fn or _challenge_qualifies
+    def _credit_attempts(kind: AttemptKind, progress, stamps, *, qualifies_fn) -> None:
+        if kind.credit != "live_reception":
+            raise ValueError(
+                f"_credit_attempts only accepts live_reception kinds, got {kind.credit!r}"
+            )
+        label = kind.display_label
         try:
-            credited = progress.credit_challenges(stamps, check)
+            if kind == CHALLENGE_KIND:
+                credited = progress.credit_challenges(stamps, qualifies_fn)
+            else:
+                credited = progress.credit_attempts(kind, stamps, qualifies_fn)
         except (OSError, sqlite3.Error) as exc:
-            app.state.challenge_error = f"a live find pass could not be saved: {exc}"
+            _set_attempt_error(kind, f"a {label} pass could not be saved: {exc}")
             return
-        app.state.challenge_error = None
+        _set_attempt_error(kind, None)
         for passed in credited:
+            slot = passed.get(kind.slot_column) if kind.slot_column is not None else None
+            payload = _pass_event_payload(
+                kind,
+                passed[kind.key_column],
+                passed["started_at"],
+                slot,
+                passed,
+            )
             try:
                 log_event(
                     app.state.events_path,
-                    "challenge_pass",
-                    {
-                        "unit": passed["unit_id"],
-                        "started_at": passed["started_at"],
-                        "instrument": passed["instrument"],
-                        "digest": passed["digest"],
-                        "event_id": passed.get("event_id"),
-                    },
+                    kind.pass_event,
+                    payload,
                     sync=managed,
                 )
             except OSError as exc:
-                app.state.challenge_error = f"a live find pass could not be logged: {exc}"
+                _set_attempt_error(kind, f"a {label} pass could not be logged: {exc}")
+
+    def _credit_live_attempts(progress, stamps) -> None:
+        for entry in tuple(app.state.attempt_registry.values()):
+            if entry.kind.credit != "live_reception" or entry.qualifies is None:
+                continue
+            _credit_attempts(entry.kind, progress, stamps, qualifies_fn=entry.qualifies)
+
+    def _start_attempt(
+        kind: AttemptKind,
+        key,
+        window_s: int,
+        *,
+        extra: dict | None = None,
+        event_fields: dict | None = None,
+        pre_start=None,
+        launch=None,
+    ) -> tuple[float, str | None]:
+        label = kind.display_label
+        start_error = None
+        extra_cols = dict(extra or {})
+        # Hold reception_lock across pre_start, reading the clock, storing the attempt, launch,
+        # and appending the start event so log order matches what live receptions see, while
+        # preserving lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
+        with reception_lock:
+            if pre_start is not None:
+                pre_start()
+            started_at = round(clock(), 3)
+            previous = None
+            try:
+                if kind == CHALLENGE_KIND:
+                    previous = app.state.progress.challenge(key)["attempt"]
+                    saved = app.state.progress.start_challenge(key, started_at, window_s)
+                else:
+                    previous = app.state.progress.attempt(kind, key)["attempt"]
+                    saved = app.state.progress.start_attempt(
+                        kind, key, started_at, window_s, **extra_cols,
+                    )
+            except (OSError, sqlite3.Error) as exc:
+                saved = False
+                start_error = f"the {label} could not be started: {exc}"
+            if saved:
+                launched = True
+                if launch is not None:
+                    try:
+                        launch()
+                    except Exception as exc:  # noqa: BLE001
+                        launched = False
+                        start_error = f"the {label} could not be launched: {exc}"
+                        try:
+                            if kind == CHALLENGE_KIND:
+                                app.state.progress.restore_challenge(key, previous)
+                            else:
+                                app.state.progress.restore_attempt(kind, key, previous)
+                        except (OSError, sqlite3.Error):
+                            pass
+                if launched:
+                    payload: dict = {
+                        kind.payload_key: key,
+                        "started_at": started_at,
+                        "window_s": window_s,
+                        **extra_cols,
+                    }
+                    if event_fields:
+                        reserved = set(payload.keys()) | {"replay", "source"}
+                        for field_key, field_val in event_fields.items():
+                            if field_key not in reserved:
+                                payload[field_key] = field_val
+                    payload.update(kind.replay_flags())
+                    try:
+                        log_event(
+                            app.state.events_path,
+                            kind.start_event,
+                            payload,
+                            sync=managed,
+                        )
+                    except OSError as exc:
+                        start_error = f"the {label} start could not be logged: {exc}"
+                        # Undo the saved attempt so a restart after a clock step cannot credit
+                        # a pre-Start reception without a start line to order against.
+                        try:
+                            if kind == CHALLENGE_KIND:
+                                app.state.progress.restore_challenge(key, previous)
+                            else:
+                                app.state.progress.restore_attempt(kind, key, previous)
+                        except (OSError, sqlite3.Error):
+                            pass
+            elif start_error is None:
+                start_error = f"the {label} store is closed"
+            _set_attempt_start_error(kind, key, start_error)
+        return started_at, start_error
+
+    def _record_attempt_pass(
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+        *,
+        event_fields: dict | None = None,
+    ) -> tuple[bool, str | None]:
+        label = kind.display_label
+        with reception_lock:
+            try:
+                inserted = app.state.progress.record_attempt_pass(
+                    kind, key, started_at, slot, pass_row,
+                )
+            except (OSError, sqlite3.Error) as exc:
+                err = f"a {label} pass could not be saved: {exc}"
+                _set_attempt_error(kind, err)
+                return False, err
+            _set_attempt_error(kind, None)
+            if not inserted:
+                return False, None
+            payload = _pass_event_payload(
+                kind, key, started_at, slot, pass_row, event_fields=event_fields,
+            )
+            try:
+                log_event(app.state.events_path, kind.pass_event, payload, sync=managed)
+            except OSError as exc:
+                err = f"a {label} pass could not be logged: {exc}"
+                _set_attempt_error(kind, err)
+                return True, err
+            return True, None
+
+    _register_attempt_kind(CHALLENGE_KIND, qualifies=_challenge_qualifies)
+    app.state.register_attempt_kind = _register_attempt_kind
+    app.state.start_attempt = _start_attempt
+    app.state.record_attempt_pass = _record_attempt_pass
 
     def _challenge_payload(unit_id: int) -> dict:
         ch = challenge_for(unit_id)
@@ -2405,18 +2622,26 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def _backfill_stamps(progress, window, appended=()):
         # In append order, including rotations. Remembering each credited event tolerates a
         # clock reset. Compact the watermark when the log rolls without removing earned badges.
+        live_entries = [
+            entry for entry in app.state.attempt_registry.values()
+            if entry.kind.credit == "live_reception" and entry.qualifies is not None
+        ]
+        start_events: dict[str, list[AttemptKind]] = {}
+        for entry in live_entries:
+            start_events.setdefault(entry.kind.start_event, []).append(entry.kind)
         events_list = read_events(app.state.events_path)
-        start_pos: dict[tuple[int, float], int] = {}
+        start_pos: dict[tuple[str, int | str, float], int] = {}
         legacy: Counter[str] = Counter()
         stamps_list = []
-        challenge_stamps = []
+        live_stamps = []
         for idx, event in enumerate(events_list):
-            if isinstance(event, dict) and event.get("kind") == "challenge_start":
+            if isinstance(event, dict) and event.get("kind") in start_events:
                 pl = event.get("payload")
-                if (isinstance(pl, dict)
-                        and type(pl.get("unit")) is int
-                        and type(pl.get("started_at")) in (int, float)):
-                    start_pos[(pl["unit"], float(pl["started_at"]))] = idx
+                if isinstance(pl, dict) and type(pl.get("started_at")) in (int, float):
+                    for kind in start_events[event["kind"]]:
+                        key_val = pl.get(kind.payload_key)
+                        if isinstance(key_val, (int, str)) and type(key_val) is not bool:
+                            start_pos[(kind.kind, key_val, float(pl["started_at"]))] = idx
             if (stamp := mint(event)) is None:
                 continue
             if "event_id" not in event:
@@ -2426,26 +2651,46 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     # Occurrence belongs in the watermark only; the evidence hash stays canonical.
                     stamp["watermark"] = f"{digest}{legacy[digest]:016x}"
             stamps_list.append(stamp)
-            challenge_stamps.append(
+            live_stamps.append(
                 {**stamp, "event_id": event.get("event_id"), "_log_pos": idx}
             )
         tail_pos = len(events_list)
         for s in appended:
             stamps_list.append(s)
-            challenge_stamps.append({**s, "_log_pos": tail_pos})
+            live_stamps.append({**s, "_log_pos": tail_pos})
 
-        def _backfill_qualifies(attempt: dict, stamp: dict) -> bool:
-            if not _challenge_qualifies(attempt, stamp):
-                return False
-            # Only receptions logged after the attempt's own challenge_start line can satisfy
-            # it during backfill, so a backward clock step cannot credit a pre-Start reception.
-            # If the start line has already rotated out of the retained log, every retained event
-            # arrived after it and stays eligible.
-            pos = start_pos.get((attempt["unit_id"], float(attempt["started_at"])))
-            log_pos = stamp.get("_log_pos")
-            return pos is None or log_pos is None or log_pos > pos
+        for entry in live_entries:
+            kind = entry.kind
+            qualifies = entry.qualifies
+            extra_gate = entry.backfill_gate
 
-        _credit_challenges(progress, challenge_stamps, qualifies_fn=_backfill_qualifies)
+            def _make_backfill_qualifies(k=kind, q=qualifies, gate=extra_gate):
+                reject = None if k.slot_column is not None else False
+
+                def _backfill_qualifies(attempt: dict, stamp: dict):
+                    match = q(attempt, stamp)
+                    if k.slot_column is not None:
+                        if match is None or match is False:
+                            return None
+                    elif not match:
+                        return False
+                    # Only receptions logged after the attempt's own start line can satisfy it
+                    # during backfill, so a backward clock step cannot credit a pre-Start
+                    # reception. If the start line has rotated out of the retained log, every
+                    # retained event arrived after it and stays eligible.
+                    pos = start_pos.get(
+                        (k.kind, attempt[k.key_column], float(attempt["started_at"]))
+                    )
+                    log_pos = stamp.get("_log_pos")
+                    if pos is not None and log_pos is not None and not (log_pos > pos):
+                        return reject
+                    if gate is not None and not gate(attempt, stamp, events_list, start_pos):
+                        return reject
+                    return match
+
+                return _backfill_qualifies
+
+            _credit_attempts(kind, progress, live_stamps, qualifies_fn=_make_backfill_qualifies())
         # A different log writer may already have rotated out the event this hook just appended.
         # When it is still in the snapshot its event ID makes the second credit a no-op.
         if progress.record_stamps(stamps_list, backfill=True):
@@ -2510,7 +2755,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     app.state.receptions.append(without_page_words(event))
                 stamp = mint(event)
                 if stamp is not None:
-                    _credit_challenges(
+                    _credit_live_attempts(
                         progress, ({**stamp, "event_id": event.get("event_id")},)
                     )
                 if monotonic() < app.state.stamp_retry_at:
@@ -2624,46 +2869,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         ch = challenge_for(unit_id)
         if ch is None or get_unit(unit_id) is None:
             raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
-        start_error = None
-        # Hold reception_lock across reading the clock, storing the attempt, and appending
-        # challenge_start so the log order matches what live receptions see, while preserving
-        # the console's lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
-        with reception_lock:
-            started_at = round(clock(), 3)
-            previous = None
-            try:
-                previous = app.state.progress.challenge(unit_id)["attempt"]
-                saved = app.state.progress.start_challenge(unit_id, started_at, ch.window_s)
-            except (OSError, sqlite3.Error) as exc:
-                saved = False
-                start_error = f"the live find could not be started: {exc}"
-            if saved:
-                try:
-                    log_event(
-                        app.state.events_path,
-                        "challenge_start",
-                        {
-                            "unit": unit_id,
-                            "started_at": started_at,
-                            "window_s": ch.window_s,
-                            "allowed": list(ch.allowed),
-                        },
-                        sync=managed,
-                    )
-                except OSError as exc:
-                    start_error = f"the live find start could not be logged: {exc}"
-                    # Undo the saved attempt so a restart after a clock step cannot credit
-                    # a pre-Start reception without a challenge_start line to order against.
-                    try:
-                        app.state.progress.restore_challenge(unit_id, previous)
-                    except (OSError, sqlite3.Error):
-                        pass
-            elif start_error is None:
-                start_error = "the live find store is closed"
-            if start_error is None:
-                app.state.challenge_start_errors.pop(unit_id, None)
-            else:
-                app.state.challenge_start_errors[unit_id] = start_error
+        _, start_error = _start_attempt(
+            CHALLENGE_KIND,
+            unit_id,
+            ch.window_s,
+            event_fields={"allowed": list(ch.allowed)},
+        )
         payload = _challenge_payload(unit_id)
         if start_error is not None:
             payload["error"] = start_error
