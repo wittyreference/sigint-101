@@ -722,7 +722,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 12, proc.stdout
+    assert len(urls) == len(_runner_check_names()), proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -851,7 +851,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 12, methods
+    assert len(marks) == len(_runner_check_names()), methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -1109,9 +1109,9 @@ def _runner_copy(render_make, edit):
 
 
 def _add_check(text, line):
-    old = '        ("render_closing.py", console),\n'
-    assert old in text
-    return text.replace(old, old + line)
+    end_of_check_list = "    )\n\n\ndef run_checks("
+    assert text.count(end_of_check_list) == 1
+    return text.replace(end_of_check_list, line + end_of_check_list)
 
 
 def test_every_check_the_runner_lists_starts_and_its_pages_are_walked(render_make):
