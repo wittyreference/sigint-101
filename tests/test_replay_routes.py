@@ -1,6 +1,8 @@
 # ABOUTME: Replays through the console's public routes using a SigMF pair and decoder fakes.
 # ABOUTME: Checks handoff, shutdown, trial and separation of replay and live credit.
 
+import re
+import signal
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -37,13 +39,13 @@ def _answer(response, status):
 
 
 @contextmanager
-def _client(tmp_path, *, no_radio=True, spawn=None, which=lambda name: name):
+def _client(tmp_path, *, no_radio=True, spawn=None, which=lambda name: name, live_child=None):
     data, recordings = tmp_path / "data", tmp_path / "recordings"
     _pair(recordings)
     live, played = [], []
 
     def live_spawn(*args):
-        live.append(Child(("rtl_433", "-d", "0")))
+        live.append(live_child if live_child is not None else Child(("rtl_433", "-d", "0")))
         return live[-1]
 
     def replay_spawn(argv, **kwargs):
@@ -168,6 +170,22 @@ def test_console_shutdown_reaps_the_replay_child(tmp_path):
     assert state.shutdown_errors == []
 
 
+def test_replay_refuses_to_start_until_live_decoder_exit_is_confirmed(tmp_path):
+    child = Child(("rtl_433", "-d", "0"), unkillable=True)
+    with _client(tmp_path, no_radio=False, live_child=child) as (client, live, played):
+        assert client.get("/api/decode").status_code == 200
+        assert live == [child]
+        try:
+            refused = _answer(client.post(START, json={"recording": "capture"}), 503)
+            assert "rtl_433 survived kill" in refused["reason"]
+            assert child.sent == ["TERM", "KILL"] and child.poll() is None
+            assert not played
+        finally:
+            child.code = -signal.SIGKILL
+        _answer(client.post(START, json={"recording": "capture"}), 200)
+        assert len(played) == 1
+
+
 def test_trial_does_not_construct_or_start_replay(tmp_path, monkeypatch):
     generation = _make_managed_generation(tmp_path, "gen1")
     original = {path.name: path.read_bytes() for path in generation.iterdir() if path.is_file()}
@@ -218,6 +236,6 @@ def test_empty_kit_shows_a_disabled_replay_key_on_both_pages(tmp_path):
         assert client.get(INDEX).json() == {"recordings": [], "refused": []}
         for url in ("/lesson/10", "/operate/ism"):
             html = client.get(url).text
-            assert "data-replay-toggle disabled" in html
-            assert "No recording" in html
-            assert "no recording on this kit yet" in html.lower()
+            keys = re.findall(r"<button\b[^>]*\bdata-replay-toggle disabled[^>]*>([^<]*)</button>",
+                              html)
+            assert keys and all(text.strip() == "No recording on this kit yet" for text in keys)

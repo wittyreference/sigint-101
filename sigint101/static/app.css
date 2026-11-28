@@ -2884,7 +2884,10 @@ body {
 .tune .tune-btn--replay {
   width: 132px;
   height: var(--touch);
+  padding-inline: 0;
   font-size: 18px;
+  line-height: 1.15;
+  white-space: normal;
 }
 .tune-btn--replay:disabled { cursor: default; }
 .tune:not(.tune--replay) .tune__dial--replay,
@@ -2915,6 +2918,10 @@ body {
 }
 .rack__tune .tune__caption {
   font-size: 13px;
+}
+.rack__tune[data-decoder-tune="decode"] [data-tune-caption] {
+  line-height: 1.15;
+  white-space: normal;
 }
 .rack__tune.tune--fixed .tune__dial {
   flex: 1 1 auto;

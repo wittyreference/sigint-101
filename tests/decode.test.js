@@ -160,3 +160,20 @@ test("a live replaying refusal follows the run started elsewhere", async () => {
   assert.equal(p.badge.textContent, "REPLAY");
   assert.equal(p.key.textContent, "Back to live");
 });
+
+for (const stateFirst of [false, true]) {
+  test("Back to live keeps the recording with " + (stateFirst ? "state first" : "list first"),
+    async () => {
+      const p = page();
+      const list = () => p.answer("/api/replay/recordings", LIST);
+      const state = () => p.answer("/api/replay/ism", REPLAYING);
+      await (stateFirst ? state() : list());
+      await (stateFirst ? list() : state());
+      assert.equal(p.key.textContent, "Back to live");
+      p.key.click();
+      await p.answer("/api/replay/ism/stop", { ...REPLAYING, state: "stopped" }, "POST");
+      await p.answer("/api/decode", LIVE);
+      assert.equal(p.key.textContent, "Replay");
+      assert.equal(p.key.disabled, false);
+    });
+}

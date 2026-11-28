@@ -86,8 +86,8 @@
       var dial = strip.querySelector("[data-replay-dial]");
       strip.classList.toggle("tune--replay", replaying);
       key.disabled = busy || (!replaying && !recording);
-      key.textContent = replaying ? "Back to live" : recording ? "Replay" : "No recording";
-      key.title = !replaying && !recording ? "No recording on this kit yet" : "";
+      key.textContent = replaying ? "Back to live" :
+        recording ? "Replay" : "No recording on this kit yet";
       if (replaying && body) {
         dial.querySelector("[data-replay-freq]").textContent =
           body.frequency_hz ? formatMHz(body.frequency_hz) + " MHz" : "— MHz";
@@ -110,10 +110,12 @@
     });
   }
 
-  async function listRecordings(gen) {
-    var result = await read(gen, "/api/replay/recordings");
-    if (result && result.ok) {
-      recording = (result.body.recordings || []).find(function (item) {
+  async function listRecordings() {
+    // The kit's recordings belong to the page, regardless of which mode is on screen.
+    var reply = await fetch("/api/replay/recordings", { cache: "no-store" });
+    if (reply.ok) {
+      var body = await reply.json();
+      recording = (body.recordings || []).find(function (item) {
         return item.instrument === "ism";
       });
       updateKeys();
@@ -191,7 +193,7 @@
     var back = mode === "replay";
     var gen = switchMode("replay");
     try {
-      if (!back) await listRecordings(gen);
+      if (!back) await listRecordings();
       if (gen !== generation) return;
       if (!back && !recording) {
         poll(switchMode("live"));
@@ -215,7 +217,7 @@
   }
 
   keys.forEach(function (key) { key.addEventListener("click", toggle); });
-  listRecordings(generation).catch(function () {});
+  listRecordings().catch(function () {});
   var initial = generation;
   read(initial, "/api/replay/ism").then(function (result) {
     if (!result) return;

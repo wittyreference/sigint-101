@@ -37,8 +37,9 @@ STUB = r"""
   }));
   window.fetch = (address, options) => {
     const path = new URL(address, location.href).pathname;
-    if (path === '/api/replay/recordings') return reply({recordings: [
-      {instrument: 'ism', stem: 'fixture'}], refused: []});
+    if (path === '/api/replay/recordings') return reply({recordings:
+      sessionStorage.getItem('replay-fixture-empty') ? [] : [{instrument: 'ism', stem: 'fixture'}],
+      refused: []});
     if (path === '/api/replay/ism/start') { started = true; return reply(replay()); }
     if (path === '/api/replay/ism/stop') { started = false; return reply(replay()); }
     if (path === '/api/replay/ism') return reply(replay());
@@ -69,6 +70,10 @@ function measureReplay(theme, badgeText, lesson) {
   const key = screen?.querySelector('[data-replay-toggle]');
   if (!panel || !badge || !key || badge.textContent !== badgeText || key.disabled) return null;
   const strip = key.closest('.tune');
+  const liveCaption = strip.querySelector('[data-tune-caption]');
+  const captionFits = lesson || badgeText === 'REPLAY' ||
+    (within(liveCaption) && liveCaption.scrollWidth <= liveCaption.clientWidth &&
+      liveCaption.scrollHeight <= liveCaption.clientHeight);
   const style = getComputedStyle(badge);
   const rows = [...panel.querySelectorAll('.decoder__item')];
   const hidden = [...strip.querySelectorAll('[data-tune-step], [data-step-cycle]')]
@@ -92,9 +97,24 @@ function measureReplay(theme, badgeText, lesson) {
     marked: rows.every(row => row.querySelector('.logbook-mark--replay')?.textContent === 'REPLAY'),
     rowsFit: rows.every(row => row.scrollWidth <= row.clientWidth + 1),
     hidden, caption: strip.querySelector('[data-replay-caption]').textContent,
+    captionFits,
     contrast: (levels[1] + 0.05) / (levels[0] + 0.05),
   };
 }
+"""
+
+MEASURE_EMPTY_KEY = r"""
+(() => {
+  const key = document.querySelector('[data-replay-toggle]');
+  if (!key) return null;
+  const bounds = key.getBoundingClientRect();
+  const label = document.createRange();
+  label.selectNodeContents(key);
+  const lines = [...label.getClientRects()];
+  return {text: key.textContent.trim(), disabled: key.disabled, fits: lines.length > 0 &&
+    lines.every(r => r.left >= bounds.left && r.right <= bounds.right &&
+                     r.top >= bounds.top && r.bottom <= bounds.bottom)};
+})()
 """
 
 MEASURE_BOOK = r"""
@@ -193,6 +213,7 @@ def panel_measure(browser, theme, badge, lesson):
 def _panel_fits(refused, replayed, live, theme, lesson):
     return (
         all(m.get("theme") == theme and m.get("doc") == [800, 480] and m.get("controls")
+            and m.get("captionFits")
             and m.get("key", [0, 0])[0] in range(72, 81) and m["key"][1] >= 18
             for m in (refused, replayed, live))
         and refused["border"] == "dashed" and live["border"] == "solid"
@@ -219,6 +240,13 @@ def main(console):
         panels = (("M10", "/lesson/10", True), ("rack", "/operate/ism", False))
         for theme in THEMES:
             browser.ev(f"localStorage.setItem('sigint101.theme', {json.dumps(theme)})")
+            browser.ev("sessionStorage.setItem('replay-fixture-empty', '1')")
+            load_page(browser, f"{console}/operate/ism")
+            empty_key = browser.ev(MEASURE_EMPTY_KEY)
+            browser.ev("sessionStorage.removeItem('replay-fixture-empty')")
+            failed |= verdict(
+                empty_key == {"text": "No recording on this kit yet", "disabled": True,
+                              "fits": True}, f"empty replay key {theme}", empty_key)
             for label, path, lesson in panels:
                 load_page(browser, console + path)
                 scope = "document"
