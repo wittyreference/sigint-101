@@ -58,7 +58,7 @@
     {% if not prediction_committed %}<span class="rail__gate">Locked until you predict</span>{% endif %}
     {# Filled by lesson-tuning.js only when the radios are not yet, or could not be, put on this
        lesson's frequencies; hidden otherwise. #}
-    <span class="rail__tuning" role="status" data-lesson-tuning hidden></span>
+    <span class="rail__tuning" role="status" data-lesson-tuning hidden><span class="rail__tuning-head" data-lesson-tuning-head></span><span class="rail__tuning-why" data-lesson-tuning-why></span></span>
   </div>
 
   {# ---- One stage at a time. Sealed stages are not rendered at all until a

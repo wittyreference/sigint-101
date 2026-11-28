@@ -95,7 +95,14 @@ from .provenance import (
     gather_provenance,
     record_baseline_sample,
 )
-from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, finish_console
+from .radio_control import (
+    CLAIM_QUEUE_WAIT_S,
+    RadioArbiter,
+    ReceptionSink,
+    TuningBusy,
+    TuningGate,
+    finish_console,
+)
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .receiver_socket import PortOccupied
@@ -479,6 +486,7 @@ def initialize_console_state(
             backfill_stamps(state)
         state.last_ppm = None
         state.radio_arbiter = RadioArbiter()
+        state.tuning_gate = TuningGate()
         state.reception_sink = ReceptionSink()
         if not trial and attach_reception_hooks is not None:
             attach_reception_hooks(state)
@@ -761,19 +769,35 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         name its own frequencies. Each decoder goes back to the frequency it was built for, and
         a lesson with no band of its own gets the FM sweep it was written against (a lesson with
         a band retunes the sweep itself when it loads). Nothing restarts that is already there.
+
+        The page posts this without blocking, so it runs through the tuning gate: no radio claim
+        starts a tool until it is done, and each reset is skipped if a tune of that receiver (the
+        next lesson's band, the learner's own step) or a newer restore landed after it began.
         """
-        for inst in INSTRUMENTS:
-            if inst.band:
-                receiver = getattr(app.state, inst.receiver)
-                home = getattr(receiver, "home_hz", None)
-                if home is not None and receiver.freq_hz != home:
-                    receiver.retune(home)
-        sweeper = app.state.sweeper
-        if not lesson.tune and (
-                (sweeper.low, sweeper.high, sweeper.bin_size) != (DEFAULT_LOW, DEFAULT_HIGH,
+        gate = app.state.tuning_gate
+        token = gate.begin_restore()
+
+        def home(receiver):
+            want = getattr(receiver, "home_hz", None)
+            if want is not None and receiver.freq_hz != want:
+                receiver.retune(want)
+
+        def fm(sweeper):
+            if ((sweeper.low, sweeper.high, sweeper.bin_size) != (DEFAULT_LOW, DEFAULT_HIGH,
                                                                   DEFAULT_BIN)
-                or getattr(sweeper, "target", None) is not None):
-            sweeper.retune(DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_BIN)
+                    or getattr(sweeper, "target", None) is not None):
+                sweeper.retune(DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_BIN)
+
+        try:
+            for inst in INSTRUMENTS:
+                if inst.band:
+                    receiver = getattr(app.state, inst.receiver)
+                    gate.restore_step(inst.receiver, token, lambda r=receiver: home(r))
+            if not lesson.tune:
+                sweeper = app.state.sweeper
+                gate.restore_step("sweeper", token, lambda: fm(sweeper))
+        finally:
+            gate.end_restore()
 
     def _recall_sources() -> list[int]:
         """Loaded lessons that carry a check block and have been completed."""
@@ -1599,8 +1623,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _claim_sdr(target: str, start=None):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
-        deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
         refusal = unavailable[target]
+        # A lesson's tuning restore runs first: a tool started now would open on the frequency
+        # the rack left (C81). The wait is bounded, then refused with the reason.
+        try:
+            app.state.tuning_gate.wait_idle()
+        except TuningBusy as exc:
+            raise refusal(str(exc)) from exc
+        deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
         consumers = {name: getattr(app.state, name) for name in sdr_consumers}
         receiver = consumers.get(target)
         intent = None
@@ -2229,10 +2259,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "tune_blocked", {"reason": reason})
             return JSONResponse(status_code=503, content={"tuned": False, "reason": reason})
 
-        if centred:
-            app.state.sweeper.retune(low, high, bin_size, target=center)
-        else:
-            app.state.sweeper.retune(low, high, bin_size)
+        # Through the tuning gate, so a lesson's restore still running cannot undo it afterwards.
+        def retune():
+            if centred:
+                app.state.sweeper.retune(low, high, bin_size, target=center)
+            else:
+                app.state.sweeper.retune(low, high, bin_size)
+
+        try:
+            app.state.tuning_gate.tune("sweeper", retune)
+        except TuningBusy as exc:
+            log_event(app.state.events_path, "tune_blocked", {"reason": str(exc)})
+            return JSONResponse(status_code=409, content={"tuned": False, "reason": str(exc)})
         tuned = {"low": low, "high": high, "bin_size": bin_size, "center": center}
         log_event(app.state.events_path, "tune", tuned)
         return {"tuned": True, **tuned}
@@ -2688,7 +2726,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "decoder_tune_blocked",
                       {"instrument": inst.key, "reason": reason})
             return JSONResponse(status_code=503, content={"tuned": False, "reason": reason})
-        getattr(app.state, inst.receiver).retune(hz)
+        try:
+            app.state.tuning_gate.tune(inst.receiver,
+                                       lambda: getattr(app.state, inst.receiver).retune(hz))
+        except TuningBusy as exc:
+            log_event(app.state.events_path, "decoder_tune_blocked",
+                      {"instrument": inst.key, "reason": str(exc)})
+            return JSONResponse(status_code=409, content={"tuned": False, "reason": str(exc)})
         log_event(app.state.events_path, "decoder_tune", {"instrument": inst.key, "freq_hz": hz})
         return {"tuned": True, "instrument": inst.key, "freq_hz": hz}
 

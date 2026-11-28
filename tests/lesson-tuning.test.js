@@ -11,6 +11,9 @@ const source = name => readFileSync(require.resolve(`../sigint101/static/${name}
 const RACK_HZ = 433_920_000;   // where the rack left the receivers
 const HOME_HZ = 315_000_000;   // where the lesson expects them
 const TIMEOUT_MS = 3000;       // how long the panels wait for the restore before polling anyway
+// The room the rail leaves the note beside "Locked until you predict" at 800 px: 113 px, about
+// 14 characters of its 13 px type. Each line the script writes itself must fit there whole.
+const RAIL_CHARS = 14;
 
 // The panels whose receivers the restore retunes, each with the poll its first tick sends.
 const PANELS = [
@@ -53,7 +56,15 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held" } = 
   const server = { hz: RACK_HZ };
   const requests = [];
   const errors = [];
-  const note = { hidden: true, textContent: "", title: "" };
+  // The note's two lines, the verdict and why, as the lesson page's rail carries them.
+  const head = { textContent: "" };
+  const why = { textContent: "" };
+  const note = {
+    hidden: true, title: "",
+    querySelector: sel => ({ "[data-lesson-tuning-head]": head,
+                             "[data-lesson-tuning-why]": why })[sel] || null,
+    get lines() { return [head.textContent, why.textContent]; },
+  };
   let answer = null;
 
   const fetch = (url, opts) => {
@@ -148,7 +159,7 @@ test("a slow restore never blocks the page: the script returns at once and taps 
   }
   const context = {
     document: { currentScript: { getAttribute: key => (key === "data-lesson-id" ? "7" : null) },
-                querySelector: () => ({ hidden: true, textContent: "", title: "" }) },
+                querySelector: () => null },
     XMLHttpRequest: BlockingXHR,
     fetch: () => new Promise(resolve => setTimeout(() => {
       events.push("restore answered");
@@ -196,12 +207,15 @@ test("a restore still running at the timeout: the panels poll anyway and the rai
   assert.equal(page.note.hidden, true);
 
   await page.advance(1);
-  // Polling now reads wherever the receiver really is, and the rail says why it may not be the
-  // lesson's frequency yet.
+  // The panels ask now (the console holds their claims until the restore is done), and the rail
+  // says the radios are still being tuned, in words that fit it whole.
   assert.equal(page.polls("/api/decode").length, 1);
   assert.equal(page.polls("/api/spectrum").length, 1);
   assert.equal(page.note.hidden, false);
-  assert.match(page.note.textContent, /tuning/i);
+  const [verdict, reason] = page.note.lines;
+  assert.match(verdict, /^tuning/i);
+  assert.ok(verdict.length <= RAIL_CHARS, `"${verdict}" does not fit the rail`);
+  assert.equal(reason, "");
 
   await page.answer(200, { tuned: true, lesson_id: 7 });
   assert.equal(page.note.hidden, true, "once the radios are on the lesson's frequencies, the note goes");
@@ -212,8 +226,8 @@ test("a refused restore says the radios were not retuned, with the reason, and t
   const page = lessonPage({ panels: ["decode"] });
   await page.answer(503, { detail: "rtl_433 did not stop" });
   assert.equal(page.note.hidden, false);
-  assert.match(page.note.textContent, /not retuned/i);
-  assert.match(page.note.textContent, /rtl_433 did not stop/);
+  // The verdict and the reason each get a line of their own, so neither is cut to make room.
+  assert.deepEqual(page.note.lines, ["Not retuned", "rtl_433 did not stop"]);
   const [first] = page.polls("/api/decode");
   assert.ok(first, "a refusal opens the panels at once");
   assert.equal(first.hz, RACK_HZ, "the panel reads where the receiver really is");
@@ -223,9 +237,17 @@ test("a lost console says the radios were not retuned, and the panels still poll
   const page = lessonPage({ panels: ["decode"], restore: "lost" });
   await settle();
   assert.equal(page.note.hidden, false);
-  assert.match(page.note.textContent, /not retuned/i);
-  assert.match(page.note.textContent, /lost contact/i);
+  assert.deepEqual(page.note.lines, ["Not retuned", "no console"]);
   assert.equal(page.polls("/api/decode").length, 1);
+});
+
+test("a refusal without a reason of its own still fits the rail, verdict and status", async () => {
+  const page = lessonPage({ panels: ["decode"] });
+  await page.answer(500, null);
+  assert.deepEqual(page.note.lines, ["Not retuned", "error 500"]);
+  for (const line of page.note.lines) {
+    assert.ok(line.length <= RAIL_CHARS, `"${line}" does not fit the rail`);
+  }
 });
 
 test("a page that names no lesson posts nothing and its panels poll at once", async () => {

@@ -55,6 +55,78 @@ class RadioArbiter:
                 self._lock.notify_all()
 
 
+# How long a radio claim or a tune waits on a lesson's tuning restore before it is refused (C81).
+TUNING_WAIT_S = 2.0
+TUNING_REASON = "tuning the radios for this lesson"
+
+
+class TuningBusy(Exception):
+    """A claim or a tune waited TUNING_WAIT_S on a lesson's tuning restore and gave up."""
+
+
+class TuningGate:
+    """Orders a lesson's tuning restore (POST /api/tuning) against tunes and radio claims.
+
+    The lesson page posts the restore without blocking, so a tune or a panel poll can arrive
+    while a slow one is still stopping tools. Three rules keep what the learner sees true:
+
+    - No receiver starts mid-restore: a claim waits for every restore to finish (wait_idle), so
+      a panel's first poll starts its tool on the lesson's frequency, not the rack's.
+    - A restore never undoes a newer tune: each receiver it resets is a step taken under the
+      step lock, and a step is skipped when a tune of that receiver, or a newer restore, has
+      landed since the restore began.
+    - Nothing waits without bound: a claim or a tune that waits TUNING_WAIT_S is refused with
+      TUNING_REASON. A tune waits only for the step in hand, not the whole restore.
+    """
+
+    def __init__(self):
+        self._step = threading.Lock()
+        self._state = threading.Condition()
+        self._restoring = 0
+        self._seq = 0
+        self._restore_seq = 0
+        self._tuned = {}
+
+    def begin_restore(self) -> int:
+        with self._state:
+            self._seq += 1
+            self._restore_seq = self._seq
+            self._restoring += 1
+            return self._seq
+
+    def end_restore(self) -> None:
+        with self._state:
+            self._restoring -= 1
+            self._state.notify_all()
+
+    def restore_step(self, receiver: str, token: int, reset) -> bool:
+        """Run `reset` for `receiver` unless something newer landed since restore `token` began."""
+        with self._step:
+            with self._state:
+                if self._restore_seq > token or self._tuned.get(receiver, 0) > token:
+                    return False
+            reset()
+            return True
+
+    def tune(self, receiver: str, action):
+        """Run a tune of `receiver`, marking it newer than any restore under way."""
+        if not self._step.acquire(timeout=TUNING_WAIT_S):
+            raise TuningBusy(TUNING_REASON)
+        try:
+            with self._state:
+                self._seq += 1
+                self._tuned[receiver] = self._seq
+            return action()
+        finally:
+            self._step.release()
+
+    def wait_idle(self) -> None:
+        """Wait for every restore under way to finish, or raise TuningBusy after the bound."""
+        with self._state:
+            if not self._state.wait_for(lambda: self._restoring == 0, timeout=TUNING_WAIT_S):
+                raise TuningBusy(TUNING_REASON)
+
+
 class ReceptionSink:
     def __init__(self):
         self._lock = threading.Lock()

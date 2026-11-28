@@ -555,19 +555,36 @@ body {
 }
 
 /* The lesson's tuning note (lesson-tuning.js): shown only while a slow restore is still running
-   or after one was refused. It takes what room the rail has left and ends in an ellipsis rather
-   than pushing the steps off the 800 px screen; the whole line rides in its title. */
+   or after one was refused. Two short lines in the rail's height, the verdict over the reason,
+   so each is read whole in the room left beside "Locked until you predict" (113 px at 800 px);
+   a longer reason from the console ends in an ellipsis rather than pushing the steps off. */
 .rail__tuning {
   flex: 0 1 auto;
   min-width: 9ch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   overflow: hidden;
-  text-overflow: ellipsis;
   font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.2;
-  text-transform: uppercase;
+  line-height: 1.15;
   color: var(--warn);
   white-space: nowrap;
+}
+/* An element with display:flex ignores the UA [hidden] rule otherwise. */
+.rail__tuning[hidden] {
+  display: none;
+}
+.rail__tuning-head {
+  font-size: 13px;
+  text-transform: uppercase;
+}
+.rail__tuning-why {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail__tuning-why:empty {
+  display: none;
 }
 
 /* ===== Stage view ========================================================= */

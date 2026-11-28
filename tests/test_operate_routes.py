@@ -3,13 +3,16 @@
 
 import json
 import re
+import threading
+import time
+from contextlib import contextmanager
 from html import unescape
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from sigint101 import childproc
+from sigint101 import childproc, radio_control
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder
@@ -638,6 +641,155 @@ def test_opening_a_lesson_with_no_band_puts_the_sweep_back_on_fm(tmp_path):
         _open_lesson(client, 1)
         sweeper = client.app.state.sweeper
         assert (sweeper.low, sweeper.high, sweeper.target) == (DEFAULT_LOW, DEFAULT_HIGH, None)
+
+
+# --- a slow lesson restore against later tunes and polls (C81) ---------------------------------
+# The lesson page posts /api/tuning without blocking, so a tune or a panel poll can arrive while a
+# slow restore is still running. Each test holds the restore inside the ISM decoder's retune (the
+# first receiver it resets), as a tool that is slow to stop does, and releases it on cue.
+
+JOIN_S = 10.0   # no request may take this long: past it the test reports a hang
+
+
+class _HeldRetune:
+    """Holds one receiver's retune until released."""
+
+    def __init__(self, receiver):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        real = receiver.retune
+
+        def retune(*args, **kwargs):
+            self.entered.set()
+            assert self.release.wait(JOIN_S), "the held retune was never released"
+            return real(*args, **kwargs)
+
+        receiver.retune = retune
+
+
+class _Request(threading.Thread):
+    """One request on its own thread, so the test can act while it is in flight."""
+
+    def __init__(self, send):
+        super().__init__(daemon=True)
+        self._send = send
+        self.response = None
+        self.took = None
+
+    def run(self):
+        started = time.monotonic()
+        self.response = self._send()
+        self.took = time.monotonic() - started
+
+    def finish(self):
+        self.join(JOIN_S)
+        assert not self.is_alive(), "the request hung"
+        return self.response
+
+
+@contextmanager
+def _slow_restore(client):
+    """Lesson 1's restore, held in the ISM decoder's retune until the test releases it.
+
+    It is released on any way out of the block, so a failed assertion never leaves a request held
+    inside the console while the client shuts it down.
+    """
+    client.post("/api/decode/tune", json={"freq_hz": 434_000_000})   # the rack left it here
+    held = _HeldRetune(client.app.state.decoder)
+    restore = _Request(lambda: client.post("/api/tuning?lesson_id=1"))
+    restore.start()
+    try:
+        assert held.entered.wait(JOIN_S)
+        yield held, restore
+    finally:
+        held.release.set()
+        restore.join(JOIN_S)
+
+
+def test_a_late_restore_never_undoes_the_next_lessons_band_tune(tmp_path):
+    # The review's race: lesson A's restore is still running when lesson B's panels time out and
+    # tune the sweep to B's band. A's restore must not then put the sweep back on FM.
+    packs = _radio_pack(tmp_path / "packs")            # lesson 1 has no band: it resets the sweep
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        with _slow_restore(client) as (held, restore):
+            band = _Request(lambda: client.post(
+                "/api/tune", json={"center": 433_920_000, "span": 2_000_000}))
+            band.start()
+            time.sleep(0.2)
+            held.release.set()
+            assert restore.finish().status_code == 200
+            assert band.finish().status_code == 200
+        sweeper = client.app.state.sweeper
+        assert sweeper.target == 433_920_000
+        assert (sweeper.low, sweeper.high) != (DEFAULT_LOW, DEFAULT_HIGH)
+
+
+@pytest.mark.parametrize("route, body, where", [
+    ("/api/tune", {"low": 100_000_000, "high": 102_000_000},
+     lambda state: (state.sweeper.low, state.sweeper.high) == (100_000_000, 102_000_000)),
+    ("/api/aprs/tune", {"freq_hz": 144_800_000},
+     lambda state: state.aprs.freq_hz == 144_800_000),
+], ids=["sweep", "aprs"])
+def test_a_learners_retune_survives_a_late_restore(tmp_path, route, body, where):
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        with _slow_restore(client) as (held, restore):
+            tune = _Request(lambda: client.post(route, json=body))
+            tune.start()
+            time.sleep(0.2)
+            held.release.set()
+            assert restore.finish().status_code == 200
+            assert tune.finish().status_code == 200
+        assert where(client.app.state), "the late restore undid the learner's tune"
+
+
+def test_a_poll_during_a_restore_waits_and_starts_on_the_lessons_frequency(tmp_path):
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})   # the rack left it here
+        with _slow_restore(client) as (held, restore):
+            poll = _Request(lambda: client.get("/api/aprs"))
+            poll.start()
+            time.sleep(0.3)
+            assert spawned == [], "a poll started its receiver while the restore was still running"
+            held.release.set()
+            assert restore.finish().status_code == 200
+            assert poll.finish().status_code == 200
+        assert spawned == [144_390_000]
+
+
+def test_a_poll_or_tune_during_a_stuck_restore_is_refused_within_the_bound(tmp_path, monkeypatch):
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.3, raising=False)
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
+        before = (client.app.state.sweeper.low, client.app.state.sweeper.high)
+        with _slow_restore(client) as (held, restore):
+            poll = _Request(lambda: client.get("/api/aprs"))
+            poll.start()
+            answer = poll.finish()
+            assert answer.status_code == 503
+            assert answer.json()["reason"] == "tuning the radios for this lesson"
+            assert poll.took < 3.0
+            assert spawned == []
+
+            tune = _Request(lambda: client.post(
+                "/api/tune", json={"center": 433_920_000, "span": 2_000_000}))
+            tune.start()
+            refused = tune.finish()
+            assert refused.status_code == 409
+            assert refused.json() == {"tuned": False,
+                                      "reason": "tuning the radios for this lesson"}
+            assert tune.took < 3.0
+            assert (client.app.state.sweeper.low, client.app.state.sweeper.high) == before
+            held.release.set()
+            assert restore.finish().status_code == 200
+        assert client.get("/api/aprs").status_code == 200
+        assert spawned == [144_390_000]
 
 
 # --- the reception log --------------------------------------------------------------------------

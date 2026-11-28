@@ -1118,6 +1118,10 @@ def test_the_lesson_page_has_a_note_that_says_when_its_tuning_is_late_or_refused
     assert note, "the lesson page has no tuning note for lesson-tuning.js to fill"
     assert 'role="status"' in note.group(0)
     assert re.search(r"\shidden\b", note.group(0))
+    # Its two lines, the verdict and why, so neither is cut to fit the rail beside the other.
+    rest = html[note.end():]
+    assert re.match(r'\s*<span[^>]*data-lesson-tuning-head[^>]*></span>'
+                    r'\s*<span[^>]*data-lesson-tuning-why[^>]*></span>\s*</span>', rest)
 
 
 def test_the_rack_never_restores_a_lessons_tuning(tmp_path):
