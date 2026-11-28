@@ -278,7 +278,7 @@ def _counting_write_authorizer(counter: list[str]):
     return auth
 
 
-# --- §8 Test 1: v0 -> v1 migration on copies, preserves every value, second pass is no-op ------
+# --- §8 Test 1: v0 to current head on copies, preserves every value, second pass is no-op ----
 
 
 @pytest.mark.parametrize(
@@ -319,10 +319,11 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     assert re_["from_version"] == 0 and re_["to_version"] == EXAM_SCHEMA_VERSION
     assert re_["migrated"] is True
 
-    # Verify head=1, exact v1 schema, and every single seeded value preserved.
+    # Verify each store's head, exact schema, and every single seeded value preserved.
     conn_p = sqlite3.connect(dst_p)
     assert conn_p.execute("PRAGMA user_version").fetchone()[0] == PROGRESS_SCHEMA_VERSION
-    assert schema_signature(conn_p) == reviewed_signatures("progress")["v1"]
+    progress_signature = reviewed_signatures("progress")[f"v{PROGRESS_SCHEMA_VERSION}"]
+    assert schema_signature(conn_p) == progress_signature
     for table, rows in exp_p.items():
         actual = conn_p.execute(f'SELECT * FROM "{table}"').fetchall()
         assert actual == rows, (p_variant, table, actual, rows)
@@ -354,18 +355,19 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     exam.close()
     assert writes_e == [], f"managed ExamStore open/read wrote: {writes_e}"
 
-    # Re-migrating an already-v1 copy reports migrated=False and keeps exact bytes/rows.
+    # Re-migrating an up-to-date copy reports migrated=False and keeps exact bytes/rows.
     dst2_dir = tmp_path / "dst2"
     dst2_dir.mkdir()
     dst_p2 = dst2_dir / "progress.db"
     dst_e2 = dst2_dir / "exam.db"
     rp2 = migrate_store_copy(dst_p, dst_p2, store="progress", scratch_dir=scratch / "progress2")
     re2 = migrate_store_copy(dst_e, dst_e2, store="exam", scratch_dir=scratch / "exam2")
-    assert rp2["migrated"] is False and rp2["from_version"] == 1 and rp2["to_version"] == 1
+    assert rp2["migrated"] is False
+    assert rp2["from_version"] == rp2["to_version"] == PROGRESS_SCHEMA_VERSION
     assert re2["migrated"] is False and re2["from_version"] == 1 and re2["to_version"] == 1
 
 
-def test_missing_legacy_store_bootstraps_v1_only_when_explicitly_allowed(tmp_path):
+def test_missing_legacy_store_bootstraps_only_when_explicitly_allowed(tmp_path):
     missing = tmp_path / "absent.db"
     gen = tmp_path / "gen"
     gen.mkdir()
@@ -381,7 +383,7 @@ def test_missing_legacy_store_bootstraps_v1_only_when_explicitly_allowed(tmp_pat
         missing, dst, store="progress", allow_missing_source=True,
         scratch_dir=tmp_path / "scratch2",
     )
-    assert receipt["from_version"] == 0 and receipt["to_version"] == 1
+    assert receipt["from_version"] == 0 and receipt["to_version"] == PROGRESS_SCHEMA_VERSION
     assert not missing.exists()
     prog = Progress(dst, managed=True)
     assert prog.stamps() == []
@@ -506,11 +508,11 @@ def test_managed_open_does_not_create_or_migrate_stores(tmp_path, store, cls, re
         cls(stale, managed=True, read_only=read_only)
     assert stale.read_bytes() == before
 
-    # Migrated v1 DB opens cleanly in both managed writable and read-only trial modes;
+    # Migrated DB opens cleanly in both managed writable and read-only trial modes;
     # read-only trial mode rejects any write attempt.
     gen = tmp_path / "gen"
     gen.mkdir()
-    migrated = gen / f"v1_{store}.db"
+    migrated = gen / f"{store}.db"
     migrate_store_copy(stale, migrated, store=store, scratch_dir=tmp_path / "scratch")
     inst = cls(migrated, managed=True, read_only=read_only)
     try:
@@ -699,7 +701,7 @@ def test_managed_live_connections_use_extra_delete(tmp_path):
             ("progress", app.state.progress._conn, PROGRESS_SCHEMA_VERSION),
             ("exam", app.state.exam_store._conn, EXAM_SCHEMA_VERSION),
         ):
-            expected_sig = reviewed_signatures(name)["v1"]
+            expected_sig = reviewed_signatures(name)[f"v{expected_ver}"]
             verify_managed_connection(conn, expected_version=expected_ver,
                                       expected_signature=expected_sig)
             conn.execute("PRAGMA synchronous = FULL")
@@ -815,10 +817,10 @@ def test_wal_source_is_recovered_on_private_copy_without_mutating_source(tmp_pat
 
     gen = tmp_path / "gen"
     gen.mkdir()
-    dst = gen / "recovered_v1.db"
+    dst = gen / "recovered.db"
     receipt = migrate_store_copy(src, dst, store="progress", scratch_dir=tmp_path / "scratch_wal")
 
-    assert receipt["to_version"] == 1
+    assert receipt["to_version"] == PROGRESS_SCHEMA_VERSION
     assert src.read_bytes() == src_before
     assert wal_path.read_bytes() == wal_before
     # Migrated copy recovered lesson 9 from the WAL and is now standalone in DELETE mode.
@@ -917,10 +919,10 @@ def test_schema_signature_catches_five_constraint_mutations(
 
     # Guard must reject the mutated v0 schema (not in reviewed set).
     assert match_v0_signature("progress", sig) is None, mutation_name
-    assert sig != reviewed_signatures("progress")["v1"], mutation_name
+    assert sig != reviewed_signatures("progress")[f"v{PROGRESS_SCHEMA_VERSION}"], mutation_name
 
-    # Even if stamped user_version = 1, managed open must refuse the mutated store.
-    conn.execute("PRAGMA user_version = 1")
+    # Even if stamped with the current user_version, managed open must refuse the mutated store.
+    conn.execute(f"PRAGMA user_version = {PROGRESS_SCHEMA_VERSION}")
     conn.commit()
     conn.close()
     with pytest.raises(SchemaError, match="signature"):
@@ -966,7 +968,7 @@ def test_read_only_hot_journal_source_migrates_without_touching_source(tmp_path)
         receipt = migrate_store_copy(
             src, dst, store="progress", scratch_dir=tmp_path / "staging" / "ro_hot"
         )
-        assert receipt["to_version"] == 1
+        assert receipt["to_version"] == PROGRESS_SCHEMA_VERSION
         assert src.read_bytes() == src_before
         assert journal.read_bytes() == journal_before
         assert (src.stat().st_mode & 0o777) == 0o444
@@ -1017,7 +1019,7 @@ def test_recovery_scratch_lives_outside_generation_and_is_not_recursively_remove
     monkeypatch.setattr(shutil, "rmtree", forbid_rmtree)
     scratch = tmp_path / "staging" / "op1" / "sqlite" / "progress"
     receipt = migrate_store_copy(src, dst, store="progress", scratch_dir=scratch)
-    assert receipt["to_version"] == 1
+    assert receipt["to_version"] == PROGRESS_SCHEMA_VERSION
     assert [p.name for p in gen.iterdir()] == ["progress.db"]
     assert (scratch / src.name).is_file()
 
@@ -1234,7 +1236,7 @@ def test_managed_open_refuses_wal_without_touching_disk_bytes(tmp_path):
             open_managed_sqlite(
                 snap,
                 expected_version=PROGRESS_SCHEMA_VERSION,
-                expected_signature=reviewed_signatures("progress")["v1"],
+                expected_signature=reviewed_signatures("progress")[f"v{PROGRESS_SCHEMA_VERSION}"],
                 read_only=read_only,
             )
         assert snap.read_bytes() == before_db

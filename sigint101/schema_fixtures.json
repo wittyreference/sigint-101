@@ -2096,6 +2096,29 @@
       },
       "triggers": [],
       "views": []
+    },
+    "v2_added_tables": {
+      "replays_seen": {
+        "columns": [
+          [0, "instrument", "TEXT", 0, null, 1, 0],
+          [1, "first_ts", "REAL", 1, null, 0, 0],
+          [2, "count", "INTEGER", 1, null, 0, 0],
+          [3, "recording", "TEXT", 1, null, 0, 0],
+          [4, "digest", "TEXT", 1, null, 0, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": [
+          {
+            "cols": [[0, 0, "instrument", 0, "BINARY", 1], [1, -1, null, 0, "BINARY", 0]],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        ],
+        "sql": "create table replays_seen (instrument text primary key, first_ts real not null, count integer not null, recording text not null, digest text not null)",
+        "without_rowid": false
+      }
     }
   }
 }
