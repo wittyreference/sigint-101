@@ -7,6 +7,13 @@ import time
 
 from render_scroll import connect, fence, leave_page
 
+RENDER_CHECK = {
+    "name": "meteor",
+    "pages": ("/operate/meteor",),
+    "scratch": False,
+    "order": 130,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 
 # 4x4 synthetic PNG (pure in-page data URI; never touches /media or any console API).

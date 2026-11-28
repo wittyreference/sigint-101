@@ -1,5 +1,6 @@
 # ABOUTME: Runs the layout checks against a scratch SIGINT 101 console it starts, or RENDER_URL.
 # ABOUTME: Pages load through a render proxy that refuses the API and writes; all of it stops whole.
+
 import os
 import shutil
 import signal
@@ -21,9 +22,12 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 sys.path.insert(1, str(REPO))
 
+from check_specs import discover_checks  # noqa: E402
 from render_scroll import connect, leave_page  # noqa: E402
 
 from sigint101.childproc import _die_with_parent  # noqa: E402
+
+RENDER_CHECK = None
 
 # The scratch console: the real app with its own data folder and no radio (render_console.py),
 # on a loopback socket bound here. Nothing of the kiosk's console (make run, port 8008) is
@@ -315,50 +319,29 @@ def headless_chromium(chromium, profile, alive=None, held=None):
             _hold_until_gone(browser, entry, alive)
 
 
-def check_list(console, output):
-    """The checks make render-check runs, in order: (script, *its arguments).
-
-    The one list: run_checks runs it, and the tests read it, so a check added here is one the
-    route coverage test also starts and measures.
-    """
-    # Home scroll can be checked on a fresh console. The exam review URL always has a diagram.
-    # M39 (the Wi-Fi survey) opens on its predict, which fits 800x480 by 3 px; its later stages
-    # are sealed on a fresh console, and render_survey.py measures them.
-    return (
-        ("render_fit.py", f"{console}/lesson/29", str(output / "predict.png")),
-        ("render_fit.py", f"{console}/lesson/39", str(output / "survey-predict.png"), "predict"),
-        ("render_scroll.py", f"{console}/", "home"),
-        ("render_figure.py", f"{console}/exam/review/T6C02", "dark", str(output / "figure")),
-        ("render_logbook.py", console),
-        ("render_lora.py", console),
-        ("render_card_sort.py", console),
-        ("render_survey.py", console),
-        ("render_recall.py", console),
-        ("render_live_find.py", console),
-        ("render_field.py", console),
-        ("render_bandmap.py", console),
-        ("render_closing.py", console),
-        ("render_meteor.py", console),
-    )
-
-
-def run_checks(console, port, output):
-    checks = check_list(console, output)
+def run_checks(console, port, output, checks):
     no_proxy = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))
     no_proxy = f"{no_proxy},127.0.0.1" if no_proxy else "127.0.0.1"
     env = dict(os.environ, CDP_PORT=port, no_proxy=no_proxy, NO_PROXY=no_proxy)
-    env[FENCE_ENV] = _origin(console)   # the checks load pages through this proxy only
+    env.pop("RENDER_URL", None)
+    env.pop(FENCE_ENV, None)
+    fenced_env = dict(env, **{FENCE_ENV: _origin(console)})
     status = 0
-    for script, *args in checks:
-        command = [sys.executable, str(Path(__file__).with_name(script)), *args]
-        try:
-            result = subprocess.run(command, env=env, timeout=60)
-        except subprocess.TimeoutExpired:
-            print(f"{script} timed out. Check the console and Chromium DevTools.", file=sys.stderr)
-            return status or 1
-        if result.returncode:
-            print(f"{script} exited with status {result.returncode}", file=sys.stderr)
-            status = status or result.returncode
+    for check in checks:
+        script = check.path.name
+        # Scratch checks create their own console and fence its browser pages themselves.
+        check_env = env if check.scratch else fenced_env
+        for args in check.invocations(console, output):
+            command = [sys.executable, str(check.path), *args]
+            try:
+                result = subprocess.run(command, env=check_env, timeout=60)
+            except subprocess.TimeoutExpired:
+                print(f"{script} timed out. Check the console and Chromium DevTools.",
+                      file=sys.stderr)
+                return status or 1
+            if result.returncode:
+                print(f"{script} exited with status {result.returncode}", file=sys.stderr)
+                status = status or result.returncode
     return status
 
 
@@ -403,6 +386,11 @@ def _close_all(sockets):
 
 
 def main():
+    try:
+        # Use the invoked directory for checks, even if the runner itself is linked.
+        checks = discover_checks(Path(__file__).parent)
+    except ValueError as error:
+        sys.exit(f"render-check: {error}")
     for sig in STOP_SIGNALS:
         signal.signal(sig, _stop_on_signal)
     # This process talks to DevTools on loopback too (api_block), never through a proxy.
@@ -438,7 +426,7 @@ def main():
             port = running.enter_context(
                 headless_chromium(chromium, output / "profile", alive, held))
             running.enter_context(api_block(port, problems, held))
-            status = run_checks(fenced, port, output)
+            status = run_checks(fenced, port, output, checks)
     finally:
         for problem in problems + alive:
             print(f"render-check: {problem}.", file=sys.stderr)

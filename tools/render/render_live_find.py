@@ -7,6 +7,14 @@ import time
 
 from render_scroll import connect, fence, leave_page
 
+RENDER_CHECK = {
+    "name": "live-find",
+    "pages": ("/unit/4", "/unit/5", "/unit/4/challenge", "/unit/5/challenge",
+              "/operate/ism?back=/unit/4/challenge"),
+    "scratch": False,
+    "order": 90,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 STATES = ("idle", "active", "passed", "expired")
 

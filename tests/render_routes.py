@@ -1,13 +1,9 @@
-# ABOUTME: The pages the render checks load on the console they measure, as path and query.
-# ABOUTME: The GET guard walks them (test_app.py); test_render_checks.py proves the list is whole.
+# ABOUTME: The GET walk derived from the render tools' source declarations.
+# ABOUTME: test_render_checks.py compares real navigations with that same set of tools and pages.
+from pathlib import Path
 
-# Kept whole by test_every_page_the_real_checks_load_is_walked, which runs the real checks under
-# the runner and reads back every page they navigate to. Recall's own scratch console pages
-# are listed too (/lesson/1, /lesson/1?recall=card&card=2), although it never loads them from
-# the measured console.
-RENDER_CHECK_PAGES = ("/lesson/29", "/", "/exam/review/T6C02", "/operate/ism", "/logbook",
-                      "/operate/lora", "/lesson/5", "/law?back=/lesson/5", "/lesson/39",
-                      "/lesson/1", "/lesson/1?recall=card&card=2", "/unit/4", "/unit/5",
-                      "/unit/4/challenge", "/unit/5/challenge",
-                      "/operate/ism?back=/unit/4/challenge", "/operate/waterfall",
-                      "/operate/meteor", "/field", "/bands", "/lesson/40")
+from tools.render.check_specs import discover_checks
+
+RENDER_DIR = Path(__file__).resolve().parents[1] / "tools" / "render"
+CHECKS = discover_checks(RENDER_DIR)
+RENDER_CHECK_PAGES = tuple(dict.fromkeys(page for check in CHECKS for page in check.pages))

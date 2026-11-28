@@ -7,6 +7,13 @@ import time
 
 from render_scroll import connect, fence, leave_page
 
+RENDER_CHECK = {
+    "name": "field",
+    "pages": ("/operate/ism", "/operate/waterfall", "/field"),
+    "scratch": False,
+    "order": 100,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 
 # Longest real command shape (SSTV + satdump/multimon hyphenated flags), injected only in the
