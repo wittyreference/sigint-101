@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -700,3 +701,391 @@ def test_app_second_live_kind_shares_heard_backfill_clock_gate_and_isolates_erro
     assert "replay" not in slotted_passes[0]["payload"]
     assert "source" not in slotted_passes[0]["payload"]
     assert json.loads(json.dumps(slotted_passes[0]))["payload"]["hunt_id"] == "hunt-1"
+
+
+def test_f1_malformed_list_kind_in_journal_is_skipped_during_backfill(tmp_path):
+    """F1: a list-valued event kind in events.jsonl is skipped rather than aborting backfill."""
+    prog = Progress(tmp_path / "progress.db")
+    try:
+        assert prog.start_challenge(4, 1000.0, 900) is True
+    finally:
+        prog.close()
+
+    journal = tmp_path / "events.jsonl"
+    lines = [
+        json.dumps({
+            "ts": 1000.0,
+            "kind": "challenge_start",
+            "payload": {"unit": 4, "started_at": 1000.0, "window_s": 900},
+        }),
+        json.dumps({
+            "ts": 1005.0,
+            "kind": ["malformed", "list"],
+            "payload": {},
+        }),
+        json.dumps({
+            "ts": 1010.0,
+            "kind": "reception",
+            "event_id": "ev-f1-1",
+            "payload": {
+                "instrument": "ism",
+                "tool": "rtl_433",
+                "freq_hz": 433_920_000,
+                "command": "rtl_433 -d 0",
+                "radio": {"kind": "rtl-sdr", "index": 0, "serial": None},
+                "item": {"model": "Test"},
+            },
+        }),
+    ]
+    journal.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    app = app_mod.create_app(data_dir=tmp_path, clock=lambda: 1020.0)
+    with TestClient(app) as client:
+        body = client.get("/api/challenges/4").json()
+        assert body["state"] == "passed"
+        assert body["passes"] == 1
+
+
+def test_f2_queued_or_superseded_pass_cannot_credit_missing_or_failed_start(
+    tmp_path, monkeypatch
+):
+    """F2: pass write verifies the matching attempt still exists in the same transaction."""
+    now = [2000.0]
+    _patch_log_clock(monkeypatch, now)
+    bench = _bench_kind()
+
+    prog_init = Progress(tmp_path / "progress.db")
+    prog_init.close()
+    _create_bench_tables(tmp_path / "progress.db")
+
+    app = app_mod.create_app(data_dir=tmp_path, clock=lambda: now[0])
+    app.state.register_attempt_kind(bench)
+
+    with TestClient(app):
+        entered = threading.Event()
+        release = threading.Event()
+        start_result: dict = {}
+        pass_result: dict = {}
+
+        def paused_failing_launch():
+            entered.set()
+            release.wait(timeout=5.0)
+            raise RuntimeError("replay stream aborted")
+
+        def run_start():
+            start_result["out"] = app.state.start_attempt(
+                bench,
+                "b-race",
+                600,
+                extra={"recording": "race.sigmf", "digest": "d-race"},
+                launch=paused_failing_launch,
+            )
+
+        def run_pass():
+            pass_result["out"] = app.state.record_attempt_pass(
+                bench,
+                "b-race",
+                2000.0,
+                None,
+                {
+                    "passed_at": 2005.0,
+                    "recording": "race.sigmf",
+                    "digest": "d-race",
+                    "answer": "fm_broadcast",
+                },
+            )
+
+        t_start = threading.Thread(target=run_start)
+        t_start.start()
+        assert entered.wait(timeout=5.0)
+
+        t_pass = threading.Thread(target=run_pass)
+        t_pass.start()
+        t_pass.join(timeout=0.2)
+        release.set()
+        t_start.join(timeout=5.0)
+        t_pass.join(timeout=5.0)
+
+        assert start_result["out"][1] is not None
+        assert pass_result["out"] == (False, None)
+        saved = app.state.progress.attempt(bench, "b-race")
+        assert saved["attempt"] is None
+        assert saved["passes"] == 0
+
+        # Superseded Start: submitting a pass for an older started_at must be rejected.
+        now[0] = 3000.0
+        _, err1 = app.state.start_attempt(
+            bench, "b-sup", 600, extra={"recording": "r1.sigmf", "digest": "d1"}
+        )
+        assert err1 is None
+        now[0] = 3100.0
+        _, err2 = app.state.start_attempt(
+            bench, "b-sup", 600, extra={"recording": "r2.sigmf", "digest": "d2"}
+        )
+        assert err2 is None
+
+        stale_ins, stale_err = app.state.record_attempt_pass(
+            bench,
+            "b-sup",
+            3000.0,
+            None,
+            {"passed_at": 3110.0, "recording": "r1.sigmf", "digest": "d1", "answer": "a"},
+        )
+        assert (stale_ins, stale_err) == (False, None)
+        assert app.state.progress.attempt(bench, "b-sup")["passes"] == 0
+
+        # Matching current Start succeeds once (insert-once preserved).
+        ok_ins, ok_err = app.state.record_attempt_pass(
+            bench,
+            "b-sup",
+            3100.0,
+            None,
+            {"passed_at": 3120.0, "recording": "r2.sigmf", "digest": "d2", "answer": "b"},
+        )
+        dup_ins, dup_err = app.state.record_attempt_pass(
+            bench,
+            "b-sup",
+            3100.0,
+            None,
+            {"passed_at": 3125.0, "recording": "r2.sigmf", "digest": "d2", "answer": "c"},
+        )
+        assert (ok_ins, ok_err) == (True, None)
+        assert (dup_ins, dup_err) == (False, None)
+        assert app.state.progress.attempt(bench, "b-sup")["passes"] == 1
+
+    evts = events.read_events(tmp_path / "events.jsonl")
+    assert [e for e in evts if e.get("payload", {}).get("bench_id") == "b-race"] == []
+    sup_passes = [
+        e for e in evts
+        if e.get("kind") == "test_bench_pass" and e.get("payload", {}).get("bench_id") == "b-sup"
+    ]
+    assert len(sup_passes) == 1 and sup_passes[0]["payload"]["started_at"] == 3100.0
+
+
+def test_f3_failed_launch_with_broken_restore_never_leaves_start_eligible(
+    tmp_path, monkeypatch
+):
+    """F3: a failed Start stays ineligible (even if restore fails) both live and after restart."""
+    now = [1000.0]
+    _patch_log_clock(monkeypatch, now)
+    slotted = _slotted_live_kind()
+
+    def slotted_qualifies(attempt, stamp):
+        if stamp.get("instrument") == "lora" and challenges.in_window(attempt, stamp):
+            return 0
+        return None
+
+    prog_init = Progress(tmp_path / "progress.db")
+    prog_init.close()
+    _create_slotted_tables(tmp_path / "progress.db")
+
+    app = app_mod.create_app(data_dir=tmp_path, clock=lambda: now[0])
+    app.state.register_attempt_kind(slotted, qualifies=slotted_qualifies)
+
+    def boom():
+        raise RuntimeError("hardware launch failed")
+
+    with TestClient(app):
+        # Case 1: launch fails while restore_attempt also raises sqlite3.OperationalError.
+        real_restore = app.state.progress.restore_attempt
+
+        def broken_restore(*_args, **_kwargs):
+            raise sqlite3.OperationalError("restore failed")
+
+        monkeypatch.setattr(app.state.progress, "restore_attempt", broken_restore)
+        _, err = app.state.start_attempt(slotted, "hunt-fail", 900, launch=boom)
+        assert err is not None and "hardware launch failed" in err
+        assert app.state.progress.attempt(slotted, "hunt-fail")["attempt"] is None
+
+        # A subsequent qualifying live reception must NOT credit the failed Start.
+        now[0] = 1015.0
+        app.state.lora.on_reception(_lora_item(from_id="!f3-bad"))
+        assert app.state.progress.attempt(slotted, "hunt-fail")["passes"] == 0
+
+        # Case 2: normal restore path preserves an earlier Start when a restart launch fails.
+        monkeypatch.setattr(app.state.progress, "restore_attempt", real_restore)
+        now[0] = 1100.0
+        _, ok_err = app.state.start_attempt(slotted, "hunt-prev", 900)
+        assert ok_err is None
+        now[0] = 1200.0
+        _, fail_err = app.state.start_attempt(slotted, "hunt-prev", 900, launch=boom)
+        assert fail_err is not None
+        assert app.state.progress.attempt(slotted, "hunt-prev")["attempt"]["started_at"] == 1100.0
+
+    # Reopen from disk (restart): rejected Start stays ineligible across backfill too.
+    app2 = app_mod.create_app(data_dir=tmp_path, clock=lambda: now[0])
+    app2.state.register_attempt_kind(slotted, qualifies=slotted_qualifies)
+    with TestClient(app2):
+        assert app2.state.progress.attempt(slotted, "hunt-fail")["attempt"] is None
+        assert app2.state.progress.attempt(slotted, "hunt-fail")["passes"] == 0
+        assert app2.state.progress.attempt(slotted, "hunt-prev")["attempt"]["started_at"] == 1100.0
+
+
+def test_f4_explicit_record_attempt_pass_rejects_live_reception_kind(tmp_path):
+    """F4: _record_attempt_pass accepts only replay_answer kinds, never live_reception."""
+    app = app_mod.create_app(data_dir=tmp_path, clock=lambda: 1000.0)
+    with TestClient(app) as client:
+        assert client.post("/api/challenges/4/start").status_code == 200
+        started_at = client.get("/api/challenges/4").json()["started_at"]
+
+        with pytest.raises(ValueError, match="replay_answer"):
+            app.state.record_attempt_pass(
+                challenges.CHALLENGE_KIND,
+                4,
+                started_at,
+                None,
+                {
+                    "passed_at": 1010.0,
+                    "instrument": "ism",
+                    "provenance": {},
+                    "digest": "fabricated",
+                },
+            )
+
+        body = client.get("/api/challenges/4").json()
+        assert body["state"] == "active"
+        assert body["passes"] == 0
+
+    evts = events.read_events(tmp_path / "events.jsonl")
+    assert [e for e in evts if e.get("kind") == "challenge_pass"] == []
+
+
+def test_f5_reserved_replay_and_source_flags_win_over_descriptor_columns_key_and_slot(
+    tmp_path, monkeypatch
+):
+    """F5: replay and source flags are reserved across columns, key, slot, and event_fields."""
+    now = [4000.0]
+    _patch_log_clock(monkeypatch, now)
+
+    live_cols = challenges.AttemptKind(
+        kind="live_flag_cols",
+        attempts_table="test_live_flag_attempts",
+        passes_table="test_live_flag_passes",
+        key_column="item_id",
+        slot_column=None,
+        start_event="live_flag_start",
+        pass_event="live_flag_pass",
+        credit="live_reception",
+        attempt_columns=("replay", "source"),
+        pass_columns=("passed_at", "instrument", "provenance", "digest"),
+    )
+    live_key_slot = challenges.AttemptKind(
+        kind="live_flag_ks",
+        attempts_table="test_live_ks_attempts",
+        passes_table="test_live_ks_passes",
+        key_column="replay",
+        slot_column="source",
+        start_event="live_ks_start",
+        pass_event="live_ks_pass",
+        credit="live_reception",
+    )
+    replay_cols = challenges.AttemptKind(
+        kind="replay_flag_cols",
+        attempts_table="test_replay_flag_attempts",
+        passes_table="test_replay_flag_passes",
+        key_column="source",
+        slot_column="replay",
+        start_event="replay_flag_start",
+        pass_event="replay_flag_pass",
+        credit="replay_answer",
+        attempt_columns=("note",),
+        pass_columns=("passed_at", "answer"),
+    )
+
+    prog_init = Progress(tmp_path / "progress.db")
+    prog_init.close()
+    conn = sqlite3.connect(tmp_path / "progress.db")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE test_live_flag_attempts (
+                item_id TEXT PRIMARY KEY, started_at REAL NOT NULL, window_s INTEGER NOT NULL,
+                replay INTEGER NOT NULL, source TEXT NOT NULL
+            );
+            CREATE TABLE test_live_flag_passes (
+                item_id TEXT NOT NULL, started_at REAL NOT NULL, passed_at REAL NOT NULL,
+                instrument TEXT NOT NULL, provenance TEXT NOT NULL, digest TEXT NOT NULL,
+                PRIMARY KEY (item_id, started_at)
+            );
+            CREATE TABLE test_live_ks_attempts (
+                replay TEXT PRIMARY KEY, started_at REAL NOT NULL, window_s INTEGER NOT NULL
+            );
+            CREATE TABLE test_live_ks_passes (
+                replay TEXT NOT NULL, started_at REAL NOT NULL, source INTEGER NOT NULL,
+                passed_at REAL NOT NULL, instrument TEXT NOT NULL, provenance TEXT NOT NULL,
+                digest TEXT NOT NULL, PRIMARY KEY (replay, started_at, source)
+            );
+            CREATE TABLE test_replay_flag_attempts (
+                source TEXT PRIMARY KEY, started_at REAL NOT NULL, window_s INTEGER NOT NULL,
+                note TEXT NOT NULL
+            );
+            CREATE TABLE test_replay_flag_passes (
+                source TEXT NOT NULL, started_at REAL NOT NULL, replay INTEGER NOT NULL,
+                passed_at REAL NOT NULL, answer TEXT NOT NULL,
+                PRIMARY KEY (source, started_at, replay)
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    app = app_mod.create_app(data_dir=tmp_path, clock=lambda: now[0])
+    app.state.register_attempt_kind(
+        live_cols, qualifies=lambda a, s: s.get("instrument") == "lora"
+    )
+    app.state.register_attempt_kind(
+        live_key_slot, qualifies=lambda a, s: 0 if s.get("instrument") == "lora" else None
+    )
+    app.state.register_attempt_kind(replay_cols)
+
+    with TestClient(app):
+        _, err1 = app.state.start_attempt(
+            live_cols,
+            "x1",
+            600,
+            extra={"replay": True, "source": "replay"},
+            event_fields={"replay": True, "source": "replay"},
+        )
+        assert err1 is None
+        _, err2 = app.state.start_attempt(
+            live_key_slot,
+            "spoof-live",
+            600,
+            event_fields={"replay": True, "source": "replay"},
+        )
+        assert err2 is None
+
+        now[0] = 4010.0
+        app.state.lora.on_reception(_lora_item(from_id="!f5-live"))
+
+        _, err3 = app.state.start_attempt(
+            replay_cols,
+            "live",
+            600,
+            extra={"note": "ok"},
+            event_fields={"replay": False, "source": "live"},
+        )
+        assert err3 is None
+        ins, perr = app.state.record_attempt_pass(
+            replay_cols,
+            "live",
+            4010.0,
+            0,
+            {"passed_at": 4020.0, "answer": "fm"},
+            event_fields={"replay": False, "source": "live"},
+        )
+        assert (ins, perr) == (True, None)
+
+    evts = events.read_events(tmp_path / "events.jsonl")
+    for kind_name in ("live_flag_start", "live_flag_pass", "live_ks_start", "live_ks_pass"):
+        matched = [e for e in evts if e.get("kind") == kind_name]
+        assert len(matched) == 1, kind_name
+        assert "replay" not in matched[0]["payload"], (kind_name, matched[0]["payload"])
+        assert "source" not in matched[0]["payload"], (kind_name, matched[0]["payload"])
+
+    for kind_name in ("replay_flag_start", "replay_flag_pass"):
+        matched = [e for e in evts if e.get("kind") == kind_name]
+        assert len(matched) == 1, kind_name
+        assert matched[0]["payload"]["replay"] is True, (kind_name, matched[0]["payload"])
+        assert matched[0]["payload"]["source"] == "replay", (kind_name, matched[0]["payload"])
