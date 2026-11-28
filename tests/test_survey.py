@@ -529,6 +529,32 @@ def test_api_survey_reports_missing_nmcli_as_missing_tool(tmp_path):
     assert "nmcli is not installed" in body["reason"]
 
 
+# A remedy a learner could paste or run: a package manager, an install verb, a script, sudo.
+_INSTALL_COMMAND = re.compile(
+    r"\b(?:sudo|apt(?:-get)?|dpkg|install(?:s|ing)?|enable|systemctl|raspi-config)\b"
+    r"|\S+\.sh\b|^Run\b",
+    re.I,
+)
+
+
+def test_missing_nmcli_remedy_names_networkmanager_and_gives_no_install_command(tmp_path):
+    # F8: nmcli ships with NetworkManager, so it is missing only where NetworkManager does not run
+    # the box's network (dhcpcd or ifupdown). Installing it there takes over every interface not
+    # in /etc/network/interfaces, and a learner on Wi-Fi SSH could lose the link. provision.sh
+    # does not install it either. So the remedy says why and leaves the switch to the bench.
+    scanner = WifiSurvey(
+        spawn=lambda argv: pytest.fail("must not spawn when nmcli missing"),
+        which=lambda name: None,
+        radio_present=lambda: True,
+    )
+    with _client(tmp_path, survey_factory=lambda: scanner) as client:
+        body = client.get("/api/survey").json()
+    step = body["next_step"]
+    assert body["cause"] == "missing_tool"
+    assert "NetworkManager" in step, step
+    assert not _INSTALL_COMMAND.search(step), step
+
+
 # --- Lesson loader + panel template + Lesson 39 consolidation pack -----------------------------
 
 
@@ -660,6 +686,13 @@ _FALSE_BEACON_HOLDING = re.compile(
     r"(?:wi-?fi\s+)?(?:beacons?|metadata|headers?)\b[^.?!;]*\b(?:lawful|legal)\b",
     re.I,
 )
+# F7: Wi-Fi payload IS carried by radio; Joffe's point is the statute's term "radio communication"
+# (18 USC 2510(16)). A bare "not radio" is false as physics; a quoted "radio" or the full term
+# is not.
+_BARE_NOT_RADIO = re.compile(
+    r"\b(?:not|isn['’]t|aren['’]t|never)\s+(?:an?\s+)?radio\b(?!\s*-|\s+communications?\b)",
+    re.I,
+)
 
 
 def _check_joffe_explain(explain: str) -> list[str]:
@@ -703,7 +736,93 @@ def _check_joffe_overstatements(all_text: str) -> list[str]:
         issues.append("presents one circuit's ruling as nationwide settled federal law")
     if _FALSE_BEACON_HOLDING.search(all_text):
         issues.append("claims Joffe held beacon metadata lawful")
+    if _BARE_NOT_RADIO.search(all_text):
+        issues.append("says payload is not radio (false as physics); name the statute's term")
     return issues
+
+
+def test_payload_radio_guard_rejects_bare_not_radio_and_accepts_the_statutory_term():
+    # F7: restatements of the defect must fail.
+    for defect in (
+        "Payload is not radio; scan metadata",
+        "Open Wi-Fi payload isn't radio, so a survey may read it.",
+        "Wi-Fi data is not a radio signal under Joffe.",
+        "Payload: not radio. This panel reads metadata.",
+    ):
+        assert _check_joffe_overstatements(defect), defect
+    # Fair wordings that mark or name the statute's term must pass.
+    for fair in (
+        'Not "radio communication"; metadata only',
+        'Payload is not "radio"; scan metadata',
+        "Payload is not a radio communication under 18 USC 2510(16); this panel stops at metadata.",
+        'Wi-Fi payload rides on radio waves, but it is not a "radio communication" (9th Cir.).',
+    ):
+        assert _check_joffe_overstatements(fair) == [], fair
+
+
+def _unquoted_radio_chips(labels) -> list[str]:
+    """Chips that use "radio" outside quote marks."""
+    return [label for label in labels
+            if re.search(r"\bradio\b", re.sub(r"\"[^\"]*\"|“[^”]*”", "", label), re.I)]
+
+
+def test_m39_chips_that_use_the_statutory_term_all_quote_it():
+    # Quote marks on the statute's term must not single out the scored chip: every chip that says
+    # "radio" quotes it, the distractors as much as the answer, and so does the predict's question.
+    lesson = load_lesson_file(PACK_M39)
+    labels = [c["label"] for c in lesson.choices]
+    assert _unquoted_radio_chips([*labels, lesson.stages["predict"]]) == []
+
+
+_NOT_RADIO_COMMUNICATION = re.compile(r"\bnot\b[^;.]*radio\s+communication", re.I)
+# The scored chip scopes the panel to metadata; it must not say reading metadata is lawful,
+# which Joffe never decided.
+_LAWFUL_CLAIM = re.compile(
+    r"\b(?:lawful|legal(?:ly)?|allowed|permitted|permissible|authori[sz]ed|fair\s+game|ok(?:ay)?)\b",
+    re.I,
+)
+
+
+def _scored_chip_issues(choices, answer) -> list[str]:
+    """What is wrong with how a lesson-39 choice set scores the Joffe question."""
+    labels = {c["key"]: c["label"] for c in choices}
+    issues = []
+    if len(answer) != 1 or answer[0] not in labels:
+        return [f"expected one scored key among the chips, got {list(answer)}"]
+    scored = labels[answer[0]]
+    if not (_NOT_RADIO_COMMUNICATION.search(scored) and re.search(r"\bmetadata\b", scored, re.I)):
+        issues.append(f"scored chip is not the payload-is-not-radio-communication one: {scored}")
+    if _LAWFUL_CLAIM.search(scored):
+        issues.append(f"scored chip claims lawfulness: {scored}")
+    for key, label in labels.items():
+        if key != answer[0] and _NOT_RADIO_COMMUNICATION.search(label):
+            issues.append(f"a distractor carries the holding: {label}")
+    return issues
+
+
+def test_m39_scores_the_chip_that_puts_payload_outside_radio_communication():
+    lesson = load_lesson_file(PACK_M39)
+    assert _scored_chip_issues(lesson.choices, lesson.answer) == []
+
+
+def test_scored_chip_guard_rejects_a_flipped_answer_and_a_lawfulness_claim():
+    lesson = load_lesson_file(PACK_M39)
+    keys = [c["key"] for c in lesson.choices]
+    for other in keys:
+        if other not in lesson.answer:
+            assert _scored_chip_issues(lesson.choices, (other,)), other
+    for claim in ('Not "radio communication"; metadata is lawful',
+                  'Not "radio communication"; metadata is legal',
+                  'Not "radio communication"; metadata is fair game',
+                  'Not "radio communication"; metadata allowed'):
+        choices = [dict(c, label=claim) if c["key"] in lesson.answer else c
+                   for c in lesson.choices]
+        assert _scored_chip_issues(choices, lesson.answer), claim
+    for fair in ('Not "radio communication"; panel reads metadata',
+                 'Payload is not a "radio communication"; metadata only'):
+        choices = [dict(c, label=fair) if c["key"] in lesson.answer else c
+                   for c in lesson.choices]
+        assert _scored_chip_issues(choices, lesson.answer) == [], fair
 
 
 def test_joffe_claim_probe_rejects_round1_overstatements_and_accepts_accurate_rewordings():
@@ -782,7 +901,8 @@ def test_m39_legal_text_matches_amended_joffe_opinion_and_cites_primary_sources(
     assert any("cdn.ca9.uscourts.gov" in u and "11-17483_opinion122713.pdf" in u for u in urls), (
         urls
     )
-    assert any("law.cornell.edu" in u and "/18/2510" in u for u in urls), urls
+    # 2510(16) is cited from the official U.S. Code (govinfo or the House's uscode site).
+    assert any(("govinfo.gov" in u or "uscode.house.gov" in u) and "2510" in u for u in urls), urls
     assert any("law.cornell.edu" in u and "/18/2511" in u for u in urls), urls
     assert any("2511(1)(a)" in t for t in titles), titles
     assert any("supremecourt.gov" in u and "13-1181" in u for u in urls), urls
