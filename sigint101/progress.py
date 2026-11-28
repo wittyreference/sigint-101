@@ -105,6 +105,25 @@ CREATE TABLE IF NOT EXISTS retrieval (
 );
 """
 
+# Tier B live-find attempts and permanent pass history: additive tables so existing databases
+# gain them on open without touching any existing table or gating any lesson (D16).
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS challenges (
+    unit_id    INTEGER PRIMARY KEY,
+    started_at REAL NOT NULL,
+    window_s   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS challenge_passes (
+    unit_id    INTEGER NOT NULL,
+    started_at REAL NOT NULL,
+    passed_at  REAL NOT NULL,
+    instrument TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    digest     TEXT NOT NULL,
+    PRIMARY KEY (unit_id, started_at)
+);
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
@@ -435,6 +454,131 @@ class Progress:
                 "SELECT instrument, first_ts, count, provenance, digest FROM stamps"
             ).fetchall()
         return [{**dict(row), "provenance": json.loads(row["provenance"])} for row in rows]
+
+    def start_challenge(self, unit_id: int, started_at: float, window_s: int) -> bool:
+        """Upsert a unit's current live-find attempt without altering earned passes."""
+        with self._lock:
+            if self._closed:
+                return False
+            self._conn.execute(
+                "INSERT INTO challenges(unit_id, started_at, window_s) VALUES(?, ?, ?) "
+                "ON CONFLICT(unit_id) DO UPDATE SET "
+                "started_at=excluded.started_at, window_s=excluded.window_s",
+                (unit_id, started_at, window_s),
+            )
+            self._conn.commit()
+            return True
+
+    def restore_challenge(self, unit_id: int, previous: dict | None) -> bool:
+        """Restore a unit's previous live-find attempt, or remove it if none existed."""
+        with self._lock:
+            if self._closed:
+                return False
+            if previous is None:
+                self._conn.execute("DELETE FROM challenges WHERE unit_id=?", (unit_id,))
+            else:
+                self._conn.execute(
+                    "INSERT INTO challenges(unit_id, started_at, window_s) VALUES(?, ?, ?) "
+                    "ON CONFLICT(unit_id) DO UPDATE SET "
+                    "started_at=excluded.started_at, window_s=excluded.window_s",
+                    (unit_id, previous["started_at"], previous["window_s"]),
+                )
+            self._conn.commit()
+            return True
+
+    def challenge(self, unit_id: int) -> dict:
+        """Return a unit's current attempt, its own pass, newest pass overall, and pass count."""
+        with self._lock:
+            if self._closed:
+                return {"attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0}
+            attempt_row = self._conn.execute(
+                "SELECT unit_id, started_at, window_s FROM challenges WHERE unit_id=?",
+                (unit_id,),
+            ).fetchone()
+            attempt_pass_row = None
+            if attempt_row is not None:
+                attempt_pass_row = self._conn.execute(
+                    "SELECT unit_id, started_at, passed_at, instrument, provenance, digest "
+                    "FROM challenge_passes WHERE unit_id=? AND started_at=?",
+                    (unit_id, attempt_row["started_at"]),
+                ).fetchone()
+            pass_row = self._conn.execute(
+                "SELECT unit_id, started_at, passed_at, instrument, provenance, digest "
+                "FROM challenge_passes WHERE unit_id=? "
+                "ORDER BY passed_at DESC, started_at DESC LIMIT 1",
+                (unit_id,),
+            ).fetchone()
+            count = self._conn.execute(
+                "SELECT COUNT(*) FROM challenge_passes WHERE unit_id=?",
+                (unit_id,),
+            ).fetchone()[0]
+        attempt_pass = (
+            {**dict(attempt_pass_row), "provenance": json.loads(attempt_pass_row["provenance"])}
+            if attempt_pass_row else None
+        )
+        latest = (
+            {**dict(pass_row), "provenance": json.loads(pass_row["provenance"])}
+            if pass_row else None
+        )
+        return {
+            "attempt": dict(attempt_row) if attempt_row else None,
+            "attempt_pass": attempt_pass,
+            "latest_pass": latest,
+            "passes": count,
+        }
+
+    def credit_challenges(self, stamps, qualifies) -> list[dict]:
+        """Credit open live-find attempts in one transaction using the first qualifying stamp."""
+        with self._lock:
+            if self._closed:
+                return []
+            credited: list[dict] = []
+            with self._conn:
+                open_attempts = [
+                    dict(row) for row in self._conn.execute(
+                        "SELECT c.unit_id, c.started_at, c.window_s "
+                        "FROM challenges c "
+                        "WHERE NOT EXISTS ("
+                        "  SELECT 1 FROM challenge_passes p "
+                        "  WHERE p.unit_id = c.unit_id AND p.started_at = c.started_at"
+                        ") ORDER BY c.unit_id"
+                    ).fetchall()
+                ]
+                if not open_attempts:
+                    return []
+                for stamp in stamps:
+                    if not open_attempts:
+                        break
+                    remaining: list[dict] = []
+                    for attempt in open_attempts:
+                        if qualifies(attempt, stamp):
+                            inserted = self._conn.execute(
+                                "INSERT INTO challenge_passes("
+                                "unit_id, started_at, passed_at, instrument, provenance, digest"
+                                ") VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                                (
+                                    attempt["unit_id"],
+                                    attempt["started_at"],
+                                    stamp["first_ts"],
+                                    stamp["instrument"],
+                                    json.dumps(stamp["provenance"]),
+                                    stamp["digest"],
+                                ),
+                            )
+                            if inserted.rowcount:
+                                credited.append({
+                                    "unit_id": attempt["unit_id"],
+                                    "started_at": attempt["started_at"],
+                                    "passed_at": stamp["first_ts"],
+                                    "instrument": stamp["instrument"],
+                                    "provenance": stamp["provenance"],
+                                    "digest": stamp["digest"],
+                                    "event_id": stamp.get("event_id"),
+                                })
+                        else:
+                            remaining.append(attempt)
+                    open_attempts = remaining
+            return credited
 
     def enroll_recall(self, lesson_ids, *, now: float) -> None:
         """Enrol newly eligible completed lessons into box 1 without overwriting existing rows."""

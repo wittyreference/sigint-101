@@ -4,6 +4,12 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-11-28: keep a failed calibration reap visible after the request
+**Finding.** A queued spectrum request can pass the release checks while ppm is still capturing.
+When the request wakes, the calibration may have returned with its child still alive.
+**How to apply.** Store an unconfirmed calibration child before releasing the reservation.
+Check it before joining the queue and again after acquiring the reservation. Confirm the
+child's exit before starting the next receiver.
 ## 2026-11-28: A blocked receive can outlive closing its UDP descriptor
 **Finding.** A reader blocked in recvmsg can still hold a kernel reference while another thread
 closes the descriptor. A sender may briefly see the receiver as open.

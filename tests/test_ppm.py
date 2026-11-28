@@ -6,6 +6,8 @@ import json
 import math
 import os
 import random
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -476,6 +478,47 @@ def test_a_stalled_rtl_fm_that_will_not_stop_is_not_reported_as_stopped(monkeypa
     assert result["ppm"] is None
     assert "would not stop" in result["reason"]
     assert "was stopped" not in result["reason"]
+
+
+@pytest.mark.parametrize("outcome, signals, reason", [
+    ("reaped", ["TERM", "KILL"], "ended before enough audio"),
+    ("already exited", ["TERM"], "ended before enough audio"),
+    ("poll error", ["TERM"], "could not be confirmed stopped"),
+    ("kill wait error", ["TERM", "KILL"], "could not be confirmed stopped"),
+    ("kill wait timeout", ["TERM", "KILL"], "survived kill"),
+])
+def test_calibration_confirms_exit_after_a_term_wait_error(monkeypatch, outcome, signals, reason):
+    waits = []
+
+    class WaitError(Child):
+        def poll(self):
+            if waits and outcome == "poll error":
+                raise OSError("exit status unavailable")
+            return super().poll()
+
+        def wait(self, timeout=None):
+            waits.append((self.sent[-1], timeout))
+            if self.sent[-1] == "TERM":
+                if outcome == "already exited":
+                    self.code = 0
+                raise OSError("TERM wait failed")
+            if outcome == "kill wait error":
+                raise OSError("KILL wait failed")
+            if outcome == "kill wait timeout":
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            self.code = -signal.SIGKILL
+            return self.code
+
+    proc = WaitError(["rtl_fm"], unkillable=True)
+    monkeypatch.setattr(ppm, "spawn", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ppm, "block_phasors", lambda *_args, **_kwargs: ([], None))
+    calibration = ppm.PpmCalibration()
+    result = calibration.measure(hz=106_500_000, temp=None)
+
+    assert proc.sent == signals
+    assert waits == [(sig, childproc.STOP_WAIT_S) for sig in signals]
+    assert reason in result["reason"]
+    assert (calibration.release_failure() is None) == (outcome in {"reaped", "already exited"})
 
 
 # A working rtl_fm, standing in on a real pipe: it streams a capture file in pieces that are not

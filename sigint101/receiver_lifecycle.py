@@ -155,11 +155,47 @@ class SupervisedReceiver:
             freq_hz = int(freq_hz)
             if freq_hz == self.freq_hz:
                 return
+            self._count_visible_exit(self._run)
             run, intent = self._cancel()
             with self._runs:
                 self.freq_hz = freq_hz
                 self._clear()
+                self._drop_death(run)
         self._wait_physical(run, intent)
+
+    def _count_visible_exit(self, run):
+        """Record a streaming child's exit that is visible but not yet observed, before the fence.
+
+        The fence that follows makes the supervisor's later observation stale, so a death it had
+        not reached yet would never advance the back-off. Recording it here counts it once:
+        _life (held) keeps the supervisor's own record-or-cancel step out until the cancel is set,
+        and ChildWatch commits one death per child, so a death the supervisor already recorded is
+        not counted again. A finite capture's exit is recorded by _cancel() itself.
+        """
+        if (run is None or run.watch.finite or run.cancel.is_set() or run.physical.is_set()
+                or run.unreported_death or run.exit_snapshot):
+            return                              # nothing running, or its exit is on record
+        try:
+            ended = [(stage, code) for stage, code in self._statuses(run) if code is not None]
+        except (OSError, ValueError):
+            return
+        if ended:
+            self._record_death(run, ended, run.watch.clock())
+
+    def _drop_death(self, run):
+        """The death of the run a retune cancelled is that run's, not the next run's answer.
+
+        Held under _life and the run guard's lock, after _cancel() cancelled and fenced the run: a
+        death the supervisor records takes _life and checks the cancel first, and an error from a
+        reader or a late diagnostic must find its run current under the run guard, so none of them
+        can record it again afterwards. (A finite capture that ended cleanly is left unfenced to
+        finish its drain; it has no death to drop.) A cleanup failure (run.failure) is physical and
+        still refuses the next start.
+        """
+        if run is not None:
+            run.unreported_death = False
+        self.error = None
+        self.watch.superseded(self.freq_hz)
 
     def stop(self):
         with self._life:
