@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -44,6 +45,7 @@ DEFAULT_MODE = "72k"
 DEFAULT_HZ = 137_900_000
 PIPELINES = {"72k": "meteor_m2-x_lrpt", "80k": "meteor_m2-x_lrpt_80k"}
 CHANNELS = ("137900000", "137100000")
+_CHANNEL_INTS = frozenset(int(c) for c in CHANNELS)
 CAPTURE_S = 900
 FINISH_CAP_S = 600  # Measure the longest product processing time on the kiosk.
 RELEASE_GRACE_S = 3.0
@@ -79,6 +81,8 @@ _MAX_DECODED_PNG_BYTES = 96 * 1024 * 1024
 _MAX_PNG_DIM = 16384
 _MAX_PNG_PIXELS = 64_000_000
 _MAX_TIMESTAMP_S = 4_102_444_800.0
+_MAX_TIMESTAMP_INT = int(_MAX_TIMESTAMP_S)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _PNG_COLOR_SPECS = {
     0: (1, (1, 2, 4, 8, 16)),
     2: (3, (8, 16)),
@@ -345,16 +349,17 @@ def _is_valid_png(data: bytes) -> bool:
         return False
 
     bpp = channels * bit_depth
+    bpp_bytes = max(1, (bpp + 7) // 8)
     if interlace == 0:
-        passes = [(height, (width * bpp + 7) // 8)]
+        passes = [(height, width, (width * bpp + 7) // 8)]
     else:
         passes = []
         for x0, y0, dx, dy in _ADAM7_PASSES:
             pw = (width - x0 + dx - 1) // dx if width > x0 else 0
             ph = (height - y0 + dy - 1) // dy if height > y0 else 0
             if pw > 0 and ph > 0:
-                passes.append((ph, (pw * bpp + 7) // 8))
-    expected_len = sum(ph * (1 + row_bytes) for ph, row_bytes in passes)
+                passes.append((ph, pw, (pw * bpp + 7) // 8))
+    expected_len = sum(ph * (1 + row_bytes) for ph, _, row_bytes in passes)
     if expected_len <= 0 or expected_len > _MAX_DECODED_PNG_BYTES:
         return False
     decomp = zlib.decompressobj()
@@ -367,24 +372,120 @@ def _is_valid_png(data: bytes) -> bool:
         return False
     if not decomp.eof or decomp.unused_data or len(raw) != expected_len:
         return False
-    offset = 0
-    for ph, row_bytes in passes:
-        stride = 1 + row_bytes
-        for _ in range(ph):
-            if raw[offset] > 4:
+    return _reconstruct_and_check_png(
+        raw,
+        passes,
+        bpp_bytes=bpp_bytes,
+        color_type=color_type,
+        bit_depth=bit_depth,
+        plte_entries=plte_entries,
+    )
+
+
+def _check_indexed_scanline(cur: bytearray, pw: int, bit_depth: int, plte_entries: int) -> bool:
+    """Verify every pixel sample (ignoring trailing pad bits) is within the PLTE bounds."""
+    if bit_depth == 8:
+        return max(cur) < plte_entries
+    if bit_depth == 4:
+        full = pw // 2
+        for b in cur[:full]:
+            if (b >> 4) >= plte_entries or (b & 0x0F) >= plte_entries:
                 return False
-            offset += stride
+        if (pw & 1) and (cur[full] >> 4) >= plte_entries:
+            return False
+        return True
+    if bit_depth == 2:
+        full = pw // 4
+        for b in cur[:full]:
+            if ((b >> 6) >= plte_entries or ((b >> 4) & 0x03) >= plte_entries
+                    or ((b >> 2) & 0x03) >= plte_entries or (b & 0x03) >= plte_entries):
+                return False
+        rem = pw & 3
+        if rem:
+            tail = cur[full]
+            for shift in (6, 4, 2)[:rem]:
+                if ((tail >> shift) & 0x03) >= plte_entries:
+                    return False
+        return True
+    # 1-bit indexed samples are 0 or 1; only a 1-entry palette can reject sample 1.
+    if plte_entries >= 2:
+        return True
+    full = pw // 8
+    if any(cur[:full]):
+        return False
+    rem = pw & 7
+    if rem:
+        mask = (0xFF << (8 - rem)) & 0xFF
+        if cur[full] & mask:
+            return False
+    return True
+
+
+def _reconstruct_and_check_png(
+    raw: bytes,
+    passes: list[tuple[int, int, int]],
+    *,
+    bpp_bytes: int,
+    color_type: int,
+    bit_depth: int,
+    plte_entries: int | None,
+) -> bool:
+    """Reverse PNG filters across every scanline and pass, checking indexed samples."""
+    offset = 0
+    for ph, pw, row_bytes in passes:
+        prev = bytearray(row_bytes)
+        for _ in range(ph):
+            flt = raw[offset]
+            src = raw[offset + 1 : offset + 1 + row_bytes]
+            offset += 1 + row_bytes
+            if flt == 0:
+                cur = bytearray(src)
+            elif flt == 1:
+                cur = bytearray(row_bytes)
+                for i in range(row_bytes):
+                    a = cur[i - bpp_bytes] if i >= bpp_bytes else 0
+                    cur[i] = (src[i] + a) & 0xFF
+            elif flt == 2:
+                cur = bytearray((s + p) & 0xFF for s, p in zip(src, prev))
+            elif flt == 3:
+                cur = bytearray(row_bytes)
+                for i in range(row_bytes):
+                    a = cur[i - bpp_bytes] if i >= bpp_bytes else 0
+                    cur[i] = (src[i] + ((a + prev[i]) >> 1)) & 0xFF
+            elif flt == 4:
+                cur = bytearray(row_bytes)
+                for i in range(row_bytes):
+                    a = cur[i - bpp_bytes] if i >= bpp_bytes else 0
+                    b = prev[i]
+                    c = prev[i - bpp_bytes] if i >= bpp_bytes else 0
+                    p = a + b - c
+                    pa = abs(p - a)
+                    pb = abs(p - b)
+                    pc = abs(p - c)
+                    pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                    cur[i] = (src[i] + pr) & 0xFF
+            else:
+                return False
+            if color_type == 3 and not _check_indexed_scanline(cur, pw, bit_depth, plte_entries):
+                return False
+            prev = cur
     return True
 
 
 def _is_valid_timestamp(value: object) -> bool:
     """Accept only finite POSIX timestamps that render cleanly as UTC datetimes."""
-    if type(value) not in (int, float) or not math.isfinite(value):
-        return False
-    if value < 0 or value > _MAX_TIMESTAMP_S:
+    if type(value) is int:
+        if value < 0 or value > _MAX_TIMESTAMP_INT:
+            return False
+        ts = float(value)
+    elif type(value) is float:
+        if not math.isfinite(value) or value < 0.0 or value > _MAX_TIMESTAMP_S:
+            return False
+        ts = value
+    else:
         return False
     try:
-        datetime.fromtimestamp(float(value), tz=timezone.utc)
+        datetime.fromtimestamp(ts, tz=timezone.utc)
     except (OverflowError, OSError, ValueError):
         return False
     return True
@@ -418,7 +519,12 @@ def _pictures(fd, device, prefix=(), budget=None):
                                 and 0 < current.st_size <= _MAX_IMAGE_BYTES):
                             raw = image.read(_MAX_IMAGE_BYTES + 1)
                             if len(raw) <= _MAX_IMAGE_BYTES and _is_valid_png(raw):
-                                yield {"path": "/".join(parts), "product": product[1]}
+                                yield {
+                                    "path": "/".join(parts),
+                                    "product": product[1],
+                                    "size": len(raw),
+                                    "sha256": hashlib.sha256(raw).hexdigest(),
+                                }
             except OSError:
                 continue
 
@@ -553,15 +659,25 @@ def _write_gallery_index(root_fd: int, root_path: Path, *, seq: int, pass_ids: l
     os.rename(tmp_name, _GALLERY_INDEX, src_dir_fd=root_fd, dst_dir_fd=root_fd)
 
 
+def _public_pass_row(row: dict) -> dict:
+    """Return a deep copy of a pass row with internal image digest fields stripped."""
+    public = copy.deepcopy(row)
+    public["images"] = [
+        {"path": img["path"], "product": img["product"]}
+        for img in row["images"]
+    ]
+    return public
+
+
 def _validate_manifest(pass_id: str, data: object) -> dict | None:
-    """Validate a saved pass manifest.json and its image entries."""
+    """Validate a saved pass manifest.json and its digest-bound image entries."""
     if not isinstance(data, dict) or data.get("id") != pass_id:
         return None
     mode = data.get("mode")
     if not isinstance(mode, str) or mode not in PIPELINES:
         return None
     freq_hz = data.get("freq_hz")
-    if type(freq_hz) is not int or str(freq_hz) not in CHANNELS:
+    if type(freq_hz) is not int or freq_hz not in _CHANNEL_INTS:
         return None
     command = data.get("command")
     if not isinstance(command, str) or not command.strip():
@@ -592,7 +708,13 @@ def _validate_manifest(pass_id: str, data: object) -> dict | None:
             return None
         path = img.get("path")
         product = img.get("product")
+        size = img.get("size")
+        sha256 = img.get("sha256")
         if not isinstance(path, str) or not isinstance(product, str) or not product.strip():
+            return None
+        if type(size) is not int or size <= 0 or size > _MAX_IMAGE_BYTES:
+            return None
+        if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
             return None
         parts = PurePosixPath(path).parts
         if (len(parts) != 3 or parts[0] != "meteor" or parts[1] != pass_id
@@ -600,7 +722,12 @@ def _validate_manifest(pass_id: str, data: object) -> dict | None:
                 or path in seen_paths):
             return None
         seen_paths.add(path)
-        clean_images.append({"path": path, "product": product})
+        clean_images.append({
+            "path": path,
+            "product": product,
+            "size": size,
+            "sha256": sha256,
+        })
     return {
         "id": pass_id,
         "started_at": float(started_at),
@@ -692,7 +819,7 @@ class MeteorDecoder(SupervisedReceiver):
         self._seq: int = 0
         self._has_index: bool = False
         self._root_parent_synced: bool = False
-        self._media_index: dict[str, tuple[str, str]] = {}
+        self._media_index: dict[str, tuple[str, str, int, str]] = {}
         self.watch = childproc.ChildWatch(SATDUMP, finite=True, clock=monotonic)
         self._init_lifecycle()
         self.error = None
@@ -735,19 +862,19 @@ class MeteorDecoder(SupervisedReceiver):
     def passes(self) -> list[dict]:
         """Deep copy of the verified published passes, newest first."""
         with self._gallery_lock:
-            return copy.deepcopy(self._passes)
+            return [_public_pass_row(row) for row in self._passes]
 
     def _rebuild_media_index_unlocked(self) -> None:
-        index: dict[str, tuple[str, str]] = {}
+        index: dict[str, tuple[str, str, int, str]] = {}
         for row in self._passes:
             pid = row["id"]
             for img in row["images"]:
                 fname = PurePosixPath(img["path"]).parts[2]
-                index[img["path"]] = (pid, fname)
+                index[img["path"]] = (pid, fname, img["size"], img["sha256"])
         self._media_index = index
 
     def _load_passes(self) -> None:
-        """Read committed verified passes on startup without creating dirs or emitting events."""
+        """Read committed verified passes on startup using manifest size + SHA-256."""
         root = self.data_dir / "meteor"
         if not root.is_dir():
             return
@@ -789,12 +916,14 @@ class MeteorDecoder(SupervisedReceiver):
                                     png_bytes = _read_regular_bytes(
                                         pfd, (fname,), max_bytes=_MAX_IMAGE_BYTES
                                     )
-                                    if not png_bytes or not _is_valid_png(png_bytes):
+                                    if (not png_bytes or len(png_bytes) != img["size"]
+                                            or hashlib.sha256(png_bytes).hexdigest()
+                                            != img["sha256"]):
                                         valid = False
                                         break
                                 if valid:
                                     loaded.append(manifest)
-                        except (OSError, UnicodeDecodeError, ValueError, TypeError):
+                        except (OSError, UnicodeDecodeError, ValueError, TypeError, OverflowError):
                             continue
         except OSError:
             return
@@ -805,12 +934,12 @@ class MeteorDecoder(SupervisedReceiver):
             self._rebuild_media_index_unlocked()
 
     def read_media(self, rel_path: str) -> bytes | None:
-        """Serve only a verified PNG listed in its pass's committed manifest, with O_NOFOLLOW."""
+        """Serve only a manifest member matching its recorded size and SHA-256, with O_NOFOLLOW."""
         with self._gallery_lock:
             target = self._media_index.get(rel_path)
         if target is None:
             return None
-        pass_id, fname = target
+        pass_id, fname, expected_size, expected_sha256 = target
         try:
             with _directory(self.data_dir, private=False) as data_fd:
                 with _directory("meteor", data_fd, private=False) as root_fd:
@@ -819,7 +948,8 @@ class MeteorDecoder(SupervisedReceiver):
                     )
         except OSError:
             return None
-        if not data or not _is_valid_png(data):
+        if (not data or len(data) != expected_size
+                or hashlib.sha256(data).hexdigest() != expected_sha256):
             return None
         return data
 
@@ -993,12 +1123,13 @@ class MeteorDecoder(SupervisedReceiver):
             return None
         stage_fd = capture.stage.fd
         satellite = _read_satellite_name(stage_fd)
-        verified_files: list[tuple[str, str, bytes]] = []
+        verified_files: list[tuple[str, str, bytes, int, str]] = []
         used_names: set[str] = set()
         for pic in capture.pictures:
             rel_parts = tuple(PurePosixPath(pic["path"]).parts)
             data = _read_regular_bytes(stage_fd, rel_parts, max_bytes=_MAX_IMAGE_BYTES)
-            if not data or not _is_valid_png(data):
+            if (not data or len(data) != pic["size"]
+                    or hashlib.sha256(data).hexdigest() != pic["sha256"]):
                 continue
             base = rel_parts[-1]
             fname = base
@@ -1008,7 +1139,7 @@ class MeteorDecoder(SupervisedReceiver):
                 fname = f"{stem}-{idx}{ext}"
                 idx += 1
             used_names.add(fname)
-            verified_files.append((fname, pic["product"], data))
+            verified_files.append((fname, pic["product"], data, pic["size"], pic["sha256"]))
         if not verified_files:
             return None
 
@@ -1035,7 +1166,7 @@ class MeteorDecoder(SupervisedReceiver):
                             with _directory(candidate_name, root_fd, private=True) as cand_fd:
                                 images_meta = []
                                 png_paths = []
-                                for fname, product, data in verified_files:
+                                for fname, product, data, size, digest in verified_files:
                                     flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                              | os.O_NOFOLLOW | os.O_CLOEXEC)
                                     fd = os.open(fname, flags, 0o644, dir_fd=cand_fd)
@@ -1044,6 +1175,8 @@ class MeteorDecoder(SupervisedReceiver):
                                     images_meta.append({
                                         "path": f"meteor/{capture.id}/{fname}",
                                         "product": product,
+                                        "size": size,
+                                        "sha256": digest,
                                     })
                                     png_paths.append(candidate_path / fname)
 
@@ -1129,7 +1262,7 @@ class MeteorDecoder(SupervisedReceiver):
                         self._has_index = True
                         self._rebuild_media_index_unlocked()
                         self._reconcile_gallery_overflow(root_fd, {r["id"] for r in self._passes})
-                        return copy.deepcopy(pass_row)
+                        return _public_pass_row(pass_row)
             except OSError as exc:
                 capture.publish_error = f"could not publish Meteor pass: {exc}"[:160]
                 return None

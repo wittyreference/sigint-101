@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import struct
@@ -802,13 +803,13 @@ def test_f4_retention_survives_backward_utc_step_and_reconciles_interrupted_evic
 
 
 def test_f5_bad_manifest_field_types_and_unrenderable_timestamps_are_skipped(rig, tmp_path):
-    """F5: damaged manifest (e.g. list mode or unrenderable timestamp) is skipped; others load."""
+    """F5: damaged manifest (list mode, huge float, or 351-digit int timestamp) is skipped."""
     decoder, made, settings = rig
     settings["utc"] = 1_732_850_000.0
 
     with meteor_client(tmp_path, decoder) as client:
         ids = []
-        for idx in range(3):
+        for idx in range(4):
             settings["utc"] += 100.0
             assert client.post(LISTEN).status_code == 200
             proc = made[-1][0]
@@ -823,18 +824,24 @@ def test_f5_bad_manifest_field_types_and_unrenderable_timestamps_are_skipped(rig
             assert decoder._run.complete.wait(3)
             ids.append(client.get(STATUS).json()["passes"][0]["id"])
 
-    good_id, bad_mode_id, bad_ts_id = ids
+    good_id, bad_mode_id, bad_ts_id, huge_int_ts_id = ids
     # Corrupt manifest 1: mode is a JSON array (unhashable!)
     m1_path = tmp_path / "meteor" / bad_mode_id / "manifest.json"
     m1 = json.loads(m1_path.read_text(encoding="utf-8"))
     m1["mode"] = ["72k"]
     m1_path.write_text(json.dumps(m1), encoding="utf-8")
 
-    # Corrupt manifest 2: started_at is an unrenderable huge timestamp
+    # Corrupt manifest 2: started_at is an unrenderable huge float timestamp
     m2_path = tmp_path / "meteor" / bad_ts_id / "manifest.json"
     m2 = json.loads(m2_path.read_text(encoding="utf-8"))
     m2["started_at"] = 1e20
     m2_path.write_text(json.dumps(m2), encoding="utf-8")
+
+    # Corrupt manifest 3: started_at is a 351-digit JSON integer (overflows float()!)
+    m3_path = tmp_path / "meteor" / huge_int_ts_id / "manifest.json"
+    m3 = json.loads(m3_path.read_text(encoding="utf-8"))
+    m3["started_at"] = 10**350
+    m3_path.write_text(json.dumps(m3), encoding="utf-8")
 
     reopened = meteor.MeteorDecoder(
         data_dir=tmp_path,
@@ -844,6 +851,186 @@ def test_f5_bad_manifest_field_types_and_unrenderable_timestamps_are_skipped(rig
     )
     try:
         assert [p["id"] for p in reopened.passes()] == [good_id]
+    finally:
+        reopened.shutdown()
+
+
+def _png_chunk(ctype: bytes, data: bytes) -> bytes:
+    crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+
+def _indexed_png(width: int, height: int, bit_depth: int, plte: bytes,
+                 raw_scanlines: bytes, *, interlace: int = 0) -> bytes:
+    ihdr = struct.pack(">IIBBBBB", width, height, bit_depth, 3, 0, 0, interlace)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"PLTE", plte)
+        + _png_chunk(b"IDAT", zlib.compress(raw_scanlines))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def test_f1a_indexed_png_out_of_palette_rejected_at_publish_and_filters_validated(rig, tmp_path):
+    """F1a: reverse PNG filters across all passes and reject out-of-palette indexed samples."""
+    decoder, made, settings = rig
+    settings["utc"] = 1_732_860_000.0
+
+    # CRC-correct 2x1 8-bit indexed PNG with 1-entry palette; Sub filter reconstructs [0, 1].
+    bad_sub_indexed = _indexed_png(2, 1, 8, b"\x00\x00\x00", b"\x01\x00\x01")
+    # Same scanlines with a 2-entry palette: reconstructed indices [0, 1] are both in range.
+    good_sub_indexed = _indexed_png(2, 1, 8, b"\x00\x00\x00\xff\xff\xff", b"\x01\x00\x01")
+
+    with meteor_client(tmp_path, decoder) as client:
+        # 1. Out-of-palette indexed PNG must be refused at publication with zero receptions/stamps.
+        assert client.post(LISTEN).status_code == 200
+        proc = made[-1][0]
+        proc.feed(progress_line())
+        proc.feed(MARKER)
+        assert decoder._run.physical.wait(2)
+        out = Path(proc.args[3])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "MSU-MR-oob.png").write_bytes(bad_sub_indexed)
+        proc.die(0)
+        proc.close_pipe()
+        assert decoder._run.complete.wait(3)
+
+        st = client.get(STATUS).json()
+        assert st["state"] == "no_picture"
+        assert st["passes"] == []
+        receptions = [
+            e for e in read_events(tmp_path / "events.jsonl")
+            if e["kind"] == "reception" and e["payload"].get("instrument") == "meteor"
+        ]
+        assert receptions == []
+        stamps = client.get("/api/stamps").json()["stamps"]
+        assert next(s for s in stamps if s["instrument"] == "meteor")["count"] == 0
+
+        # 2. Valid Sub-filtered indexed control publishes, serves 200, and earns 1 stamp.
+        settings["utc"] += 100.0
+        assert client.post(LISTEN).status_code == 200
+        proc2 = made[-1][0]
+        proc2.feed(progress_line())
+        proc2.feed(MARKER)
+        assert decoder._run.physical.wait(2)
+        out2 = Path(proc2.args[3])
+        out2.mkdir(parents=True, exist_ok=True)
+        (out2 / "MSU-MR-ok-idx.png").write_bytes(good_sub_indexed)
+        proc2.die(0)
+        proc2.close_pipe()
+        assert decoder._run.complete.wait(3)
+
+        st2 = client.get(STATUS).json()
+        assert st2["state"] == "done"
+        assert len(st2["passes"]) == 1
+        img_path = st2["passes"][0]["images"][0]["path"]
+        resp = client.get(f"/media/{img_path}")
+        assert resp.status_code == 200 and resp.content == good_sub_indexed
+        stamps2 = client.get("/api/stamps").json()["stamps"]
+        assert next(s for s in stamps2 if s["instrument"] == "meteor")["count"] == 1
+
+    # Unit checks across Up, Average, Paeth, Adam7, and sub-byte bit depths (1/2/4-bit).
+    plte2 = b"\x00\x00\x00\xff\xff\xff"
+    plte3 = plte2 + b"\x10\x20\x30"
+    # Up filter (2): row 0 = [1], row 1 raw=1 -> recon = 1 + 1 = 2 (out of bounds for plte2).
+    assert not meteor._is_valid_png(_indexed_png(1, 2, 8, plte2, b"\x00\x01\x02\x01"))
+    assert meteor._is_valid_png(_indexed_png(1, 2, 8, plte3, b"\x00\x01\x02\x01"))
+    # Average filter (3): row 0 = [0, 2], row 1 raw=[2, 1] -> [2, 1 + ((2+2)//2) = 3] (oob plte3).
+    assert not meteor._is_valid_png(_indexed_png(2, 2, 8, plte3, b"\x00\x00\x02\x03\x02\x01"))
+    assert meteor._is_valid_png(_indexed_png(2, 2, 8, plte3 + b"\x40\x50\x60",
+                                             b"\x00\x00\x02\x03\x02\x01"))
+    # Paeth filter (4): row 0=[1, 1], row 1 raw=[1, 1] -> recon [2, 3] (oob plte3, ok plte4).
+    plte4 = plte3 + b"\x40\x50\x60"
+    assert not meteor._is_valid_png(_indexed_png(2, 2, 8, plte3, b"\x00\x01\x01\x04\x01\x01"))
+    assert meteor._is_valid_png(_indexed_png(2, 2, 8, plte4, b"\x00\x01\x01\x04\x01\x01"))
+    # Adam7 2x2 indexed: passes (1x1), (1x1), (2x1). Pass 3 uses Sub [0, 2] -> oob plte2, ok plte3.
+    adam7_raw = b"\x00\x00" + b"\x00\x01" + b"\x01\x00\x02"
+    assert not meteor._is_valid_png(_indexed_png(2, 2, 8, plte2, adam7_raw, interlace=1))
+    assert meteor._is_valid_png(_indexed_png(2, 2, 8, plte3, adam7_raw, interlace=1))
+    # Sub-byte bit depths (4-bit, 2-bit, 1-bit): trailing pad bits on odd widths must be ignored,
+    # while real pixel samples past the palette must be rejected.
+    # 4-bit width=1: high nibble=0 (valid), low nibble=0xF (pad, ignored) -> valid for 1-entry plte.
+    assert meteor._is_valid_png(_indexed_png(1, 1, 4, b"\x00\x00\x00", b"\x00\x0f"))
+    # 4-bit width=2: high nibble=0, low nibble=2 -> oob for 2-entry plte, ok for 3-entry plte.
+    assert not meteor._is_valid_png(_indexed_png(2, 1, 4, plte2, b"\x00\x02"))
+    assert meteor._is_valid_png(_indexed_png(2, 1, 4, plte3, b"\x00\x02"))
+    # 2-bit width=1: top 2 bits=0, remaining 6 pad bits=0b111111 -> valid for 1-entry plte.
+    assert meteor._is_valid_png(_indexed_png(1, 1, 2, b"\x00\x00\x00", b"\x00\x3f"))
+    # 2-bit width=2: pixel 0=0, pixel 1=2 (0b00_10_0000 = 0x20) -> oob for 2-entry plte.
+    assert not meteor._is_valid_png(_indexed_png(2, 1, 2, plte2, b"\x00\x20"))
+    # 1-bit width=1: top bit=0, remaining 7 pad bits=0x7f -> valid for 1-entry plte.
+    assert meteor._is_valid_png(_indexed_png(1, 1, 1, b"\x00\x00\x00", b"\x00\x7f"))
+    # 1-bit width=2: pixel 0=0, pixel 1=1 (0b01000000 = 0x40) -> oob for 1-entry plte.
+    assert not meteor._is_valid_png(_indexed_png(2, 1, 1, b"\x00\x00\x00", b"\x00\x40"))
+
+
+def test_f1b_swapped_valid_png_refused_on_serve_and_after_restart_without_redecode(
+    rig, tmp_path, monkeypatch
+):
+    """F1b: manifest binds exact size + SHA-256; swapped valid PNG refused without PNG re-decode."""
+    decoder, made, settings = rig
+    settings["utc"] = 1_732_870_000.0
+    control_bytes = _valid_png(2, 2, (10, 120, 200))
+    target_bytes = _valid_png(2, 2, (40, 180, 90))
+    replacement_bytes = _valid_png(3, 3, (220, 30, 30))
+    assert replacement_bytes != target_bytes
+
+    with meteor_client(tmp_path, decoder) as client:
+        # Publish control pass first, then swap-target pass.
+        pairs = (("MSU-MR-ctrl.png", control_bytes), ("MSU-MR-swap.png", target_bytes))
+        for fname, content in pairs:
+            settings["utc"] += 100.0
+            assert client.post(LISTEN).status_code == 200
+            proc = made[-1][0]
+            proc.feed(progress_line())
+            proc.feed(MARKER)
+            assert decoder._run.physical.wait(2)
+            out = Path(proc.args[3])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / fname).write_bytes(content)
+            proc.die(0)
+            proc.close_pipe()
+            assert decoder._run.complete.wait(3)
+
+        passes = client.get(STATUS).json()["passes"]
+        assert len(passes) == 2
+        swap_row, ctrl_row = passes[0], passes[1]
+        swap_path = swap_row["images"][0]["path"]
+        ctrl_path = ctrl_row["images"][0]["path"]
+
+        # Manifest records exact size + SHA-256; public API keeps exact path/product shape.
+        ctrl_manifest = json.loads(
+            (tmp_path / "meteor" / ctrl_row["id"] / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert ctrl_manifest["images"][0]["size"] == len(control_bytes)
+        assert ctrl_manifest["images"][0]["sha256"] == hashlib.sha256(control_bytes).hexdigest()
+        assert ctrl_row["images"] == [{"path": ctrl_path, "product": "ctrl"}]
+
+        # Swap target PNG on disk with a DIFFERENT valid PNG, leaving manifest & gallery untouched.
+        (tmp_path / swap_path).write_bytes(replacement_bytes)
+
+        # Serve must NOT re-decode PNGs: size + SHA-256 alone admits control and refuses swap.
+        def forbid_redecode(_data):
+            raise AssertionError("startup/serve must check size + SHA-256 without re-decoding PNG")
+
+        monkeypatch.setattr(meteor, "_is_valid_png", forbid_redecode)
+        assert client.get(f"/media/{swap_path}").status_code == 404
+        ctrl_resp = client.get(f"/media/{ctrl_path}")
+        assert ctrl_resp.status_code == 200
+        assert ctrl_resp.content == control_bytes
+
+    # Startup must also check only size + SHA-256 (no PNG re-decode), skip swapped, keep control.
+    reopened = meteor.MeteorDecoder(
+        data_dir=tmp_path,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+    )
+    try:
+        assert [p["id"] for p in reopened.passes()] == [ctrl_row["id"]]
+        assert reopened.read_media(swap_path) is None
+        assert reopened.read_media(ctrl_path) == control_bytes
     finally:
         reopened.shutdown()
 
