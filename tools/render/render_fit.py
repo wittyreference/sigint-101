@@ -1,5 +1,5 @@
-# ABOUTME: Checks that demo and predict controls fit the forced 800x480 DevTools viewport.
-# ABOUTME: Reports the primary-button positions and saves a screenshot of the predict stage.
+# ABOUTME: Checks that a lesson's stage controls (demo and predict by default, each predict chip
+# ABOUTME: chosen too) fit the forced 800x480 viewport; reports them and screenshots the last.
 import base64
 import json
 import os
@@ -21,6 +21,10 @@ from render_scroll import (  # noqa: E402
 HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "9222"))
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8008/lesson/29"
 SHOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/flipper_m29_predict.png"
+# The stages to measure, comma-separated, in order; the screenshot shows the last one. A lesson
+# without a demo (M39 opens on its predict) names only the stages its page shows.
+STAGES = tuple(sys.argv[3].split(",")) if len(sys.argv) > 3 else ("demo", "predict")
+PRIMARY = {"demo": "Next", "predict": "Commit"}   # what each stage's primary button does
 
 
 def page_ws():
@@ -127,12 +131,6 @@ MEASURE = """(function(st){
     return {err: `viewport is ${window.innerWidth}x${window.innerHeight}, expected 800x480`};
   }
 
-  const buttons = [...panel.querySelectorAll('button')].filter(button =>
-    button.getClientRects().length && getComputedStyle(button).visibility === 'visible');
-  const primary = buttons.find(button => button.matches('.btn--primary'));
-  if (!primary) return {err: 'no visible primary button'};
-  const chips = panel.querySelectorAll('.predict-chip, .predict-chip__key, .predict-chip__label');
-
   function isClipped(control, bounds) {
     const style = getComputedStyle(control);
     if (style.visibility !== 'visible' ||
@@ -157,14 +155,49 @@ MEASURE = """(function(st){
     return false;
   }
 
-  const controls = [...buttons, ...chips].map(control => {
-    const bounds = control.getBoundingClientRect();
-    const {left, top, right, bottom} = bounds;
-    const label = control.getAttribute('aria-label') || control.textContent;
-    const name = label.trim().replace(/\\s+/g, ' ') || control.tagName.toLowerCase();
-    return {name, left, top, right, bottom, clipped: isClipped(control, bounds)};
-  });
-  return {primaryBottom: Math.round(primary.getBoundingClientRect().bottom), controls};
+  // The stage as it stands: every visible button and chip, `state` naming it in each control.
+  function measureState(state) {
+    const buttons = [...panel.querySelectorAll('button')].filter(button =>
+      button.getClientRects().length && getComputedStyle(button).visibility === 'visible');
+    const primary = buttons.find(button => button.matches('.btn--primary'));
+    if (!primary) return null;
+    const chips = panel.querySelectorAll('.predict-chip, .predict-chip__key, .predict-chip__label');
+    const controls = [...buttons, ...chips].map(control => {
+      const bounds = control.getBoundingClientRect();
+      const {left, top, right, bottom} = bounds;
+      const label = control.getAttribute('aria-label') || control.textContent;
+      const name = label.trim().replace(/\\s+/g, ' ') || control.tagName.toLowerCase();
+      return {name: name + state, left, top, right, bottom, clipped: isClipped(control, bounds)};
+    });
+    return {primaryBottom: Math.round(primary.getBoundingClientRect().bottom), controls};
+  }
+
+  const states = [measureState('')];
+  if (!states[0]) return {err: 'no visible primary button'};
+  // A chip chosen swaps in a longer status line and enables the commit, so each chip is chosen
+  // in turn and the stage measured again. Only the page's own change handler runs (the status
+  // line, lesson-nav.js); nothing is submitted, and the chips are put back as they were.
+  const radios = [...panel.querySelectorAll('form[data-choice-commit] input[type="radio"]')]
+    .filter(radio => !radio.disabled);
+  const were = radios.map(radio => radio.checked);
+  const changed = radio => radio.dispatchEvent(new Event('change', {bubbles: true}));
+  try {
+    for (const [i, radio] of radios.entries()) {
+      radios.forEach(other => { other.checked = other === radio; });
+      changed(radio);
+      const chip = radio.closest('.predict-chip');
+      const key = chip && chip.querySelector('.predict-chip__key');
+      const label = (key && key.textContent.trim()) || String(i + 1);
+      const state = measureState(' with ' + label + ' chosen');
+      if (!state) return {err: 'no visible primary button with ' + label + ' chosen'};
+      states.push(state);
+    }
+  } finally {
+    radios.forEach((radio, i) => { radio.checked = were[i]; });
+    if (radios.length) changed(radios[0]);
+  }
+  return {primaryBottom: Math.max(...states.map(state => state.primaryBottom)),
+          controls: states.flatMap(state => state.controls)};
 })(%r)"""
 
 
@@ -202,21 +235,20 @@ def main():
         if cdp.evaluate("document.readyState") == "complete":
             break
         time.sleep(0.2)
-    demo = cdp.evaluate(MEASURE % "demo")
-    predict = cdp.evaluate(MEASURE % "predict")
-    demo_bottom, predict_bottom = (
-        result.get("primaryBottom", "?") if isinstance(result, dict) else "?"
-        for result in (demo, predict)
+    measured = [(stage, cdp.evaluate(MEASURE % stage)) for stage in STAGES]
+    bottoms = "  ".join(
+        f"{stage} {PRIMARY.get(stage, 'primary')} bottom = "
+        f"{result.get('primaryBottom', '?') if isinstance(result, dict) else '?'}px"
+        for stage, result in measured
     )
-    print(f"800x480  demo Next bottom = {demo_bottom}px  predict Commit bottom = "
-          f"{predict_bottom}px  (max 480)")
-    # Screenshot the predict stage (left visible by the last measure).
+    print(f"800x480  {bottoms}  (max 480)")
+    # Screenshot the last stage measured (left visible by its measure).
     shot = cdp.call("Page.captureScreenshot", {"format": "png"})
     if shot.get("data"):
         with open(SHOT, "wb") as f:
             f.write(base64.b64decode(shot["data"]))
         print(f"screenshot: {SHOT}")
-    failures = fit_failures("demo", demo) + fit_failures("predict", predict)
+    failures = [failure for stage, result in measured for failure in fit_failures(stage, result)]
     if failures:
         print("VERDICT: FAIL - " + " | ".join(failures))
         sys.exit(1)
