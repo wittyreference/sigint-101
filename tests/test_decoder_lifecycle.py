@@ -4,6 +4,7 @@
 import io
 import shlex
 import signal
+import subprocess
 import threading
 
 import pytest
@@ -534,6 +535,117 @@ def test_rtl_433_that_survived_kill_refuses_every_start_until_it_is_reaped(tmp_p
     assert len(spawned) == 2 and dec.error is None
     spawned[1].unkillable = False
     dec.stop()
+
+
+# --- C52 round 4 (Codex D-093): the legacy decoder's retune and stop at the radio boundary -----
+
+
+def test_rtl_433_retune_counts_a_status_exit_without_waiting_on_its_diagnostic(
+        late_tuned, monkeypatch):
+    # F1: a tool that exits on its own (status 1, not a signal) has its stderr quoted. The retune
+    # counts the exit from its status alone and leaves the words to the diagnostic path.
+    entered, resume = threading.Event(), threading.Event()
+
+    def stalled_tail(_stage):
+        entered.set()
+        resume.wait(10)
+        return []
+
+    monkeypatch.setattr(childproc, "stderr_tail", stalled_tail)
+    dec, unavailable, procs, tuned, _ = late_tuned("decode")
+    dec.STOP_WAIT_S = 0.01
+
+    def retune_unheld(hz):
+        retune = threading.Thread(target=dec.retune, args=(hz,), daemon=True)
+        retune.start()
+        retune.join(3)
+        assert not retune.is_alive(), "the retune waited on the exit diagnostic"
+
+    try:
+        dec.start()
+        procs[0].die(1)                         # pipe still open: the reader has seen nothing
+        retune_unheld(LATE_TUNED["decode"])
+        assert dec.watch.retry_in() is None     # one death, counted, its wait lifted
+        dec.start()
+        procs[1].die(1)
+        retune_unheld(OTHER_HZ["decode"])
+        assert dec.watch.retry_in() == 2 * childproc.FIRST_RETRY_S    # the count advanced
+        with pytest.raises(unavailable, match="keeps dying"):
+            dec.start()
+        assert not entered.is_set()             # no stderr was read on the way
+    finally:
+        resume.set()
+
+
+class _WaitFails(Child):
+    """A tool that ignores SIGTERM and whose stop's reap wait fails with an OS error."""
+
+    def __init__(self):
+        super().__init__(["rtl_433"], stubborn=True)
+
+    def wait(self, timeout=None):
+        if self.code is None and "TERM" in self.sent:
+            raise OSError("wait failed")
+        return super().wait(timeout)
+
+
+def test_rtl_433_whose_stop_wait_fails_is_kept_until_its_exit_is_confirmed(tmp_path):
+    # F2: the wait error skipped keeping the child, so a live rtl_433 was dropped and the radio
+    # handed on.
+    dec, unavailable, spawned, _ = _build("decode", tmp_path, _WaitFails)
+    dec.start()
+    dec.retune(315_000_000)                     # the error is the stop's, not the caller's
+    for _ in range(3):
+        with pytest.raises(unavailable, match="could not be confirmed stopped"):
+            dec.start()
+    assert len(spawned) == 1
+    reason = dec.release_failure()
+    assert reason == dec.release_failure(pending=True)
+    assert "wait failed" in reason and "the dongle may still be held" in reason
+    spawned[0].code = -signal.SIGKILL           # its exit shows at last
+    assert dec.release_failure(pending=True) is None
+    dec.start()
+    assert len(spawned) == 2 and dec.error is None
+    spawned[1].code = 0
+    dec.stop()
+
+
+class _SlowToStop(Child):
+    """A tool whose stop is in flight: SIGTERM lands, and the reap waits for a gate."""
+
+    def __init__(self):
+        super().__init__(["rtl_433"])
+        self.waiting, self.gate = threading.Event(), threading.Event()
+
+    def terminate(self):
+        self.sent.append("TERM")
+
+    def wait(self, timeout=None):
+        if self.code is None and "TERM" in self.sent:
+            self.waiting.set()
+            if not self.gate.wait(5):
+                raise subprocess.TimeoutExpired("rtl_433", timeout)
+            self.code = -signal.SIGTERM
+        return super().wait(timeout)
+
+
+def test_rtl_433_reports_its_stop_pending_until_the_reap_is_confirmed(tmp_path):
+    # F3: while a stop is waiting on the reap, the child is in neither ownership field.
+    dec, _, spawned, _ = _build("decode", tmp_path, _SlowToStop)
+    dec.start()
+    retune = threading.Thread(target=dec.retune, args=(315_000_000,), daemon=True)
+    retune.start()
+    try:
+        assert spawned[0].waiting.wait(5)       # the stop is waiting on the reap
+        assert dec.release_failure(pending=True) == "rtl_433 is still releasing the radio"
+        assert dec.release_failure() is None    # as the supervised receivers: only pending says
+    finally:
+        spawned[0].gate.set()
+        retune.join(5)
+    assert not retune.is_alive()
+    assert dec.release_failure(pending=True) is None
+    dec.start()
+    assert len(spawned) == 2
 
 
 @pytest.mark.parametrize("name", sorted(LATE_TUNED))
