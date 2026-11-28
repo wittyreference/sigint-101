@@ -1,5 +1,5 @@
 # ABOUTME: Runs the layout checks against a scratch SIGINT 101 console it starts, or RENDER_URL.
-# ABOUTME: Starts an isolated headless Chromium, stops it whole, and reports check failures.
+# ABOUTME: Starts an isolated headless Chromium, holds an /api/* block, and stops both whole.
 import os
 import shutil
 import signal
@@ -13,22 +13,38 @@ from pathlib import Path
 from urllib.request import ProxyHandler, build_opener, urlopen
 
 # The repository this script belongs to, for the scratch console's code. Resolved, so a linked
-# copy of this script still finds it.
-REPO = Path(__file__).resolve().parents[2]
+# copy of this script still finds it and the DevTools helpers beside it.
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
+sys.path.insert(0, str(HERE))
+sys.path.insert(1, str(REPO))
 
-# The scratch console: the real app with its own data folder, on a port picked for it. Nothing
-# of the kiosk's console (make run, port 8008) is shared: not its learner state, not its server.
-SERVE = (
-    "import sys\n"
-    "import uvicorn\n"
-    "sys.path.insert(0, sys.argv[1])\n"
-    "from sigint101.app import create_app\n"
-    "uvicorn.run(create_app(data_dir=sys.argv[2]), host='127.0.0.1', port=int(sys.argv[3]),\n"
-    "            log_level='warning')\n"
-)
+from render_scroll import connect, leave_page  # noqa: E402
+
+from sigint101.childproc import _die_with_parent  # noqa: E402
+
+# The scratch console: the real app with its own data folder and no radio (render_console.py),
+# on a loopback socket bound here. Nothing of the kiosk's console (make run, port 8008) is
+# shared: not its learner state, not its server.
+CONSOLE = HERE / "render_console.py"
 CONSOLE_START_S = 60    # a Pi loads every lesson pack and verifies the exam pool before serving
 CONSOLE_STOP_S = 15     # the console's own shutdown stands its receivers down within this
 BROWSER_STOP_S = 5
+
+# The signals that end a run early: a kill, an ssh session dropping, Ctrl-C, Ctrl-\. Each stops
+# the console and Chromium on the way out. SIGKILL cannot be caught; for that case both are
+# started with a parent-death signal, so they die with this process.
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT)
+
+
+def _exited(process):
+    """Whether the process has exited, peeked at without reaping it (its pid stays reserved)."""
+    if process.returncode is not None:
+        return True
+    try:
+        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
 
 
 def chromium_port(browser, profile):
@@ -36,7 +52,7 @@ def chromium_port(browser, profile):
     opener = build_opener(ProxyHandler({}))
     port_file = profile / "DevToolsActivePort"
     deadline = time.monotonic() + 10
-    while browser.poll() is None and time.monotonic() < deadline:
+    while not _exited(browser) and time.monotonic() < deadline:
         try:
             port = int(port_file.read_text(encoding="utf-8").splitlines()[0])
             with opener.open(f"http://127.0.0.1:{port}/json/version", timeout=1):
@@ -46,78 +62,88 @@ def chromium_port(browser, profile):
     raise RuntimeError("Cannot reach Chromium DevTools. Check that headless Chromium can start.")
 
 
-def _group_alive(pgid):
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+def _group_running(pgid):
+    """The members of a process group that are still running, read from /proc.
 
-
-def _signal_group(pgid, sig):
+    Exited members awaiting their reaper (the leader, kept unreaped, or orphans init will reap)
+    do not count: they hold no files open and run no code.
+    """
+    running = []
     try:
-        os.killpg(pgid, sig)
-    except ProcessLookupError:
-        pass
+        entries = os.listdir("/proc")
+    except OSError:
+        return running
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            stat = Path("/proc", entry, "stat").read_text()
+        except OSError:
+            continue
+        fields = stat.rsplit(")", 1)[1].split()
+        if int(fields[2]) == pgid and fields[0] != "Z":
+            running.append(int(entry))
+    return running
 
 
 def stop_group(process, grace):
     """Stop a process started in a session of its own, and everything it started, then reap it.
 
     A chromium wrapper can exit on the signal while the browser it launched keeps writing into
-    its profile. So the whole process group is signalled, and this returns only once no member
-    is left: a polite SIGTERM first, then SIGKILL for whatever outlives the grace period.
+    its profile, so the whole group is signalled: SIGTERM, then SIGKILL for whatever is still
+    running after the grace period. The repo's rule (C42): the group is signalled and swept only
+    while its leader is unreaped, so its number cannot have been handed to another process. The
+    leader is reaped last, with a bounded wait.
     """
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        _signal_group(process.pid, sig)
+        if process.returncode is None:      # the leader is unreaped: the group number is ours
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
         deadline = time.monotonic() + grace
-        try:
-            process.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            continue
-        while time.monotonic() < deadline:
-            if not _group_alive(process.pid):
-                return
+        while _group_running(process.pid) and time.monotonic() < deadline:
             time.sleep(0.05)
-    process.wait()
-    deadline = time.monotonic() + grace
-    while _group_alive(process.pid):
-        if time.monotonic() > deadline:
-            print(f"processes of group {process.pid} survived SIGKILL", file=sys.stderr)
-            return
-        time.sleep(0.05)
-
-
-def _free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+        if not _group_running(process.pid):
+            break
+    else:
+        print(f"processes of group {process.pid} still run after SIGKILL", file=sys.stderr)
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        print(f"process {process.pid} was not reaped", file=sys.stderr)
 
 
 @contextmanager
 def scratch_console(data_dir):
     """Serve a console of this checkout on a free loopback port with `data_dir` as its data.
 
-    Yields the console's address and stops the server, whole, when the block ends.
+    The listening socket is bound and held here and handed to the console, so no other server
+    can take the port between choosing it and serving on it. Yields the console's address and
+    stops the server, whole, when the block ends.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    port = _free_port()
-    url = f"http://127.0.0.1:{port}"
-    command = [sys.executable, "-c", SERVE, str(REPO), str(data_dir), str(port)]
+    listener = socket.socket()
     try:
-        server = subprocess.Popen(command, cwd=REPO, stdout=subprocess.DEVNULL,
-                                  start_new_session=True)
-    except OSError as error:
-        sys.exit(f"Cannot start the scratch console. ({error})")
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(64)
+        url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        command = [sys.executable, str(CONSOLE), str(listener.fileno()), str(data_dir)]
+        try:
+            server = subprocess.Popen(command, cwd=REPO, stdout=subprocess.DEVNULL,
+                                      pass_fds=(listener.fileno(),), start_new_session=True,
+                                      preexec_fn=_die_with_parent())
+        except OSError as error:
+            sys.exit(f"Cannot start the scratch console. ({error})")
+    finally:
+        listener.close()
     try:
         opener = build_opener(ProxyHandler({}))
         deadline = time.monotonic() + CONSOLE_START_S
         while True:
-            if server.poll() is not None:
-                sys.exit(f"The scratch console exited with status {server.returncode}.")
+            if _exited(server):
+                sys.exit("The scratch console exited before it answered.")
             try:
                 with opener.open(f"{url}/", timeout=2):
                     break
@@ -139,7 +165,8 @@ def headless_chromium(chromium, profile):
     command = [chromium, "--headless=new", "--disable-gpu", "--password-store=basic",
                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank"]
     try:
-        browser = subprocess.Popen(command, stdout=subprocess.DEVNULL, start_new_session=True)
+        browser = subprocess.Popen(command, stdout=subprocess.DEVNULL, start_new_session=True,
+                                   preexec_fn=_die_with_parent())
     except OSError as error:
         sys.exit(f"Cannot start Chromium. ({error})")
     try:
@@ -179,14 +206,36 @@ def run_checks(console, port, output):
     return status
 
 
-def _stop_on_sigterm(signum, frame):
+@contextmanager
+def api_block(port):
+    """Hold a DevTools session on the page that blocks /api/* for the whole run.
+
+    Each check's own block ends with its connection, and the next check's begins only when it
+    attaches. This one spans the gaps, and leaves the page on about:blank when the run ends.
+    """
+    session = connect(port)
+    try:
+        yield
+    finally:
+        leave_page(session)
+
+
+def _stop_on_signal(signum, frame):
     # The browser and the scratch console run in sessions of their own, so a signal to this
-    # check reaches neither. Exiting through SystemExit stops both on the way out.
+    # check reaches neither. Exiting through SystemExit stops both on the way out; a second
+    # signal while that runs is ignored rather than cutting the teardown short.
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
     sys.exit(128 + signum)
 
 
 def main():
-    signal.signal(signal.SIGTERM, _stop_on_sigterm)
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, _stop_on_signal)
+    # This process talks to DevTools on loopback too (api_block), never through a proxy.
+    no_proxy = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))
+    os.environ["no_proxy"] = os.environ["NO_PROXY"] = (
+        f"{no_proxy},127.0.0.1" if no_proxy else "127.0.0.1")
     # With no RENDER_URL the checks measure a scratch console started here, never the kiosk's.
     console = os.environ.get("RENDER_URL", "").strip().rstrip("/")
     if console:
@@ -202,13 +251,15 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="sigint101-render-") as directory:
         output = Path(directory)
-        # Both stop before the folder holding their state is removed.
+        # All of them stop before the folder holding their state is removed: the block's page
+        # leaves for about:blank, then Chromium stops, then the console.
         with ExitStack() as running:
             if not console:
                 console = running.enter_context(scratch_console(output / "console"))
                 print(f"Started a scratch console at {console} with its own data folder.",
                       flush=True)
             port = running.enter_context(headless_chromium(chromium, output / "profile"))
+            running.enter_context(api_block(port))
             return run_checks(console, port, output)
 
 

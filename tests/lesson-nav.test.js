@@ -1,5 +1,5 @@
-// ABOUTME: Tests the lesson-stage navigation rules — where a Next/Previous step lands and how each
-// ABOUTME: rail pip reads, and whether the completion button advances or offers a retry.
+// ABOUTME: Tests the lesson-stage navigation rules — where a Next/Previous step lands, how each rail
+// ABOUTME: pip reads, the one open post on load, and whether Complete advances or offers a retry.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -71,7 +71,10 @@ test("Next and Prev update the progress line and leave sealed steps locked", () 
         "[data-nav='prev']": [navButton("prev")],
       }[selector] || []),
     },
-    fetch: (_url, options) => { saved.push(options.body); return Promise.resolve(); },
+    fetch: (url, options) => {
+      if (!url.startsWith("/api/opened")) saved.push(options.body);   // the open has its own test
+      return Promise.resolve();
+    },
   });
   function check(current, expected) {
     assert.equal(panels.findIndex(panel => !panel.hidden), current);
@@ -113,6 +116,7 @@ for (const [failure, failSave] of [
       document: doc,
       window: page,
       fetch: (url, options) => {
+        if (url.startsWith("/api/opened")) return Promise.resolve({ ok: true, status: 200 });
         requests.push([url, options.method]);
         return requests.length === 1 ? failSave() : Promise.resolve({ ok: true, status: 200 });
       },
@@ -134,6 +138,60 @@ for (const [failure, failSave] of [
     ]);
   });
 }
+
+// A lesson page as lesson-nav.js sees it: one stage element, Next and Prev, every fetch recorded.
+function loadLesson(stageEl) {
+  const requests = [];
+  const handlers = {};
+  const navButton = direction => ({
+    addEventListener: (_, handler) => { handlers[direction] = handler; },
+  });
+  const panels = ["frame", "demo"].map((name, i) => ({
+    hidden: i !== 0, getAttribute: key => key === "data-stage" ? name : null,
+  }));
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/lesson-nav.js"), "utf8"), {
+    document: {
+      querySelector: selector => selector === ".stage" ? stageEl : null,
+      querySelectorAll: selector => ({
+        ".stage-panel": stageEl ? panels : [],
+        "[data-nav='next']": [navButton("next")],
+        "[data-nav='prev']": [navButton("prev")],
+      }[selector] || []),
+    },
+    fetch: (url, options) => { requests.push([url, options]); return Promise.resolve({ ok: true }); },
+  });
+  return { requests, handlers };
+}
+
+test("a lesson page posts its open once, when it loads", () => {
+  const page = loadLesson({ getAttribute: key => key === "data-lesson-id" ? "7" : "0" });
+  const opens = page.requests.filter(([url]) => url.startsWith("/api/opened"));
+  assert.equal(opens.length, 1);
+  const [url, options] = opens[0];
+  assert.equal(url, "/api/opened?lesson_id=7");
+  assert.equal(options.method, "POST");
+  assert.equal(options.keepalive, true);
+  page.handlers.next();
+  page.handlers.prev();
+  assert.equal(page.requests.filter(([u]) => u.startsWith("/api/opened")).length, 1,
+               "stepping through the lesson must not post the open again");
+});
+
+test("a page with no lesson stage posts no open", () => {
+  assert.deepEqual(loadLesson(null).requests, []);
+});
+
+test("a failed open post is swallowed, so the lesson still runs", async () => {
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/lesson-nav.js"), "utf8"), {
+    document: {
+      querySelector: selector => selector === ".stage"
+        ? { getAttribute: key => key === "data-lesson-id" ? "3" : "0" } : null,
+      querySelectorAll: () => [],
+    },
+    fetch: () => Promise.reject(new Error("lost connection")),
+  });
+  await new Promise(setImmediate);
+});
 
 test("Commit follows radio selection and a submit without a choice is blocked except Skip", () => {
   const handlers = {};

@@ -727,14 +727,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         is what the template uses to decide which stages it emits, so the sealed bodies are never
         put into the HTML before the commit. Lesson.reveal() is asked for the sealed material only
         once committed — it refuses otherwise — as the code-level backstop behind the template.
-        Opening a lesson counts as progress but never as completion. It opens on the stage the
+        Opening a lesson counts as progress but never as completion; the page records it once
+        shown (POST /api/opened), so this GET writes no learner state. It opens on the stage the
         learner last reached (a reload or a power cut resumes in place), and Back leads to the
         lesson's unit rather than skipping it.
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
         _restore_lesson_tuning(lesson)
-        app.state.progress.mark_opened(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
@@ -894,6 +894,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             context={"title": "The Law", "back_href": back_href, "back_label": back_label,
                      "caution": LAW_CAUTION, "sections": LAW_SECTIONS},
         )
+
+    @app.post("/api/opened")
+    def opened(lesson_id: int):
+        """Mark a lesson opened: the lesson page posts this once it is shown (lesson-nav.js).
+
+        Loading the page records nothing, so a render check, a prefetch or a crawler cannot mark
+        a lesson opened. An unknown lesson is refused (404) like every lesson route.
+        """
+        _require_lesson(lesson_id)
+        app.state.progress.mark_opened(lesson_id)
+        return {"opened": True, "lesson_id": lesson_id}
 
     @app.post("/api/stage")
     async def stage(lesson_id: int, request: Request):

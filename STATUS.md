@@ -371,8 +371,10 @@ Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live
 - **Harness:** `tools/render/` (stdlib CDP websocket, viewport forced to 800x480).
   - `make render-check`: runs the checks with a separate headless Chromium against a scratch
     console it starts on a free port with its own data folder; `RENDER_URL` names a running
-    console instead. Every check blocks the console's `/api/*`, so none starts a receiver or
-    writes learner state.
+    console instead. A check blocks the console's `/api/*` only while its DevTools session is
+    attached, so each one leaves the page on about:blank before it closes and the runner holds
+    its own block for the whole run. The scratch console is built with no radio. Loading a page
+    writes no learner state: the rack place and a lesson's open are posts from the page.
   - `render_scroll.py`: explain scroll + Complete, home tile clipping.
   - `render_fit.py`: demo/predict button bottom.
   - `render_figure.py`: exam diagram.

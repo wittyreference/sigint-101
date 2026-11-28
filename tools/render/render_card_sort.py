@@ -5,7 +5,7 @@ import json
 import sys
 import time
 
-from render_scroll import connect
+from render_scroll import connect, leave_page
 
 THEMES = ("dark", "sunlight", "red-night")
 
@@ -197,7 +197,7 @@ def main(console):
             failed |= verdict(law_ok, f"law {theme}", law)
         return int(failed)
     finally:
-        browser.s.close()
+        leave_page(browser)
 
 
 if __name__ == "__main__":

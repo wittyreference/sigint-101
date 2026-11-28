@@ -1034,6 +1034,29 @@ def _stage(client, lesson_id, stage):
                        headers={"content-type": "application/x-www-form-urlencoded"})
 
 
+def test_showing_a_lesson_page_leaves_its_opened_state_unchanged(tmp_path):
+    # A GET has no side effect: a render check, a prefetch or a crawler that loads a lesson must
+    # not mark it opened. The page records the open itself (lesson-nav.js, POST /api/opened).
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        assert client.get("/lesson/1").status_code == 200
+        assert client.app.state.progress.get(1) is None
+
+
+def test_the_lesson_page_posting_its_open_marks_the_lesson_opened(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        resp = client.post("/api/opened?lesson_id=1")
+        assert resp.status_code == 200
+        assert resp.json() == {"opened": True, "lesson_id": 1}
+        row = client.app.state.progress.get(1)
+        assert row["opened"] == 1 and row["completed"] == 0
+
+
+def test_an_open_of_a_lesson_the_course_lacks_is_refused_and_records_nothing(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        assert client.post("/api/opened?lesson_id=99").status_code == 404
+        assert client.app.state.progress.get(99) is None
+
+
 def test_reopening_a_lesson_resumes_the_stage_the_learner_left(tmp_path):
     with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
         assert _shown_stage(client.get("/lesson/1").text) == "frame"

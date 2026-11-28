@@ -5,7 +5,7 @@ import json
 import sys
 
 from render_logbook import THEMES, load_page, verdict
-from render_scroll import connect
+from render_scroll import connect, leave_page
 
 REFUSAL = (
     "no LoRa radio — meshtasticd is not reachable at localhost:4403 "
@@ -87,7 +87,7 @@ def main(console):
             failed |= verdict(ok, f"LoRa send {theme}", measures)
         return int(failed)
     finally:
-        browser.s.close()
+        leave_page(browser)
 
 
 if __name__ == "__main__":

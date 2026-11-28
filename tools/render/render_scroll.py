@@ -1,5 +1,6 @@
 # ABOUTME: Render a page at a forced 800x480 over CDP and assert the scroll/layout is right.
 # ABOUTME: explain: body scrolls + Complete in view; home: tiles unclipped. CDP_PORT picks Chrome.
+import atexit
 import base64
 import json
 import os
@@ -29,19 +30,56 @@ def page_ws():
 # The console's whole API, which a check's pages never reach. A page's own polls start receivers
 # and claim the radio, and its posts write learner state: a check measures layout, nothing more.
 CONSOLE_API = "*/api/*"
+BLANK = "about:blank"
 
 
 def block_console_api(c):
-    """Block every console API request on this page before it loads anything.
+    """Block every console API request on this page for as long as this client is attached.
 
-    One list holds every blocked pattern, and a later Network.setBlockedURLs replaces it, so a
-    check never sets its own: this is the one place that does.
+    The block belongs to this DevTools session: it ends when the connection closes, while the
+    page would stay loaded and polling. So the page is also left on about:blank before the client
+    closes (leave_page), at the latest when the script exits. One list holds every blocked
+    pattern, and a later Network.setBlockedURLs replaces it, so a check never sets its own: this
+    is the one place that does.
     """
     c.call("Network.enable")
     c.call("Network.setBlockedURLs", {"urls": [CONSOLE_API]})
+    atexit.register(leave_page, c)
 
 
-def connect():
+def _socket(c):
+    # This module's client keeps its socket as `s`, render_fit's as `sock`.
+    return getattr(c, "s", None) or getattr(c, "sock", None)
+
+
+def leave_page(c):
+    """Navigate the page to about:blank, wait until it is there, then close the connection.
+
+    No console page is left running once its block is gone, so nothing it polls reaches the
+    console. Safe to call twice, and a no-op on a connection that is already closed.
+    """
+    sock = _socket(c)
+    if getattr(c, "left_page", False) or sock is None or sock.fileno() == -1:
+        return
+    c.left_page = True
+    try:
+        c.call("Page.navigate", {"url": BLANK})
+        for _ in range(25):
+            where = c.call("Runtime.evaluate",
+                           {"expression": "location.href", "returnByValue": True})
+            if where.get("result", {}).get("value") == BLANK:
+                break
+            time.sleep(0.2)
+        else:
+            print("the page did not reach about:blank before DevTools closed", file=sys.stderr)
+    except (OSError, TimeoutError, ValueError, SystemExit):
+        # A connection DevTools has already dropped; that check has its own failure to report.
+        pass
+    finally:
+        sock.close()
+
+
+def connect(port=None):
     """A CDP client on the browser's one page, attached through the browser endpoint, focused.
 
     Headless Chromium throttles a tab it thinks is in the background until commands stall, so
@@ -49,10 +87,11 @@ def connect():
     a new window rather than as a background tab. Launch Chromium with --remote-allow-origins=*
     and --password-store=basic: on a box with a desktop keyring running, Chromium otherwise
     blocks its first http page on a keyring password prompt nobody can answer. The console's API
-    is blocked before the client is handed back (block_console_api).
+    is blocked before the client is handed back (block_console_api). `port` overrides CDP_PORT.
     """
-    version = json.load(urllib.request.urlopen(f"http://{HOST}:{PORT}/json/version"))
-    c = CDP(version["webSocketDebuggerUrl"])
+    port = PORT if port is None else int(port)
+    version = json.load(urllib.request.urlopen(f"http://{HOST}:{port}/json/version"))
+    c = CDP(version["webSocketDebuggerUrl"], port=port)
     targets = c.call("Target.getTargets")["targetInfos"]
     page = next((t for t in targets if t["type"] == "page"), None)
     if page:
@@ -69,14 +108,15 @@ def connect():
 
 
 class CDP:
-    def __init__(self, ws):
-        path = ws.split(f"{HOST}:{PORT}", 1)[1]
+    def __init__(self, ws, port=None):
+        port = PORT if port is None else port
+        path = ws.split(f"{HOST}:{port}", 1)[1]
         # A silent DevTools socket must fail the check, not hang it forever.
-        self.s = socket.create_connection((HOST, PORT), timeout=30)
+        self.s = socket.create_connection((HOST, port), timeout=30)
         k = base64.b64encode(os.urandom(16)).decode()
         self.s.sendall(
             (
-                f"GET {path} HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nUpgrade: websocket\r\n"
+                f"GET {path} HTTP/1.1\r\nHost: {HOST}:{port}\r\nUpgrade: websocket\r\n"
                 f"Connection: Upgrade\r\nSec-WebSocket-Key: {k}\r\n"
                 "Sec-WebSocket-Version: 13\r\n\r\n"
             ).encode()

@@ -93,8 +93,10 @@ class FakeDevTools:
     def __init__(self, answers, *, disconnect_at=None):
         self.answers = answers
         self.disconnect_at = disconnect_at
-        # Every DevTools command a check sent, in order, as (method, params).
+        # Every DevTools command a check sent, in order, as (method, params). A websocket that
+        # closes adds ("<closed>", {}); a GET of /mark/<name> adds ("<mark>", {"name": name}).
         self.calls = []
+        self.url = "about:blank"
         self.server = socket.create_server(("127.0.0.1", 0))
         self.port = self.server.getsockname()[1]
         threading.Thread(target=self._serve, daemon=True).start()
@@ -130,7 +132,10 @@ class FakeDevTools:
                              b"Connection: Upgrade\r\n\r\n")
                 self._websocket(conn, rest)
                 return
-            if path == "/json/version":
+            if path.startswith("/mark/"):
+                self.calls.append(("<mark>", {"name": path[len("/mark/"):]}))
+                body, status = b"{}", b"200 OK"
+            elif path == "/json/version":
                 url = f"ws://127.0.0.1:{self.port}/devtools/browser/fake"
                 body = json.dumps({"webSocketDebuggerUrl": url}).encode()
                 status = b"200 OK"
@@ -174,6 +179,7 @@ class FakeDevTools:
                     return
                 conn.sendall(frame)
         except (EOFError, OSError):
+            self.calls.append(("<closed>", {}))
             return
 
     def _result(self, msg):
@@ -185,11 +191,15 @@ class FakeDevTools:
             return {"sessionId": "attached-1"}
         if method == "Page.captureScreenshot":
             return {"data": base64.b64encode(b"a png").decode()}
+        if method == "Page.navigate":
+            self.url = params.get("url")
         if method != "Runtime.evaluate":
             return {}
         expression = params["expression"]
         if expression == "document.readyState":
             return {"result": {"type": "string", "value": "complete"}}
+        if expression == "location.href":
+            return {"result": {"type": "string", "value": self.url}}
         for piece, value in self.answers.items():
             if piece in expression:
                 if value is THROWS:
@@ -455,6 +465,7 @@ def render_make(tmp_path, console_url, devtools):
         "    sys.exit(3)\n"
         "Path(profile).mkdir()\n"
         "if os.environ.get('CHROMIUM_FORKS'):\n"
+        "    Path(os.environ['CHROMIUM_FORKS'] + '.wrapper').write_text(str(os.getpid()))\n"
         f"    subprocess.Popen([sys.executable, {str(browser)!r}, profile,\n"
         "                      os.environ['CHROMIUM_FORKS']],\n"
         "                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
@@ -473,22 +484,22 @@ def render_make(tmp_path, console_url, devtools):
             "if name == 'render_scroll.py':\n"
             "    assert sys.argv[2] == 'home'\n"
             "print('ran', name, sys.argv[1], flush=True)\n"
+            "fake = 'http://127.0.0.1:' + os.environ['FAKE_CDP_PORT']\n"
+            "urlopen(f'{fake}/mark/{name}', timeout=10).close()\n"
             "if name == 'render_scroll.py' and os.environ.get('PROBE_CONSOLE'):\n"
             "    with urlopen(sys.argv[1], timeout=10) as page:\n"
             "        print('console', page.status, b'SIGINT 101' in page.read(), flush=True)\n"
+            "if name == os.environ.get('STALL_CHECK'):\n"
+            "    import time\n"
+            "    time.sleep(60)\n"
             "sys.exit(7 if name == os.environ.get('FAILING_CHECK') else 0)\n",
             encoding="utf-8",
         )
     make = shutil.which("make")
     assert make, "the render-check tests require make"
 
-    def run_make(*, has_chromium=True, fit_answers=None, timeout=15, **overrides):
-        """Run make render-check; an override of None removes that variable."""
-        if not has_chromium:
-            chromium.unlink()
-        if fit_answers is not None:
-            (screen / FIT.name).unlink()
-            (screen / FIT.name).symlink_to(FIT)
+    def environment(fit_answers, overrides):
+        """The check's environment; an override of None removes that variable."""
         env = dict(os.environ, PATH=str(path), RENDER_URL=console_url, TMPDIR=str(tmp_path),
                    FAKE_CDP_PORT=str(devtools(fit_answers or {})),
                    no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
@@ -497,10 +508,29 @@ def render_make(tmp_path, console_url, devtools):
                 env.pop(name, None)
             else:
                 env[name] = value
+        return env
+
+    def run_make(*, has_chromium=True, fit_answers=None, timeout=15, **overrides):
+        """Run make render-check with these stand-ins."""
+        if not has_chromium:
+            chromium.unlink()
+        if fit_answers is not None:
+            (screen / FIT.name).unlink()
+            (screen / FIT.name).symlink_to(FIT)
+        env = environment(fit_answers, overrides)
         return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
                                "render-check"], cwd=tmp_path, env=env, capture_output=True,
                               text=True, timeout=timeout)
 
+    def start(**overrides):
+        """Start the runner itself, as make would, and hand back the process to signal."""
+        return subprocess.Popen([str(tmp_path / ".venv" / "bin" / "python"),
+                                 str(screen / "render_check.py")], cwd=tmp_path,
+                                env=environment(None, overrides), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+
+    run_make.start = start
+    run_make.calls = lambda: devtools.made[-1].calls
     return run_make
 
 
@@ -604,11 +634,7 @@ def test_the_scratch_console_keeps_its_state_in_its_own_folder_and_stops(tmp_pat
 
 
 def _alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+    return _running(pid)
 
 
 def test_render_check_stops_the_whole_browser_before_removing_its_profile(render_make, tmp_path):
@@ -661,6 +687,163 @@ def test_every_render_tool_blocks_the_console_api_before_it_loads_a_page(devtool
     for method, params in calls:
         if method == "Network.setBlockedURLs":
             assert "*/api/*" in params.get("urls", []), params
+
+
+def _leaves_blank_before_closing(calls):
+    """The last page a client navigated to is about:blank, reached before its connection closed.
+
+    The /api/* block belongs to the DevTools session, so a page left loaded after the close
+    polls the console again.
+    """
+    methods = [method for method, _ in calls]
+    navigations = [i for i, (method, _) in enumerate(calls) if method == "Page.navigate"]
+    assert navigations, methods
+    last = navigations[-1]
+    assert calls[last][1].get("url") == "about:blank", calls[last]
+    assert "<closed>" in methods[last:], methods[last:]
+    closed = last + methods[last:].index("<closed>")
+    confirmed = [method for method, params in calls[last:closed]
+                 if method == "Runtime.evaluate" and params.get("expression") == "location.href"]
+    assert confirmed, "closed without waiting for about:blank"
+
+
+@pytest.mark.parametrize("tool", API_TOOLS.values(), ids=API_TOOLS.keys())
+def test_every_render_tool_leaves_its_page_on_about_blank_before_it_closes(devtools, tmp_path,
+                                                                           tool):
+    script, args, answers = tool
+    run(script, *(arg.format(tmp=tmp_path) for arg in args), port=devtools(answers))
+    _leaves_blank_before_closing(devtools.made[-1].calls)
+
+
+def test_render_check_holds_its_own_api_block_across_every_check(render_make):
+    # Between one tool's close and the next one's attach no tool's block exists. The runner's
+    # own session blocks /api/* from before the first check until after the last.
+    proc = render_make()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    calls = render_make.calls()
+    methods = [method for method, _ in calls]
+    marks = [i for i, method in enumerate(methods) if method == "<mark>"]
+    assert len(marks) == 6, methods
+    blocks = [i for i, (method, params) in enumerate(calls)
+              if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
+    assert blocks and blocks[0] < marks[0], methods
+    assert "<closed>" not in methods[blocks[0]:marks[-1]], methods
+    _leaves_blank_before_closing(calls)
+    assert methods.index("<closed>", marks[-1]) > marks[-1]
+
+
+def _running(pid):
+    """Whether a process is alive; an exited one awaiting its reaper counts as gone."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+@pytest.mark.parametrize("sig", ["SIGHUP", "SIGINT", "SIGTERM"])
+def test_a_signal_to_the_check_stops_the_scratch_console_and_the_whole_browser(render_make,
+                                                                              tmp_path, sig):
+    # An ssh drop (SIGHUP), Ctrl-C (SIGINT) or a kill (SIGTERM) reaches only the runner: the
+    # console and Chromium run in sessions of their own. The runner must stop both on the way out.
+    import signal as signals
+    pidfile = tmp_path / "browser.pid"
+    check = render_make.start(RENDER_URL=None, CHROMIUM_FORKS=str(pidfile),
+                              STALL_CHECK=FIT.name)
+    try:
+        line = ""
+        while not line.startswith("ran "):
+            line = check.stdout.readline()
+            assert line, check.stderr.read()
+        console = line.split()[2].rsplit("/", 2)[0]
+        port = int(console.rsplit(":", 1)[1])
+        check.send_signal(getattr(signals, sig))
+        check.wait(timeout=60)
+        assert check.returncode != 0
+        browser = int(pidfile.read_text())
+        wrapper = int(Path(str(pidfile) + ".wrapper").read_text())
+        assert not _running(browser), "the browser outlived the check"
+        assert not _running(wrapper), "the chromium wrapper outlived the check"
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+        assert list(tmp_path.glob("sigint101-render-*")) == []
+    finally:
+        if check.poll() is None:
+            check.kill()
+            check.wait()
+        for path in (pidfile, Path(str(pidfile) + ".wrapper")):
+            if path.is_file() and _running(int(path.read_text())):
+                os.kill(int(path.read_text()), 9)
+        check.stdout.close()
+        check.stderr.close()
+
+
+def test_stop_group_signals_the_group_only_while_its_leader_is_unreaped(tmp_path, monkeypatch):
+    # The repo's rule (C42): once the leader is reaped its number can be reused, so the group is
+    # swept of survivors first and the leader reaped last. A wrapper that dies on SIGTERM leaves a
+    # child that ignores it; that child must still be gone when stop_group returns.
+    render_check = _load_render_check()
+    child_pid = tmp_path / "child.pid"
+    child = tmp_path / "stubborn.py"
+    child.write_text("import os, signal, sys, time\n"
+                     "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                     "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                     "time.sleep(60)\n", encoding="utf-8")
+    leader = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess, sys, time\n"
+         "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+         "time.sleep(60)\n", str(child), str(child_pid)],
+        start_new_session=True)
+    try:
+        for _ in range(200):
+            if child_pid.is_file() and child_pid.read_text():
+                break
+            subprocess.run(["sleep", "0.05"])
+        signalled = []
+        real_killpg = os.killpg
+
+        def killpg(pgid, sig):
+            signalled.append((sig, leader.returncode))
+            return real_killpg(pgid, sig)
+
+        monkeypatch.setattr(render_check.os, "killpg", killpg)
+        render_check.stop_group(leader, 0.5)
+        monkeypatch.undo()
+        assert leader.returncode is not None, "the leader was never reaped"
+        assert signalled, "the group was never signalled"
+        assert all(code is None for _, code in signalled), signalled
+        assert not _running(int(child_pid.read_text())), "a survivor outlived stop_group"
+    finally:
+        if leader.poll() is None:
+            leader.kill()
+            leader.wait()
+        if child_pid.is_file() and _running(int(child_pid.read_text())):
+            os.kill(int(child_pid.read_text()), 9)
+
+
+def _listening_addresses(port):
+    """The local addresses a socket is listening on at this port, from /proc/net/tcp{,6}."""
+    found = []
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        for row in Path(table).read_text().splitlines()[1:]:
+            local, state = row.split()[1], row.split()[3]
+            address, hexport = local.rsplit(":", 1)
+            if int(hexport, 16) == port and state == "0A":
+                found.append(address)
+    return found
+
+
+def test_the_scratch_console_listens_on_loopback_only_and_has_no_radio(tmp_path):
+    from urllib.request import urlopen
+    render_check = _load_render_check()
+    with render_check.scratch_console(tmp_path / "console") as url:
+        port = int(url.rsplit(":", 1)[1])
+        assert _listening_addresses(port) == ["0100007F"]
+        with urlopen(f"{url}/api/hardware", timeout=10) as reply:
+            radio = json.load(reply)
+    assert radio["present"] is False and radio["state"] == "absent", radio
+    assert "render check" in radio["detail"], radio
 
 
 LOGBOOK_FITS = {"back": True, "doc": [800, 480], "scrolls": True, "lastVisible": True,
