@@ -7,6 +7,61 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 MARK_BEGIN="# >>> sigint101 kiosk >>>"
 MARK_END="# <<< sigint101 kiosk <<<"
 ICON="/usr/local/share/icons/hicolor/scalable/apps/sigint101.svg"
+COURSE_BIN="/usr/local/bin/sigint101-course"
+# The running course watchdog holds a flock on this (deploy/kiosk/start-kiosk.sh).
+WATCH_LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sigint101-kiosk-watch.lock"
+
+# This user's running watchdogs: the processes that have the lock file open and whose command
+# line is exactly "<shell> <launcher> watch". Never a pattern match on names: the watchdog's own
+# children and the kiosk browser may have the file open too, and they are left alone.
+watchdog_pids() {
+  [ -e "$WATCH_LOCK" ] || return 0
+  local fd pid seen=" "
+  local -a argv
+  while IFS= read -r fd; do
+    pid="${fd#/proc/}"
+    pid="${pid%%/*}"
+    case "$seen" in *" $pid "*) continue ;; esac
+    seen+="$pid "
+    [ -O "/proc/$pid" ] || continue
+    mapfile -d '' argv 2>/dev/null < "/proc/$pid/cmdline" || continue
+    [ "${#argv[@]}" -eq 3 ] && [ "${argv[2]}" = watch ] || continue
+    case "${argv[1]##*/}" in
+      sigint101-course | start-kiosk.sh) printf '%s\n' "$pid" ;;
+    esac
+  done < <(find /proc/[0-9]*/fd -maxdepth 1 -lname "$WATCH_LOCK" 2>/dev/null)
+}
+
+# A running watchdog keeps the launcher it started with in memory, so without this a launcher
+# change (the window bounds, say) waits for the next login. Stop it by PID and start the
+# installed launcher's watchdog in the same desktop session, with that session's environment
+# (install.sh is often run over SSH, which has no WAYLAND_DISPLAY). The kiosk browser is never
+# touched: a learner may be mid-lesson, so new browser flags apply at its next launch.
+restart_watchdog() {
+  local pid
+  local -a pids session_env run
+  mapfile -t pids < <(watchdog_pids)
+  [ "${#pids[@]}" -gt 0 ] || return 0
+  if ! mapfile -d '' session_env 2>/dev/null < "/proc/${pids[0]}/environ"; then
+    echo "install: WARN could not read the course watchdog's session; it restarts at the next login" >&2
+    return 0
+  fi
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  # The lock frees when the watchdog has exited. An older launcher let its sleep or curl inherit
+  # the lock, which then lasts up to that command's end, so allow it some seconds.
+  if ! flock -w 15 "$WATCH_LOCK" true; then
+    kill -KILL "${pids[@]}" 2>/dev/null || true
+    if ! flock -w 5 "$WATCH_LOCK" true; then
+      echo "install: WARN the course watchdog's lock is still held; it restarts at the next login" >&2
+      return 0
+    fi
+  fi
+  run=("$COURSE_BIN" watch)
+  if command -v systemd-cat >/dev/null 2>&1; then
+    run=(systemd-cat -t sigint101-course "${run[@]}")
+  fi
+  setsid -f env -i "${session_env[@]}" "${run[@]}" </dev/null >/dev/null 2>&1
+}
 
 # 1) Lesson server: a user unit plus lingering, so it runs from boot with nobody logged in.
 install -D -m 0644 "$HERE/kiosk/sigint101.service" "$HOME/.config/systemd/user/sigint101.service"
@@ -44,4 +99,9 @@ sudo systemctl restart systemd-journald
 #    labels and terminal (MC's call, 2026-11-03). Per-user; reloads whatever is running.
 bash "$HERE/desktop/apply-theme.sh"
 
+# 6) Hand the course watchdog over to the launcher just installed. The open kiosk stays open.
+restart_watchdog
+
 echo "install: server service enabled, course on the desktop with Exit and icon, journal persistent"
+echo "install: window and launcher changes reach the kiosk at its next launch; to apply them now," \
+  "Exit the course and reopen it from the SIGINT 101 icon (or sigint101-course open)"

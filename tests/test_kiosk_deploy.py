@@ -55,6 +55,8 @@ class Box:
         _stub(self.bin, "fc-cache", "exit 0")
         _stub(self.bin, "fc-list", 'echo "PT Mono"; echo "Russo One"')
         _stub(self.bin, "pkill", f'echo "pkill $*" >> {self.log}')
+        # Nothing a test starts writes to the host's journal.
+        _stub(self.bin, "systemd-cat", f'echo "systemd-cat $*" >> {self.log}; shift 2; exec "$@"')
 
     def start_session(self):
         self.socket = socket.socket(socket.AF_UNIX)
@@ -523,6 +525,126 @@ def test_install_with_no_profile_at_all_still_succeeds(box):
     result = box.run(INSTALL)
     assert result.returncode == 0, result.stderr
     assert not (box.home / ".profile").exists()
+
+
+# --- install.sh hands the running watchdog over to the launcher it installs -----------
+# On the reference Recon a watchdog that had run for two weeks kept the old launcher in memory, so
+# after a deploy the kiosk relaunched at the old 780x460 until someone restarted the watchdog.
+
+
+INSTALLED_LAUNCHER = "/usr/local/bin/sigint101-course"
+
+
+def _installed_launcher(box):
+    """What install.sh's (stubbed) sudo would have put at /usr/local/bin: the checkout's launcher,
+    marked so the test can tell its runs from the old watchdog's. setsid runs it in its place."""
+    path = box.log.parent / "sigint101-course"
+    first, rest = LAUNCHER.read_text(encoding="utf-8").split("\n", 1)
+    path.write_text(f'{first}\necho "launcher installed $*" >> {box.log}\n{rest}',
+                    encoding="utf-8")
+    path.chmod(0o755)
+    _stub(box.bin, "setsid",
+          f'echo "setsid $*" >> {box.log}\n'
+          '[ "$1" = -f ] && shift\n'
+          'args=()\n'
+          f'for a in "$@"; do [ "$a" = {INSTALLED_LAUNCHER} ] && a={path}; args+=("$a"); done\n'
+          '"${args[@]}" </dev/null >/dev/null 2>&1 &')
+    return path
+
+
+def _fake_kiosk(box):
+    """A stand-in for the open kiosk Chromium: it has the watchdog's lock file open, as a browser
+    an older launcher started would, and notes every signal it can catch."""
+    signals = box.log.parent / "kiosk-signals"
+    real_sleep = shutil.which("sleep")
+    script = (f'exec 8<"{_lock(box)}"\n'
+              'for s in TERM INT HUP QUIT USR1 USR2 ALRM PIPE CONT; do\n'
+              f'  trap "echo $s >> {signals}" "$s"\n'
+              'done\n'
+              f'while :; do {real_sleep} 0.1; done')
+    proc = subprocess.Popen(["bash", "-c", script, "chromium", "--kiosk",
+                             f"--user-data-dir={box.home}/.config/chromium-kiosk",
+                             "--app=http://127.0.0.1:8008"])
+    return proc, signals
+
+
+class _Deploy:
+    """A running watchdog (the old launcher, mid-sleep), an open kiosk, then install.sh."""
+
+    def __init__(self, box):
+        self.box = box
+        box.alive.touch()  # the course is open
+        # Only the watchdog's kiosk check finds anything: no labwc or bar for the theme to reload.
+        _stub(box.bin, "pgrep", f'echo "pgrep $*" >> {box.log}\n'
+                                'case "$*" in\n'
+                                f'  *"[u]ser-data-dir="*) [ -e {box.alive} ] ;;\n'
+                                '  *) exit 1 ;;\n'
+                                'esac')
+        box.start_session()
+        self.sleeper = _LongSleep(box)
+        _installed_launcher(box)
+        self.old = subprocess.Popen(["bash", str(LAUNCHER), "watch"], env=box.env(),
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.kiosk = None
+        try:
+            self.sleeper.first_pid()
+            self.kiosk, self.signals = _fake_kiosk(box)
+            assert _wait_for(lambda: any(
+                os.path.realpath(f"/proc/{self.kiosk.pid}/fd/{fd}") == str(_lock(box))
+                for fd in os.listdir(f"/proc/{self.kiosk.pid}/fd")))
+            self.sleeper.hold.unlink()  # sleeps from here on end the session
+            self.result = box.run(INSTALL)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        for proc in (self.old, self.kiosk):
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+            if proc is not None:
+                proc.wait(timeout=10)
+        self.sleeper.stop_all()
+
+
+@pytest.fixture
+def deploy(box):
+    d = _Deploy(box)
+    yield d
+    d.close()
+
+
+def test_install_restarts_the_running_watchdog_on_the_launcher_it_installed(deploy, box):
+    result = deploy.result
+    assert result.returncode == 0, result.stderr
+    # The old watchdog was stopped, by its PID.
+    deploy.old.wait(timeout=10)
+    assert box.calls("pkill") == []
+    # A watchdog on the installed launcher took over in the same desktop session: it took the
+    # lock and ran its pass.
+    [started] = box.calls("setsid")
+    assert started.endswith(f"{INSTALLED_LAUNCHER} watch"), started
+    assert "WAYLAND_DISPLAY=wayland-9" in started.split(), started
+    assert _wait_for(lambda: box.calls("sleep") == ["sleep 10"]), box.log.read_text()
+    assert box.calls("launcher installed") == ["launcher installed watch"]
+
+
+def test_install_leaves_the_open_kiosk_alone_and_says_when_changes_apply(deploy, box):
+    result = deploy.result
+    assert result.returncode == 0, result.stderr
+    assert deploy.kiosk.poll() is None, "install.sh stopped the open kiosk"
+    assert not deploy.signals.exists(), deploy.signals.read_text()
+    assert box.launches(wait=0.3) == []
+    [line] = [ln for ln in result.stdout.splitlines() if "next launch" in ln]
+    assert "sigint101-course open" in line, line
+
+
+def test_install_with_no_watchdog_running_starts_none(box):
+    box.start_session()
+    result = box.run(INSTALL)
+    assert result.returncode == 0, result.stderr
+    assert box.calls("setsid") == []
+    assert len([ln for ln in result.stdout.splitlines() if "next launch" in ln]) == 1
 
 
 # --- the desktop entries ------------------------------------------------------------
