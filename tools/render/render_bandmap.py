@@ -43,13 +43,17 @@ function measureBandmapPage(expectedTheme) {
   const app = document.querySelector('.app');
   const back = document.querySelector('.btn-back[href="/"]');
   const caption = document.querySelector('.bandmap__caption');
+  const keyLine = document.querySelector('.bandmap__key');
   const dial = document.querySelector('.bandmap__dial');
   const entries = document.querySelector('.bandmap__entries');
+  const headings = [...document.querySelectorAll('.bandmap__heading')];
   const rows = [...document.querySelectorAll('.bandmap__row')];
   const lessonRows = rows.filter(el => !el.classList.contains('bandmap__row--off-dial'));
   const offDialRows = rows.filter(el => el.classList.contains('bandmap__row--off-dial'));
   const replay = document.querySelector('.bandmap__row .logbook-mark--replay');
-  if (!app || !back || !caption || !dial || !entries || !rows.length || !replay) return null;
+  if (!app || !back || !caption || !keyLine || !dial || !entries || !rows.length || !replay) {
+    return null;
+  }
 
   function inViewport(r) {
     return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 &&
@@ -62,6 +66,12 @@ function measureBandmapPage(expectedTheme) {
   const capLineH = parseFloat(capStyle.lineHeight) || 24;
   const captionSingleLine = capRect.height <= capLineH * 1.5;
   const captionUnclipped = inViewport(capRect) && caption.scrollWidth <= caption.clientWidth + 1;
+
+  const keyRect = keyLine.getBoundingClientRect();
+  const keyVisible = inViewport(keyRect) && keyLine.scrollWidth <= keyLine.clientWidth + 1;
+  const headingsForcedUpper = headings.some(
+    el => getComputedStyle(el).textTransform === 'uppercase'
+  );
 
   const dialChildren = [...dial.querySelectorAll('rect, line, text')];
   const leftEdge = Math.min(...dialChildren.map(el => el.getBoundingClientRect().left));
@@ -76,6 +86,8 @@ function measureBandmapPage(expectedTheme) {
       break;
     }
   }
+  const lineEls = [...document.querySelectorAll('.bandmap__line1, .bandmap__line2')];
+  const clippedLines = lineEls.filter(el => el.scrollWidth > el.clientWidth + 1).length;
 
   const replayStyle = getComputedStyle(replay);
   const lessonBordersDouble = lessonRows.length > 0 && lessonRows.every(
@@ -87,6 +99,7 @@ function measureBandmapPage(expectedTheme) {
 
   const fontEls = [
     caption,
+    keyLine,
     replay,
     ...document.querySelectorAll(
       '.bandmap__dial-label, .bandmap__heading, .bandmap__line1, .bandmap__line2, ' +
@@ -101,11 +114,14 @@ function measureBandmapPage(expectedTheme) {
     back: inViewport(backRect) && backRect.width >= 72 && backRect.height >= 72,
     captionSingleLine,
     captionUnclipped,
+    keyVisible,
+    headingsForcedUpper,
     overviewBounds: [Math.round(leftEdge * 10) / 10, Math.round(rightEdge * 10) / 10],
     entriesClientH: entries.clientHeight,
     rowCount: rows.length,
     minRowH: Math.round(minRowH * 10) / 10,
     rowsOverlap,
+    clippedLines,
     replayRadius: replayStyle.borderTopLeftRadius,
     replayText: replay.textContent.trim(),
     lessonBordersDouble,
@@ -192,6 +208,8 @@ def _page_ok(page, end, theme) -> bool:
         and bool(page.get("back"))
         and bool(page.get("captionSingleLine"))
         and bool(page.get("captionUnclipped"))
+        and bool(page.get("keyVisible"))
+        and not page.get("headingsForcedUpper", True)
         and len(bounds) == 2
         and bounds[0] >= 17.5
         and bounds[1] <= 782.5
@@ -199,6 +217,7 @@ def _page_ok(page, end, theme) -> bool:
         and page.get("rowCount", 0) > 0
         and page.get("minRowH", 0) >= 72
         and not page.get("rowsOverlap", True)
+        and page.get("clippedLines", 1) == 0
         and page.get("replayRadius") == "0px"
         and page.get("replayText") == "REPLAY ONLY"
         and bool(page.get("lessonBordersDouble"))

@@ -27,6 +27,7 @@
   </div>
   <div class="scroll-frame bandmap__frame">
     <div class="bandmap__entries" tabindex="0">
+      <p class="bandmap__key">{{ key_line }}</p>
       {% for group in bandmap.groups %}
       <section class="bandmap__group">
         <h2 class="bandmap__heading">{{ group.allocation.heading }}{% if group.allocation.service %} &middot; {{ group.allocation.service }}{% endif %}</h2>
@@ -34,8 +35,8 @@
           {% for row in group.rows %}
           <a class="bandmap__row" href="/lesson/{{ row.lesson_id }}" data-lesson-id="{{ row.lesson_id }}">
             <span class="bandmap__row-body">
-              <span class="bandmap__line1">M{{ row.lesson_id }} &middot; {% if row.kind == 'default_sweep' %}sweeps {{ panels.mhz(row.low_hz) }}-{{ panels.mhz(row.high_hz) }} MHz{% else %}tunes {{ panels.mhz(row.center_hz) }} MHz{% endif %} &middot; {{ row.title }}</span>
-              <span class="bandmap__line2">{% if row.status == 'replay-only' %}<span class="logbook-mark logbook-mark--replay">REPLAY ONLY</span> {{ row.note }}{% else %}{{ row.tool }} &middot; {{ row.instrument_label }}{% if row.fixed_hz|length > 1 %} &middot; decoder listens on {% for hz in row.fixed_hz %}{{ panels.mhz(hz) }}{% if not loop.last %} and {% endif %}{% endfor %} MHz{% endif %}{% endif %}</span>
+              <span class="bandmap__line1">M{{ row.lesson_id }} &middot; {% if row.kind == 'default_sweep' %}sweeps {{ panels.mhz(row.low_hz) }}-{{ panels.mhz(row.high_hz) }} MHz{% elif row.between_channels %}tunes {{ '%.1f'|format(row.center_hz / 1000000) }} MHz between them{% else %}tunes {{ panels.mhz(row.center_hz) }} MHz{% endif %} &middot; {{ row.title }}</span>
+              <span class="bandmap__line2">{% if row.status == 'replay-only' %}<span class="logbook-mark logbook-mark--replay">REPLAY ONLY</span> {{ row.note }}{% elif row.between_channels %}{{ row.tool }} &middot; {% for hz in row.fixed_hz %}{{ panels.mhz(hz) }}{% if not loop.last %}/{% endif %}{% endfor %} MHz &middot; one receiver hears both{% else %}{{ row.tool }} &middot; {{ row.instrument_label }}{% if row.fixed_hz|length > 1 %} &middot; decoder listens on {% for hz in row.fixed_hz %}{{ panels.mhz(hz) }}{% if not loop.last %} and {% endif %}{% endfor %} MHz{% endif %}{% endif %}</span>
             </span>
             <span class="bandmap__arrow" aria-hidden="true">&rarr;</span>
           </a>

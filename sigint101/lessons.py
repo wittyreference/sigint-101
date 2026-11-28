@@ -106,6 +106,7 @@ HARDWARE_BADGES = {
     "lora": "2nd node",
     "flipper": "Flipper",
 }
+KNOWN_HARDWARE = (*BUILT_IN_HARDWARE, *HARDWARE_BADGES)
 
 
 class LessonError(ValueError):
@@ -765,6 +766,12 @@ def load_lessons(pack_dir) -> dict:
     lessons: dict = {}
     for path in sorted(pack_dir.glob("*.yaml")):
         lesson = load_lesson_file(path)
+        for hw in lesson.hardware:
+            if hw not in KNOWN_HARDWARE:
+                known = ", ".join(KNOWN_HARDWARE)
+                raise LessonError(
+                    f"lesson {lesson.id}: unknown hardware {hw!r} (known: {known})"
+                )
         if lesson.id in lessons:
             raise LessonError(f"duplicate lesson id {lesson.id} in {path}")
         lessons[lesson.id] = lesson

@@ -6,15 +6,20 @@ from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 
+import pytest
+import yaml
 from fastapi.testclient import TestClient
 
+import sigint101.bandmap as bandmap_mod
 from sigint101.app import PACK_DIR, create_app
+from sigint101.events import log_event
 from sigint101.hardware import RadioProbe
-from sigint101.lessons import load_lessons
+from sigint101.lessons import LessonError, load_lessons
 from sigint101.progress import Progress
 
 EXPECTED_CAPTION = "Where each lesson tunes. A pin never means a signal on the air now."
 FORBIDDEN_ROW_RE = re.compile(r"\b(live|heard|receiving|on air|active|detected)\b", re.IGNORECASE)
+CSS_PATH = Path(__file__).resolve().parent.parent / "sigint101" / "static" / "app.css"
 
 
 class _SpyReceiver:
@@ -72,17 +77,23 @@ def _make_app(tmp_path: Path, calls: list):
 
 
 class _RowExtractor(HTMLParser):
-    """Collects anchor rows, their text, and interactive tags inside .bandmap__overview."""
+    """Collects anchor rows, full .bandmap text, and interactive tags inside .bandmap__overview."""
 
     def __init__(self):
         super().__init__()
         self.rows: list[tuple[str, str]] = []
         self._in_row: str | None = None
         self._row_chunks: list[str] = []
+        self._bandmap_depth = 0
+        self._bandmap_chunks: list[str] = []
         self._overview_depth = 0
         self.overview_interactive: list[str] = []
         self._statusbar_depth = 0
         self.statusbar_links: list[str] = []
+
+    @property
+    def bandmap_text(self) -> str:
+        return " ".join("".join(self._bandmap_chunks).split())
 
     def handle_starttag(self, tag, attrs):
         attr_map = dict(attrs)
@@ -96,6 +107,11 @@ class _RowExtractor(HTMLParser):
                 self._statusbar_depth += 1
             if tag == "a" and "href" in attr_map:
                 self.statusbar_links.append(attr_map["href"])
+
+        if tag == "section" and "bandmap" in classes:
+            self._bandmap_depth = 1
+        elif self._bandmap_depth > 0 and tag not in void_tags:
+            self._bandmap_depth += 1
 
         if "bandmap__overview" in classes:
             self._overview_depth = 1
@@ -119,6 +135,8 @@ class _RowExtractor(HTMLParser):
     def handle_endtag(self, tag):
         if self._statusbar_depth > 0:
             self._statusbar_depth -= 1
+        if self._bandmap_depth > 0:
+            self._bandmap_depth -= 1
         if self._overview_depth > 0:
             self._overview_depth -= 1
         if tag == "a" and self._in_row is not None:
@@ -127,8 +145,18 @@ class _RowExtractor(HTMLParser):
             self._row_chunks = []
 
     def handle_data(self, data):
+        if self._bandmap_depth > 0:
+            self._bandmap_chunks.append(data)
         if self._in_row is not None:
             self._row_chunks.append(data)
+
+
+def _snapshot_dir(root: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
 
 
 def test_bands_page_markup_honest_wording_and_replay_mark(tmp_path):
@@ -155,6 +183,15 @@ def test_bands_page_markup_honest_wording_and_replay_mark(tmp_path):
     assert caption is not None
     assert unescape(caption.group(1)).strip() == EXPECTED_CAPTION
 
+    # N5: key line explains CAPITALS = primary, lowercase = secondary; headings not forced upper.
+    key_match = re.search(r'<p class="bandmap__key">([^<]+)</p>', html)
+    assert key_match is not None
+    assert unescape(key_match.group(1)).strip() == getattr(bandmap_mod, "KEY_LINE", None)
+    css = CSS_PATH.read_text(encoding="utf-8")
+    heading_block = re.search(r"\.bandmap__heading\s*\{([^}]*)\}", css, re.S)
+    assert heading_block is not None
+    assert "text-transform" not in heading_block.group(1)
+
     # No reception badge mark anywhere on /bands.
     assert "logbook-mark--stamp" not in html
 
@@ -167,11 +204,12 @@ def test_bands_page_markup_honest_wording_and_replay_mark(tmp_path):
     assert len(actual_hrefs) == len(expected_hrefs)
     assert set(actual_hrefs) == expected_hrefs
 
-    # Row text never claims a signal is live/heard/receiving/on air/active/detected.
-    for href, text in parser.rows:
-        assert not FORBIDDEN_ROW_RE.search(text), f"{href}: forbidden wording in {text!r}"
+    # N6: the whole .bandmap section never claims a signal is live/heard/receiving/on air/active.
+    assert not FORBIDDEN_ROW_RE.search(parser.bandmap_text), (
+        f"forbidden wording in .bandmap: {parser.bandmap_text!r}"
+    )
 
-    # M24's row carries .logbook-mark--replay with "REPLAY ONLY".
+    # N8: M24's row carries .logbook-mark--replay with "REPLAY ONLY" and honest kit detail.
     m24_match = re.search(
         r'<a class="bandmap__row"[^>]*href="/lesson/24"[^>]*>(.*?)</a>', html, re.S
     )
@@ -179,13 +217,20 @@ def test_bands_page_markup_honest_wording_and_replay_mark(tmp_path):
     m24_html = m24_match.group(1)
     assert "logbook-mark--replay" in m24_html
     assert "REPLAY ONLY" in m24_html
-    assert "NOAA APT off the air since August 2025" in m24_html
+    assert "No APT recording ships on this kit yet" in m24_html
+
+    # F2: M26's pin line says the course tunes 162.0 MHz between the two AIS channels.
+    m26_text = dict(parser.rows)["/lesson/26"]
+    assert "162.0 MHz" in m26_text
+    assert "between" in m26_text
+    assert "161.975" in m26_text and "162.025" in m26_text
+    assert "one receiver hears both" in m26_text
 
     # Overview contains no <a> or <button>.
     assert parser.overview_interactive == []
 
 
-def test_bands_touches_no_radio_and_leaves_progress_byte_identical(tmp_path):
+def test_bands_touches_no_radio_and_leaves_data_dir_byte_identical(tmp_path):
     # Seed progress with opened, completed, prediction, and stamp data before starting the app.
     prog = Progress(tmp_path / "progress.db")
     prog.mark_opened(1)
@@ -206,19 +251,60 @@ def test_bands_touches_no_radio_and_leaves_progress_byte_identical(tmp_path):
     calls: list = []
     app = _make_app(tmp_path, calls)
     with TestClient(app) as client:
-        # Clear any startup calls (none expected from spy, just in case) and snapshot progress.db.
         calls.clear()
-        db_path = tmp_path / "progress.db"
-        before_bytes = db_path.read_bytes()
+        # F6: snapshot every file in data_dir (progress.db, exam.db, events.jsonl if any).
+        before_no_events = _snapshot_dir(tmp_path)
+        assert "progress.db" in before_no_events
 
         resp = client.get("/bands")
         assert resp.status_code == 200
+        assert _snapshot_dir(tmp_path) == before_no_events
 
-        after_bytes = db_path.read_bytes()
+        # Also seed events.jsonl explicitly and confirm a second GET leaves it byte-identical.
+        log_event(tmp_path / "events.jsonl", "seed", {"source": "test"})
+        before_with_events = _snapshot_dir(tmp_path)
+        assert "events.jsonl" in before_with_events
 
-    assert after_bytes == before_bytes
+        resp2 = client.get("/bands")
+        assert resp2.status_code == 200
+        assert _snapshot_dir(tmp_path) == before_with_events
+
     radio_actions = [c for c in calls if c[1] in ("retune", "start", "release")]
     assert radio_actions == []
+
+
+def test_unknown_hardware_fails_at_app_startup_not_on_bands_request(tmp_path):
+    # F7: an unknown hardware name must raise LessonError during app startup, never as a
+    # white-page 500 when a learner later taps BANDS.
+    bad_packs = tmp_path / "packs"
+    bad_packs.mkdir()
+    (bad_packs / "99-unknown.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": 99,
+                "slug": "unknown-kit",
+                "title": "Unknown Kit",
+                "concept": "test concept",
+                "hardware": ["mystery"],
+                "stages": {
+                    "predict": "What?",
+                    "operate": "Do.",
+                    "observe": "See.",
+                    "explain": "Why.",
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(
+        pack_dir=bad_packs,
+        data_dir=tmp_path / "data",
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+    )
+    with pytest.raises(LessonError, match="mystery"):
+        with TestClient(app):
+            pass
 
 
 def test_home_has_bands_key_in_statusbar(tmp_path):

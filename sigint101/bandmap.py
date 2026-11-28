@@ -11,6 +11,7 @@ from .operate import INSTRUMENTS, instrument
 from .spectrum import DEFAULT_HIGH, DEFAULT_LOW, TUNER_MAX_HZ, TUNER_MIN_HZ
 
 CAPTION = "Where each lesson tunes. A pin never means a signal on the air now."
+KEY_LINE = "US table key: CAPITALS = primary service; lowercase = secondary."
 
 DIAL_MIN_HZ = TUNER_MIN_HZ
 DIAL_MAX_HZ = TUNER_MAX_HZ
@@ -34,6 +35,9 @@ class Allocation:
     `edge_hz` is set only for a printed table boundary whose owning row is unsettled (450.0 MHz,
     the shared edge of 420-450 and 450-454 MHz), so it matches that exact frequency while the
     neighbouring interval row stays strictly below it.
+
+    `channel_bands` and `between_hz` cover paired narrow channels such as US52's AIS 1 and AIS 2,
+    where the course tunes the gap frequency between the two bands so one receiver hears both.
     """
 
     low_hz: int
@@ -42,70 +46,107 @@ class Allocation:
     service: str
     cite: str
     edge_hz: int | None = None
+    channel_bands: tuple[tuple[int, int], ...] = ()
+    between_hz: int | None = None
 
     def contains_hz(self, hz: int) -> bool:
         if self.edge_hz is not None:
             return hz == self.edge_hz
+        if self.channel_bands:
+            return self.between_hz == hz or any(lo <= hz < hi for lo, hi in self.channel_bands)
         return self.low_hz <= hz < self.high_hz
 
     def contains_band(self, low_hz: int, high_hz: int) -> bool:
-        if self.edge_hz is not None:
+        if self.edge_hz is not None or self.channel_bands:
             return False
         return self.low_hz <= low_hz and high_hz <= self.high_hz
 
 
-# Primary-source allocations only: codified 47 CFR 2.106 footnotes, or FCC Online Table of
-# Frequency Allocations (rev. 2026-09-11) cross-checked against NTIA's June 2025 Manual.
+# Primary-source allocations only:
+# - Table rows: NTIA Redbook Table of Frequency Allocations (redbook.ntia.gov, read 2026-11-28).
+# - Footnotes: 47 CFR 2.106 on eCFR, up to date as of 2026-11-25 (read 2026-11-28).
+# Per the US table convention, ALL CAPS marks primary services and lowercase marks secondary.
 ALLOCATIONS: tuple[Allocation, ...] = (
     Allocation(
         low_hz=88_000_000,
         high_hz=108_000_000,
         heading="88-108 MHz",
-        service="FM broadcasting",
-        cite="47 CFR 2.106(c)(93) (US93); 47 CFR 2.106(d)(5) (NG5)",
+        service="BROADCASTING (FM, non-Federal, primary)",
+        cite=(
+            "NTIA Table of Frequency Allocations, row 88-108 MHz (read 2026-11-28); "
+            "47 CFR 2.106(d)(5) (NG5) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(c)(93) (US93) (eCFR as of 2026-11-25, read 2026-11-28)"
+        ),
     ),
     Allocation(
         low_hz=117_975_000,
         high_hz=137_000_000,
         heading="117.975-137 MHz",
-        service="aeronautical mobile",
-        cite="47 CFR 2.106(b)(200) (5.200); 47 CFR 2.106(c)(26) (US26)",
+        service="AERONAUTICAL MOBILE (primary)",
+        cite=(
+            "NTIA Table of Frequency Allocations, rows 123.5875-128.8125 and 128.8125-132.0125 MHz "
+            "(read 2026-11-28); "
+            "47 CFR 2.106(b)(200) (5.200) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(c)(26) (US26) (eCFR as of 2026-11-25, read 2026-11-28)"
+        ),
     ),
     Allocation(
         low_hz=137_000_000,
         high_hz=138_000_000,
         heading="137-138 MHz",
-        service="meteorological-satellite, space operation, space research, mobile-satellite",
+        service=(
+            "space-to-Earth: METEOROLOGICAL-SATELLITE, SPACE OPERATION, SPACE RESEARCH; "
+            "MOBILE-SATELLITE (primary at 137.5 MHz; mobile-satellite secondary on "
+            "137.025-137.175 and 137.825-138 MHz)"
+        ),
         cite=(
-            "FCC Table of Frequency Allocations, row 137-137.025 MHz (rev. 2026-09-11); "
-            "rows 137.025-137.175, 137.175-137.825, 137.825-138 MHz; 5.208, US319, US320"
+            "NTIA Table of Frequency Allocations, rows 137-137.025, 137.025-137.175, "
+            "137.175-137.825, 137.825-138 MHz (read 2026-11-28); "
+            "47 CFR 2.106(b)(208) (5.208) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(c)(319) (US319) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(c)(320) (US320) (eCFR as of 2026-11-25, read 2026-11-28)"
         ),
     ),
     Allocation(
         low_hz=144_000_000,
         high_hz=148_000_000,
         heading="144-148 MHz",
-        service="amateur (non-Federal; amateur-satellite on 144-146; no Federal service)",
+        service=(
+            "AMATEUR (non-Federal, primary; AMATEUR-SATELLITE primary on 144-146 MHz; "
+            "no Federal service)"
+        ),
         cite=(
-            "FCC Table of Frequency Allocations, row 144-146 MHz (rev. 2026-09-11); "
-            "row 146-148 MHz (rev. 2026-09-11)"
+            "NTIA Table of Frequency Allocations, rows 144-146 and 146-148 MHz (read 2026-11-28)"
         ),
     ),
     Allocation(
-        low_hz=161_975_000,
-        high_hz=162_025_000,
-        heading="161.975 / 162.025 MHz",
-        service="AIS 1 and AIS 2, Automatic Identification Systems",
-        cite="47 CFR 2.106(c)(52) (US52)",
+        low_hz=161_962_500,
+        high_hz=162_037_500,
+        heading="AIS 1 (161.9625-161.9875 MHz) and AIS 2 (162.0125-162.0375 MHz)",
+        service=(
+            "MARITIME MOBILE, MOBILE-SATELLITE (Earth-to-space), "
+            "AERONAUTICAL MOBILE (OR) — AIS (US52)"
+        ),
+        cite=(
+            "47 CFR 2.106(c)(52) (US52) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "NTIA Table of Frequency Allocations, rows 161.9625-161.9875 and 162.0125-162.0375 MHz "
+            "(read 2026-11-28); "
+            "NTIA Table of Frequency Allocations, row 161.9875-162.0125 MHz (read 2026-11-28)"
+        ),
+        channel_bands=((161_962_500, 161_987_500), (162_012_500, 162_037_500)),
+        between_hz=162_000_000,
     ),
+    # 5.138 (433.05-434.79 MHz ISM) is Region 1 only and not printed in the US columns;
+    # US269 governs non-Federal radiolocation, not the Federal primary allocation named here.
     Allocation(
         low_hz=420_000_000,
         high_hz=450_000_000,
         heading="420-450 MHz",
-        service="amateur (non-Federal, secondary), radiolocation (Federal, primary)",
+        service="RADIOLOCATION (Federal, primary); amateur (non-Federal, secondary)",
         cite=(
-            "47 CFR 2.106(c)(270) (US270); 47 CFR 2.106(c)(269) (US269); "
-            "47 CFR 2.106(b)(282) (5.282); 47 CFR 2.106(b)(138) (5.138)"
+            "NTIA Table of Frequency Allocations, row 420-450 MHz (read 2026-11-28); "
+            "47 CFR 2.106(c)(270) (US270) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(b)(282) (5.282) (eCFR as of 2026-11-25, read 2026-11-28)"
         ),
     ),
     Allocation(
@@ -113,12 +154,14 @@ ALLOCATIONS: tuple[Allocation, ...] = (
         high_hz=450_000_000,
         heading="450.0 MHz · edge of 420-450 and 450-454 MHz",
         service=(
-            "420-450 MHz (non-Federal amateur, Federal radiolocation) and "
-            "450-454 MHz (non-Federal land mobile)"
+            "420-450 MHz (Federal RADIOLOCATION, primary; non-Federal amateur, secondary) and "
+            "450-454 MHz (non-Federal LAND MOBILE, primary; US87 space telecommand "
+            "449.75-450.25 MHz)"
         ),
         cite=(
-            "FCC Table of Frequency Allocations, row 420-450 MHz (rev. 2026-09-11); "
-            "row 450-454 MHz (rev. 2026-09-11); 5.286, US87"
+            "NTIA Table of Frequency Allocations, rows 420-450 and 450-454 MHz (read 2026-11-28); "
+            "47 CFR 2.106(b)(286) (5.286) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(c)(87) (US87) (eCFR as of 2026-11-25, read 2026-11-28)"
         ),
         edge_hz=450_000_000,
     ),
@@ -126,17 +169,27 @@ ALLOCATIONS: tuple[Allocation, ...] = (
         low_hz=929_000_000,
         high_hz=930_000_000,
         heading="929-930 MHz",
-        service="land mobile and fixed (non-Federal; no Federal service)",
-        cite="FCC Table of Frequency Allocations, row 929-930 MHz (rev. 2026-09-11); US116, US268",
+        service=(
+            "FIXED, LAND MOBILE (non-Federal, primary); "
+            "Federal ship radiolocation offshore (US268)"
+        ),
+        cite=(
+            "NTIA Table of Frequency Allocations, row 929-930 MHz (read 2026-11-28); "
+            "47 CFR 2.106(c)(116) (US116) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(c)(268) (US268) (eCFR as of 2026-11-25, read 2026-11-28)"
+        ),
     ),
     Allocation(
         low_hz=960_000_000,
-        high_hz=1_215_000_000,
-        heading="960-1215 MHz",
-        service="aeronautical radionavigation",
+        high_hz=1_164_000_000,
+        heading="960-1164 MHz",
+        service="AERONAUTICAL RADIONAVIGATION, AERONAUTICAL MOBILE (R) (both primary)",
         cite=(
-            "47 CFR 2.106(b)(328) (5.328); 47 CFR 2.106(c)(224) (US224); "
-            "47 CFR 2.106(c)(78) (US78)"
+            "NTIA Table of Frequency Allocations, row 960-1164 MHz (read 2026-11-28); "
+            "47 CFR 2.106(b)(327)(i) (5.327A) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(b)(328) (5.328) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(c)(78) (US78) (eCFR as of 2026-11-25, read 2026-11-28); "
+            "47 CFR 2.106(c)(224) (US224) (eCFR as of 2026-11-25, read 2026-11-28)"
         ),
     ),
 )
@@ -155,6 +208,7 @@ class BandRow:
     tool: str | None
     instrument_label: str | None
     fixed_hz: tuple[int, ...] = ()
+    between_channels: bool = False
     status: str | None = None
     note: str = ""
 
@@ -312,6 +366,8 @@ def build_map(lessons: dict) -> BandMap:
         if lesson.tune is not None:
             center = lesson.tune["center_hz"]
             inst = _instrument_for_lesson(lesson)
+            fixed_hz = tuple(inst.fixed_hz) if inst else ()
+            between = len(fixed_hz) == 2 and min(fixed_hz) < center < max(fixed_hz)
             dial_rows.append(
                 BandRow(
                     lesson_id=lesson.id,
@@ -322,7 +378,8 @@ def build_map(lessons: dict) -> BandMap:
                     center_hz=center,
                     tool=inst.tool if inst else None,
                     instrument_label=inst.label if inst else None,
-                    fixed_hz=tuple(inst.fixed_hz) if inst else (),
+                    fixed_hz=fixed_hz,
+                    between_channels=between,
                     status=status,
                     note=note,
                 )

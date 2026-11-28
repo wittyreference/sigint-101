@@ -36,6 +36,7 @@ from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .bandmap import CAPTION as BANDMAP_CAPTION
+from .bandmap import KEY_LINE as BANDMAP_KEY_LINE
 from .bandmap import build_map as build_band_map
 from .battery import BatteryGauge
 from .challenges import (
@@ -442,6 +443,7 @@ def initialize_console_state(
     state.data_dir = resolved_data
     state.pool_path = resolved_pool if resolved_pool is not None else DEFAULT_POOL_PATH
     state.lessons = load_lessons(resolved_pack)
+    state.band_map = build_band_map(state.lessons)
     state.progress = Progress(
         resolved_data / "progress.db", managed=managed, read_only=read_only
     )
@@ -701,7 +703,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 "back_href": "/",
                 "back_label": "Home",
                 "caption": BANDMAP_CAPTION,
-                "bandmap": build_band_map(app.state.lessons),
+                "key_line": BANDMAP_KEY_LINE,
+                "bandmap": app.state.band_map,
             },
         )
 

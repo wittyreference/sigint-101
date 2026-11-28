@@ -23,7 +23,7 @@ tune:
   step_hz: 100000
 band_map:
   status: replay-only
-  note: "NOAA APT off the air since August 2025"
+  note: "No APT recording ships on this kit yet"
 
 stages:
   frame: >-

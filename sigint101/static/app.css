@@ -3544,6 +3544,12 @@ body {
   overscroll-behavior: contain;
   padding: 0 var(--gutter);
 }
+.bandmap__key {
+  margin: 0 0 6px;
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg-dim);
+}
 .bandmap__group {
   margin: 0 0 8px;
 }
@@ -3556,8 +3562,7 @@ body {
   font-size: 18px;
   line-height: 1.25;
   font-weight: 400;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   color: var(--fg-dim);
 }
 .bandmap__group:first-child .bandmap__heading {
