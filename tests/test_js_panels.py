@@ -81,6 +81,22 @@ def test_every_shipped_panel_has_its_own_test():
                          f"untested: {missing}")
 
 
+def test_no_page_script_makes_a_synchronous_request():
+    """No shipped script uses XMLHttpRequest: every request goes through fetch, which cannot block.
+
+    A synchronous XHR freezes the page on screen and drops the learner's taps for as long as the
+    console takes to answer, and a page cannot put a timeout on one (C81). Banning XMLHttpRequest
+    outright, rather than only `open(..., false)`, also catches a flag passed through a variable.
+    The templates' inline scripts are scanned too.
+    """
+    scripts = sorted((REPO / "sigint101" / "static").rglob("*.js"))
+    templates = sorted((REPO / "sigint101" / "templates").rglob("*.html"))
+    assert scripts and templates
+    offenders = [str(path.relative_to(REPO)) for path in scripts + templates
+                 if "XMLHttpRequest" in path.read_text(encoding="utf-8")]
+    assert not offenders, f"these files make XMLHttpRequest calls (use fetch): {offenders}"
+
+
 def test_the_panel_javascript_has_tests_and_they_run():
     """Run every tests/*.test.js under node, and fail loudly if node is missing or too old.
 
