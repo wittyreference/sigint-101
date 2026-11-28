@@ -38,6 +38,18 @@ from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .battery import BatteryGauge
+from .challenges import (
+    challenge_for,
+    format_evidence,
+    format_pass_summary,
+    rack_label,
+)
+from .challenges import (
+    qualifies as challenge_qualifies,
+)
+from .challenges import (
+    status as challenge_status,
+)
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event, read_events
@@ -306,7 +318,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
-               kiosk_exit=request_exit, battery_gauge=None) -> FastAPI:
+               kiosk_exit=request_exit, battery_gauge=None,
+               clock=time.time) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -593,6 +606,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.receptions = None
         app.state.reception_error = None
         app.state.stamp_error = None
+        app.state.challenge_error = None
         app.state.stamp_window = None
         app.state.stamp_retry_at = 0.0
         try:
@@ -700,6 +714,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if unit is None:
             raise HTTPException(status_code=404, detail=f"unit {unit_id} not found")
         tiles = _lesson_tiles(unit, app.state.lessons, app.state.progress)
+        if tiles and challenge_for(unit.id) is not None:
+            find = _challenge_payload(unit.id)
+            tiles.append({
+                "kind": "find",
+                "unit_id": unit.id,
+                "code": "FIND",
+                "name": "Live find",
+                "glyph": unit.glyph,
+                "status": "",
+                "href": f"/unit/{unit.id}/challenge",
+                "find_state": find["state"],
+                "remaining_s": find["remaining_s"],
+            })
         return templates.TemplateResponse(
             request=request,
             name="unit.html",
@@ -886,12 +913,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
 
     def _safe_back(back: str | None) -> tuple[str, str]:
-        """Resolve an optional internal back path for /law, refusing any external URL."""
+        """Resolve an optional internal back path for /law and /operate, refusing external URLs."""
         if back and back.startswith("/") and not back.startswith("//"):
             if re.fullmatch(r"/lesson/\d+", back):
                 return back, f"Lesson {back.rsplit('/', 1)[-1]}"
             if re.fullmatch(r"/unit/\d+", back):
                 return back, f"Unit {back.rsplit('/', 1)[-1]}"
+            if re.fullmatch(r"/unit/\d+/challenge", back):
+                return back, "Live find"
         return "/", "Home"
 
     @app.get("/law", response_class=HTMLResponse)
@@ -1975,13 +2004,83 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.stamp_error = f"a reception badge could not be saved: {exc}"
         app.state.stamp_retry_at = monotonic() + STAMP_RETRY_S
 
+    def _challenge_qualifies(attempt: dict, stamp: dict) -> bool:
+        ch = challenge_for(attempt["unit_id"])
+        return ch is not None and challenge_qualifies(ch, attempt, stamp)
+
+    def _credit_challenges(progress, stamps) -> None:
+        try:
+            credited = progress.credit_challenges(stamps, _challenge_qualifies)
+        except (OSError, sqlite3.Error) as exc:
+            app.state.challenge_error = f"a live find pass could not be saved: {exc}"
+            return
+        app.state.challenge_error = None
+        for passed in credited:
+            try:
+                log_event(
+                    app.state.events_path,
+                    "challenge_pass",
+                    {
+                        "unit": passed["unit_id"],
+                        "started_at": passed["started_at"],
+                        "instrument": passed["instrument"],
+                        "digest": passed["digest"],
+                        "event_id": passed.get("event_id"),
+                    },
+                )
+            except OSError as exc:
+                app.state.challenge_error = f"a live find pass could not be logged: {exc}"
+
+    def _challenge_payload(unit_id: int) -> dict:
+        ch = challenge_for(unit_id)
+        if ch is None or get_unit(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        read_error = None
+        try:
+            saved = app.state.progress.challenge(unit_id)
+        except (OSError, sqlite3.Error) as exc:
+            saved = {"attempt": None, "latest_pass": None, "passes": 0}
+            read_error = f"the live find state could not be read: {exc}"
+        now = round(clock(), 3)
+        st = challenge_status(ch, saved["attempt"], saved["latest_pass"], now)
+        allowed = [
+            {"key": key, "label": rack_label(key),
+             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
+            for key in ch.allowed
+        ]
+        return {
+            "unit_id": unit_id,
+            "state": st["state"],
+            "prompt": ch.prompt,
+            "allowed": allowed,
+            "window_s": st["window_s"],
+            "started_at": st["started_at"],
+            "remaining_s": st["remaining_s"],
+            "reason": st["reason"],
+            "latest_pass": format_pass_summary(saved["latest_pass"]),
+            "passes": saved["passes"],
+            "error": read_error or app.state.challenge_error,
+        }
+
     def _backfill_stamps(progress, window, appended=()):
         # In append order, including rotations. Remembering each credited event tolerates a
         # clock reset. Compact the watermark when the log rolls without removing earned badges.
-        stamps = stamps_from_log(read_events(app.state.events_path))
+        events_list = read_events(app.state.events_path)
+        event_ids = {
+            stamp["digest"]: event["event_id"]
+            for event in events_list
+            if event.get("event_id") is not None and (stamp := mint(event)) is not None
+        }
+        stamps_list = list(chain(stamps_from_log(events_list), appended))
+        challenge_stamps = [
+            ({**s, "event_id": event_ids[s["digest"]]}
+             if s["digest"] in event_ids and "event_id" not in s else s)
+            for s in stamps_list
+        ]
+        _credit_challenges(progress, challenge_stamps)
         # A different log writer may already have rotated out the event this hook just appended.
         # When it is still in the snapshot its event ID makes the second credit a no-op.
-        if progress.record_stamps(chain(stamps, appended), backfill=True):
+        if progress.record_stamps(stamps_list, backfill=True):
             app.state.stamp_window = window
             app.state.stamp_error = None
 
@@ -2041,10 +2140,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 app.state.reception_error = None
                 if app.state.receptions is not None:
                     app.state.receptions.append(without_page_words(event))
+                stamp = mint(event)
+                if stamp is not None:
+                    _credit_challenges(
+                        progress, ({**stamp, "event_id": event.get("event_id")},)
+                    )
                 if monotonic() < app.state.stamp_retry_at:
                     # The log retains this reception for the next recovery pass in append order.
                     return
-                if (stamp := mint(event)) is None:
+                if stamp is None:
                     return
                 try:
                     window = _stamp_window()
@@ -2111,6 +2215,51 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "stamps": rows, "stamp_error": error},
         )
 
+    @app.get("/api/challenges/{unit_id}")
+    def challenge_get(unit_id: int):
+        """Return one unit's live-find challenge state, countdown, rack links, and pass history."""
+        return _challenge_payload(unit_id)
+
+    @app.post("/api/challenges/{unit_id}/start")
+    def challenge_start(unit_id: int):
+        """Start or restart one unit's live-find attempt without altering earned passes (D16)."""
+        ch = challenge_for(unit_id)
+        if ch is None or get_unit(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        started_at = round(clock(), 3)
+        app.state.progress.start_challenge(unit_id, started_at, ch.window_s)
+        log_event(
+            app.state.events_path,
+            "challenge_start",
+            {
+                "unit": unit_id,
+                "started_at": started_at,
+                "window_s": ch.window_s,
+                "allowed": list(ch.allowed),
+            },
+        )
+        return _challenge_payload(unit_id)
+
+    @app.get("/unit/{unit_id}/challenge", response_class=HTMLResponse)
+    def challenge_view(request: Request, unit_id: int):
+        """Interactive Tier B live-find screen for a receiving unit."""
+        unit = get_unit(unit_id)
+        if unit is None or challenge_for(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        payload = _challenge_payload(unit_id)
+        return templates.TemplateResponse(
+            request=request,
+            name="challenge.html",
+            context={
+                "title": f"Unit {unit.id} · Live find",
+                "back_href": f"/unit/{unit.id}",
+                "back_label": f"Unit {unit.id}",
+                "unit": unit,
+                "challenge": payload,
+                "evidence_text": format_evidence(payload),
+            },
+        )
+
     @app.get("/operate")
     def operate_home():
         """The rack opens on the instrument last used, or the waterfall the first time."""
@@ -2119,7 +2268,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return RedirectResponse(f"/operate/{key}", status_code=303)
 
     @app.get("/operate/{key}", response_class=HTMLResponse)
-    def operate_view(request: Request, key: str):
+    def operate_view(request: Request, key: str, back: str | None = None):
         """One instrument in the rack, remembered so /operate reopens on it.
 
         The panel's own poll claims the dongle through _claim_sdr exactly as a lesson's does, so
@@ -2139,10 +2288,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             freq_hz = getattr(receiver, "freq_hz", None)
         if freq_hz is None and len(inst.fixed_hz) == 1:
             freq_hz = inst.fixed_hz[0]
+        back_href, back_label = _safe_back(back)
         return templates.TemplateResponse(
             request=request,
             name="operate.html",
-            context={"title": "Operator mode", "back_href": "/", "back_label": "Home",
+            context={"title": "Operator mode", "back_href": back_href, "back_label": back_label,
                      "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
                      # The pager shows framing only wherever it is tuned; its dial says so.
                      "text_withheld": inst.key == "pager",
