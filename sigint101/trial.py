@@ -1,5 +1,5 @@
 # ABOUTME: Private read-only trial server and child launcher over a mode-0700 Unix domain socket.
-# ABOUTME: Uses shared console startup with write suppression, -B byte stability, and PDEATHSIG.
+# ABOUTME: Uses shared console startup with write suppression, -B -s isolation, and SO_PEERCRED.
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import socket
+import struct
 import subprocess
 import tempfile
 import time
@@ -33,6 +34,7 @@ from .validation import (
     ValidationError,
     attest_open_pair,
     compute_settings_fingerprint,
+    is_forbidden_trial_env_var,
     validate_course_content,
     validate_saved_state,
     verify_pair_attestation,
@@ -55,16 +57,36 @@ class TrialResult:
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
-    """Stdlib HTTP client speaking directly over a local Unix domain socket."""
+    """Stdlib HTTP client speaking over a Unix socket, optionally pinning peer PID (F9)."""
 
-    def __init__(self, socket_path: str | Path, timeout: float = 5.0):
+    def __init__(
+        self,
+        socket_path: str | Path,
+        *,
+        timeout: float = 5.0,
+        expected_pid: int | None = None,
+    ):
         super().__init__("localhost", timeout=timeout)
         self._socket_path = os.fspath(socket_path)
+        self._expected_pid = expected_pid
 
     def connect(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
-        sock.connect(self._socket_path)
+        try:
+            sock.connect(self._socket_path)
+            if self._expected_pid is not None and hasattr(socket, "SO_PEERCRED"):
+                creds = sock.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+                )
+                peer_pid, _peer_uid, _peer_gid = struct.unpack("3i", creds)
+                if peer_pid != self._expected_pid:
+                    raise PermissionError(
+                        f"trial socket peer PID {peer_pid} != expected child {self._expected_pid}"
+                    )
+        except BaseException:
+            sock.close()
+            raise
         self.sock = sock
 
 
@@ -73,9 +95,10 @@ def http_get_unix(
     path: str,
     *,
     timeout: float = 5.0,
+    expected_pid: int | None = None,
 ) -> tuple[int, bytes]:
     """Perform a single HTTP GET over a local Unix domain socket."""
-    conn = _UnixHTTPConnection(socket_path, timeout=timeout)
+    conn = _UnixHTTPConnection(socket_path, timeout=timeout, expected_pid=expected_pid)
     try:
         conn.request("GET", path, headers={"Host": "localhost"})
         resp = conn.getresponse()
@@ -105,6 +128,7 @@ def create_trial_app(
     resolved_templates = (
         Path(templates_dir) if templates_dir is not None else BASE_DIR / "templates"
     )
+    effective_pack = Path(pack_dir) if pack_dir is not None else BASE_DIR.parent / "lesson_packs"
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -113,7 +137,7 @@ def create_trial_app(
         try:
             initialize_console_state(
                 app.state,
-                pack_dir=pack_dir,
+                pack_dir=effective_pack,
                 data_dir=data_dir,
                 pool_path=pool_path,
                 managed=True,
@@ -131,8 +155,13 @@ def create_trial_app(
             if app.state.initialized:
                 await shutdown_console_state(app.state, trial=True)
 
-    app = FastAPI(title="SIGINT 101 Trial", docs_url=None, redoc_url=None, openapi_url=None,
-                  lifespan=lifespan)
+    app = FastAPI(
+        title="SIGINT 101 Trial",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
 
     @app.get(TRIAL_READY_PATH)
     def trial_ready():
@@ -161,6 +190,8 @@ def create_trial_app(
                     progress=app.state.progress,
                     exam_store=app.state.exam_store,
                     data_dir=app.state.data_dir,
+                    pack_dir=app.state.pack_dir,
+                    pool_path=app.state.pool_path,
                     package_root=release_root,
                     require_release_manifest=require_release_manifest,
                     settings_fingerprint=settings_fingerprint,
@@ -239,19 +270,15 @@ def run_private_trial(
 
     sock_dir, sock_path = _make_private_socket_dir(socket_parent_dir)
     cfg_path = sock_dir / "cfg.json"
+    log_path = sock_dir / "trial.log"
 
-    # Resolve pack_dir unless explicitly overridden by unit_settings env.
-    effective_env = unit_settings.env if unit_settings is not None else {}
+    # F1: pack and pool always come from the candidate release (never from unit/drop-in env).
     effective_pack = (
         str(Path(pack_dir).resolve())
         if pack_dir is not None
-        else effective_env.get("SIGINT101_PACK_DIR", str(rel_root / "lesson_packs"))
+        else str(rel_root / "lesson_packs")
     )
-    effective_pool = (
-        str(Path(pool_path).resolve())
-        if pool_path is not None
-        else effective_env.get("SIGINT101_POOL_PATH")
-    )
+    effective_pool = str(Path(pool_path).resolve()) if pool_path is not None else None
 
     cfg_payload = {
         "pack_dir": effective_pack,
@@ -263,29 +290,31 @@ def run_private_trial(
         "require_release_manifest": require_release_manifest,
         "settings_fingerprint": fingerprint,
     }
-    cfg_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    cfg_fd = os.open(os.fspath(cfg_path), cfg_flags, 0o600)
+    priv_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    cfg_fd = os.open(os.fspath(cfg_path), priv_flags, 0o600)
     try:
         os.write(cfg_fd, json.dumps(cfg_payload, sort_keys=True).encode("utf-8"))
     finally:
         os.close(cfg_fd)
 
+    # F1/F5/F10: strip PYTHON*, LD_*, and release-path override vars before adding our own.
     child_env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", str(sock_dir)),
         "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONPATH": str(rel_root),
     }
     if unit_settings is not None:
-        # Apply structured unit/drop-in environment directly without shell evaluation.
-        child_env.update(unit_settings.env)
-        child_env["PYTHONDONTWRITEBYTECODE"] = "1"
-        child_env["PYTHONPATH"] = str(rel_root)
+        for k, v in unit_settings.env.items():
+            if not is_forbidden_trial_env_var(k):
+                child_env[k] = v
+    child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    child_env["PYTHONPATH"] = str(rel_root)
 
+    # F10: -B suppresses bytecode and -s excludes user site-packages.
     cmd = [
         str(python_executable),
         "-B",
+        "-s",
         "-m",
         "sigint101.trial",
         "--socket",
@@ -293,17 +322,27 @@ def run_private_trial(
         "--config",
         str(cfg_path),
     ]
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(sock_dir),
-        env=child_env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        close_fds=True,
-        start_new_session=True,
-        preexec_fn=_die_with_parent(),
+
+    # F11: send child stdout/stderr to a private file so >64 KiB output can never deadlock a pipe.
+    log_fd = os.open(
+        os.fspath(log_path),
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        0o600,
     )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(sock_dir),
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=log_fd,
+            close_fds=True,
+            start_new_session=True,
+            preexec_fn=_die_with_parent(),
+        )
+    finally:
+        os.close(log_fd)
 
     try:
         deadline = time.monotonic() + timeout_s
@@ -312,19 +351,25 @@ def run_private_trial(
         last_err = ""
         while time.monotonic() < deadline:
             if proc.poll() is not None:
-                raw_err = proc.stderr.read() if proc.stderr else b""
-                stderr_tail = raw_err.decode("utf-8", "replace").strip()
+                log_tail = (
+                    log_path.read_text(encoding="utf-8", errors="replace").strip()[-500:]
+                    if log_path.is_file()
+                    else ""
+                )
                 return TrialResult(
                     ready=False,
                     status_code=503,
-                    errors=[f"trial process exited early ({proc.returncode}): {stderr_tail}"],
+                    errors=[f"trial process exited early ({proc.returncode}): {log_tail}"],
                     attestation={},
                     settings_fingerprint=fingerprint,
                     pid=proc.pid,
                 )
             if sock_path.exists():
                 try:
-                    status_code, raw = http_get_unix(sock_path, TRIAL_READY_PATH, timeout=2.0)
+                    # F9: verify SO_PEERCRED peer PID matches our spawned trial child.
+                    status_code, raw = http_get_unix(
+                        sock_path, TRIAL_READY_PATH, timeout=2.0, expected_pid=proc.pid
+                    )
                     body_dict = json.loads(raw.decode("utf-8"))
                     break
                 except (OSError, ValueError, http.client.HTTPException) as exc:
@@ -355,6 +400,8 @@ def run_private_trial(
                     expected_release_id=expected_release_id,
                     expected_commit=expected_commit,
                     expected_package_root=rel_root,
+                    expected_pack_dir=effective_pack,
+                    expected_pool_path=effective_pool,
                     expected_generation_id=expected_generation_id,
                     expected_data_dir=gen_dir,
                 )
@@ -373,11 +420,7 @@ def run_private_trial(
         )
     finally:
         _stop_and_reap(proc)
-        if proc.stdout:
-            proc.stdout.close()
-        if proc.stderr:
-            proc.stderr.close()
-        for cleanup_file in (sock_path, cfg_path):
+        for cleanup_file in (sock_path, cfg_path, log_path):
             try:
                 cleanup_file.unlink()
             except FileNotFoundError:
