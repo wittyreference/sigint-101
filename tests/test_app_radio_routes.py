@@ -137,10 +137,13 @@ def test_a_refused_route_names_no_command(tmp_path, path, factory, build, key, k
 
 
 def test_spectrum_names_the_sweep_command_while_it_runs(tmp_path):
-    with _client(tmp_path, probe=_present,
-                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+    proc = Child(["rtl_power", "-f", "88000000:108000000:125000", "-i", "1", "-d", "0"])
+    sweeper = _StubSweeper(_rows(), proc=proc)
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: sweeper) as client:
         body = client.get("/api/spectrum").json()
-    assert body["command"] == "rtl_power -f 88000000:108000000:125000"
+        assert body["command"] == "rtl_power -f 88000000:108000000:125000 -i 1 -d 0"
+        proc.code = 0
+        assert sweeper.live_command() is None
 
 
 @pytest.mark.parametrize("path,body_key", [("/api/lora", "packets"),
