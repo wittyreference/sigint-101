@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1172,6 +1173,7 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
             resp = client.get("/api/spectrum")
             assert resp.status_code == 200
             assert app.state.sweeper.running
+            return resp
 
         def check_locks_cleanup():
             # Verify neither DB lock nor reception lock is held during cleanup.
@@ -1236,6 +1238,7 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
             resp = client.get("/api/spectrum")
             assert resp.status_code == 200
             assert app.state.sweeper.running
+            return resp
 
         def supersede_and_fail(path, kind, payload, **kw):
             if kind == "challenge_start":
@@ -1271,6 +1274,7 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
                 assert client.get("/api/spectrum").status_code == 200
                 assert app.state.sweeper._proc is not first_proc
                 replacement_proc.append(app.state.sweeper._proc)
+                return resp
 
             monkeypatch.setattr(
                 app_mod,
@@ -1299,8 +1303,9 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
 
             def launch_with_explicit_run():
                 run = app.state.claim_sdr("sweeper", app.state.sweeper.start)
+                assert run is not None
                 assert run.name == "sweeper"
-                assert callable(run.cleanup)
+                assert callable(run.stop)
                 first_proc = app.state.sweeper._proc
                 app.state.sweeper.stop()
                 assert client.get("/api/spectrum").status_code == 200
@@ -1367,7 +1372,7 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
                         4,
                         900,
                         event_fields={"bad": object()},
-                        launch=rtl.start,
+                        launch=rtl.start_owned,
                     )
                 msg = str(exc_info.value)
                 assert "not JSON serializable" in msg
@@ -1383,7 +1388,7 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
                     challenges.CHALLENGE_KIND,
                     4,
                     900,
-                    launch=rtl.start,
+                    launch=rtl.start_owned,
                 )
                 assert err_reap is not None
                 assert "rtl_433" in err_reap
@@ -1954,3 +1959,574 @@ def test_f5_reserved_event_key_aliases_rejected_and_safe_alias_preserves_backfil
     assert len(passes) == 1
     assert passes[0]["payload"]["attempt_key"] == "k1"
     assert "source" not in passes[0]["payload"] and "replay" not in passes[0]["payload"]
+
+
+# --- Round 5: Owned-run handle contract, atomic compare-and-stop, pre-launch cleanup boundary ---
+
+
+def _make_live_child_cls():
+    from tests.child_fakes import Child
+
+    class _LivePipe:
+        def __init__(self, closed: threading.Event):
+            self._closed = closed
+
+        def __iter__(self):
+            self._closed.wait(timeout=15.0)
+            return iter(())
+
+        def close(self):
+            self._closed.set()
+
+    class _LiveChild(Child):
+        """Fake streaming child whose stdout stays open until terminated, killed, or closed."""
+
+        def __init__(self, args=("tool",)):
+            super().__init__(args)
+            self._closed = threading.Event()
+            self.stdout = _LivePipe(self._closed)
+
+        def terminate(self):
+            super().terminate()
+            self._closed.set()
+
+        def kill(self):
+            super().kill()
+            self._closed.set()
+
+    return _LiveChild
+
+
+def test_r5_interleaving_unrelated_claim_before_launch_and_reversed_replacement(
+    tmp_path, monkeypatch
+):
+    """R5 (codex2 interleavings): exact OwnedRun handle tracks only the run acquired by the hook;
+    no global claim-window or receiver-snapshot fallback can steal or mis-target another claim."""
+    from sigint101.decode import Decoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+    from tests.test_app import _present
+
+    LiveChild = _make_live_child_cls()
+    now = [5000.0]
+    _patch_log_clock(monkeypatch, now)
+    pwr_children: list = []
+    rtl_children: list = []
+
+    def spawn_pwr(cmd, **_kw):
+        ch = LiveChild(cmd)
+        pwr_children.append(ch)
+        return ch
+
+    def spawn_rtl(cmd, **_kw):
+        ch = LiveChild(cmd)
+        rtl_children.append(ch)
+        return ch
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=spawn_pwr, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    rtl = Decoder(
+        spawn=spawn_rtl, which=lambda n: n, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        sweeper_factory=lambda: sweeper,
+        decoder_factory=lambda: rtl,
+        clock=lambda: now[0],
+    )
+
+    real_log = app_mod.log_event
+
+    def fail_start_log(path, kind, payload, **kw):
+        if kind == "challenge_start":
+            raise OSError("append failed")
+        return real_log(path, kind, payload, **kw)
+
+    monkeypatch.setattr(app_mod, "log_event", fail_start_log)
+
+    try:
+        with TestClient(app) as client:
+            # Interleaving A: pause Start hook BEFORE its claim; an unrelated request opens rtl_433;
+            # hook then claims rtl_power via /api/spectrum and returns its response receipt.
+            # When journal append fails, rtl_power MUST be stopped and no attempt committed.
+            paused = threading.Event()
+            resume = threading.Event()
+            holder: dict = {}
+
+            def launch_after_unrelated():
+                paused.set()
+                assert resume.wait(timeout=5.0)
+                resp = client.get("/api/spectrum")
+                assert resp.status_code == 200
+                assert "x-sigint-claim" in resp.headers
+                return resp
+
+            t = threading.Thread(
+                target=lambda: holder.update(
+                    out=app.state.start_attempt(
+                        challenges.CHALLENGE_KIND, 9, 900, launch=launch_after_unrelated,
+                    )
+                )
+            )
+            t.start()
+            assert paused.wait(timeout=5.0)
+            assert client.get("/api/decode").status_code == 200
+            assert len(rtl_children) == 1 and rtl_children[-1].poll() is None
+            resume.set()
+            t.join(timeout=5.0)
+
+            assert holder["out"][1] is not None and "append failed" in holder["out"][1]
+            assert not t.is_alive()
+            assert len(pwr_children) == 1
+            assert pwr_children[-1].poll() is not None, "failed Start left rtl_power running"
+            assert not sweeper.running
+            assert app.state.progress.challenge(9)["attempt"] is None
+
+            # Interleaving B (reversed): hook opens rtl_433 directly via start_owned(), another
+            # request claims rtl_power (standing rtl_433 down), then Start fails on journal append.
+            # Cleanup must NOT stop the newer rtl_power child!
+            rtl_children.clear()
+            pwr_children.clear()
+            rtl.resume()
+
+            def launch_rtl_then_replaced():
+                handle = rtl.start_owned()
+                assert handle is not None
+                assert len(rtl_children) == 1 and rtl_children[-1].poll() is None
+                assert client.get("/api/spectrum").status_code == 200
+                assert len(pwr_children) == 1 and pwr_children[-1].poll() is None
+                return handle
+
+            _, err_b = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_rtl_then_replaced,
+            )
+            assert err_b is not None and "append failed" in err_b
+            assert len(pwr_children) == 1
+            assert pwr_children[-1].poll() is None, "cleanup killed replacement rtl_power"
+            assert sweeper.running
+            sweeper.stop()
+
+            # Fallback-deleted check: an unrelated thread starts rtl_power during a hook that
+            # itself acquired and returned NO handle. Start failure MUST NOT touch it!
+            pwr_children.clear()
+            paused2 = threading.Event()
+            resume2 = threading.Event()
+            holder2: dict = {}
+
+            def noop_hook_paused():
+                paused2.set()
+                assert resume2.wait(timeout=5.0)
+                return None
+
+            t2 = threading.Thread(
+                target=lambda: holder2.update(
+                    out=app.state.start_attempt(
+                        challenges.CHALLENGE_KIND, 9, 900, launch=noop_hook_paused,
+                    )
+                )
+            )
+            t2.start()
+            assert paused2.wait(timeout=5.0)
+            assert client.get("/api/spectrum").status_code == 200
+            assert len(pwr_children) == 1 and pwr_children[-1].poll() is None
+            resume2.set()
+            t2.join(timeout=5.0)
+            assert not t2.is_alive()
+
+            assert holder2["out"][1] is not None and "append failed" in holder2["out"][1]
+            assert pwr_children[-1].poll() is None, (
+                "deleted global claim-window fallback must not stop an unrelated thread's receiver"
+            )
+            assert sweeper.running
+            sweeper.stop()
+    finally:
+        sweeper.stop()
+        rtl.stop()
+
+
+def test_r5_overlapping_claims_on_only_receiver_vs_genuine_replacement_and_borrowed_claim(
+    tmp_path, monkeypatch
+):
+    """R5: overlapping claims on the only running receiver do not invalidate the owner's handle
+    (borrowed claims get no handle), while a genuine replacement is always spared."""
+    from sigint101.acars import AcarsDecoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+    from tests.test_app import _present
+
+    LiveChild = _make_live_child_cls()
+    now = [6000.0]
+    _patch_log_clock(monkeypatch, now)
+    pwr_children: list = []
+    spawn_entered = threading.Event()
+    release_spawn = threading.Event()
+    pause_next_spawn = [False]
+
+    def spawn_pwr(cmd, **_kw):
+        ch = LiveChild(cmd)
+        pwr_children.append(ch)
+        if pause_next_spawn[0]:
+            pause_next_spawn[0] = False
+            spawn_entered.set()
+            assert release_spawn.wait(timeout=5.0)
+        return ch
+
+    acars_children: list = []
+
+    def spawn_acars(*_a, **_kw):
+        ch = LiveChild(["acarsdec"])
+        acars_children.append(ch)
+        return ch
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=spawn_pwr, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    acars = AcarsDecoder(
+        spawn=spawn_acars, which=lambda n: n, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        sweeper_factory=lambda: sweeper,
+        acars_factory=lambda: acars,
+        clock=lambda: now[0],
+    )
+
+    real_log = app_mod.log_event
+    monkeypatch.setattr(
+        app_mod,
+        "log_event",
+        lambda path, kind, payload, **kw: (
+            (_ for _ in ()).throw(OSError("append failed"))
+            if kind == "challenge_start"
+            else real_log(path, kind, payload, **kw)
+        ),
+    )
+
+    try:
+        with TestClient(app) as client:
+            # 1. Two overlapping HTTP /api/spectrum claims on the only receiver (1 spawn total).
+            pause_next_spawn[0] = True
+            spawn_entered.clear()
+            release_spawn.clear()
+            r1_box: dict = {}
+            r2_box: dict = {}
+
+            def req1():
+                r1_box["resp"] = client.get("/api/spectrum")
+
+            def req2():
+                r2_box["resp"] = client.get("/api/spectrum")
+
+            def launch_overlapping_http():
+                t1 = threading.Thread(target=req1)
+                t2 = threading.Thread(target=req2)
+                t1.start()
+                try:
+                    assert spawn_entered.wait(timeout=5.0)
+                    t2.start()
+                    time.sleep(0.05)  # Let req2 enter the arbiter reservation queue.
+                finally:
+                    release_spawn.set()
+                    t1.join(timeout=5.0)
+                    if t2.ident is not None:
+                        t2.join(timeout=5.0)
+                assert not t1.is_alive() and not t2.is_alive()
+                assert r1_box["resp"].status_code == 200
+                assert r2_box["resp"].status_code == 200
+                assert "x-sigint-claim" in r1_box["resp"].headers
+                assert "x-sigint-claim" not in r2_box["resp"].headers
+                return r1_box["resp"]
+
+            _, err1 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_overlapping_http,
+            )
+            assert err1 is not None and "append failed" in err1
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None, (
+                "second overlapping claim invalidated owner's handle and left rtl_power running"
+            )
+            assert not sweeper.running
+
+            # 2. Two overlapping direct app.state.claim_sdr calls on the only receiver.
+            pwr_children.clear()
+            pause_next_spawn[0] = True
+            spawn_entered.clear()
+            release_spawn.clear()
+            c1_box: dict = {}
+            c2_box: dict = {}
+
+            def launch_overlapping_direct():
+                t1 = threading.Thread(
+                    target=lambda: c1_box.update(
+                        h=app.state.claim_sdr("sweeper", sweeper.start)
+                    )
+                )
+                t2 = threading.Thread(
+                    target=lambda: c2_box.update(
+                        h=app.state.claim_sdr("sweeper", sweeper.start)
+                    )
+                )
+                t1.start()
+                try:
+                    assert spawn_entered.wait(timeout=5.0)
+                    t2.start()
+                    time.sleep(0.05)
+                finally:
+                    release_spawn.set()
+                    t1.join(timeout=5.0)
+                    if t2.ident is not None:
+                        t2.join(timeout=5.0)
+                assert not t1.is_alive() and not t2.is_alive()
+                assert c1_box["h"] is not None
+                assert c2_box["h"] is None, "borrowed claim must return no handle"
+                return c1_box["h"]
+
+            _, err2 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_overlapping_direct,
+            )
+            assert err2 is not None and "append failed" in err2
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None
+            assert not sweeper.running
+
+            # 3. Genuine replacement: stop first child and spawn a second -> cleanup spares child 2.
+            pwr_children.clear()
+
+            def launch_only_h1():
+                h1 = app.state.claim_sdr("sweeper", sweeper.start)
+                assert h1 is not None
+                return h1
+
+            def replace_on_log(path, kind, payload, **kw):
+                if kind == "challenge_start":
+                    sweeper.stop()
+                    h2 = app.state.claim_sdr("sweeper", sweeper.start)
+                    assert h2 is not None
+                    raise OSError("append failed after genuine replacement")
+                return real_log(path, kind, payload, **kw)
+
+            monkeypatch.setattr(app_mod, "log_event", replace_on_log)
+            _, err3 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_only_h1,
+            )
+            assert err3 is not None
+            assert len(pwr_children) == 2
+            assert pwr_children[0].poll() is not None
+            assert pwr_children[1].poll() is None, "cleanup stopped genuine replacement child"
+            assert sweeper.running
+
+            # 4. Borrowed already-running receiver: claim returns None, Start failure leaves it up.
+            monkeypatch.setattr(
+                app_mod,
+                "log_event",
+                lambda path, kind, payload, **kw: (
+                    (_ for _ in ()).throw(OSError("append failed on borrowed"))
+                    if kind == "challenge_start"
+                    else real_log(path, kind, payload, **kw)
+                ),
+            )
+            borrowed_handles: list = []
+
+            def launch_borrowed():
+                h = app.state.claim_sdr("sweeper", sweeper.start)
+                borrowed_handles.append(h)
+                return h
+
+            _, err4 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_borrowed,
+            )
+            assert err4 is not None
+            assert borrowed_handles == [None]
+            assert pwr_children[1].poll() is None, "failed Start stopped borrowed receiver"
+            assert sweeper.running
+            sweeper.stop()
+
+            # 5. SupervisedReceiver (AcarsDecoder): overlapping claim borrows (None), owner stops.
+            def launch_acars_with_borrow():
+                h_own = app.state.claim_sdr("acars")
+                assert h_own is not None
+                h_borrow = app.state.claim_sdr("acars")
+                assert h_borrow is None
+                return h_own
+
+            _, err5 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_acars_with_borrow,
+            )
+            assert err5 is not None and "append failed" in err5
+            assert len(acars_children) == 1
+            assert acars_children[0].poll() is not None
+            assert not acars.running
+    finally:
+        release_spawn.set()
+        sweeper.stop()
+        acars.shutdown()
+
+
+def test_r5_launch_hook_exception_after_successful_claim_stops_owned_run(tmp_path, monkeypatch):
+    """R5: if a launch hook claims/starts a receiver and then raises before returning, the
+    pre-installed cleanup boundary stops the registered owned run after locks unwind."""
+    from sigint101.decode import Decoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+    from tests.test_app import _present
+
+    LiveChild = _make_live_child_cls()
+    now = [7000.0]
+    _patch_log_clock(monkeypatch, now)
+    pwr_children: list = []
+    rtl_children: list = []
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=lambda cmd, **_kw: (pwr_children.append(LiveChild(cmd)) or pwr_children[-1]),
+        radio_present=lambda: True,
+        list_devices=lambda: devs,
+    )
+    rtl = Decoder(
+        spawn=lambda cmd, **_kw: (rtl_children.append(LiveChild(cmd)) or rtl_children[-1]),
+        which=lambda n: n,
+        radio_present=lambda: True,
+        list_devices=lambda: devs,
+    )
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        sweeper_factory=lambda: sweeper,
+        decoder_factory=lambda: rtl,
+        clock=lambda: now[0],
+    )
+
+    try:
+        with TestClient(app):
+            # Case 1: hook calls app.state.claim_sdr successfully, then raises OSError.
+            def claim_then_raise():
+                h = app.state.claim_sdr("sweeper", sweeper.start)
+                assert h is not None
+                assert pwr_children[-1].poll() is None
+                raise OSError("post-claim hook I/O failure")
+
+            _, err1 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=claim_then_raise,
+            )
+            assert err1 is not None and "post-claim hook I/O failure" in err1
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None, (
+                "hook exception after claim_sdr bypassed cleanup and left child running"
+            )
+            assert not sweeper.running
+            assert app.state.progress.challenge(9)["attempt"] is None
+
+            # Case 2: hook calls rtl.start_owned() directly, then raises RuntimeError.
+            rtl.resume()
+
+            def start_owned_then_raise():
+                h = rtl.start_owned()
+                assert h is not None
+                assert rtl_children[-1].poll() is None
+                raise RuntimeError("hook crashed after start_owned")
+
+            _, err2 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=start_owned_then_raise,
+            )
+            assert err2 is not None and "hook crashed after start_owned" in err2
+            assert len(rtl_children) == 1
+            assert rtl_children[0].poll() is not None, (
+                "hook exception after start_owned bypassed cleanup and left rtl_433 running"
+            )
+            assert not rtl.running
+            assert app.state.progress.challenge(9)["attempt"] is None
+    finally:
+        sweeper.stop()
+        rtl.stop()
+
+
+def test_r5_clock_exception_after_launch_stops_owned_run_and_preserves_exception(
+    tmp_path, monkeypatch
+):
+    """R5: if the injected clock raises after launch returns an owned handle, cleanup stops the
+    run after both locks unwind and the original exception is preserved."""
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+    from tests.test_app import _present
+
+    LiveChild = _make_live_child_cls()
+    pwr_children: list = []
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=lambda cmd, **_kw: (pwr_children.append(LiveChild(cmd)) or pwr_children[-1]),
+        radio_present=lambda: True,
+        list_devices=lambda: devs,
+    )
+    boom_clock = [False]
+
+    def flaky_clock():
+        if boom_clock[0]:
+            raise TypeError("clock failure after launch")
+        return 8000.0
+
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        sweeper_factory=lambda: sweeper,
+        clock=flaky_clock,
+    )
+
+    try:
+        with TestClient(app):
+            lock_state: dict[str, bool] = {}
+
+            def check_locks_free():
+                db_free = app.state.progress._lock.acquire(blocking=False)
+                if db_free:
+                    app.state.progress._lock.release()
+                lock_state["db_free"] = db_free
+                app.state.lora.on_reception(_lora_item(from_id="!r5-clock-cleanup"))
+                lock_state["reception_free"] = True
+
+            def launch_and_arm_clock_fault():
+                h = app.state.claim_sdr("sweeper", sweeper.start)
+                assert h is not None
+                boom_clock[0] = True
+                return h
+
+            with pytest.raises(TypeError, match="clock failure after launch"):
+                app.state.start_attempt(
+                    challenges.CHALLENGE_KIND,
+                    9,
+                    900,
+                    launch=launch_and_arm_clock_fault,
+                    cleanup=check_locks_free,
+                )
+
+            boom_clock[0] = False
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None, (
+                "clock TypeError after launch escaped cleanup and left rtl_power running"
+            )
+            assert not sweeper.running
+            assert app.state.progress.challenge(9)["attempt"] is None
+            assert lock_state == {"db_free": True, "reception_free": True}
+
+            # Also verify an unsupported non-handle return value raises TypeError inside the
+            # cleanup boundary and still stops any run already registered during launch().
+            pwr_children.clear()
+
+            def launch_bad_return():
+                h = app.state.claim_sdr("sweeper", sweeper.start)
+                assert h is not None
+                return "not-an-owned-run-handle"
+
+            with pytest.raises(TypeError, match="unsupported handle"):
+                app.state.start_attempt(
+                    challenges.CHALLENGE_KIND, 9, 900, launch=launch_bad_return,
+                )
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None
+            assert not sweeper.running
+    finally:
+        boom_clock[0] = False
+        sweeper.stop()

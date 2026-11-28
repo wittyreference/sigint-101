@@ -1,12 +1,47 @@
 # ABOUTME: Owns teardown and reader retirement for a receiver's exact process or feed.
 # ABOUTME: Separates hardware release from reader drain, diagnostics, and report completion.
 
+import contextvars
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from . import childproc
+
+_ACTIVE_RUN_REGISTRAR: contextvars.ContextVar = contextvars.ContextVar(
+    "sigint101_owned_run_registrar", default=None
+)
+
+
+@dataclass(frozen=True)
+class OwnedRun:
+    """Exact receiver run acquired by one launch, with atomic compare-and-stop."""
+
+    name: str
+    run_id: object
+    stop: object
+    result: object = None
+
+
+def register_owned_run(handle: OwnedRun | None) -> OwnedRun | None:
+    """Register an acquired OwnedRun with any active Start cleanup boundary."""
+    if handle is not None:
+        registrar = _ACTIVE_RUN_REGISTRAR.get()
+        if registrar is not None:
+            registrar(handle)
+    return handle
+
+
+@contextmanager
+def owned_run_scope(registrar):
+    """Bind a cleanup boundary so every OwnedRun acquired inside it registers immediately."""
+    tok = _ACTIVE_RUN_REGISTRAR.set(registrar)
+    try:
+        yield
+    finally:
+        _ACTIVE_RUN_REGISTRAR.reset(tok)
 
 SUPERVISOR_POLL_S = 0.1
 STREAM_EOF_S = 3.0
@@ -424,6 +459,39 @@ class SupervisedReceiver:
 
     def start(self):
         self.launch_start(self.prepare_start())
+
+    def stop_owned_run(self, expected_run) -> str | None:
+        """Atomically stop this receiver only if expected_run is still current."""
+        if expected_run is None:
+            return None
+        with self._life:
+            if self._run is not expected_run:
+                return None
+            run, intent, retry = self._cancel()
+        self._wait_physical(run, intent, retry)
+        if run.failure:
+            return run.failure
+        if not run.reaped and not run.ready.is_set():
+            return f"{run.watch.tool} did not stop after Start failed"
+        return None
+
+    def start_owned(self, *, name: str | None = None) -> OwnedRun | None:
+        """Start this receiver and return an OwnedRun iff this call spawned a new run."""
+        intent = self.prepare_start()
+        if intent is None:
+            self.launch_start(None)
+            return None
+        result = self.launch_start(intent)
+        run = intent.run
+        if run is None:
+            return None
+        handle = OwnedRun(
+            name=name or self.watch.tool,
+            run_id=run,
+            stop=lambda r=run: self.stop_owned_run(r),
+            result=result,
+        )
+        return register_owned_run(handle)
 
     def _read_run(self, run):
         try:

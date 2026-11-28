@@ -25,6 +25,7 @@ from .hardware import (
     probe_rtlsdr,
     select_rtlsdr_index,
 )
+from .receiver_lifecycle import OwnedRun, register_owned_run
 
 # The FM broadcast band at 125 kHz bins — rtl_power's own worked example, and the
 # resolution where individual stations read as ~200 kHz blocks rather than hairlines.
@@ -627,6 +628,32 @@ class Sweeper:
         """Begin sweeping, unless the radio is absent or deliberately released."""
         with self._life:
             self._start_locked()
+
+    def start_owned(self, *, name: str = "sweeper") -> OwnedRun | None:
+        """Start rtl_power and return an OwnedRun iff this call spawned a new child."""
+        with self._life:
+            if self.running:
+                return None
+            self._start_locked()
+            run_id = (self._run, self._proc)
+        handle = OwnedRun(
+            name=name,
+            run_id=run_id,
+            stop=lambda rid=run_id: self.stop_owned_run(rid),
+        )
+        return register_owned_run(handle)
+
+    def stop_owned_run(self, expected: tuple[int, object]) -> str | None:
+        """Atomically stop rtl_power only if expected (run_gen, proc) is still current."""
+        with self._life:
+            if (self._run, self._proc) != expected:
+                return None
+            self._stop_locked()
+            if reason := self.release_failure(pending=True):
+                return reason
+            if self.running:
+                return f"{RTL_POWER} did not stop after Start failed"
+            return None
 
     def release_failure(self, *, pending=False) -> str | None:
         """Why the radio cannot be handed on: a retiring rtl_power's exit is not confirmed yet.

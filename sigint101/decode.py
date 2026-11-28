@@ -27,6 +27,7 @@ from .hardware import (
     probe_rtlsdr,
     rtlsdr_radio_for_run,
 )
+from .receiver_lifecycle import OwnedRun, register_owned_run
 
 # The 433.92 MHz ISM band, where keyfobs, doorbells and the weather/sensor zoo chatter. rtl_433
 # tunes to one centre frequency (it demodulates a band around it) rather than sweeping a span.
@@ -341,6 +342,32 @@ class Decoder:
         """Begin decoding, unless the radio is absent, rtl_433 is missing, or we were released."""
         with self._life:
             self._start_locked()
+
+    def start_owned(self, *, name: str = "decoder") -> OwnedRun | None:
+        """Start rtl_433 and return an OwnedRun iff this call spawned a new child."""
+        with self._life:
+            if self.running:
+                return None
+            self._start_locked()
+            run_id = (self._run, self._proc)
+        handle = OwnedRun(
+            name=name,
+            run_id=run_id,
+            stop=lambda rid=run_id: self.stop_owned_run(rid),
+        )
+        return register_owned_run(handle)
+
+    def stop_owned_run(self, expected: tuple[int, object]) -> str | None:
+        """Atomically stop rtl_433 only if expected (run_gen, proc) is still current."""
+        with self._life:
+            if (self._run, self._proc) != expected:
+                return None
+            self._stop_locked()
+            if reason := self.release_failure(pending=True):
+                return reason
+            if self.running:
+                return f"{RTL_433} did not stop after Start failed"
+            return None
 
     def release_failure(self, *, pending=False) -> str | None:
         """Why the radio cannot be handed on: a retiring rtl_433's exit is not confirmed yet.
