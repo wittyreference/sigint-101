@@ -11,7 +11,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from .childproc import FIRST_RETRY_S, MAX_RETRY_S, STABLE_AFTER_S, spawn
+from .childproc import FIRST_RETRY_S, MAX_RETRY_S, STABLE_AFTER_S, running_command, spawn
 from .hardware import (
     RTL_POWER,
     DeviceSelectionError,
@@ -534,6 +534,11 @@ class Sweeper:
         # middle of a lesson, caused by nothing worse than handing the dongle back.
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def live_command(self) -> str | None:
+        """The exact command running now, read off the spawned process; None when nothing runs."""
+        proc = self._proc
+        return running_command(proc)
 
     def _choose_device(self) -> int:
         """Which radio index to open, re-checked every time a sweep starts.

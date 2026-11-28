@@ -27,6 +27,7 @@ CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
 SURVEY = REPO / "tools" / "render" / "render_survey.py"
 RECALL = REPO / "tools" / "render" / "render_recall.py"
 LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
+FIELD = REPO / "tools" / "render" / "render_field.py"
 EVAL = REPO / "tools" / "render" / "render_eval.py"
 CHECK = REPO / "tools" / "render" / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
@@ -538,7 +539,7 @@ def render_make(tmp_path, console_url, devtools, strays):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -611,12 +612,12 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     "failing",
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails",
+        "recall-fails", "live-find-fails", "field-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -631,6 +632,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {SURVEY.name} {console_url}",
         f"ran {RECALL.name} {console_url}",
         f"ran {LIVE_FIND.name} {console_url}",
+        f"ran {FIELD.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -673,7 +675,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 9, proc.stdout
+    assert len(urls) == 10, proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -740,6 +742,7 @@ API_TOOLS = {
     "eval": (EVAL, ["http://127.0.0.1:1/operate/ism", "1"], {}),
     "survey": (SURVEY, ["http://127.0.0.1:9"], {}),
     "live-find": (LIVE_FIND, ["http://127.0.0.1:9"], {}),
+    "field": (FIELD, ["http://127.0.0.1:9"], {}),
 }
 
 
@@ -799,7 +802,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 9, methods
+    assert len(marks) == 10, methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -1846,3 +1849,64 @@ def test_recall_render_console_uses_no_radio_probe(tmp_path, monkeypatch):
     assert callable(probe_fn), "render_recall._run_server must pass a no-radio probe"
     probe = probe_fn()
     assert probe.present is False
+
+
+RACK_FIELD_FITS = {
+    "doc": [800, 480],
+    "target": [76, 72],
+    "visible": True,
+    "titleUnclipped": True,
+}
+FIELD_PAGE_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "scrolls": True,
+    "lastVisible": True,
+    "noOverflow": True,
+    "noSplitHyphens": True,
+    "bodyPx": 18,
+    "codePx": 18,
+}
+
+
+def _field_pages(*, page_defect=None, rack_defect=None):
+    pages = {}
+    for theme in THEMES:
+        rack = {**RACK_FIELD_FITS, "theme": theme}
+        page = {**FIELD_PAGE_FITS, "theme": theme}
+        if theme == "red-night":
+            rack.update(rack_defect or {})
+            page.update(page_defect or {})
+        pages[f"measureRackField({json.dumps(theme)})"] = rack
+        pages[f"measureFieldPage({json.dumps(theme)},"] = page
+    return pages
+
+
+def test_field_render_checks_rack_and_page_including_no_split_hyphens(devtools):
+    port = devtools(_field_pages())
+    proc = run(FIELD, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - rack-field-ism dark",
+        "VERDICT: PASS - rack-field-waterfall dark",
+        "VERDICT: PASS - field dark",
+        "VERDICT: PASS - rack-field-ism sunlight",
+        "VERDICT: PASS - rack-field-waterfall sunlight",
+        "VERDICT: PASS - field sunlight",
+        "VERDICT: PASS - rack-field-ism red-night",
+        "VERDICT: PASS - rack-field-waterfall red-night",
+        "VERDICT: PASS - field red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"noSplitHyphens": False},
+    {"noOverflow": False},
+    {"bodyPx": 17},
+    {"codePx": 17},
+])
+def test_field_render_fails_on_split_hyphen_overflow_or_small_font(devtools, defect):
+    port = devtools(_field_pages(page_defect=defect))
+    proc = run(FIELD, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - field red-night"

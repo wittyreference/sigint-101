@@ -8,14 +8,16 @@ import signal
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 
-from sigint101 import app, aprs, childproc, decode, radio_control, receiver_lifecycle
+from sigint101 import app, aprs, childproc, decode, ppm, radio_control, receiver_lifecycle
 from sigint101.events import read_events
+from sigint101.spectrum import Sweeper
 from tests.child_fakes import Child, LateProc
-from tests.test_app import _client, _present, _StubSweeper
+from tests.test_app import _client, _present, _rows, _StubSweeper
 from tests.test_apt_retirement import _decoder as apt_decoder
 from tests.test_stale_readers import APRS_1
 
@@ -243,6 +245,189 @@ def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_pat
         assert launches == [-signal.SIGKILL]
 
 
+@pytest.mark.parametrize("method,url,queued", [
+    ("GET", "/api/spectrum", True),
+    ("GET", "/api/spectrum", False),
+    ("GET", "/api/provenance", False),
+    ("POST", "/api/provenance/baseline", False),
+], ids=["queued-spectrum", "later-spectrum", "provenance", "baseline"])
+def test_unreaped_ppm_capture_holds_the_radio_until_exit_is_confirmed(
+        tmp_path, monkeypatch, method, url, queued):
+    proc = Child(["rtl_fm"], unkillable=True)
+    measuring, finish, waiting = (threading.Event() for _ in range(3))
+    launches = []
+
+    def capture_blocks(stream, **_):
+        measuring.set()
+        assert finish.wait(5)
+        stream.stalled = True
+        return [], None
+
+    class Sweep(_StubSweeper):
+        def start(self):
+            launches.append(proc.poll())
+            super().start()
+
+    monkeypatch.setattr(ppm, "spawn", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ppm, "block_phasors", capture_blocks)
+    with (_client(tmp_path, probe=_present, sweeper_factory=lambda: Sweep(_rows())) as client,
+          ThreadPoolExecutor(max_workers=2) as requests):
+        condition = client.app.state.radio_arbiter._lock
+        real_wait = condition.wait
+
+        def visible_wait(timeout):
+            waiting.set()
+            return real_wait(timeout)
+
+        monkeypatch.setattr(condition, "wait", visible_wait)
+        calibration = requests.submit(client.post, "/api/ppm/measure")
+        try:
+            assert measuring.wait(5)
+            if queued:
+                waiter = requests.submit(client.request, method, url)
+                assert waiting.wait(5)
+        finally:
+            finish.set()
+
+        measured = calibration.result(timeout=5)
+        if queued:
+            refused = waiter.result(timeout=5)
+        else:
+            refused = client.request(method, url)
+        assert measured.status_code == 200 and measured.json()["ppm"] is None
+        assert "may still hold the radio" in measured.json()["reason"]
+        assert proc.sent == ["TERM", "KILL"] and proc.poll() is None
+        if url == "/api/spectrum":
+            assert refused.status_code == 503
+            assert "calibration" in refused.json()["reason"]
+            assert "may still hold the radio" in refused.json()["reason"]
+        elif method == "GET":
+            assert refused.status_code == 200 and refused.json()["provenance"]["ref_db"] is None
+        else:
+            assert refused.status_code == 400 and refused.json()["recorded"] is False
+        assert not launches
+        assert client.get("/api/hardware").json()["state"] == "busy"
+        assert client.post("/api/ppm/measure").status_code == 503
+        assert proc.sent == ["TERM", "KILL"]
+
+        proc.code = -signal.SIGKILL
+        assert client.get("/api/hardware").json()["state"] == "present"
+        assert client.request(method, url).status_code == 200
+        assert launches == [-signal.SIGKILL]
+
+
+@pytest.mark.parametrize("unkillable", [False, True], ids=["killed", "unconfirmed"])
+def test_ppm_wait_error_escalates_and_holds_the_radio_until_exit(tmp_path, monkeypatch, unkillable):
+    class WaitError(Child):
+        def wait(self, timeout=None):
+            raise OSError("cannot read the exit status")
+
+    proc = WaitError(["rtl_fm"], stubborn=True, unkillable=unkillable)
+    monkeypatch.setattr(ppm, "spawn", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ppm, "block_phasors", lambda *_args, **_kwargs: ([], None))
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: _StubSweeper([])) as client:
+        measured = client.post("/api/ppm/measure")
+        assert measured.status_code == 200 and measured.json()["ppm"] is None
+        assert proc.sent == ["TERM", "KILL"]
+        if unkillable:
+            assert "may still hold the radio" in measured.json()["reason"]
+            assert client.get("/api/spectrum").status_code == 503
+            assert not client.app.state.sweeper.running
+            proc.code = -signal.SIGKILL
+        else:
+            assert proc.poll() == -signal.SIGKILL
+            assert "ended before enough audio" in measured.json()["reason"]
+        assert client.get("/api/spectrum").status_code == 200
+
+
+def test_provenance_poll_leaves_a_released_sweeper_passive(tmp_path):
+    # Guard the case where the sweep was already released before provenance checked it.
+    proc = Child(["rtl_fm"])
+    receiver = _aprs(proc)
+    sweeper = Sweeper(radio_present=lambda: True,
+                      spawn=lambda *_: pytest.fail("provenance took the radio from APRS"))
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: receiver,
+                 sweeper_factory=lambda: sweeper) as client:
+        assert client.get("/api/aprs").status_code == 200
+        assert sweeper.released
+        provenance = client.get("/api/provenance")
+        assert provenance.status_code == 200 and provenance.json()["provenance"]["ref_db"] is None
+        assert receiver.running and not proc.sent
+
+
+def test_provenance_queued_behind_aprs_preserves_the_decoder_claim(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "CLAIM_QUEUE_WAIT_S", 10)
+    checked, spawning, waiting, finish = (threading.Event() for _ in range(4))
+    sweep_children = []
+    proc = Child(["rtl_fm"])
+
+    class Sweep(Sweeper):
+        @property
+        def released(self):
+            released = super().released
+            if not released:
+                # Provenance has read the old state. Let APRS release the sweep before it queues.
+                checked.set()
+                assert spawning.wait(5)
+            return released
+
+    def spawn_aprs(*_):
+        spawning.set()
+        assert finish.wait(5)
+        return proc
+
+    def spawn_sweep(*_):
+        child = Child(["rtl_power"])
+        sweep_children.append(child)
+        return child
+
+    sweeper = Sweep(radio_present=lambda: True, spawn=spawn_sweep)
+    receiver = aprs.AprsDecoder(spawn=spawn_aprs, radio_present=lambda: True, which=lambda t: t)
+    with (_client(tmp_path, probe=_present, aprs_factory=lambda: receiver,
+                  sweeper_factory=lambda: sweeper) as client,
+          ThreadPoolExecutor(max_workers=2) as requests):
+        condition = client.app.state.radio_arbiter._lock
+        real_wait = condition.wait
+
+        def visible_wait(timeout):
+            waiting.set()
+            return real_wait(timeout)
+
+        monkeypatch.setattr(condition, "wait", visible_wait)
+        provenance = requests.submit(client.get, "/api/provenance")
+        try:
+            assert checked.wait(5), "provenance did not read the sweep's release state"
+            decoder = requests.submit(client.get, "/api/aprs")
+            assert waiting.wait(5), "provenance did not queue behind APRS"
+            assert sweeper.released
+        finally:
+            finish.set()
+
+        assert decoder.result(timeout=5).status_code == 200
+        reading = provenance.result(timeout=5)
+        assert reading.status_code == 200 and reading.json()["provenance"]["ref_db"] is None
+        assert proc.sent == [], "provenance stood APRS down"
+        assert receiver.running
+        assert not sweep_children
+
+
+def test_provenance_lazy_start_checks_other_receivers_for_failed_reap(tmp_path):
+    proc = Child(["rtl_fm"], unkillable=True)
+    receiver = _aprs(proc)
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: receiver,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        receiver.start()
+        receiver.release()
+        try:
+            assert receiver.release_failure() and proc.poll() is None
+            response = client.get("/api/provenance")
+            assert response.status_code == 200
+            assert response.json()["provenance"]["ref_db"] is None
+            assert not client.app.state.sweeper.running
+        finally:
+            proc.code = -signal.SIGKILL
+
+
 def test_late_diagnostic_failure_cannot_hold_or_clear_a_new_claim(tmp_path, monkeypatch):
     proc = Child(["aprs"])
     decoder = _aprs(proc)
@@ -411,6 +596,40 @@ def test_shutdown_cancels_grace_and_releases_other_radios_while_reporting_is_blo
         worker.join(6)
     assert not worker.is_alive()
     assert console.state.shutdown_errors == []
+
+
+def test_shutdown_reports_an_unconfirmed_ppm_child(tmp_path, monkeypatch, caplog):
+    proc = Child(["rtl_fm"], unkillable=True)
+    monkeypatch.setattr(ppm, "spawn", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ppm, "block_phasors", lambda *_args, **_kwargs: ([], None))
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: _StubSweeper([])) as client:
+        assert client.post("/api/ppm/measure").status_code == 200
+        assert proc.poll() is None
+
+    reason = "ppm: the calibration rtl_fm may still hold the radio because its exit is unconfirmed"
+    assert client.app.state.shutdown_errors == [reason]
+    assert f"console shutdown: {reason}" in caplog.messages
+
+
+def test_shutdown_retries_a_retained_ppm_child(tmp_path, monkeypatch):
+    class SecondKillStops(Child):
+        def kill(self):
+            self.unkillable = "KILL" not in self.sent
+            super().kill()
+
+    proc = SecondKillStops(["rtl_fm"], stubborn=True)
+    monkeypatch.setattr(ppm, "spawn", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ppm, "block_phasors", lambda *_args, **_kwargs: ([], None))
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: _StubSweeper([])) as client:
+        measured = client.post("/api/ppm/measure")
+        assert measured.status_code == 200
+        assert "may still hold the radio" in measured.json()["reason"]
+        assert client.get("/api/spectrum").status_code == 503
+        assert proc.sent == ["TERM", "KILL"]
+
+    assert proc.sent == ["TERM", "KILL", "KILL"]
+    assert proc.poll() == -signal.SIGKILL
+    assert client.app.state.shutdown_errors == []
 
 
 def test_shutdown_interpreter_exits_at_deadline_with_a_stalled_worker(tmp_path):
