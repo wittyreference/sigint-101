@@ -8,6 +8,15 @@ MARK_BEGIN="# >>> sigint101 kiosk >>>"
 MARK_END="# <<< sigint101 kiosk <<<"
 ICON="/usr/local/share/icons/hicolor/scalable/apps/sigint101.svg"
 
+# A provision run can pull this checkout and keep its loaded build recipes. It invokes
+# this installer from the course checkout when the server unit changes.
+if [[ "$HERE" -ef "$HOME/sigint-101/deploy" && -x "$HERE/../.venv/bin/python" ]]; then
+  (
+    . "$HERE/provision.sh"
+    ensure_ais_companion
+  )
+fi
+
 # 1) Lesson server: a user unit plus lingering, so it runs from boot with nobody logged in.
 install -D -m 0644 "$HERE/kiosk/sigint101.service" "$HOME/.config/systemd/user/sigint101.service"
 systemctl --user daemon-reload

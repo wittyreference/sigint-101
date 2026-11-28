@@ -25,6 +25,7 @@ from sigint101.childproc import spawn as spawn_child
 from sigint101.events import read_events
 from sigint101.hardware import RadioProbe
 from tests.child_fakes import LateByteProc, LateProc
+from tests.test_ais import _udp_pair
 from tests.test_sstv import PNG_BYTES
 
 FIXTURE_PACKS = Path(__file__).resolve().parent / "fixtures" / "lesson_packs"
@@ -1242,16 +1243,17 @@ def test_adsb_socket_buffered_lines_after_stop_do_not_leak_into_new_run():
 def test_ais_udp_buffered_lines_after_stop_do_not_leak_into_new_run():
     # One UDP datagram carrying two AIVDM lines: closing the socket on stop() does not stop the
     # inner splitlines() loop from yielding the second line once the hook unblocks.
-    socks = []
+    senders = []
     procs = []
 
     def spawn(device, host, port):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("127.0.0.1", 0))
-        socks.append(sock)
+        sender, sock = _udp_pair()
+        senders.append(sender)
         proc = _AliveProc(["rtl_ais", "-d", str(device), "--run", str(len(procs) + 1)])
         procs.append(proc)
-        return ais._Feed(proc, sock)
+        feed = ais._Feed(proc, sock, sender)
+        feed.configure()
+        return feed
 
     dec = ais.AisDecoder(spawn=spawn, **_common())
     dec.STOP_WAIT_S = 0.05
@@ -1271,8 +1273,7 @@ def test_ais_udp_buffered_lines_after_stop_do_not_leak_into_new_run():
     try:
         dec.start()
         old_thread = dec._thread
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
-            sender.sendto((AIS_1 + "\n" + AIS_2 + "\n").encode(), socks[0].getsockname())
+        senders[0].send((AIS_1 + "\n" + AIS_2 + "\n").encode())
         assert paused.wait(5)
 
         dec.release()
@@ -1291,7 +1292,7 @@ def test_ais_udp_buffered_lines_after_stop_do_not_leak_into_new_run():
     finally:
         go_on.set()
         dec.stop()
-        for s in socks:
+        for s in senders:
             try:
                 s.close()
             except OSError:
@@ -1383,12 +1384,19 @@ class _BoundarySocket:
         self.armed = threading.Event()
         self._fired = False
 
-    def recv(self, bufsize: int):
+    def _maybe_timeout(self):
         if self.armed.is_set() and not self._fired:
             self._fired = True
             self._on_timeout()
             raise TimeoutError("timed out")
+
+    def recv(self, bufsize: int):
+        self._maybe_timeout()
         return self._sock.recv(bufsize)
+
+    def recvmsg(self, bufsize: int):
+        self._maybe_timeout()
+        return self._sock.recvmsg(bufsize)
 
     def __enter__(self):
         self._sock.__enter__()
@@ -1763,16 +1771,17 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
     # Pause the AIS reader on its first accepted vessel, queue a second complete UDP datagram in
     # the socket, mark rtl_ais exited, and give the drain a budget shorter than FEED_POLL_S. Only
     # non-blocking draining finishes before the join budget on an idle UDP socket.
-    socks = []
+    senders = []
     procs = []
 
     def spawn(device, host, port):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("127.0.0.1", 0))
-        socks.append(sock)
+        sender, sock = _udp_pair()
+        senders.append(sender)
         proc = _AliveProc(["rtl_ais", "-d", str(device), "--run", str(len(procs) + 1)])
         procs.append(proc)
-        return ais._Feed(proc, sock)
+        feed = ais._Feed(proc, sock, sender)
+        feed.configure()
+        return feed
 
     dec = ais.AisDecoder(spawn=spawn, **_common())
     dec.STOP_WAIT_S = 0.15
@@ -1794,11 +1803,10 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
     dec.on_reception = gated
     try:
         dec.start()
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
-            sender.sendto((AIS_1 + "\n").encode(), socks[0].getsockname())
-            assert paused.wait(5)
-            # Queue the second datagram in the UDP socket buffer and end the child naturally.
-            sender.sendto((AIS_2 + "\n").encode(), socks[0].getsockname())
+        senders[0].send((AIS_1 + "\n").encode())
+        assert paused.wait(5)
+        # Queue the second datagram in the UDP socket buffer and end the child naturally.
+        senders[0].send((AIS_2 + "\n").encode())
         real_thread = dec._thread
         joined = threading.Event()
         alive_after_join = []
@@ -1828,7 +1836,7 @@ def test_ais_natural_exit_drains_complete_datagram_queued_in_socket():
     finally:
         go_on.set()
         dec.stop()
-        for s in socks:
+        for s in senders:
             try:
                 s.close()
             except OSError:
@@ -1839,27 +1847,27 @@ def test_ais_live_read_timeout_as_last_datagram_arrives_still_drains():
     # If a live blocking recv() times out right as rtl_ais exits and the final UDP datagram
     # arrives, the feed must loop once more in non-blocking mode and drain it rather than exiting
     # on the TimeoutError.
-    socks = []
+    senders = []
     procs = []
     boundary = []
     timed_out = threading.Event()
 
     def spawn(device, host, port):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("127.0.0.1", 0))
-        socks.append(sock)
+        sender, sock = _udp_pair()
+        senders.append(sender)
         proc = _AliveProc(["rtl_ais", "-d", str(device), "--run", str(len(procs) + 1)])
         procs.append(proc)
 
         def on_timeout():
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
-                sender.sendto((AIS_2 + "\n").encode(), sock.getsockname())
+            sender.send((AIS_2 + "\n").encode())
             proc.returncode = 1
             timed_out.set()
 
         wrapped = _BoundarySocket(sock, on_timeout)
         boundary.append(wrapped)
-        return ais._Feed(proc, wrapped)
+        feed = ais._Feed(proc, wrapped, sender)
+        feed.configure()
+        return feed
 
     dec = ais.AisDecoder(spawn=spawn, **_common())
     dec.STOP_WAIT_S = 0.15
@@ -1881,8 +1889,7 @@ def test_ais_live_read_timeout_as_last_datagram_arrives_still_drains():
     dec.on_reception = gated
     try:
         dec.start()
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
-            sender.sendto((AIS_1 + "\n").encode(), socks[0].getsockname())
+        senders[0].send((AIS_1 + "\n").encode())
         assert paused.wait(5)
 
         real_thread = dec._thread
@@ -1909,7 +1916,7 @@ def test_ais_live_read_timeout_as_last_datagram_arrives_still_drains():
     finally:
         go_on.set()
         dec.stop()
-        for s in socks:
+        for s in senders:
             try:
                 s.close()
             except OSError:
