@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -885,3 +886,43 @@ def test_sstv_run_numbered_names_isolate_delayed_writers_and_orphan_sidecars(
     assert Path(report[0]["path"]).name == second_path.name
     assert (dec.output_dir / second_path.name).stat().st_size == len(PNG_BYTES)
     assert first_path.exists()
+
+
+# --- bounded retirement ------------------------------------------------------------
+
+
+def test_sstv_stalled_exit_diagnostic_does_not_hold_a_clean_capture(capture_files, monkeypatch):
+    dec, launches, heard = capture_files
+    monkeypatch.setattr(receiver_lifecycle, "DIAGNOSTIC_WAIT_S", 0.05)
+    stalled, unstall = threading.Event(), threading.Event()
+
+    class StalledStderr(io.StringIO):
+        def read(self, *args):
+            stalled.set()
+            unstall.wait(10)
+            return ""
+
+    dec.start()
+    child, staged = launches[0]
+    child.stderr.close()
+    child.stderr = StalledStderr()
+    staged.write_bytes(PNG_BYTES)
+    ticket = dec._run
+    try:
+        _finish(child)
+        assert stalled.wait(2)
+        assert ticket.ready.wait(2), "a stalled exit diagnostic held the finished capture"
+        assert ticket.complete.wait(2)
+        assert ticket.reaped and not ticket.reap_failed
+        # A confirmed clean reap still publishes, and says its diagnostic never finished.
+        [(item, command, _)] = heard
+        assert item["meta"]["exit_diagnostic"] == {
+            "status": 0, "reason": "exit diagnostic did not finish",
+        }
+        assert command == childproc.command_line(child)
+        assert [image["path"] for image in dec.images()] == [item["path"]]
+        assert not staged.exists()
+        dec.start()
+        assert len(launches) == 2 and dec.running
+    finally:
+        unstall.set()
