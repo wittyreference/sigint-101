@@ -9,6 +9,10 @@ import struct
 import sys
 import time
 import urllib.request
+from urllib.parse import urlsplit
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from render_proxy import serve_in_thread  # noqa: E402
 
 # The DevTools endpoint comes from the environment, not argv, so other harness scripts can import
 # CDP/page_ws without this module misreading their arguments.
@@ -45,11 +49,53 @@ def check_reply(method, msg):
     return msg.get("result", {})
 
 
+# The render proxies this process may load pages through: the runner's (named in the
+# environment), and any a tool run on its own started for itself (fence). A page loads from no
+# other origin, so the browser never holds the console's own address.
+FENCE_ENV = "RENDER_FENCE"
+_FENCES = {}
+
+
+def _origin(url):
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def fenced_origins():
+    runner = os.environ.get(FENCE_ENV)
+    return set(_FENCES.values()) | ({runner} if runner else set())
+
+
+def fence(url):
+    """The same page, reached through a render proxy (render_proxy.py) instead of directly.
+
+    Under make render-check the console is already the runner's proxy, named in RENDER_FENCE,
+    and stays as it is. A tool run on its own starts its own proxy, once per console, which
+    lives as long as the tool does.
+    """
+    origin = _origin(url)
+    if origin in fenced_origins():
+        return url
+    if origin not in _FENCES:
+        _FENCES[origin] = serve_in_thread(origin)
+    return _FENCES[origin] + url[len(origin):]
+
+
 def check_navigation(client, method, params):
-    """Refuse to load any page but about:blank on a client whose API block is not confirmed."""
-    if (method == "Page.navigate" and (params or {}).get("url") != BLANK
-            and not getattr(client, "blocked", False)):
+    """Refuse a navigation before the /api/* block is confirmed, or past the render proxy.
+
+    about:blank is always allowed. Any other page must come through a render proxy (fence):
+    the proxy refuses the API and every write, whatever becomes of DevTools.
+    """
+    if method != "Page.navigate":
+        return
+    url = (params or {}).get("url")
+    if url == BLANK:
+        return
+    if not getattr(client, "blocked", False):
         raise CDPError("refusing to load a page before the /api/* block is confirmed")
+    if _origin(url or "") not in fenced_origins():
+        raise CDPError(f"refusing to load {url} directly; pages load through the render proxy")
 
 
 def block_console_api(c, exit_check=True):
@@ -329,7 +375,7 @@ def main():
         "Emulation.setDeviceMetricsOverride",
         {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False},
     )
-    c.call("Page.navigate", {"url": URL})
+    c.call("Page.navigate", {"url": fence(URL)})
     time.sleep(2.5)
     for _ in range(20):
         if c.ev("document.readyState") == "complete":
