@@ -16,7 +16,7 @@ BASH = shutil.which("bash")
 # Standard read-only utilities provision.sh calls; linked by name so /usr/bin (and real node)
 # never enters the test PATH.
 CORE_UTILS = (
-    "awk", "basename", "cat", "cmp", "cut", "date", "dirname", "grep", "mkdir", "paste",
+    "awk", "basename", "cat", "cut", "date", "dirname", "grep", "mkdir", "paste",
     "readlink", "rm", "sleep", "sort", "timeout",
 )
 
@@ -32,6 +32,8 @@ class ProvisionBox:
 
     def __init__(self, tmp_path: Path):
         self.home = tmp_path / "home"
+        # The box's own /usr/local, /etc and so on: what install.sh would have installed.
+        self.root = tmp_path / "root"
         self.bin = tmp_path / "bin"
         self.log = tmp_path / "calls.log"
         self.home.mkdir()
@@ -42,6 +44,20 @@ class ProvisionBox:
             found = shutil.which(tool)
             assert found, f"host lacks {tool}, needed to run deploy/provision.sh in tests"
             (self.bin / tool).symlink_to(found)
+        # cmp is how --check compares what install.sh installed. Every system path it is given
+        # (anything outside this box) is read from the box's fake root, never from the host.
+        real_cmp = shutil.which("cmp")
+        assert real_cmp, "host lacks cmp, needed to run deploy/provision.sh in tests"
+        _stub(self.bin / "cmp",
+              'args=()\n'
+              'for a in "$@"; do\n'
+              '  case "$a" in\n'
+              f'    "{tmp_path}"/*) args+=("$a") ;;\n'
+              f'    /*) args+=("{self.root}$a") ;;\n'
+              '    *) args+=("$a") ;;\n'
+              '  esac\n'
+              'done\n'
+              f'exec "{real_cmp}" "${{args[@]}}"')
 
         # Fake checkout at ~/sigint-101 so step_course, step_venv and step_kiosk stay local.
         course = self.home / "sigint-101"
@@ -311,19 +327,66 @@ def test_provision_node_check_is_idempotent_across_two_runs(box, version):
     assert _node_section(first.stdout) == _node_section(second.stdout)
 
 
-def test_check_reports_an_installed_course_launcher_that_differs_from_the_checkout(box):
-    """A box keeps running its installed launcher until install.sh copies the new one over, so a
-    launcher fix (the full-panel window bounds) reaches the panel only if --check flags it."""
-    kiosk = box.home / "sigint-101" / "deploy" / "kiosk"
-    kiosk.mkdir()
-    (kiosk / "start-kiosk.sh").write_text((REPO / "deploy" / "kiosk" / "start-kiosk.sh")
-                                          .read_text(encoding="utf-8"), encoding="utf-8")
-    result = box.run("--check")
+# What install.sh installs, as (checkout copy under deploy/, installed path). A path under ~ is
+# the box's own HOME; an absolute one lives under the box's fake system root.
+INSTALLED = (
+    ("kiosk/sigint101.service", "~/.config/systemd/user/sigint101.service"),
+    ("kiosk/start-kiosk.sh", "/usr/local/bin/sigint101-course"),
+    ("kiosk/sigint101.desktop", "/usr/local/share/applications/sigint101.desktop"),
+    ("kiosk/sigint101.svg", "/usr/local/share/icons/hicolor/scalable/apps/sigint101.svg"),
+    ("kiosk/sigint101-autostart.desktop", "~/.config/autostart/sigint101.desktop"),
+    ("kiosk/sigint101-link.desktop", "~/Desktop/sigint101.desktop"),
+    ("system/journald-sigint101.conf", "/etc/systemd/journald.conf.d/50-sigint101.conf"),
+)
+
+
+def _install_tree(box, differ=()):
+    """Put the checkout's install.sh pieces in the fake checkout and an installed copy of each in
+    the box: identical, unless its checkout name is in `differ`."""
+    for src, dest in INSTALLED:
+        body = (REPO / "deploy" / src).read_bytes()
+        checkout = box.home / "sigint-101" / "deploy" / src
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        checkout.write_bytes(body)
+        installed = (box.home / dest[2:]) if dest.startswith("~/") else box.root / dest[1:]
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_bytes(body + b"# an older copy\n" if src in differ else body)
+
+
+def _install_line(result):
     assert result.returncode == 0, result.stdout + result.stderr
+    lines = [ln for ln in result.stdout.splitlines() if "deploy/install.sh" in ln]
+    assert len(lines) == 2, lines  # the step heading and its one verdict
+    return lines[1]
+
+
+@pytest.mark.parametrize("others", ["none-installed", "others-match", "others-differ"])
+def test_check_reports_an_installed_course_launcher_that_differs_from_the_checkout(box, others):
+    """A box keeps running its installed launcher until install.sh copies the new one over, so a
+    launcher fix (the full-panel window bounds) reaches the panel only if --check flags it. It
+    reads the box's installed tree, never the host's, whatever else that tree holds."""
+    if others == "none-installed":
+        kiosk = box.home / "sigint-101" / "deploy" / "kiosk"
+        kiosk.mkdir()
+        (kiosk / "start-kiosk.sh").write_text((REPO / "deploy" / "kiosk" / "start-kiosk.sh")
+                                              .read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        rest = {src for src, _ in INSTALLED} if others == "others-differ" else set()
+        _install_tree(box, differ=rest | {"kiosk/start-kiosk.sh"})
+    result = box.run("--check")
     [line] = [ln for ln in result.stdout.splitlines() if "run deploy/install.sh" in ln]
     assert line.startswith("  would  "), line
     assert "course launcher" in line, line
     assert "install.sh" not in box.calls(), "--check ran install.sh"
+
+
+def test_check_does_not_flag_an_installed_course_launcher_that_matches_the_checkout(box):
+    """The other half of the claim: a launcher that matches is not reported, even when the host
+    the suite runs on has none installed, or an older one."""
+    _install_tree(box, differ={"kiosk/sigint101.svg"})
+    line = _install_line(box.run("--check"))
+    assert "course launcher" not in line, line
+    assert "icon" in line, line
 
 
 @pytest.mark.parametrize("region,preset,use_preset,tx_enabled", [(0, 0, False, False),
