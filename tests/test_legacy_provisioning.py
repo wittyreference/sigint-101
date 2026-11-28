@@ -35,7 +35,11 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "deploy/kiosk/start-kiosk.sh",
         "sysroot",
         "usr/local/bin/sigint101-course",
-        "acb558c9cf59841776d2b2f05f79f30464369668ef0e2b1bc46b2950b557bbbd",
+        # Refrozen for C78-C80 (reviewed legacy deploy change): the watch loop runs with the
+        # lock's fd 9 closed so no child inherits it, a watchdog that stands down says why, a
+        # wlr-randr that ignores TERM is killed (timeout -k), and the loop forks no shell that
+        # could keep the lock's backup (the output size is read without $(...); Codex D-111 F4).
+        "446893522cf963e16522f943317db2405e602eb0177b4118e95546bfc0795485",
     ),
     (
         "deploy/kiosk/sigint101.svg",
@@ -316,6 +320,16 @@ class StatefulLegacyBox:
         assert f"--user-data-dir={self.home}/.config/chromium-kiosk" in launched, launched
         assert "deploy/managed" not in launched, launched
         return proc, launched
+
+
+def test_the_frozen_launcher_digest_is_on_install_shs_reviewed_launcher_list():
+    """install.sh's helper may SIGKILL a watchdog only on a launcher listed in
+    deploy/reviewed-launchers.sha256; the digest frozen here must be that list's entry for the
+    shipped launcher, so the two can never drift apart."""
+    [frozen] = [sha for src, _, _, sha in LEGACY_INSTALLED_FILES
+                if src == "deploy/kiosk/start-kiosk.sh"]
+    reviewed = (REPO / "deploy" / "reviewed-launchers.sha256").read_text(encoding="utf-8")
+    assert f"{frozen}  deploy/kiosk/start-kiosk.sh" in reviewed.splitlines()
 
 
 def test_interim_pr_legacy_provisioning_still_boots_checkout(tmp_path):

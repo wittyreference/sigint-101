@@ -2216,7 +2216,9 @@ def test_restart_kills_a_stalled_rtl_power_that_ignores_sigterm():
     sweeper.stop()
 
 
-def test_a_restart_that_cannot_free_the_dongle_is_reported_once_by_the_next_start():
+def test_a_restart_that_cannot_free_the_dongle_refuses_every_start_until_it_is_freed():
+    # C77: the reason was reported once, and the start after it spawned a second rtl_power beside
+    # the one still holding the dongle. Every start now refuses until the old one's exit shows.
     procs = []
     clock = _Clock()
     sweeper = Sweeper(spawn=_first_then_fed(HeldProc, procs), radio_present=lambda: True,
@@ -2229,13 +2231,14 @@ def test_a_restart_that_cannot_free_the_dongle_is_reported_once_by_the_next_star
     sweeper.restart()
     assert procs[0].killed
     assert sweeper.error == "rtl_power survived kill; the dongle may still be held"
-    with pytest.raises(SpectrumUnavailable, match="survived kill"):
-        sweeper.start()
-    assert len(procs) == 1                         # nothing spawned into the held dongle then
+    for _ in range(3):
+        with pytest.raises(SpectrumUnavailable, match="survived kill"):
+            sweeper.start()
+    assert len(procs) == 1                         # nothing spawned into the held dongle
+    procs[0].free()
     sweeper.start()
     assert len(procs) == 2
     assert sweeper.newest()[1] == "restarting"
-    procs[0].free()
     sweeper.stop()
 
 
@@ -2538,4 +2541,187 @@ def test_a_restart_after_an_exit_that_does_not_come_waits_out_its_back_off():
     sweeper.start()
     assert len(procs) == 2
     assert sweeper.newest()[1] == "restarting"
+    sweeper.stop()
+
+
+# --- C77: an rtl_power the stop cannot confirm ended keeps the radio ---------------------------
+# WHY: the stop cleared its handle before the reap and kept only an error string, which the next
+# start reported once and cleared, so the start after it spawned a second rtl_power beside the
+# live one. Nor did the sweeper answer the console's release_failure() check, so ppm and every
+# decoder were handed the radio at once, and the status bar read "present". A wait error after
+# SIGTERM was taken for "already gone" and sent no SIGKILL. C40's rule: no receiver is handed the
+# radio before the old child's reap is confirmed. The C76 ruling: SIGKILL right after a wait error.
+
+SURVIVED = "rtl_power survived kill; the dongle may still be held"
+
+
+class SignalledProc(WaitedProc):
+    """rtl_power at the stop boundary, keeping each signal the stop sends in `sent`.
+
+    `stubborn` ignores SIGTERM, and `unkillable` ignores SIGKILL too. While `wait_error` is set, a
+    wait for a process that has not exited raises it as an OSError, as a failed waitpid does.
+    While `poll_error` is set, poll() raises it, so not even the exit status can be read. exit()
+    ends the process without a signal, as a kill that lands late does, and die() ends its pipe too.
+    """
+
+    def __init__(self, *, stubborn=False, unkillable=False, wait_error=None):
+        super().__init__()
+        self.sent = []
+        self.stubborn = stubborn or unkillable
+        self.unkillable = unkillable
+        self.wait_error = wait_error
+        self.poll_error = None
+
+    def poll(self):
+        if self.poll_error is not None:
+            raise OSError(self.poll_error)
+        return super().poll()
+
+    def terminate(self):
+        self.sent.append("TERM")
+        self.terminated = True
+        if not self.stubborn and not self._exited.is_set():
+            self.die(-15)
+
+    def kill(self):
+        self.sent.append("KILL")
+        if not self.unkillable and not self._exited.is_set():
+            self.die(-9)
+
+    def wait(self, timeout=None):
+        if self.wait_error is not None and not self._exited.is_set():
+            raise OSError(self.wait_error)
+        return super().wait(timeout)
+
+
+class SlowStopProc(SignalledProc):
+    """rtl_power whose stop is in flight: SIGTERM lands, and the reap waits for `gate`."""
+
+    def __init__(self):
+        super().__init__(stubborn=True)
+        self.waiting, self.gate = threading.Event(), threading.Event()
+
+    def wait(self, timeout=None):
+        if "TERM" in self.sent and not self._exited.is_set():
+            self.waiting.set()
+            if not self.gate.wait(5):
+                raise subprocess.TimeoutExpired("rtl_power", timeout)
+            self.die(-15)
+        return super().wait(timeout)
+
+
+def _held_sweeper(first):
+    """A running sweep whose first rtl_power is `first()`; every later start gets a FedProc."""
+    procs = []
+    sweeper = Sweeper(spawn=_first_then_fed(first, procs), radio_present=lambda: True,
+                      clock=_Clock())
+    sweeper.STOP_WAIT_S = 0.05
+    sweeper.start()
+    return sweeper, procs
+
+
+def test_an_rtl_power_that_survives_kill_refuses_every_start_until_its_exit_is_confirmed():
+    sweeper, procs = _held_sweeper(lambda: SignalledProc(unkillable=True))
+    sweeper.stop()
+    assert procs[0].sent == ["TERM", "KILL"]
+    assert sweeper.release_failure() == SURVIVED
+    assert sweeper.release_failure(pending=True) == SURVIVED
+    for _ in range(3):
+        with pytest.raises(SpectrumUnavailable, match="survived kill"):
+            sweeper.start()
+    assert len(procs) == 1                         # nothing spawned beside the live rtl_power
+    assert not sweeper.running
+    procs[0].die(-9)                               # the kill lands at last
+    assert sweeper.release_failure(pending=True) is None
+    sweeper.start()
+    assert len(procs) == 2 and sweeper.error is None
+    sweeper.stop()
+
+
+@pytest.mark.parametrize("unkillable", [False, True], ids=["killed", "unconfirmed"])
+def test_a_wait_error_after_sigterm_escalates_to_kill_at_once(unkillable):
+    sweeper, procs = _held_sweeper(lambda: SignalledProc(
+        stubborn=True, unkillable=unkillable, wait_error="cannot read the exit status"))
+    sweeper.stop()
+    assert procs[0].sent == ["TERM", "KILL"]
+    if unkillable:
+        reason = sweeper.release_failure()
+        assert reason == ("rtl_power could not be confirmed stopped (cannot read the exit status);"
+                          " the dongle may still be held")
+        for _ in range(2):
+            with pytest.raises(SpectrumUnavailable, match="could not be confirmed stopped"):
+                sweeper.start()
+        assert len(procs) == 1
+        procs[0].die(-9)                           # its exit shows at last
+    assert sweeper.release_failure(pending=True) is None
+    sweeper.start()
+    assert len(procs) == 2
+    sweeper.stop()
+
+
+@pytest.mark.parametrize("again", ["stop", "release", "retune", "gain"])
+def test_a_later_stop_signals_a_kept_rtl_power_again_and_retries_its_reap(again):
+    sweeper, procs = _held_sweeper(lambda: SignalledProc(unkillable=True))
+    sweeper.stop()
+    assert procs[0].sent == ["TERM", "KILL"]
+    procs[0].unkillable = False                    # the next SIGKILL lands
+    {"stop": sweeper.stop, "release": sweeper.release,
+     "retune": lambda: sweeper.retune(88_000_000, 93_000_000, 78_125),
+     "gain": lambda: sweeper.set_gain(20)}[again]()
+    assert procs[0].sent == ["TERM", "KILL", "KILL"]
+    assert sweeper.release_failure(pending=True) is None
+    sweeper.resume()
+    sweeper.start()
+    assert len(procs) == 2
+    sweeper.stop()
+
+
+def test_a_kept_rtl_power_is_not_signalled_once_its_exit_shows():
+    # A reaped child's PID may be another process's by now: only a child still ours is signalled.
+    sweeper, procs = _held_sweeper(lambda: SignalledProc(unkillable=True))
+    sweeper.stop()
+    procs[0].exit(-9)                              # it exited, and poll() has its status
+    sweeper.stop()
+    sweeper.release()
+    assert procs[0].sent == ["TERM", "KILL"]       # no further signal
+    assert sweeper.release_failure(pending=True) is None
+    procs[0].close_pipe()
+
+
+def test_an_rtl_power_whose_exit_cannot_be_read_is_never_signalled():
+    # An exit status that cannot be read cannot show the PID is still ours, so nothing is sent.
+    sweeper, procs = _held_sweeper(lambda: SignalledProc(stubborn=True, wait_error="interrupted"))
+    procs[0].poll_error = "status unreadable"
+    sweeper.stop()
+    sweeper.stop()                                 # the retry cannot tell either
+    assert procs[0].sent == ["TERM"]
+    reason = sweeper.release_failure()
+    assert reason == ("rtl_power could not be confirmed stopped (status unreadable);"
+                      " the dongle may still be held")
+    with pytest.raises(SpectrumUnavailable, match="could not be confirmed stopped"):
+        sweeper.start()
+    assert len(procs) == 1
+    procs[0].poll_error = None
+    procs[0].die(-15)                              # its exit reads at last
+    assert sweeper.release_failure(pending=True) is None
+    sweeper.start()
+    assert len(procs) == 2
+    sweeper.stop()
+
+
+def test_a_stop_in_flight_reports_rtl_power_still_releasing_the_radio():
+    sweeper, procs = _held_sweeper(SlowStopProc)
+    stop = threading.Thread(target=sweeper.stop, daemon=True)
+    stop.start()
+    try:
+        assert procs[0].waiting.wait(5)            # the stop is waiting on the reap
+        assert sweeper.release_failure(pending=True) == "rtl_power is still releasing the radio"
+        assert sweeper.release_failure() is None   # as the other receivers: only pending says
+    finally:
+        procs[0].gate.set()
+        stop.join(5)
+    assert not stop.is_alive()
+    assert sweeper.release_failure(pending=True) is None
+    sweeper.start()
+    assert len(procs) == 2
     sweeper.stop()

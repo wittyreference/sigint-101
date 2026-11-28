@@ -21,6 +21,9 @@ tune:
   center_hz: 137500000
   span_hz: 1000000
   step_hz: 100000
+band_map:
+  status: replay-only
+  note: "No APT recording ships on this kit yet"
 
 stages:
   frame: >-
