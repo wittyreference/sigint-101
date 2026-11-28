@@ -174,7 +174,9 @@ def test_a_dead_tool_reads_stopped_not_live(tmp_path, path, factory, build, key,
         spawned.append(Child(["rtl_fm", "-f", "1"], code=1, said=USB_BUSY))
         return spawned[-1]
 
-    with _client(tmp_path, probe=_present, **{factory: lambda: build(spawn, tmp_path)}) as client:
+    receiver = build(spawn, tmp_path)
+    receiver.watch.clock = _Clock()              # all six polls are within the first back-off
+    with _client(tmp_path, probe=_present, **{factory: lambda: receiver}) as client:
         client.get(path)                          # launches it; it dies at once
         polls = [client.get(path) for _ in range(6)]
     for resp in polls:
