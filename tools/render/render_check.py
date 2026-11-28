@@ -94,20 +94,26 @@ def stop_group(process, grace):
     running after the grace period. The repo's rule (C42): the group is signalled and swept only
     while its leader is unreaped, so its number cannot have been handed to another process. The
     leader is reaped last, with a bounded wait. True only when no member is left running and
-    the leader is reaped; otherwise False, with what is left on stderr.
+    the leader is reaped; otherwise False, with what is left on stderr. A signal the kernel
+    refuses also leaves it False; a failure to read the group raises, and the caller counts that
+    as unconfirmed too.
     """
+    refused = False
     for sig in (signal.SIGTERM, signal.SIGKILL):
         if process.returncode is None:      # the leader is unreaped: the group number is ours
             try:
                 os.killpg(process.pid, sig)
             except ProcessLookupError:
                 pass
+            except OSError as error:
+                print(f"could not signal group {process.pid}: {error}", file=sys.stderr)
+                refused = True
         deadline = time.monotonic() + grace
         while _group_running(process.pid) and time.monotonic() < deadline:
             time.sleep(0.05)
         if not _group_running(process.pid):
             break
-    stopped = True
+    stopped = not refused
     if survivors := _group_running(process.pid):
         print(f"processes {survivors} of group {process.pid} still run after SIGKILL",
               file=sys.stderr)
@@ -120,10 +126,58 @@ def stop_group(process, grace):
     return stopped
 
 
-def _stop(process, grace, name, alive):
-    """Stop a child's group; if it will not stop, say so in `alive`, the run's list of them."""
-    if not stop_group(process, grace) and alive is not None:
-        alive.append(f"{name} (process group {process.pid}) is still running")
+def _launched(process, name, alive):
+    """Count a child as running from launch: only a verified stop takes it off `alive`."""
+    entry = f"{name} (process group {process.pid}) is still running"
+    if alive is not None:
+        alive.append(entry)
+    return entry
+
+
+def _stop(process, grace, entry, alive):
+    """Stop a child's group; it stays on `alive` unless its exit was verified."""
+    try:
+        confirmed = stop_group(process, grace)
+    except Exception as error:   # a group that cannot be checked is not known to be gone
+        print(f"could not confirm that group {process.pid} stopped: {error}", file=sys.stderr)
+        confirmed = False
+    if confirmed and alive is not None and entry in alive:
+        alive.remove(entry)
+    return confirmed
+
+
+def _hold_until_gone(process, entry, alive):
+    """Keep this process, and the held /api/* block with it, until the browser group is gone.
+
+    Reached only when the page could neither leave the console nor be closed, and the group
+    would not stop. Dropping the block then would let the still-loaded page post to the console
+    (the reviewer saw /api/opened arrive and write progress). So the run waits, saying how to
+    end it, and ignores further signals; SIGKILL of this check still takes the browser's leader
+    with it (the parent-death signal).
+    """
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    notice = (f"render-check: Chromium (process group {process.pid}) will not stop and its page "
+              "could not leave the console. Holding its /api/* block until the group is gone; "
+              f"end it with: kill -9 -{process.pid}")
+    print(notice, file=sys.stderr, flush=True)
+    said = time.monotonic()
+    while True:
+        try:
+            if not _group_running(process.pid):
+                break
+        except Exception as error:   # not known to be gone: keep holding
+            print(f"render-check: cannot read group {process.pid}: {error}", file=sys.stderr)
+        if time.monotonic() - said > 30:
+            print(notice, file=sys.stderr, flush=True)
+            said = time.monotonic()
+        time.sleep(0.2)
+    try:
+        process.wait(timeout=BROWSER_STOP_S)
+    except (subprocess.TimeoutExpired, ChildProcessError):
+        pass
+    if alive is not None and entry in alive:
+        alive.remove(entry)
 
 
 @contextmanager
@@ -132,8 +186,8 @@ def scratch_console(data_dir, alive=None):
 
     The listening socket is bound and held here and handed to the console, so no other server
     can take the port between choosing it and serving on it. Yields the console's address and
-    stops the server, whole, when the block ends; a server that will not stop is added to
-    `alive`.
+    stops the server, whole, when the block ends. From launch the server is on `alive` until its
+    exit is verified.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -151,6 +205,7 @@ def scratch_console(data_dir, alive=None):
             sys.exit(f"Cannot start the scratch console. ({error})")
     finally:
         listener.close()
+    entry = _launched(server, "the scratch console", alive)
     try:
         opener = build_opener(ProxyHandler({}))
         deadline = time.monotonic() + CONSOLE_START_S
@@ -170,14 +225,16 @@ def scratch_console(data_dir, alive=None):
               "folder.", flush=True)
         yield url
     finally:
-        _stop(server, CONSOLE_STOP_S, "the scratch console", alive)
+        _stop(server, CONSOLE_STOP_S, entry, alive)
 
 
 @contextmanager
-def headless_chromium(chromium, profile, alive=None):
+def headless_chromium(chromium, profile, alive=None, held=None):
     """Run Chromium in a session of its own on `profile`; yield its DevTools port.
 
-    A browser group that will not stop is added to `alive`, and the run then keeps the profile.
+    From launch the browser is on `alive` until its exit is verified, and while it is the run
+    keeps the profile. If a block is still held (`held`: its page could not leave the console)
+    and the browser will not stop, this waits for the browser to go rather than return.
     """
     command = [chromium, "--headless=new", "--disable-gpu", "--password-store=basic",
                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank"]
@@ -186,6 +243,7 @@ def headless_chromium(chromium, profile, alive=None):
                                    preexec_fn=_die_with_parent())
     except OSError as error:
         sys.exit(f"Cannot start Chromium. ({error})")
+    entry = _launched(browser, "Chromium", alive)
     try:
         try:
             port = chromium_port(browser, profile)
@@ -193,7 +251,8 @@ def headless_chromium(chromium, profile, alive=None):
             sys.exit(str(error))
         yield port
     finally:
-        _stop(browser, BROWSER_STOP_S, "Chromium", alive)
+        if not _stop(browser, BROWSER_STOP_S, entry, alive) and held:
+            _hold_until_gone(browser, entry, alive)
 
 
 def run_checks(console, port, output):
@@ -231,16 +290,19 @@ def api_block(port, problems, held):
     """Hold a DevTools session on the page that blocks /api/* for the whole run.
 
     Each check's own block ends with its connection, and the next check's begins only when it
-    attaches. This one spans the gaps. At the end the page leaves for about:blank; if it cannot,
-    the run fails and the session's socket goes to `held`, closed only once Chromium has stopped,
-    so the block never ends while a console page is loaded.
+    attaches. This one spans the gaps. At the end the page leaves for about:blank, or failing
+    that its target is closed (leave_page); either failure fails the run. If neither worked the
+    session's socket goes to `held`: it is closed only once the browser group is gone, so the
+    block never ends while a console page can still be loaded.
     """
-    session = connect(port)
+    session = connect(port, exit_check=False)
     try:
         yield
     finally:
-        if leave_page(session) is False:
-            problems.append("the page could not leave the console for about:blank")
+        left = leave_page(session)
+        if left != "blank":
+            problems.append(f"the page could not leave the console for about:blank ({left})")
+        if left == "kept":
             held.append(session.s)
 
 
@@ -290,7 +352,8 @@ def main():
             if not console:
                 console = running.enter_context(scratch_console(output / "console", alive))
             running.callback(_close_all, held)
-            port = running.enter_context(headless_chromium(chromium, output / "profile", alive))
+            port = running.enter_context(
+                headless_chromium(chromium, output / "profile", alive, held))
             running.enter_context(api_block(port, problems, held))
             status = run_checks(console, port, output)
     finally:

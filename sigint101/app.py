@@ -618,6 +618,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             _backfill_stamps(app.state.progress, _stamp_window())
         except (OSError, sqlite3.Error) as exc:
             _stamp_failed(exc)
+        # Check lessons completed before enrolment moved to the completion post have no recall
+        # row yet: enrol them once here, at startup, so no page load ever has to write one.
+        try:
+            app.state.progress.enroll_recall(_recall_sources(), now=clock())
+        except (OSError, sqlite3.Error) as exc:
+            logging.getLogger(__name__).error("recall enrolment backfill: %s", exc)
         app.state.last_ppm = None
         app.state.radio_arbiter = RadioArbiter()
         app.state.reception_sink = ReceptionSink()
@@ -900,9 +906,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         saved_stage = app.state.progress.get_stage(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
         unit = unit_for_lesson(lesson_id)
+        # Read-only: a completed check lesson is enrolled for recall when it is completed (POST
+        # /api/complete) or, for older completions, when the console starts; never by a GET.
         sources = _recall_sources()
         now = clock()
-        app.state.progress.enroll_recall(sources, now=now)
         if saved_stage is None and prediction is None:
             recall_page = _recall_response(request, lesson, unit, sources, now)
             if recall_page is not None:
@@ -1194,6 +1201,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"lesson": lesson_id, "reason": reason})
             return JSONResponse(status_code=400, content={"completed": False, "reason": reason})
         app.state.progress.mark_completed(lesson_id)
+        # A completed lesson with a check becomes a pre-lesson recall source from now (box 1).
+        if app.state.lessons[lesson_id].check:
+            app.state.progress.enroll_recall([lesson_id], now=clock())
         try:
             log_event(app.state.events_path, "completed", {"lesson": lesson_id}, sync=managed)
         except OSError as exc:

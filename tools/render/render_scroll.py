@@ -33,18 +33,41 @@ CONSOLE_API = "*/api/*"
 BLANK = "about:blank"
 
 
-def block_console_api(c):
+class CDPError(RuntimeError):
+    """Chrome answered a DevTools command with a protocol error, or a command was refused here."""
+
+
+def check_reply(method, msg):
+    """The result of a DevTools reply; a protocol error is a failure, never an empty result."""
+    if "error" in msg:
+        error = msg["error"]
+        raise CDPError(f"{method} failed: {error.get('message', error)}")
+    return msg.get("result", {})
+
+
+def check_navigation(client, method, params):
+    """Refuse to load any page but about:blank on a client whose API block is not confirmed."""
+    if (method == "Page.navigate" and (params or {}).get("url") != BLANK
+            and not getattr(client, "blocked", False)):
+        raise CDPError("refusing to load a page before the /api/* block is confirmed")
+
+
+def block_console_api(c, exit_check=True):
     """Block every console API request on this page for as long as this client is attached.
 
-    The block belongs to this DevTools session: it ends when the connection closes, while the
-    page would stay loaded and polling. So the page is also left on about:blank before the client
-    closes (leave_page), at the latest when the script exits. One list holds every blocked
-    pattern, and a later Network.setBlockedURLs replaces it, so a check never sets its own: this
-    is the one place that does.
+    Both commands must succeed (a protocol error raises), and only then is the client marked
+    blocked, so no page loads before the block is in place. The block belongs to this DevTools
+    session: it ends when the connection closes, while the page would stay loaded and polling.
+    So the page is also left on about:blank before the client closes (leave_page), at the latest
+    when the script exits. One list holds every blocked pattern, and a later
+    Network.setBlockedURLs replaces it, so a check never sets its own: this is the one place
+    that does.
     """
     c.call("Network.enable")
     c.call("Network.setBlockedURLs", {"urls": [CONSOLE_API]})
-    atexit.register(_leave_at_exit, c)
+    c.blocked = True
+    if exit_check:
+        atexit.register(_leave_at_exit, c)
 
 
 def _socket(c):
@@ -54,7 +77,7 @@ def _socket(c):
 
 def _leave_at_exit(c):
     """At exit, leave the page; a check whose page could not leave fails, whatever it measured."""
-    if leave_page(c) is False:
+    if leave_page(c) in ("closed", "kept"):
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(1)
@@ -75,39 +98,76 @@ def _blank_failure(c):
                 return None
             time.sleep(0.2)
         return f"the page is still on {where}"
-    except (OSError, TimeoutError, ValueError, SystemExit) as error:
+    except (OSError, TimeoutError, ValueError, RuntimeError, SystemExit) as error:
         return f"DevTools failed: {error}"
 
 
-def leave_page(c):
-    """Navigate the page to about:blank and, once it is confirmed there, close the connection.
+def _target_listed(c):
+    """Whether DevTools still lists this client's page target."""
+    with urllib.request.urlopen(f"http://{HOST}:{c.port}/json/list", timeout=5) as reply:
+        return any(target.get("id") == c.target_id for target in json.load(reply))
 
-    True once the page has left; None when DevTools had already dropped the connection (that
-    check has its own failure to report). False, with the reason on stderr, when the page could
-    not leave: the connection, and with it the block, is then kept open, never closed with a
-    console page loaded. Safe to call twice.
+
+def _close_failure(c):
+    """Why the page target is not closed, or None once DevTools no longer lists it."""
+    if not getattr(c, "target_id", None):
+        return "the page target is not known"
+    session, c.session = getattr(c, "session", None), None   # a browser-level command
+    try:
+        c.call("Target.closeTarget", {"targetId": c.target_id})
+    except (OSError, TimeoutError, ValueError, RuntimeError, SystemExit) as error:
+        return f"DevTools failed: {error}"
+    finally:
+        c.session = session
+    try:
+        for _ in range(25):
+            if not _target_listed(c):
+                return None
+            time.sleep(0.2)
+    except (OSError, ValueError) as error:
+        return f"DevTools could not list its targets: {error}"
+    return "the page target is still listed"
+
+
+def leave_page(c):
+    """Leave the console page, and close the connection only once nothing there can poll.
+
+    "blank" once the page is confirmed on about:blank. If it cannot get there, the page target
+    itself is closed instead: "closed" once DevTools no longer lists it. Either way the
+    connection then closes. "kept", with the reasons on stderr, when neither worked: the
+    connection, and with it the block, stays open, never closed with a console page loaded.
+    "gone" when DevTools had already dropped the connection (that check has its own failure to
+    report). Safe to call twice.
     """
     if hasattr(c, "left_page"):
         return c.left_page
     sock = _socket(c)
     if sock is None or sock.fileno() == -1:
-        c.left_page = None
-        return None
+        c.left_page = "gone"
+        return c.left_page
     failure = _blank_failure(c)
-    if sock.fileno() == -1:
-        c.left_page = None
-        return None
-    if failure is not None:
-        print(f"Could not leave the console page for about:blank ({failure}). Its /api/* block "
-              "stays until this DevTools connection ends.", file=sys.stderr)
-        c.left_page = False
-        return False
-    c.left_page = True
-    sock.close()
-    return True
+    if failure is None:
+        c.left_page = "blank"
+    elif sock.fileno() == -1:
+        c.left_page = "gone"
+        return c.left_page
+    else:
+        print(f"Could not leave the console page for about:blank ({failure}).", file=sys.stderr)
+        closing = _close_failure(c)
+        if closing is None:
+            print("Closed the page target instead.", file=sys.stderr)
+            c.left_page = "closed"
+        else:
+            print(f"Could not close the page target either ({closing}). Its /api/* block stays "
+                  "until this DevTools connection ends.", file=sys.stderr)
+            c.left_page = "kept"
+            return c.left_page
+    if sock.fileno() != -1:
+        sock.close()
+    return c.left_page
 
 
-def connect(port=None):
+def connect(port=None, exit_check=True):
     """A CDP client on the browser's one page, attached through the browser endpoint, focused.
 
     Headless Chromium throttles a tab it thinks is in the background until commands stall, so
@@ -116,6 +176,7 @@ def connect(port=None):
     and --password-store=basic: on a box with a desktop keyring running, Chromium otherwise
     blocks its first http page on a keyring password prompt nobody can answer. The console's API
     is blocked before the client is handed back (block_console_api). `port` overrides CDP_PORT.
+    A caller that checks leave_page's answer itself passes exit_check=False.
     """
     port = PORT if port is None else int(port)
     version = json.load(urllib.request.urlopen(f"http://{HOST}:{port}/json/version"))
@@ -129,9 +190,10 @@ def connect(port=None):
         target = opened["targetId"]
     attached = c.call("Target.attachToTarget", {"targetId": target, "flatten": True})
     c.session = attached["sessionId"]
+    c.target_id = target
     c.call("Page.bringToFront")
     c.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
-    block_console_api(c)
+    block_console_api(c, exit_check)
     return c
 
 
@@ -155,6 +217,9 @@ class CDP:
         self.buf = b.split(b"\r\n\r\n", 1)[1]
         self.id = 0
         self.session = None
+        self.port = port
+        self.target_id = None
+        self.blocked = False
 
     def _recv(self, size):
         chunk = self.s.recv(size)
@@ -206,12 +271,13 @@ class CDP:
         return d
 
     def call(self, m, p=None, t=15):
+        check_navigation(self, m, p)
         w = self.send(m, p)
         end = time.time() + t
         while time.time() < end:
             msg = json.loads(self.frame().decode("utf-8", "replace"))
             if msg.get("id") == w:
-                return msg.get("result", {})
+                return check_reply(m, msg)
         raise TimeoutError(m)
 
     def ev(self, e):

@@ -1109,27 +1109,117 @@ def test_the_lesson_page_restores_its_tuning_before_any_panel_starts_polling(tmp
 
 
 # Every page the render checks load (tools/render/*.py), in the order make render-check runs them.
+# Every page the render checks load (tools/render/*.py), in the order make render-check runs them.
+# test_every_page_a_render_check_loads_is_in_the_walk keeps this list whole.
 RENDER_CHECK_PAGES = ("/lesson/29", "/", "/exam/review/T6C02", "/operate/ism", "/logbook",
-                      "/operate/lora", "/lesson/5", "/law?back=/lesson/5", "/lesson/39")
+                      "/operate/lora", "/lesson/5", "/law?back=/lesson/5", "/lesson/39",
+                      "/lesson/1", "/lesson/1?recall=card&card=2", "/unit/4", "/unit/5",
+                      "/unit/4/challenge", "/unit/5/challenge",
+                      "/operate/ism?back=/unit/4/challenge")
+
+
+def test_every_page_a_render_check_loads_is_in_the_walk():
+    # A page a render tool loads (f"{console}/..." or f"{base}/...") must be walked below, so a
+    # GET that starts writing fails here. A {placeholder} matches any one path segment.
+    tools = Path(__file__).resolve().parent.parent / "tools" / "render"
+    found = set()
+    for path in tools.glob("*.py"):
+        found |= set(re.findall(r'f"\{(?:console|base)\}(/[^"]*)"', path.read_text("utf-8")))
+    assert found, "no page paths found in tools/render"
+    for page in sorted(found):
+        pattern = re.sub(r"\\\{[^}]*\\\}", "[^/?&]+", re.escape(page))
+        assert any(re.fullmatch(pattern, walked) for walked in RENDER_CHECK_PAGES), page
+
+
+def _stored_state(data_dir):
+    """Every row of the console's two databases, and the event log's bytes."""
+    import sqlite3
+    from contextlib import closing
+    state = {}
+    for name in ("progress.db", "exam.db"):
+        path = data_dir / name
+        if path.exists():
+            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
+                state[name] = list(db.iterdump())
+    events = data_dir / "events.jsonl"
+    state["events.jsonl"] = events.read_bytes() if events.exists() else None
+    return state
+
+
+def _check_lesson(app):
+    """A lesson with a check (a retrieval source once completed), and one choice of its predict."""
+    lesson = next(item for _, item in sorted(app.state.lessons.items()) if item.check)
+    return lesson.id, lesson.choices[0]["key"]
 
 
 def test_a_render_check_walk_against_a_live_console_changes_none_of_its_state(tmp_path):
     # With /api/* blocked, a check's page loads are plain GETs. Against a console whose rack has
-    # retuned two decoders and holds a place, none of them may move a receiver or learner state.
+    # retuned two decoders and holds a place, and with a completed check lesson that has no
+    # retrieval row yet, none of them may move a receiver or write a row or an event: the next
+    # GET that writes fails here.
     app = create_app(data_dir=tmp_path, probe=_absent)
     with TestClient(app) as client:
         _tuned_away(client)
         client.post("/api/rack/place", json={"instrument": "pager"})
-        lessons = (29, 5, 39)
-        before = ({n: app.state.progress.get(n) for n in lessons},
-                  {n: app.state.progress.get_stage(n) for n in lessons})
+        source, _ = _check_lesson(app)
+        app.state.progress.mark_completed(source)
+        assert app.state.progress.get_retrieval([source]) == {}
+        before = _stored_state(tmp_path)
         for page in RENDER_CHECK_PAGES:
             assert client.get(page).status_code == 200, page
         assert app.state.aprs.freq_hz == RACK_APRS_HZ
         assert app.state.decoder.freq_hz == RACK_ISM_HZ
-        assert app.state.progress.get_place("rack") == "pager"
-        assert ({n: app.state.progress.get(n) for n in lessons},
-                {n: app.state.progress.get_stage(n) for n in lessons}) == before
+        assert app.state.progress.get_retrieval([source]) == {}
+        assert _stored_state(tmp_path) == before
+
+
+def test_a_lesson_get_enrols_no_completed_check_lesson_for_recall(tmp_path):
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        source, _ = _check_lesson(app)
+        app.state.progress.mark_completed(source)
+        other = next(lid for lid in sorted(app.state.lessons) if lid != source)
+        assert client.get(f"/lesson/{other}").status_code == 200
+        assert app.state.progress.get_retrieval([source]) == {}
+
+
+def test_completing_a_check_lesson_enrols_it_for_recall(tmp_path):
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        source, choice = _check_lesson(app)
+        client.post(f"/api/predict?lesson_id={source}", data={"prediction": choice},
+                    follow_redirects=False)
+        assert client.post(f"/api/complete?lesson_id={source}").status_code == 200
+        row = app.state.progress.get_retrieval([source])[source]
+        assert row["box"] == 1 and row["seen"] == 0
+
+
+def test_a_completion_without_a_check_enrols_nothing(tmp_path):
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        plain = next(item for _, item in sorted(app.state.lessons.items()) if not item.check)
+        client.post(f"/api/predict?lesson_id={plain.id}",
+                    data={"prediction": plain.choices[0]["key"]}, follow_redirects=False)
+        assert client.post(f"/api/complete?lesson_id={plain.id}").status_code == 200
+        assert app.state.progress.get_retrieval([plain.id]) == {}
+
+
+def test_completions_from_before_recall_are_enrolled_when_the_console_starts(tmp_path):
+    # A check lesson completed before enrolment moved to the completion post has no row; the
+    # console enrols it once, at startup, beside the stamp backfill, never on a page load.
+    from sigint101.app import PACK_DIR
+    from sigint101.lessons import load_lessons
+    from sigint101.progress import Progress
+    source = next(lid for lid, item in sorted(load_lessons(PACK_DIR).items()) if item.check)
+    plain = next(lid for lid, item in sorted(load_lessons(PACK_DIR).items()) if not item.check)
+    seeded = Progress(tmp_path / "progress.db")
+    seeded.mark_completed(plain)
+    seeded.mark_completed(source)
+    assert seeded.get_retrieval([source]) == {}
+    seeded.close()
+    with TestClient(create_app(data_dir=tmp_path, probe=_absent)) as client:
+        assert source in client.app.state.progress.get_retrieval([source])
+        assert client.app.state.progress.get_retrieval([plain]) == {}
 
 
 def test_reopening_a_lesson_resumes_the_stage_the_learner_left(tmp_path):

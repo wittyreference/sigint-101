@@ -94,24 +94,52 @@ class FakeDevTools:
     `disconnect_at` can end the connection during the handshake or the first reply frame.
     """
 
-    def __init__(self, answers, *, disconnect_at=None, blank_fails=False):
+    def __init__(self, answers, *, disconnect_at=None, blank_fails=False, errors=(),
+                 polls=False):
         self.answers = answers
         self.disconnect_at = disconnect_at
         # A navigation to about:blank that Chrome refuses: the page stays where it was.
         self.blank_fails = blank_fails
+        # Methods Chrome answers with a protocol error instead of a result.
+        self.errors = set(errors)
         # Every DevTools command a check sent, in order, as (method, params). A websocket that
         # closes adds ("<closed>", {}); a GET of /mark/<name> adds ("<mark>", {"name": name}).
         self.calls = []
         self.url = "about:blank"
+        self.page_closed = False
+        self.browser_gone = False
+        self.sessions = 0
         self.server = socket.create_server(("127.0.0.1", 0))
         self.port = self.server.getsockname()[1]
         threading.Thread(target=self._serve, daemon=True).start()
+        if polls:
+            threading.Thread(target=self._poll, daemon=True).start()
 
     def close(self):
+        self.browser_gone = True
         try:
             self.server.shutdown(socket.SHUT_RDWR)
         finally:
             self.server.close()
+
+    def _poll(self):
+        """The page's own polls, as a real page makes them once no DevTools session blocks them.
+
+        Only a loaded console page polls: not about:blank, not a closed page, not a page whose
+        browser has gone.
+        """
+        from urllib.request import ProxyHandler, Request, build_opener
+        opener = build_opener(ProxyHandler({}))
+        while not self.browser_gone:
+            url = self.url or ""
+            if self.sessions == 0 and not self.page_closed and url.startswith("http"):
+                origin = "/".join(url.split("/")[:3])
+                try:
+                    opener.open(Request(f"{origin}/api/opened?lesson_id=1", data=b"",
+                                        method="POST"), timeout=2).close()
+                except OSError:
+                    pass
+            threading.Event().wait(0.02)
 
     def _serve(self):
         while True:
@@ -136,7 +164,11 @@ class FakeDevTools:
                     return
                 conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                              b"Connection: Upgrade\r\n\r\n")
-                self._websocket(conn, rest)
+                self.sessions += 1
+                try:
+                    self._websocket(conn, rest)
+                finally:
+                    self.sessions -= 1
                 return
             if path.startswith("/mark/"):
                 self.calls.append(("<mark>", {"name": path[len("/mark/"):]}))
@@ -145,9 +177,11 @@ class FakeDevTools:
                 url = f"ws://127.0.0.1:{self.port}/devtools/browser/fake"
                 body = json.dumps({"webSocketDebuggerUrl": url}).encode()
                 status = b"200 OK"
-            elif path == "/json":
+            elif path in ("/json", "/json/list"):
                 url = f"ws://127.0.0.1:{self.port}/devtools/page/fake"
-                body = json.dumps([{"type": "page", "webSocketDebuggerUrl": url}]).encode()
+                pages = [] if self.page_closed else [
+                    {"type": "page", "id": "page-1", "webSocketDebuggerUrl": url}]
+                body = json.dumps(pages).encode()
                 status = b"200 OK"
             else:
                 body, status = b"{}", b"404 Not Found"
@@ -178,7 +212,12 @@ class FakeDevTools:
                 data = bytes(b ^ mask[i % 4] for i, b in enumerate(buf[off + 4:off + 4 + n]))
                 buf = buf[off + 4 + n:]
                 msg = json.loads(data)
-                reply = {"id": msg["id"], "result": self._result(msg)}
+                result = self._result(msg)
+                if msg["method"] in self.errors:
+                    reply = {"id": msg["id"],
+                             "error": {"code": -32000, "message": f"{msg['method']} refused"}}
+                else:
+                    reply = {"id": msg["id"], "result": result}
                 frame = _ws_frame(json.dumps(reply).encode())
                 if self.disconnect_at == "frame":
                     conn.sendall(frame[:-1])
@@ -191,8 +230,17 @@ class FakeDevTools:
     def _result(self, msg):
         method, params = msg["method"], msg.get("params", {})
         self.calls.append((method, params))
+        if method in self.errors:
+            return {}
         if method == "Target.getTargets":
-            return {"targetInfos": [{"type": "page", "targetId": "page-1"}]}
+            pages = [] if self.page_closed else [{"type": "page", "targetId": "page-1"}]
+            return {"targetInfos": pages}
+        if method == "Target.closeTarget":
+            self.page_closed = True
+            return {"success": True}
+        if method == "Target.createTarget":
+            self.page_closed, self.url = False, params.get("url", "about:blank")
+            return {"targetId": "page-1"}
         if method == "Target.attachToTarget":
             return {"sessionId": "attached-1"}
         if method == "Page.captureScreenshot":
@@ -221,8 +269,9 @@ class FakeDevTools:
 def devtools():
     made = []
 
-    def make(answers, *, disconnect_at=None, blank_fails=False):
-        fake = FakeDevTools(answers, disconnect_at=disconnect_at, blank_fails=blank_fails)
+    def make(answers, *, disconnect_at=None, blank_fails=False, errors=()):
+        fake = FakeDevTools(answers, disconnect_at=disconnect_at, blank_fails=blank_fails,
+                            errors=errors)
         made.append(fake)
         return fake.port
 
@@ -513,10 +562,11 @@ def render_make(tmp_path, console_url, devtools, strays):
     make = shutil.which("make")
     assert make, "the render-check tests require make"
 
-    def environment(fit_answers, overrides, blank_fails=False):
+    def environment(fit_answers, overrides, blank_fails=False, errors=()):
         """The check's environment; an override of None removes that variable."""
+        port = devtools(fit_answers or {}, blank_fails=blank_fails, errors=errors)
         env = dict(os.environ, PATH=str(path), RENDER_URL=console_url, TMPDIR=str(tmp_path),
-                   FAKE_CDP_PORT=str(devtools(fit_answers or {}, blank_fails=blank_fails)),
+                   FAKE_CDP_PORT=str(port),
                    no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
         for name, value in overrides.items():
             if value is None:
@@ -526,14 +576,14 @@ def render_make(tmp_path, console_url, devtools, strays):
         return env
 
     def run_make(*, has_chromium=True, fit_answers=None, timeout=15, blank_fails=False,
-                 **overrides):
+                 errors=(), **overrides):
         """Run make render-check with these stand-ins."""
         if not has_chromium:
             chromium.unlink()
         if fit_answers is not None:
             (screen / FIT.name).unlink()
             (screen / FIT.name).symlink_to(FIT)
-        env = environment(fit_answers, overrides, blank_fails)
+        env = environment(fit_answers, overrides, blank_fails, errors)
         return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
                                "render-check"], cwd=tmp_path, env=env, capture_output=True,
                               text=True, timeout=timeout)
@@ -689,6 +739,7 @@ API_TOOLS = {
     "card-sort": (CARD_SORT, ["http://127.0.0.1:9"], {}),
     "eval": (EVAL, ["http://127.0.0.1:1/operate/ism", "1"], {}),
     "survey": (SURVEY, ["http://127.0.0.1:9"], {}),
+    "live-find": (LIVE_FIND, ["http://127.0.0.1:9"], {}),
 }
 
 
@@ -788,7 +839,8 @@ def test_a_tool_whose_page_cannot_reach_about_blank_fails(devtools, tmp_path, to
 
 
 def test_the_runner_keeps_its_block_until_chromium_has_stopped_when_blank_fails(render_make):
-    proc = render_make(blank_fails=True, MARK_STOP="1")
+    # Chrome refuses both ways off the console page: the blank navigation and closing the target.
+    proc = render_make(blank_fails=True, errors={"Target.closeTarget"}, MARK_STOP="1")
     assert proc.returncode != 0, (proc.stdout, proc.stderr)
     assert "about:blank" in proc.stderr, proc.stderr
     calls = render_make.calls()
@@ -796,6 +848,238 @@ def test_the_runner_keeps_its_block_until_chromium_has_stopped_when_blank_fails(
     stopped = calls.index(("<mark>", {"name": "chromium-stopped"}))
     assert "<closed>" not in methods[:stopped], methods
     assert "<closed>" in methods[stopped:], methods
+
+
+def test_a_page_that_cannot_reach_blank_is_closed_before_the_block_ends(render_make):
+    # The fence after a refused blank navigation: the page target itself is closed, and the
+    # session's close comes only once DevTools no longer lists it. The run still fails.
+    proc = render_make(blank_fails=True, MARK_STOP="1")
+    assert proc.returncode != 0, (proc.stdout, proc.stderr)
+    calls = render_make.calls()
+    methods = [method for method, _ in calls]
+    closed_target = methods.index("Target.closeTarget")
+    assert "<closed>" in methods[closed_target:], methods
+    assert "<closed>" not in methods[methods.index("Network.setBlockedURLs"):closed_target]
+
+
+@pytest.mark.parametrize("tool", API_TOOLS.values(), ids=API_TOOLS.keys())
+@pytest.mark.parametrize("refused", ["Network.enable", "Network.setBlockedURLs"])
+def test_a_refused_api_block_stops_a_tool_before_it_loads_any_page(devtools, tmp_path, tool,
+                                                                   refused):
+    # Chrome answering the block setup with a protocol error must not read as a block in place.
+    script, args, answers = tool
+    proc = run(script, *(arg.format(tmp=tmp_path) for arg in args),
+               port=devtools(answers, errors={refused}))
+    assert proc.returncode != 0, (proc.stdout, proc.stderr)
+    loads = [params.get("url") for method, params in devtools.made[-1].calls
+             if method == "Page.navigate"]
+    assert all(url == "about:blank" for url in loads), loads
+
+
+@pytest.mark.parametrize("tool", [API_TOOLS["scroll"], API_TOOLS["fit"]], ids=["scroll", "fit"])
+def test_a_devtools_protocol_error_fails_the_tool(devtools, tmp_path, tool):
+    script, args, answers = tool
+    proc = run(script, *(arg.format(tmp=tmp_path) for arg in args),
+               port=devtools(answers, errors={"Emulation.setDeviceMetricsOverride"}))
+    assert proc.returncode != 0, (proc.stdout, proc.stderr)
+    assert "Emulation.setDeviceMetricsOverride" in proc.stderr, proc.stderr
+
+
+def test_both_devtools_clients_refuse_to_load_a_page_before_the_block_is_confirmed(
+        devtools, monkeypatch):
+    import importlib
+    port = devtools({})
+    fake = devtools.made[-1]
+    monkeypatch.syspath_prepend(str(SCROLL.parent))
+    monkeypatch.setenv("CDP_PORT", str(port))
+    scroll = importlib.import_module("render_scroll")
+    fit = importlib.import_module("render_fit")
+    monkeypatch.setattr(fit, "PORT", port)
+    clients = [scroll.CDP(f"ws://127.0.0.1:{port}/devtools/browser/fake", port=port),
+               fit.CDP(f"ws://127.0.0.1:{port}/devtools/page/fake")]
+    for client in clients:
+        with pytest.raises(RuntimeError, match="block"):
+            client.call("Page.navigate", {"url": "http://127.0.0.1:9/lesson/1"})
+        _socket = getattr(client, "s", None) or client.sock
+        _socket.close()
+    assert "Page.navigate" not in [method for method, _ in fake.calls]
+
+
+def _fake_browser(tmp_path):
+    """A stand-in chromium: makes its profile, writes into it, and sleeps until killed."""
+    pidfile = tmp_path / "chromium.pid"
+    chromium = tmp_path / "chromium"
+    chromium.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "profile = Path(next(a.split('=', 1)[1] for a in sys.argv\n"
+        "                    if a.startswith('--user-data-dir=')))\n"
+        "profile.mkdir()\n"
+        "(profile / 'Default').write_text('in use')\n"
+        f"Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(120)\n", encoding="utf-8")
+    chromium.chmod(0o755)
+    return chromium, pidfile
+
+
+def _kill_fake_browser(pidfile):
+    import contextlib
+    if pidfile.is_file():
+        pid = int(pidfile.read_text())
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, 9)
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+
+
+def _runner_in_process(monkeypatch, tmp_path, console, chromium, *, real_block=False, **patches):
+    """render_check with a stand-in browser, no real checks and no signal handlers installed.
+
+    Without `real_block` the runner holds no DevTools session of its own.
+    """
+    import contextlib
+    render_check = _load_render_check()
+    monkeypatch.setenv("RENDER_URL", console)
+    # main() adds loopback to these; the test's own values come back afterwards.
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setattr(render_check.shutil, "which",
+                        lambda name: str(chromium) if name == "chromium" else None)
+    monkeypatch.setattr(render_check, "chromium_port", lambda browser, profile: "1")
+    if not real_block:
+        monkeypatch.setattr(render_check, "api_block",
+                            lambda port, problems, held: contextlib.nullcontext())
+    monkeypatch.setattr(render_check, "run_checks", lambda console, port, output: 0)
+    monkeypatch.setattr(render_check, "BROWSER_STOP_S", 0.3)
+    monkeypatch.setattr(render_check.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(render_check.tempfile, "tempdir", str(tmp_path))
+    for name, value in patches.items():
+        target, attr = (render_check.os, "killpg") if name == "killpg" else (render_check, name)
+        monkeypatch.setattr(target, attr, value)
+    return render_check
+
+
+def _raise(error):
+    def fail(*args):
+        raise error
+    return fail
+
+
+@pytest.mark.parametrize("patch", [
+    {"killpg": _raise(PermissionError(1, "Operation not permitted"))},
+    {"_group_running": _raise(OSError(5, "cannot read /proc"))},
+], ids=["signal-refused", "verify-fails"])
+def test_an_unconfirmed_browser_stop_keeps_the_profile(tmp_path, monkeypatch, console_url, capsys,
+                                                       patch):
+    # From launch until its exit is verified the browser counts as running. A signal that
+    # raises, or a check of the group that raises, leaves it unconfirmed: the profile stays.
+    chromium, pidfile = _fake_browser(tmp_path)
+
+    def checks_once_the_browser_is_up(console, port, output):
+        for _ in range(200):     # the stand-in has made its profile and is running
+            if pidfile.is_file() and pidfile.read_text():
+                break
+            threading.Event().wait(0.05)
+        return 0
+
+    render_check = _runner_in_process(monkeypatch, tmp_path, console_url, chromium,
+                                      run_checks=checks_once_the_browser_is_up, **patch)
+    try:
+        try:
+            status = render_check.main()
+        except SystemExit as stop:
+            status = stop.code
+        monkeypatch.undo()
+        err = capsys.readouterr().err
+        profiles = list(tmp_path.glob("sigint101-render-*/profile"))
+        assert status not in (0, None), err
+        assert len(profiles) == 1 and (profiles[0] / "Default").is_file(), err
+        assert str(profiles[0].parent) in err, err
+    finally:
+        monkeypatch.undo()
+        _kill_fake_browser(pidfile)
+
+
+@pytest.fixture
+def recording_console():
+    """A target console that records every request it is sent."""
+    hits = []
+
+    class Console(BaseHTTPRequestHandler):
+        def _answer(self):
+            hits.append((self.command, self.path))
+            self.send_response(200 if self.path == "/" or self.path.startswith("/api/") else 404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_GET = do_POST = _answer
+
+        def log_message(self, *args):
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Console) as server:
+        worker = threading.Thread(target=server.serve_forever)
+        worker.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}", hits
+        finally:
+            server.shutdown()
+            worker.join()
+
+
+def test_a_browser_that_will_not_stop_keeps_its_page_blocked_until_it_is_gone(
+        tmp_path, monkeypatch, recording_console, capsys):
+    # The scenario of the review: the page cannot reach about:blank, its target cannot be closed,
+    # and the browser group will not stop. Dropping the block then would let the still-loaded
+    # page post to the console. The runner fails, and holds its block until the browser is gone.
+    import contextlib
+    console, hits = recording_console
+    fake = FakeDevTools({}, blank_fails=True, errors={"Target.closeTarget"}, polls=True)
+    chromium, pidfile = _fake_browser(tmp_path)
+
+    def checks_leave_a_console_page_loaded(console_url, port, output):
+        fake.url = f"{console_url}/lesson/1"
+        return 0
+
+    render_check = _runner_in_process(
+        monkeypatch, tmp_path, console, chromium, real_block=True,
+        killpg=lambda pgid, sig: None,
+        chromium_port=lambda browser, profile: str(fake.port),
+        run_checks=checks_leave_a_console_page_loaded)
+    result = []
+    runner = threading.Thread(target=lambda: result.append(render_check.main()), daemon=True)
+
+    def api_calls():   # the runner's own reachability check of RENDER_URL is a GET of /
+        return [hit for hit in hits if hit[1].startswith("/api/")]
+
+    try:
+        runner.start()
+        waited, err = 0.0, ""
+        while "holding" not in err.lower() and waited < 30:
+            threading.Event().wait(0.1)
+            waited += 0.1
+            err += capsys.readouterr().err
+        assert "holding" in err.lower(), err
+        threading.Event().wait(0.5)
+        assert runner.is_alive(), "the runner gave up the block with the browser still running"
+        assert "<closed>" not in [method for method, _ in fake.calls]
+        assert api_calls() == [], hits
+        # The browser is killed from outside, as the message says to; the page dies with it.
+        _kill_fake_browser(pidfile)
+        fake.browser_gone = True
+        runner.join(timeout=30)
+        assert not runner.is_alive()
+        assert result == [1]
+        assert "<closed>" in [method for method, _ in fake.calls]
+        threading.Event().wait(0.3)
+        assert api_calls() == [], hits
+    finally:
+        fake.browser_gone = True
+        _kill_fake_browser(pidfile)
+        runner.join(timeout=5)
+        with contextlib.suppress(OSError):
+            fake.close()
 
 
 def test_render_check_keeps_the_profile_and_fails_when_the_browser_will_not_stop(
