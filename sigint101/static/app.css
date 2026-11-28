@@ -3113,6 +3113,14 @@ body {
 .sort-head__score {
   color: var(--fg-dim);
 }
+/* Quiet: the tap's feedback still stands; only the server copy of that answer is missing. */
+.sort-head__unsaved {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+.sort-head__unsaved[hidden] {
+  display: none;
+}
 .stage-panel--sort > .sort-card {
   grid-row: 3;
   grid-column: 1 / -1;
@@ -3180,13 +3188,33 @@ body {
 .sort-foot {
   gap: 8px;
 }
-.sort-law-link,
-.sort-nav-btn {
+.sort-law-link {
   flex: none;
   padding: 0 12px;
   font-size: 17px;
   white-space: nowrap;
   text-decoration: none;
+}
+/* The card steps: one joined pair with a dashed edge, a different shape from the solid, separate
+   stage buttons (Prev, Next step), and labelled "Card" rather than Prev or Next. */
+.sort-step {
+  flex: none;
+  display: flex;
+}
+.sort-step__btn {
+  flex: none;
+  min-width: var(--touch);
+  padding: 0 12px;
+  font-size: 17px;
+  white-space: nowrap;
+  border: 2px dashed var(--border-strong);
+  color: var(--fg);
+  background: var(--surface-2);
+  text-shadow: none;
+}
+.sort-step__btn + .sort-step__btn {
+  border-left-style: solid;
+  border-left-width: 1px;
 }
 .sort-foot .btn--primary {
   margin-left: auto;
