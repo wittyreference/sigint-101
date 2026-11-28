@@ -1474,6 +1474,541 @@ def test_the_reviewed_launcher_list_names_exactly_the_reviewed_launchers():
     assert listed == {hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 
 
+# Runs inside the hook: only the launcher file's owner reads as root; its real mode stays, so a
+# group- or world-writable mode is still seen.
+_LAUNCHER_ROOT_OWNER_ONLY = _LAUNCHER_ROOT_OWNED.replace("st.st_mode & ~0o222", "st.st_mode")
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o757], ids=["group-write", "world-write"])
+def test_install_never_kills_a_reviewed_launcher_that_others_can_rewrite(box, mode):
+    """A reviewed launcher owned by someone else is safe only if no group or other user can
+    rewrite it either: with a real group- or world-writable mode it is TERM only, with a warning,
+    and the watchdog survives."""
+    assert "st.st_mode, st.st_ino" in _LAUNCHER_ROOT_OWNER_ONLY
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, _LAUNCHER_ROOT_OWNER_ONLY)
+    _checkout_launcher(box).chmod(mode)
+    old, hold, pids = _reviewed_watchdog_ignoring_term(box)
+    try:
+        result = box.run(_install(box), timeout=40)
+        _term_only(box, result, old, "can be rewritten by the kiosk user")
+    finally:
+        _end(old)
+        _kill_all(_pids(pids))
+
+
+def _wait_for_lock_script(box, seconds, found="1:1"):
+    """install.sh's own wait_for_lock and what it calls, run on their own against the box."""
+    names = ("within_scan_limit", "watchdog_helper", "lock_holders", "watchdogs", "uptime_cs",
+             "cs_to_s", "wait_for_lock")
+    return (f'WATCH_LOCK="{_lock(box)}"\nHERE="{REPO / "deploy"}"\n'
+            'COURSE_BIN=/usr/local/bin/sigint101-course\n'
+            f'CHECKOUT_LAUNCHER="{LAUNCHER}"\nSCAN_LIMIT=""\n'
+            + "".join(_install_function(n) for n in names)
+            + f'found=("{found}")\nwait_for_lock {seconds}; echo "rc=$?"\n')
+
+
+def _slow(box, name, seconds):
+    """`name` on the box's PATH, the real one after a pause."""
+    _stub(box.bin, name, f"{shutil.which('sleep')} {seconds}; exec {shutil.which(name)} \"$@\"")
+
+
+def _held_lock(box):
+    import fcntl
+    held = open(_lock(box), "w")
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return held
+
+
+def test_the_lock_wait_keeps_its_deadline_when_every_step_of_a_scan_is_slow(box):
+    """Each step of a lock-holder scan held up for 0.78 s (finding the holders, reading their
+    fdinfo, the identity check): a two-second wait must still end at two seconds, not 2.6."""
+    _python_hook(box, "import time\nif sys.argv[1] in ('FIND', 'HOLDERS'):\n"
+                      "    time.sleep(0.78)\n")
+    _slow(box, "find", 0.78)
+    _slow(box, "grep", 0.78)
+    held = _held_lock(box)
+    try:
+        start = time.monotonic()
+        run = subprocess.run(["bash", "-c", _wait_for_lock_script(box, 2)], env=box.env(),
+                             capture_output=True, text=True, timeout=30)
+        took = time.monotonic() - start
+    finally:
+        held.close()
+    assert run.stdout.strip() == "rc=1", (run.stdout, run.stderr)
+    assert took < 2.3, took
+
+
+def test_the_lock_wait_cuts_off_a_scan_that_hangs_past_its_deadline(box):
+    """The scan's one time limit is what keeps the deadline: a holder scan that hangs for 20 s
+    must not hold up a two-second wait."""
+    _python_hook(box, "import time\nif sys.argv[1] in ('FIND', 'HOLDERS'):\n"
+                      "    time.sleep(20)\n")
+    held = _held_lock(box)
+    try:
+        start = time.monotonic()
+        run = subprocess.run(["bash", "-c", _wait_for_lock_script(box, 2)], env=box.env(),
+                             capture_output=True, text=True, timeout=60)
+        took = time.monotonic() - start
+    finally:
+        held.close()
+    assert run.stdout.strip() == "rc=1", (run.stdout, run.stderr)
+    assert took < 2.3, took
+
+
+def test_the_lock_wait_takes_no_scan_result_that_came_after_its_deadline(box):
+    """A scan that answers "a new watchdog" only as the deadline passes is not a hand-over: the
+    time ran out first, so the wait reports that (1), not the replacement (2)."""
+    _python_hook(box, "import time\nif sys.argv[1] == 'FIND':\n"
+                      "    print('999:1', flush=True)\n"
+                      "    time.sleep(5)\n"
+                      "    sys.exit(0)\n")
+    held = _held_lock(box)
+    try:
+        run = subprocess.run(["bash", "-c", _wait_for_lock_script(box, 2)], env=box.env(),
+                             capture_output=True, text=True, timeout=30)
+    finally:
+        held.close()
+    assert run.stdout.strip() == "rc=1", (run.stdout, run.stderr)
+
+
+def test_an_empty_first_scan_with_the_lock_held_looks_again_before_it_warns(box):
+    """The old watchdog can exit during the first scan while a new one (another install's, or
+    autostart's) takes the lock. That first scan finds nothing; a second look finds the new
+    watchdog, which is the hand-over done: no "no watchdog" WARN and no signal."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    pids, once = box.log.parent / "watchdog-pids", box.log.parent / "first-find"
+    # The first scan: the old watchdog hands its locked fd to a detached successor and exits,
+    # and the scan, having seen it go, finds nothing.
+    _python_hook(box,
+                 "import os, time\n"
+                 "def _running(pid):\n"
+                 "    try:\n"
+                 "        return open(f'/proc/{pid}/stat').read().rpartition(') ')[2][0] != 'Z'\n"
+                 "    except OSError:\n"
+                 "        return False\n"
+                 f"if sys.argv[1] == 'FIND' and not os.path.exists({str(once)!r}):\n"
+                 f"    open({str(once)!r}, 'w').close()\n"
+                 f"    first = int(open({str(pids)!r}).read().split()[0])\n"
+                 "    os.kill(first, _signal.SIGUSR1)\n"
+                 "    end = time.time() + 5\n"
+                 f"    while time.time() < end and (len(open({str(pids)!r}).read().split()) < 2\n"
+                 "                                 or _running(first)):\n"
+                 "        time.sleep(0.05)\n"
+                 "    sys.exit(0)\n")
+    real_sleep = shutil.which("sleep")
+    _old_install(box,
+                 "#!/bin/bash\n"
+                 'if [ -z "${SUCCESSOR:-}" ]; then\n'
+                 f'  exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
+                 "fi\n"
+                 f"echo $$ >> {pids}\n"
+                 f"trap '( SUCCESSOR=1 {shutil.which('bash')} \"$0\" watch & ); exit 0' USR1\n"
+                 f"while :; do {real_sleep} 0.2; done\n")
+    old = _watchdog(box, _checkout_launcher(box))
+    try:
+        assert _wait_for(lambda: len(_pids(pids)) == 1)
+        result = box.run(_install(box))
+        assert result.returncode == 0, result.stderr
+        assert once.exists(), "the first scan was not the staged one"
+        old.wait(timeout=10)  # the old watchdog is gone
+        [_, successor] = _pids(pids)
+        assert "WARN" not in result.stderr, result.stderr
+        assert any("already started the new course watchdog" in ln
+                   for ln in result.stdout.splitlines()), result.stdout
+        assert _sent(box) == [] and box.calls("setsid") == []
+        assert _alive(successor) and not _lock_is_free(box)
+    finally:
+        _end(old)
+        _kill_all(_pids(pids))
+
+
+def _install_lock(box):
+    """install.sh's lock, one per user under the home directory; made ready to hold."""
+    lock = box.home / ".cache" / "sigint101" / "install.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return lock
+
+
+@pytest.mark.parametrize("runtime", ["present", "absent", "overridden"])
+def test_every_install_of_the_same_home_takes_the_same_lock(box, runtime):
+    """The install lock does not follow XDG_RUNTIME_DIR: with the runtime dir set, unset, or
+    pointed elsewhere, an install of the same home finds the lock held and stops (after the 1 s
+    a test may set), so any two of them are serialised."""
+    import fcntl
+    other = box.log.parent / "other-runtime"
+    other.mkdir()
+    env = {"SIGINT101_TESTING": "1", "SIGINT101_TEST_INSTALL_WAIT_S": "1"}
+    if runtime == "overridden":
+        env["XDG_RUNTIME_DIR"] = str(other)
+    with open(_install_lock(box), "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        command = ["bash", str(INSTALL)]
+        if runtime == "absent":
+            command = ["env", "-u", "XDG_RUNTIME_DIR"] + command
+        result = subprocess.run(command, env=box.env(**env), capture_output=True, text=True,
+                                timeout=30)
+    assert result.returncode == 1, result.stderr
+    assert "stopped: another install.sh still holds" in result.stderr, result.stderr
+    assert box.calls("systemctl") == []
+    assert not list(box.runtime.glob("*install*")) and not list(other.glob("*install*"))
+
+
+def test_two_installs_with_different_runtime_dirs_take_turns(box):
+    other = box.log.parent / "other-runtime"
+    other.mkdir()
+    # The first install's sudo steps take a while, so it holds the lock when the second starts.
+    _stub(box.bin, "sudo", f'echo "sudo $*" >> {box.log}; {shutil.which("sleep")} 0.5')
+    first = subprocess.Popen(["bash", str(INSTALL)], env=box.env(), stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    assert _wait_for(lambda: box.calls("sudo"))
+    second = subprocess.Popen(["bash", str(INSTALL)], env=box.env(XDG_RUNTIME_DIR=str(other)),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    outs = [p.communicate(timeout=120) for p in (first, second)]
+    assert [first.returncode, second.returncode] == [0, 0], outs
+    assert "waiting for it" in outs[1][1], outs[1][1]
+
+
+def test_install_refuses_a_lock_reached_through_a_symlink(box):
+    """The lock is opened only as a plain file of the user's: a symlink in its place (to some
+    file the install would otherwise open for writing) stops the install before anything."""
+    target = box.log.parent / "elsewhere.txt"
+    target.write_text("keep me\n")
+    lock = _install_lock(box)
+    lock.symlink_to(target)
+    result = box.run(INSTALL)
+    assert result.returncode == 1
+    assert "must be a plain file of yours" in result.stderr, result.stderr
+    assert target.read_text() == "keep me\n"
+    assert box.calls("systemctl") == []
+
+
+def _snapshot(root):
+    """Every entry under ROOT, links not followed: its type, mode, and contents or link target."""
+    import hashlib
+    entries = {}
+    for top, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            p = Path(top) / name
+            st = p.lstat()
+            if p.is_symlink():
+                entries[str(p.relative_to(root))] = ("link", os.readlink(p))
+            elif p.is_dir():
+                entries[str(p.relative_to(root))] = ("dir", st.st_mode)
+            else:
+                digest = hashlib.sha256(p.read_bytes()).hexdigest()
+                entries[str(p.relative_to(root))] = ("file", st.st_mode, digest)
+    return entries
+
+
+@pytest.mark.parametrize("ready", [False, True], ids=["empty-target", "lock-dir-in-target"])
+def test_install_refuses_a_symlinked_cache_and_writes_nothing_through_it(box, ready):
+    """C86 r4 (F1a): ~/.cache itself a symlink to a writable directory elsewhere. The install
+    stops before it makes anything under it or opens the lock: the link's target, the install's
+    destinations in the home, and the log of system and service calls all stay as they were."""
+    target = box.log.parent / "elsewhere-cache"
+    target.mkdir(mode=0o700)
+    (target / "keep.txt").write_text("keep me\n")
+    if ready:
+        (target / "sigint101").mkdir(mode=0o700)
+    (box.home / ".cache").symlink_to(target)
+    before_target, before_home = _snapshot(target), _snapshot(box.home)
+    before_log = box.log.read_text()
+    result = box.run(INSTALL)
+    assert result.returncode == 1, result.stderr
+    assert "stopped:" in result.stderr and "nothing was changed" in result.stderr, result.stderr
+    assert "symlink" in result.stderr, result.stderr
+    assert _snapshot(target) == before_target
+    assert _snapshot(box.home) == before_home
+    assert box.log.read_text() == before_log
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o755, 0o777, 0o2770],
+                         ids=["0775", "0755", "0777", "setgid-0770"])
+def test_install_makes_an_existing_lock_directory_private_before_it_opens_the_lock(box, mode):
+    """C86 r4 (F1b): a lock directory that is already there, the user's own and no symlink, but
+    open to others. Its ownership and path are checked, then it is set to 0700 before the lock is
+    opened, so nobody else can put anything in it from then on. The install then runs as usual."""
+    lock_dir = box.home / ".cache" / "sigint101"
+    lock_dir.mkdir(parents=True)
+    lock_dir.chmod(mode)
+    assert lock_dir.stat().st_mode & 0o7777 == mode
+    result = box.run(INSTALL)
+    assert result.returncode == 0, result.stderr
+    assert lock_dir.stat().st_mode & 0o7777 == 0o700
+    lock = lock_dir / "install.lock"
+    assert lock.is_file() and not lock.is_symlink()
+
+
+@pytest.mark.parametrize("when", ["after-chmod", "before-chmod"])
+def test_a_lock_directory_replaced_around_its_chmod_gets_no_lock_and_stops_the_install(box, when):
+    """C86 r5 (F1b): the lock directory is swapped for a 0775 one at the moment install.sh sets
+    it to 0700 (a chmod stand-in does the swap, just after or just before the real chmod). The
+    lock may open only in the directory that was checked and set to 0700, and since the path no
+    longer names that directory the install stops: nothing is opened in the replacement, its
+    mode is left alone, and no system or service call is made."""
+    real_chmod = shutil.which("chmod")
+    lock_dir = box.home / ".cache" / "sigint101"
+    aside = box.home / ".cache" / "pinned-aside"
+    staged = box.log.parent / "swapped"
+    swap = (f'mv {lock_dir} {aside} && mkdir {lock_dir} && {real_chmod} 0775 {lock_dir} && '
+            f'touch {staged}')
+    first = "first" if when == "before-chmod" else "then"
+    real = f'{real_chmod} "$@" || exit'
+    _stub(box.bin, "chmod",
+          f'if [ "$1" = 00700 ] && [ ! -e {staged} ]; then\n'
+          + (f'  {swap}\n  {real}\n' if first == "first" else f'  {real}\n  {swap}\n')
+          + '  exit 0\n'
+          'fi\n'
+          f'exec {real_chmod} "$@"')
+    result = box.run(INSTALL)
+    assert staged.exists(), "the swap never ran: " + result.stderr
+    assert result.returncode == 1, result.stderr
+    assert "stopped:" in result.stderr and "replaced" in result.stderr, result.stderr
+    assert not (lock_dir / "install.lock").exists(), "the lock opened in the replacement"
+    assert lock_dir.stat().st_mode & 0o7777 == 0o775
+    assert aside.stat().st_mode & 0o7777 == 0o700
+    assert box.calls("sudo") == [] and box.calls("systemctl") == []
+
+
+def test_install_runs_in_the_directory_it_was_started_from_after_taking_the_lock(box):
+    """The lock is opened from inside its directory; the install then goes back to where it was
+    started, so nothing after it runs from the lock's directory."""
+    start = box.log.parent / "started-here"
+    start.mkdir()
+    probe = box.log.parent / "sudo-cwd"
+    _stub(box.bin, "sudo", f'echo "sudo $*" >> {box.log}; pwd -P > {probe}')
+    result = subprocess.run(["bash", str(INSTALL)], env=box.env(), cwd=start,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert probe.read_text().strip() == str(start.resolve())
+
+
+def test_a_fresh_lock_directory_is_made_private(box):
+    """No lock directory yet: the install makes it 0700, whatever the umask."""
+    result = box.run(INSTALL)
+    assert result.returncode == 0, result.stderr
+    assert (box.home / ".cache" / "sigint101").stat().st_mode & 0o7777 == 0o700
+
+
+@pytest.mark.parametrize("offset, replacement", [(-1, False), (0, False), (1, True)],
+                         ids=["older", "same-tick", "later"])
+def test_only_a_strictly_later_start_counts_as_a_replacement(offset, replacement):
+    """A watchdog that started in the same hundredth as discovery began proves nothing either
+    way, so it is restarted like the old one, never taken for the new one."""
+    ticks = int(subprocess.check_output(["getconf", "CLK_TCK"], text=True))
+    since = 123456
+    start = (since + offset) * ticks // 100
+    if (since + offset) * ticks % 100:
+        start += 1  # the first tick inside that hundredth
+    script = _install_function("started_since") + f'started_since {since} "4242:{start}"'
+    run = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert (run.returncode == 0) is replacement, (start, run.stderr)
+
+
+def test_a_free_first_probe_after_an_empty_scan_never_warns_of_no_watchdog(box):
+    """The scan finds no watchdog and the lock is free when probed, then a watchdog takes it (a
+    new one starting: autostart's, or another install's). That probe is the answer: nothing ran
+    to restart. A second probe that now finds the lock held must not turn it into the "no
+    watchdog" WARN. Staged with flock reporting the first probe of the watchdog's lock free."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    probed = box.log.parent / "first-probe"
+    real_flock = shutil.which("flock")
+    _stub(box.bin, "flock",
+          f'if [ "$*" = "-n {_lock(box)} true" ] && [ ! -e {probed} ]; then\n'
+          f'  touch {probed}; exit 0\n'
+          'fi\n'
+          f'exec {real_flock} "$@"')
+    _python_hook(box, "if sys.argv[1] == 'FIND':\n    sys.exit(0)\n")  # the empty scans
+    old = _stubborn_watchdog(box, stubborn=False)
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box))
+        assert result.returncode == 0, result.stderr
+        assert probed.exists(), "the staged probe never ran"
+        assert "WARN" not in result.stderr, result.stderr
+        assert _sent(box) == [] and box.calls("setsid") == []
+    finally:
+        _end(old)
+
+
+def test_nothing_the_desktop_theme_leaves_running_keeps_the_install_lock(box):
+    """The theme step reloads pcmanfm, which can leave a process behind. That process must not
+    have the install lock, or the next install would wait for it."""
+    import fcntl
+    box.start_session()
+    # Only pcmanfm's desktop is running (the pattern is "[p]cmanfm --desktop").
+    _stub(box.bin, "pgrep", 'case "$*" in *cmanfm*) exit 0 ;; *) exit 1 ;; esac')
+    left = box.log.parent / "left-behind"
+    _stub(box.bin, "pcmanfm",
+          # Detached as a daemon would be: its own stdio, every other fd it was given kept.
+          f'( {shutil.which("sleep")} 30 </dev/null >/dev/null 2>&1 & echo $! > {left} )\n'
+          f'echo "pcmanfm $*" >> {box.log}')
+    try:
+        result = box.run(INSTALL)
+        assert result.returncode == 0, result.stderr
+        assert box.calls("pcmanfm --reconfigure"), box.log.read_text()
+        assert _wait_for(lambda: left.exists() and left.read_text().strip())
+        assert _alive(int(left.read_text()))
+        with open(_install_lock(box), "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)  # free, with the reload child running
+    finally:
+        _kill_all(_pids(left))
+
+
+def test_a_first_scan_that_missed_the_old_watchdog_restarts_it_without_claiming_a_handover(box):
+    """When the second look finds a watchdog that is older than the first scan, it is the old
+    watchdog that scan missed, not a replacement: install.sh restarts it as usual and does not
+    say another install already did."""
+    box.alive.touch()
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    once = box.log.parent / "first-find"
+    _python_hook(box, "import os\n"
+                      f"if sys.argv[1] == 'FIND' and not os.path.exists({str(once)!r}):\n"
+                      f"    open({str(once)!r}, 'w').close()\n"
+                      "    sys.exit(0)\n")
+    old = _stubborn_watchdog(box, stubborn=False)
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box), timeout=40)
+        assert once.exists(), "the first scan was not the staged empty one"
+        assert "already started" not in result.stdout, result.stdout
+        assert "WARN" not in result.stderr, result.stderr
+        assert _sent(box) == [signal.SIGTERM]
+        old.wait(timeout=10)
+        _hands_over(box, result)
+    finally:
+        _end(old)
+
+
+def test_a_second_install_stops_and_says_why_when_the_wait_runs_out(box):
+    """The bounded wait's other end: the lock still held when the wait runs out (cut to 1 s, as
+    only a test may), so the second install stops before changing anything and says why."""
+    import fcntl
+    lock = _install_lock(box)
+    with open(lock, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        start = time.monotonic()
+        result = box.run(INSTALL, SIGINT101_TESTING="1", SIGINT101_TEST_INSTALL_WAIT_S="1")
+        took = time.monotonic() - start
+    assert result.returncode == 1
+    assert box.calls("systemctl") == [] and box.calls("sudo") == []
+    assert "waiting for it (up to 1 s)" in result.stderr, result.stderr
+    assert (f"stopped: another install.sh still holds {lock} after 1 s; nothing was changed"
+            in result.stderr), result.stderr
+    assert took < 5, took
+
+
+def test_the_install_wait_is_cut_short_only_when_a_test_says_so(box):
+    """Without SIGINT101_TESTING=1 the shorter wait is ignored: the second install keeps
+    waiting for the first."""
+    import fcntl
+    lock = _install_lock(box)
+    with open(lock, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.Popen(["bash", str(INSTALL)],
+                                env=box.env(SIGINT101_TEST_INSTALL_WAIT_S="1"),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(3)
+        assert proc.poll() is None, "it stopped instead of waiting"
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert "up to 300 s" in err, err
+
+
+def test_a_second_install_waits_for_the_first_and_says_so(box):
+    """Two installs at once take turns: the second waits for the first's lock and says it is
+    waiting, then runs to the end."""
+    import fcntl
+    lock = _install_lock(box)
+    with open(lock, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.Popen(["bash", str(INSTALL)], env=box.env(), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        time.sleep(1.5)
+        assert proc.poll() is None, "it did not wait for the lock"
+        assert box.calls("systemctl") == [], "it changed things before it had the lock"
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert "another install.sh is running; waiting for it" in err, err
+
+
+def _tree(home):
+    """Every file under HOME, by path, with its digest (the home path itself made neutral)."""
+    import hashlib
+    files = {}
+    for path in sorted(home.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            data = path.read_bytes().replace(str(home).encode(), b"~")
+            files[str(path.relative_to(home))] = hashlib.sha256(data).hexdigest()
+    return files
+
+
+def test_thirty_installs_at_once_all_finish_complete_with_one_watchdog(tmp_path):
+    """C83: overlapping installs raced in their `install -D` steps, and the loser stopped half
+    done. Thirty at once, over a running watchdog: every one exits 0, every installed file is
+    whole (the same as after one install alone), exactly one watchdog is left, and no lasting
+    process keeps the install lock."""
+    (tmp_path / "one").mkdir()
+    reference = Box(tmp_path / "one")
+    try:
+        assert reference.run(INSTALL).returncode == 0
+        expected = _tree(reference.home)
+    finally:
+        reference.close()
+    assert expected, "the single install installed nothing"
+
+    (tmp_path / "race").mkdir()
+    box = Box(tmp_path / "race")
+    box.alive.touch()
+    _quiet_desktop(box)
+    box.start_session()
+    sleeper = _LongSleep(box)
+    # The new watchdogs run this checkout's launcher, a path each later install accepts as the
+    # watchdog's (on a box it is /usr/local/bin/sigint101-course).
+    _stub(box.bin, "setsid",
+          f'echo "setsid $*" >> {box.log}\n[ "$1" = -f ] && shift\nargs=()\n'
+          f'for a in "$@"; do [ "$a" = {INSTALLED_LAUNCHER} ] && a={LAUNCHER}; '
+          'args+=("$a"); done\n"${args[@]}" </dev/null >/dev/null 2>&1 &')
+    old = _watchdog(box, LAUNCHER)
+    try:
+        sleeper.first_pid()
+        procs = [subprocess.Popen(["bash", str(INSTALL)], env=box.env(), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True) for _ in range(30)]
+        results = [(p.wait(timeout=600), p.stderr.read()) for p in procs]
+        for p in procs:
+            p.stdout.close()
+            p.stderr.close()
+        failed = [err for rc, err in results if rc != 0]
+        assert failed == [], failed[0]
+        assert _tree(box.home) == expected
+        watchdogs = set()
+        for fd in Path("/proc").glob("[0-9]*/fd/*"):
+            try:
+                if os.readlink(fd) == str(_lock(box)):
+                    argv = Path(f"/proc/{fd.parts[2]}/cmdline").read_bytes().split(b"\0")
+                    if argv[1:3] == [str(LAUNCHER).encode(), b"watch"]:
+                        watchdogs.add(fd.parts[2])
+            except OSError:
+                pass
+        assert len(watchdogs) == 1, watchdogs
+        import fcntl
+        with open(_install_lock(box), "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)  # free: no watchdog kept it
+    finally:
+        _end(old)
+        sleeper.stop_all()
+        box.close()
+
+
 def test_install_never_kills_a_reused_pid_whose_start_time_differs(box):
     """A reused PID cannot be staged without privileges, so the start time stands in: at the
     SIGKILL re-check, /proc/PID/stat reports another start time for the pinned PID, as it would
@@ -1483,7 +2018,8 @@ def test_install_never_kills_a_reused_pid_whose_start_time_differs(box):
     _installed_launcher(box)
     _python_hook(box, "import builtins, io\n"
                       "_open = builtins.open\n"
-                      "_pid = sys.argv[5].partition(':')[0]\n"
+                      # FIND may come with no PID now (it scans the holders itself).
+                      "_pid = sys.argv[5].partition(':')[0] if len(sys.argv) > 5 else ''\n"
                       "def _reopened(path, *a, **k):\n"
                       "    f = _open(path, *a, **k)\n"
                       "    if sys.argv[1] != 'KILL' or str(path) != f'/proc/{_pid}/stat':\n"

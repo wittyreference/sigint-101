@@ -1601,10 +1601,10 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
     lifecycle = []
 
     class _TrackedFeed(adsb._Feed):
-        def stop_child(self):
+        def stop_child(self, **options):
             with dec._runs:
                 lifecycle.append(("stop", dec._runs.is_current(dec._run.number)))
-            return super().stop_child()
+            return super().stop_child(**options)
 
         def close_transport(self):
             with dec._runs:

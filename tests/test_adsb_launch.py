@@ -85,6 +85,15 @@ def test_adsb_post_spawn_fault_retains_child_until_reaped(tmp_path, monkeypatch,
     monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.01)
     monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.02)
     receiver = _decoder()
+    retry_reap = receiver._retry_reap
+
+    def retry_after_probes(run, timeout):
+        # Hold the startup refusal steady until the handoff assertions have sampled it.
+        # Then let the periodic retry demonstrate recovery with the same child and socket.
+        if can_reap.wait(5):
+            retry_reap(run, timeout)
+
+    monkeypatch.setattr(receiver, "_retry_reap", retry_after_probes)
     sweep = _StubSweeper([])
     with _client(tmp_path, probe=_present, adsb_factory=lambda: receiver,
                  sweeper_factory=lambda: sweep) as client:
