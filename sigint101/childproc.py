@@ -208,12 +208,14 @@ class GroupPopen(subprocess.Popen):
 CAPTURE = object()
 
 
-def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=False, env=None):
+def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=False, env=None,
+          pass_fds=()):
     """Start one radio tool in its own session, tied to the console's life.
 
     stderr defaults to a scratch file rather than a pipe: nothing drains stderr while the tool
     runs, and a full pipe would wedge the tool rather than the diagnostic. The file is attached as
-    `proc.stderr`, so the reason a tool died is in one place to read.
+    `proc.stderr`, so the reason a tool died is in one place to read. `pass_fds` are the only
+    other descriptors the tool inherits (SSTV hands its stages its staging lock this way).
     """
     scratch = None
     if stderr is CAPTURE:
@@ -222,7 +224,7 @@ def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=Fals
     try:
         proc = _SPAWNER.run(lambda: GroupPopen(
             argv, stdin=stdin, stdout=stdout, stderr=stderr, text=text, env=env,
-            start_new_session=True, preexec_fn=_die_with_parent()))
+            pass_fds=pass_fds, start_new_session=True, preexec_fn=_die_with_parent()))
     except BaseException:
         if scratch is not None:
             scratch.close()

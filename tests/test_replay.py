@@ -695,7 +695,8 @@ def test_existing_progress_database_gains_replay_table_without_losing_any_rows(t
 
 
 def test_replay_schema_enrolls_main_legacy_layout_without_touching_source(tmp_path):
-    source = tmp_path / "previous.db"
+    source = tmp_path / "old" / "previous.db"
+    source.parent.mkdir()
     expected = _build_progress_v0(source, "v0_challenges_retrieval")
     signature = reviewed_signatures("progress")["v0"]["v0_challenges_retrieval"]
     with closing(sqlite3.connect(source)) as conn:
@@ -730,7 +731,8 @@ def test_replay_legacy_variants_are_frozen(variant, base):
 
 
 def test_migrating_legacy_progress_preserves_replays_already_seen(tmp_path):
-    source = tmp_path / "progress.db"
+    source = tmp_path / "old" / "progress.db"
+    source.parent.mkdir()
     legacy = Progress(source)
     try:
         assert legacy.record_replay_seen("ism", recording="clip", digest="hash", ts=123)

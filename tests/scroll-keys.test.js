@@ -182,3 +182,33 @@ test("keys scroll the /law reference list when it overflows", () => {
   assert.deepEqual(moves, [["by", 0, 272], ["to", 0, 980]]);
   assert.equal(prevented, 2);
 });
+
+test("keys scroll the /field command list when it overflows", () => {
+  let onKey;
+  let prevented = 0;
+  const moves = [];
+  const entries = {
+    scrollHeight: 1120,
+    clientHeight: 360,
+    scrollBy: (x, y) => moves.push(["by", x, y]),
+    scrollTo: (x, y) => moves.push(["to", x, y]),
+  };
+  runInNewContext(readFileSync(require.resolve("../sigint101/static/scroll-keys.js"), "utf8"), {
+    document: {
+      querySelectorAll: () => [],
+      querySelector: s => s === ".field__entries" ? entries : null,
+      addEventListener: (event, handler) => { if (event === "keydown") onKey = handler; },
+    },
+  });
+
+  onKey({ key: "ArrowDown", preventDefault: () => { prevented++; } });
+  onKey({ key: "PageDown", preventDefault: () => { prevented++; } });
+  onKey({ key: "End", preventDefault: () => { prevented++; } });
+  assert.deepEqual(moves, [["by", 0, 48], ["by", 0, 312], ["to", 0, 1120]]);
+  assert.equal(prevented, 3);
+
+  entries.scrollHeight = 362;   // <= 2 px overflow is ignored
+  onKey({ key: "ArrowDown", preventDefault: () => { prevented++; } });
+  assert.equal(moves.length, 3);
+  assert.equal(prevented, 3);
+});

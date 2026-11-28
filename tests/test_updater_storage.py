@@ -475,7 +475,9 @@ def test_missing_legacy_store_bootstraps_v1_only_when_explicitly_allowed(tmp_pat
 @pytest.mark.parametrize("store", ["progress", "exam"])
 @pytest.mark.parametrize("fail_point", ["after_step", "after_version"])
 def test_failed_migration_rolls_back_schema_rows_and_version(tmp_path, store, fail_point):
-    src = tmp_path / f"src_{store}.db"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    src = src_dir / f"src_{store}.db"
     gen = tmp_path / "gen"
     gen.mkdir()
     dst = gen / f"dst_{store}.db"
@@ -524,7 +526,9 @@ def test_failed_migration_rolls_back_schema_rows_and_version(tmp_path, store, fa
 @pytest.mark.parametrize("store", ["progress", "exam"])
 @pytest.mark.parametrize("bad_kind", ["extra_table", "unsupported_head", "v1_corrupt_schema"])
 def test_unknown_schema_or_head_is_refused_before_any_write(tmp_path, store, bad_kind):
-    src = tmp_path / f"bad_{store}_{bad_kind}.db"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    src = src_dir / f"bad_{store}_{bad_kind}.db"
     gen = tmp_path / "gen"
     gen.mkdir()
     dst = gen / f"out_{store}_{bad_kind}.db"
@@ -576,7 +580,9 @@ def test_managed_open_does_not_create_or_migrate_stores(tmp_path, store, cls, re
     assert not missing.parent.exists()
 
     # Stale v0 DB -> refused with specific version/schema reason, NO DDL executed, bytes unchanged.
-    stale = tmp_path / f"stale_{store}.db"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    stale = src_dir / f"stale_{store}.db"
     if store == "progress":
         _build_progress_v0(stale, "v0_72ddf9c")
     else:
@@ -842,7 +848,9 @@ def test_current_legacy_constructor_signatures_are_in_reviewed_set(tmp_path):
     assert match_v0_signature("progress", unreviewed) is None
 
     # Exercise migrated pre-PR-134 and PR-134/current DBs with seeded first evidence & watermarks.
-    pre_134 = tmp_path / "pre134.db"
+    pre_src = tmp_path / "pre_src"
+    pre_src.mkdir()
+    pre_134 = pre_src / "pre134.db"
     _build_progress_v0(pre_134, "v0_02c2095")
     pre_gen = tmp_path / "pre_gen"
     pre_gen.mkdir()
@@ -853,7 +861,9 @@ def test_current_legacy_constructor_signatures_are_in_reviewed_set(tmp_path):
     assert p_pre.get(1)["completed"] == 1
     p_pre.close()
 
-    pr_134 = tmp_path / "pr134.db"
+    pr_src = tmp_path / "pr_src"
+    pr_src.mkdir()
+    pr_134 = pr_src / "pr134.db"
     _build_progress_v0(pr_134, "v0_e72c706")
     pr_gen = tmp_path / "pr_gen"
     pr_gen.mkdir()
@@ -879,7 +889,9 @@ def test_wal_source_is_recovered_on_private_copy_without_mutating_source(tmp_pat
     )
     conn.commit()
     # Snapshot a quiesced uncheckpointed WAL pair (as after a power cut) before closing live conn.
-    src = tmp_path / "wal_progress.db"
+    src_dir = tmp_path / "wal_src"
+    src_dir.mkdir()
+    src = src_dir / "wal_progress.db"
     shutil.copy2(live, src)
     shutil.copy2(Path(f"{live}-wal"), Path(f"{src}-wal"))
     if Path(f"{live}-shm").exists():
@@ -1069,7 +1081,9 @@ def test_read_only_hot_journal_source_migrates_without_touching_source(tmp_path)
 def test_recovery_scratch_lives_outside_generation_and_is_not_recursively_removed(
     tmp_path, monkeypatch
 ):
-    src = tmp_path / "src.db"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    src = src_dir / "src.db"
     _build_progress_v0(src, "v0_1a35a1a")
     gen = tmp_path / "gen"
     gen.mkdir()
@@ -1331,3 +1345,227 @@ def test_migration_row_preservation_distinguishes_int_from_float(tmp_path):
     with pytest.raises(SchemaError, match="altered pre-existing rows"):
         _verify_preserved_rows(conn, before)
     conn.close()
+
+
+# --- PR 1 Round 2 build-review leftovers (coverage gaps & R2-a/R2-b/F14 residuals) -------------
+
+
+def test_migration_refusals_cleanup_and_scratch_boundary_checks(tmp_path, monkeypatch):
+    # 1) Destination already exists is refused without overwriting existing destination bytes.
+    src_dir = tmp_path / "src_exists"
+    src_dir.mkdir()
+    src = src_dir / "progress.db"
+    _build_progress_v0(src, "v0_1a35a1a")
+    dst_dir = tmp_path / "dst_exists"
+    dst_dir.mkdir()
+    dst = dst_dir / "progress.db"
+    dst.write_bytes(b"existing-sentinel")
+    with pytest.raises(FileExistsError, match="already exists"):
+        migrate_store_copy(src, dst, store="progress", scratch_dir=tmp_path / "scratch_exists")
+    assert dst.read_bytes() == b"existing-sentinel"
+
+    # 2) Orphan sidecar without a main database is refused even when allow_missing_source=True.
+    orphan_dir = tmp_path / "orphan_src"
+    orphan_dir.mkdir()
+    orphan_db = orphan_dir / "progress.db"
+    Path(f"{orphan_db}-wal").write_bytes(b"stray-wal")
+    with pytest.raises(SchemaError, match="orphan SQLite sidecars"):
+        migrate_store_copy(
+            orphan_db,
+            tmp_path / "orphan_dst" / "progress.db",
+            store="progress",
+            allow_missing_source=True,
+            scratch_dir=tmp_path / "scratch_orphan",
+        )
+
+    # 3) Corrupt source fails PRAGMA integrity_check and unlinks the partial destination file.
+    corrupt_dir = tmp_path / "corrupt_src"
+    corrupt_dir.mkdir()
+    corrupt_db = corrupt_dir / "progress.db"
+    _build_progress_v0(corrupt_db, "v0_1a35a1a")
+    raw = bytearray(corrupt_db.read_bytes())
+    raw[-128:] = b"\xff" * 128
+    corrupt_db.write_bytes(bytes(raw))
+    corrupt_dst = tmp_path / "corrupt_dst" / "progress.db"
+    with pytest.raises((SchemaError, sqlite3.DatabaseError)):
+        migrate_store_copy(
+            corrupt_db, corrupt_dst, store="progress", scratch_dir=tmp_path / "scratch_corrupt"
+        )
+    assert not corrupt_dst.exists()
+
+    # 4) A failure during SQLite backup unlinks the destination file cleanly.
+    backup_dst = tmp_path / "backup_fail_dst" / "progress.db"
+
+    class _FailingBackupConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, *args, **kwargs):
+            return self._inner.execute(*args, **kwargs)
+
+        def backup(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("simulated backup I/O failure")
+
+        def close(self):
+            self._inner.close()
+
+    real_connect = sqlite3.connect
+    calls = {"n": 0}
+
+    def wrapped_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FailingBackupConn(conn)
+        return conn
+
+    monkeypatch.setattr("sigint101.migrations.sqlite3.connect", wrapped_connect)
+    with pytest.raises(sqlite3.OperationalError, match="simulated backup I/O failure"):
+        migrate_store_copy(
+            src, backup_dst, store="progress", scratch_dir=tmp_path / "scratch_backup_fail"
+        )
+    assert not backup_dst.exists()
+    monkeypatch.undo()
+
+    # 5) R2-a: scratch inside/equal to source dir or an ancestor of destination is refused.
+    nested_dst = tmp_path / "outer_scratch" / "gen" / "progress.db"
+    for bad_scratch in (
+        src_dir,
+        src_dir / "nested_scratch",
+        tmp_path / "outer_scratch",
+    ):
+        with pytest.raises(ValueError, match="scratch"):
+            migrate_store_copy(src, nested_dst, store="progress", scratch_dir=bad_scratch)
+
+
+def test_storage_normalize_sql_and_open_error_and_sidecar_paths(tmp_path, monkeypatch):
+    # 1) _normalize_sql comment, bracket-identifier, doubled-quote, and trailing-semicolon paths.
+    assert storage_mod._normalize_sql(None) == ""
+    assert storage_mod._normalize_sql("") == ""
+    sql = (
+        "CREATE TABLE [MyTbl] (\n"
+        "  -- leading line comment\n"
+        "  id INTEGER PRIMARY KEY, /* block comment */ "
+        "label TEXT DEFAULT 'can''t'/*inline*/,\n"
+        "  \"col\"\"name\" TEXT--tail comment\n"
+        ");;;"
+    )
+    norm = storage_mod._normalize_sql(sql)
+    expected_norm = (
+        "create table [MyTbl] (id integer primary key, "
+        "label text default 'can''t', \"col\"\"name\" text)"
+    )
+    assert norm == expected_norm
+    # Unclosed bracket identifier stays intact without crashing.
+    assert storage_mod._normalize_sql("CREATE TABLE [unclosed") == "create table [unclosed"
+
+    # 2) sync_media_asset drops the dead sidecar_path parameter.
+    import inspect
+
+    assert list(inspect.signature(storage_mod.sync_media_asset).parameters) == ["png_path"]
+
+    # 3) Header read OSError and sqlite3.connect sqlite3.Error raise SchemaError.
+    gen = tmp_path / "err_gen"
+    gen.mkdir()
+    db_path = gen / "progress.db"
+    migrate_store_copy(
+        tmp_path / "none.db",
+        db_path,
+        store="progress",
+        allow_missing_source=True,
+        scratch_dir=tmp_path / "scratch_err",
+    )
+    sig = reviewed_signatures("progress")["v1"]
+
+    def bad_open(*_args, **_kwargs):
+        raise OSError("unreadable header")
+
+    monkeypatch.setattr(Path, "open", bad_open)
+    with pytest.raises(SchemaError, match="cannot read managed store"):
+        open_managed_sqlite(db_path, expected_version=1, expected_signature=sig)
+    monkeypatch.undo()
+
+    def bad_connect(*_args, **_kwargs):
+        raise sqlite3.OperationalError("simulated connect failure")
+
+    monkeypatch.setattr("sigint101.storage.sqlite3.connect", bad_connect)
+    with pytest.raises(SchemaError, match="cannot open managed store"):
+        open_managed_sqlite(db_path, expected_version=1, expected_signature=sig)
+    monkeypatch.undo()
+
+    # 4) R2-b: stray -wal or -shm beside a DELETE-mode store is refused without touching disk.
+    for ext in ("-wal", "-shm"):
+        stray = Path(f"{db_path}{ext}")
+        stray.write_bytes(b"stray-sidecar-bytes")
+        before_db = db_path.read_bytes()
+        try:
+            with pytest.raises(SchemaError, match="WAL|sidecar"):
+                open_managed_sqlite(db_path, expected_version=1, expected_signature=sig)
+            assert db_path.read_bytes() == before_db
+            assert stray.read_bytes() == b"stray-sidecar-bytes"
+        finally:
+            stray.unlink()
+
+    # 5) F14 residual: read-only open of a hot-journal store raises SchemaError.
+    hot_dir = tmp_path / "hot_ro"
+    hot_dir.mkdir()
+    hot_db = hot_dir / "progress.db"
+    shutil.copy2(db_path, hot_db)
+    conn = sqlite3.connect(hot_db, isolation_level=None)
+    conn.execute("PRAGMA journal_mode = DELETE")
+    conn.execute("PRAGMA cache_size = 1")
+    conn.execute("BEGIN EXCLUSIVE")
+    for idx in range(100, 140):
+        conn.execute(
+            "INSERT INTO progress(lesson_id, opened, completed, updated) VALUES(?, 1, 0, 1.0)",
+            (idx,),
+        )
+    ro_snap_dir = tmp_path / "hot_ro_snap"
+    ro_snap_dir.mkdir()
+    ro_db = ro_snap_dir / "progress.db"
+    shutil.copy2(hot_db, ro_db)
+    shutil.copy2(Path(f"{hot_db}-journal"), Path(f"{ro_db}-journal"))
+    conn.execute("ROLLBACK")
+    conn.close()
+
+    before_ro_db = ro_db.read_bytes()
+    before_ro_journal = Path(f"{ro_db}-journal").read_bytes()
+    with pytest.raises(SchemaError, match="read-only|journal|cannot"):
+        open_managed_sqlite(ro_db, expected_version=1, expected_signature=sig, read_only=True)
+    assert ro_db.read_bytes() == before_ro_db
+    assert Path(f"{ro_db}-journal").read_bytes() == before_ro_journal
+
+
+def test_apt_report_skips_announcement_when_sync_fails(tmp_path, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    from sigint101.apt import AptDecoder
+
+    apt_dir = tmp_path / "apt"
+    apt_dir.mkdir()
+    first = apt_dir / "pass1.png"
+    second = apt_dir / "pass2.png"
+    first.write_bytes(b"\x89PNG\r\n\x1a\nfirst")
+    second.write_bytes(b"\x89PNG\r\n\x1a\nsecond")
+    os.utime(first, (1_700_000_001, 1_700_000_001))
+    os.utime(second, (1_700_000_002, 1_700_000_002))
+
+    decoder = AptDecoder(output_dir=apt_dir, data_dir=tmp_path, sync_assets=True)
+    emitted: list[str] = []
+    decoder.on_reception = lambda item, **_kw: emitted.append(item["path"])
+
+    def selective_sync(png_path):
+        if Path(png_path).name == "pass1.png":
+            raise OSError("simulated fsync EIO on pass1")
+
+    monkeypatch.setattr("sigint101.apt.sync_media_asset", selective_sync)
+    run = SimpleNamespace(
+        args=(137_100_000, set(), {"kind": "rtl-sdr", "serial": None, "index": 0}),
+        proc=SimpleNamespace(args=["satdump"]),
+        ready=threading.Event(),
+    )
+    decoder._report(run)
+    assert run.ready.is_set()
+    assert emitted == ["apt/pass2.png"]
+    assert "simulated fsync EIO on pass1" in (decoder.error or "")

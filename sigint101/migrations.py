@@ -167,15 +167,35 @@ def _target_head(store: str) -> int:
     raise ValueError(f"unknown store: {store!r}")
 
 
-def _validate_scratch_dir(dest_path: Path, scratch_dir: Path) -> Path:
-    """Require an exclusive private scratch directory outside the destination generation."""
+def _validate_scratch_dir(
+    dest_path: Path,
+    scratch_dir: Path,
+    *,
+    source_path: Path | None = None,
+) -> Path:
+    """Require an exclusive private scratch directory outside both source and destination."""
     dest_gen = dest_path.parent.resolve()
     scratch = scratch_dir.resolve()
-    if scratch == dest_gen or scratch.is_relative_to(dest_gen):
+    if (
+        scratch == dest_gen
+        or scratch.is_relative_to(dest_gen)
+        or dest_gen.is_relative_to(scratch)
+    ):
         raise ValueError(
             f"recovery scratch directory must stay outside destination generation {dest_gen}: "
             f"{scratch}"
         )
+    if source_path is not None and source_path.exists():
+        src_gen = source_path.parent.resolve()
+        if (
+            scratch == src_gen
+            or scratch.is_relative_to(src_gen)
+            or src_gen.is_relative_to(scratch)
+        ):
+            raise ValueError(
+                f"recovery scratch directory must stay outside source generation {src_gen}: "
+                f"{scratch}"
+            )
     if scratch.exists():
         raise FileExistsError(f"recovery scratch directory already exists: {scratch}")
     return scratch
@@ -193,7 +213,7 @@ def _copy_sqlite_to_standalone_delete(
     Recovery scratch is created exclusively outside the destination generation and left with the
     operation's records — never placed inside the generation and never recursively deleted.
     """
-    scratch = _validate_scratch_dir(dest_path, scratch_dir)
+    scratch = _validate_scratch_dir(dest_path, scratch_dir, source_path=source_path)
     if dest_path.exists():
         raise FileExistsError(f"migration destination already exists: {dest_path}")
 
