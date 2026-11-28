@@ -62,13 +62,18 @@
   }
 
   // Session storage can be missing or throw (private windows, blocked site data); the place is a
-  // convenience, so any failure just means opening on the first unanswered card.
+  // convenience, so any failure just means opening on the first unanswered card. The place is
+  // one-shot: set only on the way out to /law, and forgotten as soon as it is read back, so a later
+  // ordinary visit in the same kiosk tab opens on the first unanswered card.
   function placeKey(lessonId) {
     return "sigint101.cardSort.place." + lessonId;
   }
 
   function recallCard(storage, lessonId) {
-    try { return storage ? storage.getItem(placeKey(lessonId)) : null; } catch (_) { return null; }
+    var key = null;
+    try { key = storage ? storage.getItem(placeKey(lessonId)) : null; } catch (_) { key = null; }
+    try { if (storage && storage.removeItem) storage.removeItem(placeKey(lessonId)); } catch (_) { /* gone with the tab */ }
+    return key;
   }
 
   function rememberCard(storage, lessonId, cardKey) {
@@ -159,7 +164,6 @@
     var card = cards[current];
     var saved = answers[card.key] || null;
     var tally = summarizeScore(cards, answers);
-    rememberCard(store, lessonId, card.key);
 
     if (unsavedEl) unsavedEl.hidden = !unsaved[card.key];
     if (counterEl) counterEl.textContent = "Card " + (current + 1) + " of " + cards.length;
@@ -223,6 +227,14 @@
       record(btn.getAttribute("data-sort-choice"));
     });
   });
+
+  // Only the trip to "Show me the law" keeps the place; Back from there reopens this card.
+  var lawLink = panel.querySelector("[data-sort-law]");
+  if (lawLink) {
+    lawLink.addEventListener("click", function () {
+      rememberCard(store, lessonId, cards[current].key);
+    });
+  }
 
   if (prevBtn) {
     prevBtn.addEventListener("click", function () {

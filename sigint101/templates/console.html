@@ -657,7 +657,7 @@
                 <button class="btn sort-step__btn" type="button" data-sort-prev aria-label="Previous card">&lsaquo; Card</button>
                 <button class="btn sort-step__btn" type="button" data-sort-next aria-label="Next card">Card &rsaquo;</button>
               </div>
-              <a class="btn btn--secondary sort-law-link" href="/law?back=/lesson/{{ lesson.id }}">Show me the law</a>
+              <a class="btn btn--secondary sort-law-link" href="/law?back=/lesson/{{ lesson.id }}" data-sort-law>Show me the law</a>
               {% endif %}
               {% if safety_notice and not lesson.uses_lora %}
               {{ panels.safety_notice(safety_notice) }}

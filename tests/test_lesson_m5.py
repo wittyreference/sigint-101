@@ -313,6 +313,13 @@ def test_lesson_5_sort_head_carries_a_hidden_not_saved_mark(tmp_path):
     assert "not saved" in mark.group(1).lower()
 
 
+def test_lesson_5_law_link_is_the_hook_that_keeps_the_card_place(tmp_path):
+    # card-sort.js keeps the current card only when the learner leaves through this link.
+    with _client(tmp_path) as client:
+        html = client.get("/lesson/5").text
+    assert re.search(r'<a\b[^>]*href="/law\?back=/lesson/5"[^>]*\bdata-sort-law\b', html)
+
+
 def _foot_controls(footer_html: str) -> list[tuple[str, str, str]]:
     """(opening tag, class attribute, visible label) for each button or link in a footer."""
     controls = []

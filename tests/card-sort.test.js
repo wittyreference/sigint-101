@@ -141,7 +141,7 @@ function memoryStorage(seed) {
 function mountPanel({ saved = {}, fetchImpl, storage } = {}) {
   const els = {};
   for (const name of ["deck", "saved", "counter", "score", "unsaved", "text", "feedback", "tag",
-    "answer", "why", "cite", "prev", "next"]) {
+    "answer", "why", "cite", "prev", "next", "law"]) {
     els[name] = fakeEl({});
   }
   // The card steps as the console template labels them.
@@ -170,6 +170,7 @@ function mountPanel({ saved = {}, fetchImpl, storage } = {}) {
     "[data-sort-cite]": els.cite,
     "[data-sort-prev]": els.prev,
     "[data-sort-next]": els.next,
+    "[data-sort-law]": els.law,
   };
   panelEl.querySelectorAll = (sel) => (sel === "[data-sort-choice]" ? choices : []);
   const calls = [];
@@ -230,6 +231,7 @@ test("coming back from the law page reopens the card the learner left, not the f
   first.els.next.click();
   first.els.next.click();
   assert.equal(first.els.counter.textContent, "Card 3 of 3");
+  first.els.law.click();   // Show me the law
 
   // A fresh page load in the same tab (Back from /law), with nothing answered yet.
   const back = mountPanel({ fetchImpl, storage });
@@ -248,6 +250,27 @@ test("coming back from the law page reopens the card the learner left, not the f
   assert.equal(ui.els.counter.textContent, "Card 2 of 3");
   ui.els.next.click();
   assert.equal(ui.els.counter.textContent, "Card 3 of 3");
+});
+
+test("the remembered card is one-shot: a normal later visit opens on the first unanswered card", () => {
+  const storage = memoryStorage();
+  const fetchImpl = () => Promise.resolve({ ok: true });
+  const saved = { c1: { choice: "legal", correct: true } };
+
+  // Peeking ahead without going to the law page leaves no place behind.
+  const browsing = mountPanel({ saved, fetchImpl, storage });
+  browsing.els.next.click();
+  assert.equal(browsing.els.counter.textContent, "Card 3 of 3");
+  const later = mountPanel({ saved, fetchImpl, storage });
+  assert.equal(later.els.counter.textContent, "Card 2 of 3");
+
+  // A law trip's place is used once on the way back, then forgotten.
+  later.els.next.click();
+  later.els.law.click();
+  const back = mountPanel({ saved, fetchImpl, storage });
+  assert.equal(back.els.counter.textContent, "Card 3 of 3");
+  const daysLater = mountPanel({ saved, fetchImpl, storage });
+  assert.equal(daysLater.els.counter.textContent, "Card 2 of 3");
 });
 
 test("stepping the deck never relabels the card steps with a stage button's words", () => {
