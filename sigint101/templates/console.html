@@ -382,6 +382,7 @@
                   <div class="tune__freq">{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
                   <div class="tune__caption">ISM band &middot; rtl_433</div>
                 </div>
+                {{ panels.replay_controls() }}
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>

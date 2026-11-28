@@ -7,7 +7,7 @@
 <section class="logbook" aria-label="Reception badges">
   <div class="logbook__legend">
     <p>{{ panels.reception_badge() }} First live reception on each instrument.</p>
-    <p>{{ panels.replay_mark() }} Recordings earn this mark only. None yet.</p>
+    <p>{{ panels.replay_mark() }} Seen in a replay of a recording. Never a reception.</p>
   </div>
   <div class="scroll-frame logbook__frame">
     <div class="logbook__entries">
@@ -17,7 +17,13 @@
         <li class="logbook__entry" data-logbook-instrument="{{ stamp.instrument }}">
           <div class="logbook__heading">
             <strong>{{ stamp.label }}</strong>
-            {% if stamp.count %}{{ panels.reception_badge() }}{% else %}<span>Not heard yet</span>{% endif %}
+            {% if stamp.count or stamp.replayed %}
+            <span class="logbook__marks">
+              {% if stamp.count %}{{ panels.reception_badge() }}{% endif %}
+              {% if stamp.replayed %}{{ panels.replay_mark() }}{% endif %}
+            </span>
+            {% endif %}
+            {% if not stamp.count %}<span>{{ "Not heard live yet" if stamp.replayed else "Not heard yet" }}</span>{% endif %}
           </div>
           {% if stamp.count %}
           {% set p = stamp.provenance %}
@@ -34,6 +40,11 @@
           <p>RTL-SDR {{ p.radio.serial or "index " ~ p.radio.index }}</p>
           <p><code>{{ p.command }}</code></p>
           {% endif %}
+          {% endif %}
+          {% if stamp.replayed %}
+          <p>Replayed recordings/{{ stamp.replayed.recording }} · first
+            <time datetime="{{ stamp.first_seen.isoformat() }}">{{ stamp.first_seen.strftime("%Y-%m-%d %H:%M:%S UTC") }}</time>
+            · {{ stamp.replayed.count }}×</p>
           {% endif %}
         </li>
         {% endfor %}

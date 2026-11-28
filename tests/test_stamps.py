@@ -311,7 +311,7 @@ def test_logbook_lists_receivers_and_uses_distinct_marks(tmp_path):
         assert 'class="btn-back" href="/operate"' in html
         assert 'class="logbook-mark logbook-mark--stamp">STAMP<' in html
         assert 'class="logbook-mark logbook-mark--replay">REPLAY<' in html
-        assert "Not heard yet" in html and "None yet" in html
+        assert "Not heard yet" in html and "Seen in a replay of a recording." in html
         assert "433.92 MHz" in html and "receiver-serial" in html and "rtl_433 -d 0" in html
         assert "bridge:4403" in html and '<time datetime="' in html
 

@@ -9,6 +9,13 @@ from pathlib import Path
 
 from render_scroll import connect, fence, leave_page
 
+RENDER_CHECK = {
+    "name": "closing",
+    "pages": ("/lesson/40",),
+    "scratch": False,
+    "order": 120,
+}
+
 REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))

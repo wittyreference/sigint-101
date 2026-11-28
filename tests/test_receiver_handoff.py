@@ -1365,7 +1365,8 @@ def test_console_shutdown_reports_each_unconfirmed_radio_consumer_before_stores_
     def close():
         logged_at_close.append(tuple(caplog.messages))
 
-    state = SimpleNamespace(**dict.fromkeys((*app.SDR_CONSUMERS, "lora", "flock", "rayhunter")))
+    names = (*app.SDR_CONSUMERS, "replay", "lora", "flock", "rayhunter")
+    state = SimpleNamespace(**dict.fromkeys(names))
     state.sweeper, state.aprs, state.ais = map(Consumer, ("sweeper", "aprs", "ais"))
     state.ppm_calibration = Consumer("ppm")
     state.radio_arbiter = radio_control.RadioArbiter()
@@ -1662,7 +1663,8 @@ def test_queued_aprs_claim_does_not_retry_failed_legacy_stop(tmp_path, monkeypat
 @pytest.mark.parametrize("broken", ["sweeper", "ppm"])
 def test_shutdown_owner_probe_failure_does_not_hide_other_owners(broken, caplog):
     reports_at_close = []
-    state = SimpleNamespace(**dict.fromkeys((*app.SDR_CONSUMERS, "lora", "flock", "rayhunter")))
+    names = (*app.SDR_CONSUMERS, "replay", "lora", "flock", "rayhunter")
+    state = SimpleNamespace(**dict.fromkeys(names))
 
     def consumer(name):
         def failure(*, pending=False):
