@@ -508,6 +508,11 @@ class MeteorDecoder(SupervisedReceiver):
             return f"SatDump finisher {result}"
         return f"SatDump {result}; the dongle may still be held"
 
+    def _physical_wait_event(self, run):
+        # The attempt can finish with a failed reap while the dongle is still held.
+        capture, = run.args
+        return capture.handoff_done
+
     def _notify_physical(self, run):
         capture, = run.args
         if run.reaped:

@@ -1482,3 +1482,209 @@ def test_claim_already_queued_does_not_retry_a_failed_stop(tmp_path, monkeypatch
             assert client.get("/api/hardware").json()["state"] == "busy"
         finally:
             proc.code = -9
+
+
+@pytest.mark.parametrize("spawning", [False, True], ids=["live", "spawning"])
+def test_shutdown_only_stops_a_live_or_opening_aprs_child_once(monkeypatch, spawning):
+    spawn_entered, spawn_open, shutdown_waiting = (threading.Event() for _ in range(3))
+    waits = []
+
+    class Proc(Child):
+        def wait(self, timeout=None):
+            waits.append((tuple(self.sent), timeout))
+            return super().wait(timeout)
+
+    proc = Proc(["rtl_fm"], unkillable=True)
+    decoder = _aprs(proc)
+
+    def spawn(*_):
+        spawn_entered.set()
+        assert spawn_open.wait(5)
+        return proc
+
+    if spawning:
+        decoder._spawn = spawn
+    wait_physical = decoder._wait_physical
+
+    def observe_wait(*args):
+        shutdown_waiting.set()
+        return wait_physical(*args)
+
+    monkeypatch.setattr(decoder, "_wait_physical", observe_wait)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as controls:
+            start = controls.submit(decoder.start)
+            try:
+                if spawning:
+                    assert spawn_entered.wait(3)
+                else:
+                    start.result(timeout=5)
+                shutdown = controls.submit(decoder.shutdown)
+                assert shutdown_waiting.wait(3)
+            finally:
+                spawn_open.set()
+
+            if spawning:
+                with pytest.raises(aprs.AprsUnavailable, match="receiver start was cancelled"):
+                    start.result(timeout=8)
+            with pytest.raises(aprs.AprsUnavailable, match="survived kill"):
+                shutdown.result(timeout=8)
+
+        run = decoder._run
+        assert run.complete.wait(3)
+        assert proc.sent == ["TERM", "KILL"]
+        assert [sent for sent, _ in waits] == [("TERM",), ("TERM", "KILL")]
+        assert sum(budget for _, budget in waits) <= receiver_lifecycle.PHYSICAL_WAIT_S == 7
+        assert run.reap_failed and not run.reaped
+    finally:
+        proc.code = -9
+
+
+@pytest.mark.parametrize("control", ["stop", "release", "retune", "shutdown"])
+def test_control_during_periodic_retry_keeps_its_own_ticket(monkeypatch, control):
+    # Advance only the lifecycle clock, leaving Event.wait and the child wait budgets real.
+    now = [10.0]
+    monkeypatch.setattr(receiver_lifecycle, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    timer_waiting, periodic_waiting, time_out, control_waiting = (
+        threading.Event() for _ in range(4)
+    )
+    waits = []
+
+    class Proc(Child):
+        def wait(self, timeout=None):
+            waits.append((len(self.sent), timeout))
+            if len(self.sent) == 3:
+                periodic_waiting.set()
+                assert time_out.wait(5)
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return super().wait(timeout)
+
+    proc = Proc(["rtl_fm"], unkillable=True)
+    decoder = _aprs(proc)
+    decoder.start()
+    run = decoder._run
+    wait_timer = run.retry_wake.wait
+
+    def observe_timer(timeout):
+        timer_waiting.set()
+        return wait_timer(timeout)
+
+    monkeypatch.setattr(run.retry_wake, "wait", observe_timer)
+    decoder.stop()
+    wait_physical = decoder._wait_physical
+
+    def observe_control(run, intent, ticket):
+        assert ticket is not None
+        control_waiting.set()
+        return wait_physical(run, intent, ticket)
+
+    monkeypatch.setattr(decoder, "_wait_physical", observe_control)
+    action = (lambda: decoder.retune(145_000_000)) if control == "retune" else (
+        getattr(decoder, control))
+    try:
+        assert timer_waiting.wait(3)
+        now[0] += 30
+        run.retry_wake.set()
+        assert periodic_waiting.wait(3)
+        with ThreadPoolExecutor(max_workers=1) as controls:
+            request = controls.submit(action)
+            try:
+                assert control_waiting.wait(3)
+                assert not request.done()
+                proc.unkillable = False
+            finally:
+                time_out.set()
+            request.result(timeout=5)
+
+        assert proc.sent == ["TERM", "KILL", "KILL", "KILL"]
+        assert run.reaped and decoder.release_failure(pending=True) is None
+        budget = decoder.STOP_WAIT_S if control == "shutdown" else (
+            receiver_lifecycle.REAP_RETRY_WAIT_S)
+        assert [phase for phase, _ in waits] == [1, 2, 3, 4]
+        assert 0 < waits[-1][1] <= budget
+    finally:
+        time_out.set()
+        proc.code = -9
+        monkeypatch.setattr(decoder, "_wait_physical", wait_physical)
+        _finish_fault_fake(decoder)
+
+
+@pytest.mark.parametrize("owner", ["sweeper", "decoder"])
+def test_queued_aprs_claim_does_not_retry_failed_legacy_stop(tmp_path, monkeypatch, owner):
+    queued, proceed = threading.Event(), threading.Event()
+    proc = Child(unkillable=True)
+    receiver = (Sweeper(spawn=lambda *_: proc, radio_present=lambda: True)
+                if owner == "sweeper" else _sensors(lambda *_: proc))
+    launched = []
+
+    def spawn_aprs(*_):
+        launched.append(Child())
+        return launched[-1]
+
+    def aprs_factory():
+        return aprs.AprsDecoder(spawn=spawn_aprs, radio_present=lambda: True, which=lambda t: t)
+
+    with _client(tmp_path, probe=_present, aprs_factory=aprs_factory,
+                 **{f"{owner}_factory": lambda: receiver}) as client:
+        receiver.start()
+        arbiter = client.app.state.radio_arbiter
+        reserve = arbiter.reserve
+
+        @contextmanager
+        def queued_reservation(*args):
+            queued.set()
+            assert proceed.wait(5)
+            with reserve(*args):
+                yield
+
+        monkeypatch.setattr(arbiter, "reserve", queued_reservation)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as claims:
+                claim = claims.submit(client.get, "/api/aprs")
+                try:
+                    assert queued.wait(3)
+                    receiver.stop()
+                    assert proc.sent == ["TERM", "KILL"]
+                    reason = receiver.release_failure()
+                    assert reason is not None
+                finally:
+                    proceed.set()
+                response = claim.result(timeout=5)
+            assert response.status_code == 503 and response.json()["reason"] == reason
+            assert proc.sent == ["TERM", "KILL"]
+            assert not launched
+            assert client.get("/api/hardware").json()["state"] == "busy"
+        finally:
+            proc.code = -9
+
+
+@pytest.mark.parametrize("broken", ["sweeper", "ppm"])
+def test_shutdown_owner_probe_failure_does_not_hide_other_owners(broken, caplog):
+    reports_at_close = []
+    state = SimpleNamespace(**dict.fromkeys((*app.SDR_CONSUMERS, "lora", "flock", "rayhunter")))
+
+    def consumer(name):
+        def failure(*, pending=False):
+            assert pending == (name != "ppm")
+            if name == broken:
+                raise OSError("ownership probe failed")
+            return "still releasing the radio"
+
+        return SimpleNamespace(stop=lambda: None, release_failure=failure)
+
+    state.sweeper, state.decoder = consumer("sweeper"), consumer("decoder")
+    state.ppm_calibration = consumer("ppm")
+    state.radio_arbiter = radio_control.RadioArbiter()
+    state.reception_sink = radio_control.ReceptionSink()
+    state.progress = state.exam_store = SimpleNamespace(
+        close=lambda: reports_at_close.append(tuple(caplog.messages)))
+    errors = asyncio.run(app.shutdown_console_state(state))
+
+    assert len(reports_at_close) == 2
+    expected = {f"{name}: still releasing the radio" for name in ("sweeper", "decoder", "ppm")
+                if name != broken}
+    expected.add(f"{broken}: radio ownership could not be confirmed (ownership probe failed)")
+    assert set(errors) == expected
+    for lines in reports_at_close:
+        assert all(f"console shutdown: {entry}" in lines for entry in expected)

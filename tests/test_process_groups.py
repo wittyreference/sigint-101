@@ -381,10 +381,11 @@ def _foreign_reapers(source, *, childproc_source=False):
         if isinstance(node, ast.Call) and node not in allowed:
             name, dot, suffix = ast.unparse(node.func).partition(".")
             call = names.get(name, name) + dot + suffix
+            arguments = (*node.args, *(keyword.value for keyword in node.keywords))
             if (call in forbidden or call.endswith((".set_child_watcher", ".get_child_watcher"))
                     or (call == "signal.signal" and any(
                         isinstance(arg, (ast.Name, ast.Attribute))
-                        and ast.unparse(arg).split(".")[-1] == "SIGCHLD" for arg in node.args))):
+                        and ast.unparse(arg).split(".")[-1] == "SIGCHLD" for arg in arguments))):
                 yield node.lineno
 
 
@@ -405,6 +406,7 @@ def test_sigint101_has_no_reaper_outside_group_popen():
     "from asyncio import create_subprocess_exec as spawn; spawn()",
     "import asyncio; asyncio.get_event_loop_policy().set_child_watcher(watcher)",
     "import signal; signal.signal(signal.SIGCHLD, signal.SIG_IGN)",
+    "import signal; signal.signal(signalnum=signal.SIGCHLD, handler=signal.SIG_IGN)",
     "class GroupPopen:\n def poll(self): return os.waitpid(-1, 0)",
     "class GroupPopen:\n def _exit_pending(self): return os.waitid(os.P_PID, self.pid, os.WEXITED)",
 ])

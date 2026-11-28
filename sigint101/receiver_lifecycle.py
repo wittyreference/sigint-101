@@ -263,28 +263,30 @@ class SupervisedReceiver:
     def _request_retry(self, run):
         # Called under _life. Keep the ticket sticky even if the supervisor has not
         # entered its retry loop, and coalesce controls while its attempt is in flight.
-        if (run and not run.reaped and not run.ready.is_set()
-                and (run.reap_failed or self._closing)):
+        if run and run.reap_failed and not run.reaped and not run.ready.is_set():
             if run.retry_done is None:
                 run.retry_done = threading.Event()
             run.retry_wake.set()
             return run.retry_done
 
-    def _ack_retry(self, run):
+    def _ack_retry(self, run, ticket):
         with self._life:
-            if run.retry_done is not None:
-                run.retry_done.set()
+            if ticket is not None and run.retry_done is ticket:
+                ticket.set()
                 run.retry_done = None
 
     def _fence(self, run):
         self._runs.end(run.watch, expected=run.number)
+
+    def _physical_wait_event(self, run):
+        return run.physical
 
     def _wait_physical(self, run, intent, retry=None):
         deadline = time.monotonic() + PHYSICAL_WAIT_S
         if intent and intent.done.wait(max(0, deadline - time.monotonic())) and intent.run:
             run, retry = intent.run, intent.run.retry_done
         if run:
-            (retry or run.physical).wait(max(0, deadline - time.monotonic()))
+            (retry or self._physical_wait_event(run)).wait(max(0, deadline - time.monotonic()))
         return run
 
     def release_failure(self, *, pending=False):
@@ -407,8 +409,6 @@ class SupervisedReceiver:
                 if cancelled:
                     run.cancel.set()
                     self._fence(run)
-                    if self._closing:
-                        self._request_retry(run)
                 if self._read is not None and launch_failure is None:
                     run.reader = daemon(self._read_run, run,
                                         name=f"sigint101-{self.watch.tool}-reader")
@@ -585,7 +585,6 @@ class SupervisedReceiver:
                 run.reaped = True
                 run.failure = None
                 self._notify_physical(run)
-                self._ack_retry(run)
             if reaped and result.error is None and (ended or run.preserve_drain):
                 try:
                     self._drain_reader(run)
@@ -606,7 +605,6 @@ class SupervisedReceiver:
             self._notify_physical(run)
             if reaped:
                 run.failure = None
-                self._ack_retry(run)
         try:
             if not run.reaped:
                 self._retry(run)
@@ -667,14 +665,20 @@ class SupervisedReceiver:
 
     def _retry(self, run):
         deadline = time.monotonic() + REAP_RETRY_MIN_S
-        while not run.reaped:
+        while True:
             with self._life:
-                requested, closing = run.retry_done is not None, self._closing
+                ticket, closing = run.retry_done, self._closing
+                if run.reaped:
+                    # A control queued during a successful periodic reap can finish now.
+                    self._ack_retry(run, ticket)
+                    return
+                if closing and ticket is None:
+                    # Close admission before leaving, so a later control cannot queue a ticket.
+                    run.ready.set()
+                    return
                 run.retry_wake.clear()
-            if closing and not requested:
-                return
             now = time.monotonic()
-            if not requested and now < deadline:
+            if ticket is None and now < deadline:
                 run.retry_wake.wait(deadline - now)
                 continue
             if now >= deadline:
@@ -685,7 +689,7 @@ class SupervisedReceiver:
             except Exception as exc:
                 run.failure = f"{run.watch.tool} cleanup retry failed: {exc}"
             finally:
-                self._ack_retry(run)
+                self._ack_retry(run, ticket)
 
     def _report(self, run):
         """Streaming receivers already report each item from their reader."""

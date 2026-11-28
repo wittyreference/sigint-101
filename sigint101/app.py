@@ -548,12 +548,17 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
 
     def report_owners():
         reasons = []
-        for name in SDR_CONSUMERS:
-            failure = getattr(getattr(state, name), "release_failure", None)
-            if failure is not None and (reason := failure(pending=True)):
+        for name in (*SDR_CONSUMERS, "ppm"):
+            try:
+                if name == "ppm":
+                    reason = state.ppm_calibration.release_failure()
+                else:
+                    failure = getattr(getattr(state, name), "release_failure", None)
+                    reason = failure(pending=True) if failure is not None else None
+            except Exception as exc:  # noqa: BLE001
+                reason = f"radio ownership could not be confirmed ({exc})"
+            if reason:
                 reasons.append(f"{name}: {reason}")
-        if reason := state.ppm_calibration.release_failure():
-            reasons.append(f"ppm: {reason}")
         for reason in reasons:
             logger.error("console shutdown: %s", reason)
         reported_owners.update(reasons)

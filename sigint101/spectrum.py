@@ -597,6 +597,12 @@ class Sweeper:
         """True while the dongle has been handed to another program on purpose."""
         return self._released
 
+    def release_for_claim(self) -> None:
+        """Stand down without retrying a failed stop under a radio reservation."""
+        with self._life:
+            if self.release_failure() is None:
+                self.release()
+
     def release(self) -> None:
         """Hand the dongle to another program and stay off it until resumed.
 
