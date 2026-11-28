@@ -39,17 +39,41 @@
     return clean.strongest != null ? clean.strongest + "%" : "—";
   }
 
-  function summary(row) {
+  // The summary in two parts: the SSID names, which may be cut short on screen, and the "+N",
+  // hidden and open counts after them, which never are. names + tail is the whole summary.
+  function summaryParts(row) {
     var clean = envelopeRow(row);
-    var parts = [];
-    if (clean.ssids.length) {
-      var shown = clean.ssids.slice(0, 2).join(", ");
-      if (clean.ssids.length > 2) shown += ", +" + (clean.ssids.length - 2);
-      parts.push(shown);
-    }
-    if (clean.hidden > 0) parts.push(clean.hidden + " hidden");
-    if (clean.open > 0) parts.push(clean.open + " open");
-    return parts.length ? parts.join(" · ") : "(no SSID)";
+    var names = clean.ssids.slice(0, 2).join(", ");
+    var counts = [];
+    if (clean.hidden > 0) counts.push(clean.hidden + " hidden");
+    if (clean.open > 0) counts.push(clean.open + " open");
+    var tail = clean.ssids.length > 2 ? ", +" + (clean.ssids.length - 2) : "";
+    if (counts.length) tail += (names ? " · " : "") + counts.join(" · ");
+    if (!names && !tail) names = "(no SSID)";
+    return { names: names, tail: tail };
+  }
+
+  function summary(row) {
+    var parts = summaryParts(row);
+    return parts.names + parts.tail;
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  // One census row's markup. The names span shrinks with an ellipsis; the tail span never does.
+  function rowHtml(row) {
+    var parts = summaryParts(row);
+    return '<span class="decoder__model">' + escapeHtml(channelLabel(row)) + "</span>" +
+      '<span class="decoder__mod">' + escapeHtml(countLabel(row)) + "</span>" +
+      '<span class="decoder__read">' +
+        '<span class="census__names">' + escapeHtml(parts.names) + "</span>" +
+        '<span class="census__tail">' + escapeHtml(parts.tail) + "</span>" +
+      "</span>" +
+      '<span class="decoder__tone">' + escapeHtml(signalLabel(row)) + "</span>";
   }
 
   function badgeState(body) {
@@ -94,6 +118,8 @@
       countLabel: countLabel,
       signalLabel: signalLabel,
       summary: summary,
+      summaryParts: summaryParts,
+      rowHtml: rowHtml,
       badgeState: badgeState,
       emptyMessage: emptyMessage,
       pollAnswer: pollAnswer,
@@ -108,12 +134,6 @@
   var RETRY_MS = 5000;     // when no Wi-Fi radio is ready, poll gently until one appears
   var stopped = false;
 
-  function esc(value) {
-    var div = document.createElement("div");
-    div.textContent = value == null ? "" : String(value);
-    return div.innerHTML;
-  }
-
   function render(panel, body) {
     var list = panel.querySelector("[data-survey-list]");
     var empty = panel.querySelector("[data-survey-empty]");
@@ -123,11 +143,7 @@
     rows.forEach(function (row) {
       var li = document.createElement("li");
       li.className = "decoder__item";
-      li.innerHTML =
-        '<span class="decoder__model">' + esc(channelLabel(row)) + "</span>" +
-        '<span class="decoder__mod">' + esc(countLabel(row)) + "</span>" +
-        '<span class="decoder__read">' + esc(summary(row)) + "</span>" +
-        '<span class="decoder__tone">' + esc(signalLabel(row)) + "</span>";
+      li.innerHTML = rowHtml(row);
       list.appendChild(li);
     });
     if (body && body.cached === true) {
