@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
 import threading
 import time
+import uuid
+import weakref
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,9 +64,202 @@ DEFAULT_OUTPUT_DIR = "data/sstv"
 # sstv prints exactly this, then the mode's name, when it locks onto a transmission.
 _MODE_PREFIX = "Detected SSTV mode "
 
+_log = logging.getLogger(__name__)
+
+# Each decoder stages in a subfolder of the staging folder that it owns, named by a random uuid4
+# and held under an exclusive flock on the lock file inside it for as long as the decoder lives.
+# The lock, not any file name, says whether the owner is gone. A subfolder is only ever given its
+# owner's name once its lock is held, so no sweep can find it unlocked while its owner is alive.
+_OWNER_NAME = re.compile(r"[0-9a-f]{32}")
+_OWNER_LOCK = ".owner.lock"
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_SHARED_WRITE = stat.S_IWGRP | stat.S_IWOTH
+
 
 class SstvUnavailable(RuntimeError):
     """The SSTV stream cannot be read. Never a reason to emit a placeholder — gallery stays bare."""
+
+
+class _UntrustedStaging(OSError):
+    """A staging folder or subfolder this console cannot identify as its own to clean."""
+
+
+def _require_private_dir(info: os.stat_result, what: str) -> None:
+    if not stat.S_ISDIR(info.st_mode):
+        raise _UntrustedStaging(f"the {what} is not a directory")
+    if info.st_uid != os.geteuid():
+        raise _UntrustedStaging(f"the {what} belongs to another account")
+    if info.st_mode & _SHARED_WRITE:
+        raise _UntrustedStaging(f"the {what} is writable by other accounts")
+
+
+def _open_staging(parent: Path, staging_name: str, gallery_name: str) -> int:
+    """Open the staging folder by descriptor and prove it is this account's, not the gallery.
+
+    The data folder is the configured root and is opened as given. Below it nothing is followed:
+    the gallery and the staging folder are each opened relative to the root's descriptor, and the
+    staging folder is compared with the gallery by the descriptors' own fstat.
+    """
+    root = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        gallery_fd = os.open(gallery_name, _DIR_FLAGS, dir_fd=root)
+        try:
+            gallery = os.fstat(gallery_fd)
+        finally:
+            os.close(gallery_fd)
+        try:
+            os.mkdir(staging_name, 0o700, dir_fd=root)
+        except FileExistsError:
+            pass
+        fd = os.open(staging_name, _DIR_FLAGS, dir_fd=root)
+        try:
+            info = os.fstat(fd)
+            if os.path.samestat(info, gallery) or os.path.samestat(info, os.fstat(root)):
+                raise _UntrustedStaging("the staging folder is the gallery or the data folder")
+            if info.st_mode & _SHARED_WRITE and info.st_uid == os.geteuid():
+                # Earlier versions made it under the umask. It is this account's: close it.
+                os.fchmod(fd, stat.S_IMODE(info.st_mode) & ~_SHARED_WRITE)
+                info = os.fstat(fd)
+            _require_private_dir(info, "staging folder")
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(root)
+    return fd
+
+
+def _empty_owned(staging_fd: int, name: str, sub_fd: int, sub_info: os.stat_result) -> None:
+    """Remove a subfolder whose lock this caller holds: its entries, its lock, then itself.
+
+    Every entry belongs to the subfolder's owner. unlink never follows a link, so a symlink goes as
+    a link and its target stays. A nested directory is not entered: it stays, and so do the lock
+    and the subfolder, which a later sweep tries again.
+    """
+    left = False
+    for entry in os.listdir(sub_fd):
+        if entry == _OWNER_LOCK:
+            continue
+        try:
+            os.unlink(entry, dir_fd=sub_fd)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            left = True
+    if left:
+        return
+    os.unlink(_OWNER_LOCK, dir_fd=sub_fd)
+    # rmdir removes only an empty directory, and only the one this descriptor opened.
+    if os.path.samestat(os.stat(name, dir_fd=staging_fd, follow_symlinks=False), sub_info):
+        os.rmdir(name, dir_fd=staging_fd)
+
+
+def _sweep_retired(staging_fd: int, name: str) -> None:
+    """Remove one subfolder of the staging folder if its owner is gone: its lock is free."""
+    sub_fd = os.open(name, _DIR_FLAGS, dir_fd=staging_fd)
+    try:
+        sub_info = os.fstat(sub_fd)
+        _require_private_dir(sub_info, f"staging subfolder {name}")
+        # O_NONBLOCK: a FIFO in the lock's place must not hold up the console's start.
+        lock_fd = os.open(_OWNER_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                          dir_fd=sub_fd)
+        try:
+            lock = os.fstat(lock_fd)
+            if not stat.S_ISREG(lock.st_mode) or lock.st_uid != os.geteuid():
+                raise _UntrustedStaging(f"the lock in staging subfolder {name} is not this "
+                                        "account's regular file")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return  # Its owner, or a stage of its owner's, is alive.
+            if not os.path.samestat(
+                    os.stat(_OWNER_LOCK, dir_fd=sub_fd, follow_symlinks=False), lock):
+                return  # Another sweep retired it first.
+            _empty_owned(staging_fd, name, sub_fd, sub_info)
+        finally:
+            os.close(lock_fd)
+    finally:
+        os.close(sub_fd)
+
+
+def _close_all(fds: tuple) -> None:
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+class _StagingOwner:
+    """One decoder's own staging subfolder, held under its flock until the decoder retires.
+
+    The descriptors close when the owner is retired or garbage-collected, which frees the lock
+    unless a pipeline stage that inherited it is still running.
+    """
+
+    def __init__(self, staging_fd: int, name: str, sub_fd: int, lock_fd: int):
+        self.staging_fd = staging_fd
+        self.name = name
+        self.sub_fd = sub_fd
+        self.lock_fd = lock_fd
+        self.sub_info = os.fstat(sub_fd)
+        self._close = weakref.finalize(self, _close_all, (lock_fd, sub_fd, staging_fd))
+
+    @classmethod
+    def create(cls, parent: Path, staging_name: str, gallery_name: str) -> _StagingOwner:
+        staging_fd = _open_staging(parent, staging_name, gallery_name)
+        name = uuid.uuid4().hex
+        pending = f".new-{name}"
+        sub_fd = lock_fd = None
+        try:
+            os.mkdir(pending, 0o700, dir_fd=staging_fd)
+            sub_fd = os.open(pending, _DIR_FLAGS, dir_fd=staging_fd)
+            lock_fd = os.open(_OWNER_LOCK, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                              | os.O_CLOEXEC, 0o600, dir_fd=sub_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.rename(pending, name, src_dir_fd=staging_fd, dst_dir_fd=staging_fd)
+            return cls(staging_fd, name, sub_fd, lock_fd)
+        except BaseException:
+            if lock_fd is not None:
+                _close_all((lock_fd,))
+                try:
+                    os.unlink(_OWNER_LOCK, dir_fd=sub_fd)
+                except OSError:
+                    pass
+            if sub_fd is not None:
+                _close_all((sub_fd,))
+            try:
+                os.rmdir(pending, dir_fd=staging_fd)
+            except OSError:
+                pass
+            _close_all((staging_fd,))
+            raise
+
+    def sweep(self) -> None:
+        """Remove every other subfolder whose owner is gone. Live owners' locks cannot be taken."""
+        for name in os.listdir(self.staging_fd):
+            if name == self.name or not _OWNER_NAME.fullmatch(name):
+                continue
+            try:
+                _sweep_retired(self.staging_fd, name)
+            except FileNotFoundError:
+                pass  # Retired by another sweep, or never an owner's.
+            except OSError as exc:
+                _log.warning("SSTV left staging subfolder %s in place: %s", name, exc)
+
+    def inherited_lock(self) -> int | None:
+        """A duplicate of the lock for one launch to hand its stages, or None once retired."""
+        return os.dup(self.lock_fd) if self._close.alive else None
+
+    def retire(self, *, clean: bool) -> None:
+        """Release the lock; first remove the subfolder when nothing of it can still be in use."""
+        try:
+            if clean and self._close.alive:
+                _empty_owned(self.staging_fd, self.name, self.sub_fd, self.sub_info)
+        except OSError as exc:
+            _log.warning("SSTV could not remove its staging subfolder %s: %s", self.name, exc)
+        finally:
+            self._close()
 
 
 @dataclass(frozen=True)
@@ -122,16 +320,20 @@ def pipeline_commands(freq_hz: int, device: int, output_path,
     return [rtl_fm, sox, sstv]
 
 
-def _popen(freq_hz: int, device: int, output_path):
-    """Launch rtl_fm|sox|sstv so sstv decodes a picture into output_path, printing its mode."""
+def _popen(freq_hz: int, device: int, output_path, *, pass_fds=()):
+    """Launch rtl_fm|sox|sstv so sstv decodes a picture into output_path, printing its mode.
+
+    Every stage inherits `pass_fds`: the decoder's staging lock, so a stage that outlives the
+    console keeps the capture's staging subfolder from being swept.
+    """
     rtl_cmd, sox_cmd, sstv_cmd = pipeline_commands(freq_hz, device, output_path)
-    rtl_fm = spawn(rtl_cmd, stdout=subprocess.PIPE)
+    rtl_fm = spawn(rtl_cmd, stdout=subprocess.PIPE, pass_fds=pass_fds)
     sox = None
     try:
-        sox = spawn(sox_cmd, stdin=rtl_fm.stdout, stdout=subprocess.PIPE)
+        sox = spawn(sox_cmd, stdin=rtl_fm.stdout, stdout=subprocess.PIPE, pass_fds=pass_fds)
         # The detected mode comes on stdout. Drop the progress bar on stderr.
         sstv = spawn(sstv_cmd, stdin=sox.stdout, stdout=subprocess.PIPE,
-                     stderr=subprocess.DEVNULL, text=True)
+                     stderr=subprocess.DEVNULL, text=True, pass_fds=pass_fds)
     except (OSError, ValueError) as exc:
         started = rtl_fm if sox is None else Pipeline(rtl_fm, sox, finite=True)
         raise PartialLaunch(started, exc) from exc
@@ -155,7 +357,7 @@ class SstvDecoder(SupervisedReceiver):
 
     EOF_WAIT_S = DEFAULT_CAPTURE_S
 
-    def __init__(self, *, freq_hz=DEFAULT_SSTV_HZ, device=0, spawn=_popen,
+    def __init__(self, *, freq_hz=DEFAULT_SSTV_HZ, device=0, spawn=None,
                  output_dir=DEFAULT_OUTPUT_DIR, data_dir=None,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None,
                  clock=time.time):
@@ -167,9 +369,12 @@ class SstvDecoder(SupervisedReceiver):
         self._discard_dir = self._staging_dir / ".discard"
         self._staged_cleanup: set[Path] = set()
         self._staging_lock = threading.Lock()
+        # This decoder's own staging subfolder, made at its first launch; retired at shutdown.
+        self._owner: _StagingOwner | None = None
+        self._owner_retired = False
         self.data_dir = Path(data_dir) if data_dir is not None else self.output_dir.parent
         self._list_devices = list_devices
-        self._spawn = spawn
+        self._spawn = spawn if spawn is not None else self._spawn_pipeline
         self._which = which
         self._clock = clock
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
@@ -203,14 +408,14 @@ class SstvDecoder(SupervisedReceiver):
             raise SstvUnavailable(str(exc)) from exc
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            self._staging_dir.mkdir(parents=True, exist_ok=True)
+            owned = self._staging_dir / self._own_staging().name
             with self._staging_lock:
                 cleanup = self._staged_cleanup.copy()
             # Entries only get here by moving the exact owned file after a confirmed reap.
             cleanup.update(self._discard_dir.glob("*.png"))
             for path in cleanup:
                 self._remove_staged(path)
-            capture = self._allocate_capture(self._clock(), number, freq_hz)
+            capture = self._allocate_capture(self._clock(), number, freq_hz, owned)
         except (OSError, ValueError) as exc:
             raise SstvUnavailable(f"cannot stage the SSTV capture: {exc}") from exc
 
@@ -224,7 +429,57 @@ class SstvDecoder(SupervisedReceiver):
 
         return launch, (capture, radio)
 
-    def _allocate_capture(self, received_at: float, run: int, freq_hz: int) -> _Capture:
+    def _own_staging(self) -> _StagingOwner:
+        """This decoder's staging subfolder. The first call makes it, then sweeps retired ones."""
+        with self._staging_lock:
+            if self._owner_retired:
+                raise SstvUnavailable("SSTV has shut down")
+            if self._owner is None:
+                try:
+                    owner = _StagingOwner.create(self._staging_dir.parent,
+                                                 self._staging_dir.name, self.output_dir.name)
+                except OSError as exc:
+                    # Never fall back to paths: no subfolder, no sweep, and no capture.
+                    _log.warning("SSTV staging cleanup aborted: %s", exc)
+                    raise
+                # Under this decoder's own lock, so its subfolder is never a candidate.
+                owner.sweep()
+                self._owner = owner
+            return self._owner
+
+    def _spawn_pipeline(self, freq_hz, device, output_path):
+        """Launch the real pipeline. Each stage inherits this decoder's staging lock."""
+        with self._staging_lock:
+            lock = self._owner.inherited_lock() if self._owner is not None else None
+        try:
+            return _popen(freq_hz, device, output_path, pass_fds=() if lock is None else (lock,))
+        finally:
+            if lock is not None:
+                os.close(lock)
+
+    def shutdown(self):
+        """Stop as every receiver does, then retire this decoder's staging subfolder.
+
+        Only a shutdown that reaped and reported every run removes the subfolder. Otherwise its
+        files stay and the lock is released: a later console sweeps them once no stage holds it.
+        """
+        clean = False
+        try:
+            super().shutdown()
+            clean = True
+        finally:
+            with self._staging_lock:
+                owner, self._owner = self._owner, None
+                self._owner_retired = True
+                cleanup = self._staged_cleanup.copy()
+            if clean:
+                for path in cleanup:
+                    self._remove_staged(path)
+            if owner is not None:
+                owner.retire(clean=clean)
+
+    def _allocate_capture(self, received_at: float, run: int, freq_hz: int,
+                          owned: Path) -> _Capture:
         """Give this writer a sortable stem distinct from earlier runs and saved files."""
         stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(received_at))
         millis = int((received_at % 1) * 1000)
@@ -233,7 +488,7 @@ class SstvDecoder(SupervisedReceiver):
         while True:
             stem = base if suffix == 0 else f"{base}-{suffix}"
             published = self.output_dir / f"{stem}.png"
-            staged = self._staging_dir / published.name
+            staged = owned / published.name
             paths = (staged, staged.with_suffix(".json"), published, published.with_suffix(".json"),
                      self._discard_dir / staged.name)
             if not any(os.path.lexists(path) for path in paths):
@@ -304,8 +559,8 @@ class SstvDecoder(SupervisedReceiver):
             self._discard_aborted(capture.staged_path)
             return
         if run.exit_code != 0:
-            with self._staging_lock:
-                self._staged_cleanup.add(capture.staged_path)
+            # The reap is confirmed, so this exact file is retired: discard it now.
+            self._discard_aborted(capture.staged_path)
             return
         if not run.diagnosed.wait(receiver_lifecycle.DIAGNOSTIC_WAIT_S):
             # The reap is confirmed and clean, so the picture may still publish with the fault.

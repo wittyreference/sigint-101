@@ -477,7 +477,8 @@ def test_sstv_aborted_or_failed_capture_discards_its_picture(capture_files, exit
         child.die(exit_code)
     child.close_pipe()
     dec.stop()
-    assert staged.exists() is (exit_code is not None)
+    # A reaped failed exit is discarded at once, as an aborted capture is (C58).
+    assert not staged.exists()
     assert dec.images() == []
     assert heard == []
     if exit_code is not None:
@@ -785,7 +786,8 @@ def test_sstv_settle_diagnostic_error_sweeps_only_its_confirmed_reaped_capture(
         assert not staged.exists()
         assert len(dec.images()) == 1
     else:
-        assert staged.exists()
+        # Only an unconfirmed reap keeps the file; a reaped nonzero exit is discarded (C58).
+        assert staged.exists() is (outcome != "nonzero")
         assert heard == []
         assert links == []
         assert dec.images() == []
@@ -817,7 +819,7 @@ def test_sstv_settle_diagnostic_error_sweeps_only_its_confirmed_reaped_capture(
                 "status": 0, "reason": "diagnostics failed",
             }
     elif outcome == "nonzero":
-        assert staged in dec._staged_cleanup
+        assert staged not in dec._staged_cleanup
         with pytest.raises(SstvUnavailable, match="exit status 9.*diagnostics failed"):
             dec.start()
         assert not staged.exists()
