@@ -9,14 +9,14 @@ from render_scroll import connect
 
 THEMES = ("dark", "sunlight", "red-night")
 
-# Longest real command shape (SSTV pipeline, sstv.py:106-122), injected only in the browser DOM
-# for layout measurement; the page never serves it.
+# Longest real command shape (SSTV + satdump/multimon hyphenated flags), injected only in the
+# browser DOM for layout and wrap verification; the page never serves it.
 LONG_COMMAND_SAMPLE = (
     "rtl_fm -M fm -f 437550000 -s 48000 -g 49 -d 0 - | "
     "sox -t raw -r 48000 -e signed-integer -b 16 -c 1 - -t wav "
     "/tmp/sstv-capture-20261128T000000.wav trim 0 120 | "
-    "sstv -d /tmp/sstv-capture-20261128T000000.wav "
-    "-o /var/lib/sigint101/data/sstv/20261128T000000-000-r1.png"
+    "satdump live noaa_apt --source rtlsdr --samplerate 1024000 | "
+    "multimon-ng -t raw -a POCSAG512 -o /var/lib/sigint101/data/sstv/20261128T000000-000-r1.png"
 )
 
 RACK_FIELD = """
@@ -48,11 +48,18 @@ function measureFieldPage(expectedTheme, longCmd) {
   const last = list?.querySelector('.field__entry:last-child');
   if (!app || !back || !list || !firstEntry || !last) return null;
 
-  // Inject the longest real command shape into a row for wrap/width verification only.
+  // Inject the longest real command shape using the template's .field__tok token spans.
   const probe = document.createElement('p');
   probe.className = 'field__cmd';
   const code = document.createElement('code');
-  code.textContent = longCmd;
+  const tokens = longCmd.split(' ');
+  tokens.forEach((tok, idx) => {
+    if (idx > 0) code.appendChild(document.createTextNode(' '));
+    const span = document.createElement('span');
+    span.className = 'field__tok';
+    span.textContent = tok;
+    code.appendChild(span);
+  });
   probe.appendChild(code);
   firstEntry.appendChild(probe);
 
@@ -69,6 +76,19 @@ function measureFieldPage(expectedTheme, longCmd) {
   const noOverflow = list.scrollWidth <= list.clientWidth &&
                      firstEntry.scrollWidth <= firstEntry.clientWidth &&
                      probe.scrollWidth <= probe.clientWidth;
+  // Every hyphenated token shorter than the row stays on one line box (never splits after '-'),
+  // and code.textContent stays byte-identical to the command string.
+  const rowWidth = probe.clientWidth;
+  let noSplitHyphens = code.textContent === longCmd;
+  for (const span of code.querySelectorAll('.field__tok')) {
+    if (!span.textContent.includes('-')) continue;
+    const range = document.createRange();
+    range.selectNodeContents(span);
+    const rects = range.getClientRects();
+    if (rects.length > 1 && span.getBoundingClientRect().width < rowWidth - 1) {
+      noSplitHyphens = false;
+    }
+  }
   const backBefore = inViewport(back);
   list.scrollTop = list.scrollHeight;
   const end = last.getBoundingClientRect().bottom;
@@ -82,6 +102,7 @@ function measureFieldPage(expectedTheme, longCmd) {
     scrolls,
     lastVisible,
     noOverflow,
+    noSplitHyphens,
     bodyPx,
     codePx,
   };
@@ -134,6 +155,7 @@ def main(console):
             page_ok = (measures.get("theme") == theme and measures.get("doc") == [800, 480]
                        and measures.get("back") and measures.get("scrolls")
                        and measures.get("lastVisible") and measures.get("noOverflow")
+                       and measures.get("noSplitHyphens") is True
                        and measures.get("bodyPx", 0) >= 18 and measures.get("codePx", 0) >= 18)
             failed |= verdict(page_ok, f"field {theme}", measures)
         return int(failed)

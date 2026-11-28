@@ -33,7 +33,7 @@
             <time datetime="{{ row.when.isoformat() }}">{{ row.when.strftime("%Y-%m-%d %H:%M:%S UTC") }}</time>
           </p>
           {% endif %}
-          <p class="field__cmd"><code>{{ row.command }}</code></p>
+          <p class="field__cmd"><code>{% for tok in row.command.split(" ") %}{% if not loop.first %} {% endif %}<span class="field__tok">{{ tok }}</span>{% endfor %}</code></p>
           {% else %}
           <p class="field__prompt">{{ row.prompt }}</p>
           {% endif %}

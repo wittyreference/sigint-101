@@ -894,3 +894,64 @@ globalThis.window = {{ fetch: origFetch }};
 """
     node_proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
     assert node_proc.returncode == 0, node_proc.stdout + node_proc.stderr
+
+
+RACK_FIELD_FITS = {
+    "doc": [800, 480],
+    "target": [76, 72],
+    "visible": True,
+    "titleUnclipped": True,
+}
+FIELD_PAGE_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "scrolls": True,
+    "lastVisible": True,
+    "noOverflow": True,
+    "noSplitHyphens": True,
+    "bodyPx": 18,
+    "codePx": 18,
+}
+
+
+def _field_pages(*, page_defect=None, rack_defect=None):
+    pages = {}
+    for theme in THEMES:
+        rack = {**RACK_FIELD_FITS, "theme": theme}
+        page = {**FIELD_PAGE_FITS, "theme": theme}
+        if theme == "red-night":
+            rack.update(rack_defect or {})
+            page.update(page_defect or {})
+        pages[f"measureRackField({json.dumps(theme)})"] = rack
+        pages[f"measureFieldPage({json.dumps(theme)},"] = page
+    return pages
+
+
+def test_field_render_checks_rack_and_page_including_no_split_hyphens(devtools):
+    port = devtools(_field_pages())
+    proc = run(FIELD, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - rack-field-ism dark",
+        "VERDICT: PASS - rack-field-waterfall dark",
+        "VERDICT: PASS - field dark",
+        "VERDICT: PASS - rack-field-ism sunlight",
+        "VERDICT: PASS - rack-field-waterfall sunlight",
+        "VERDICT: PASS - field sunlight",
+        "VERDICT: PASS - rack-field-ism red-night",
+        "VERDICT: PASS - rack-field-waterfall red-night",
+        "VERDICT: PASS - field red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"noSplitHyphens": False},
+    {"noOverflow": False},
+    {"bodyPx": 17},
+    {"codePx": 17},
+])
+def test_field_render_fails_on_split_hyphen_overflow_or_small_font(devtools, defect):
+    port = devtools(_field_pages(page_defect=defect))
+    proc = run(FIELD, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - field red-night"

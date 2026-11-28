@@ -1193,6 +1193,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 sweeper.start()
             except SpectrumUnavailable:
                 pass
+            else:
+                _started("spectrum", {"command": sweeper.live_command(),
+                                      "command_from": "process"})
         return sweeper.reading()
 
     def _snapshot():
@@ -1560,7 +1563,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 detector.start()
             except FlockUnavailable as exc:
                 return _refused("flock", exc, {"detections": []}, detector.watch)
-            tool = getattr(detector, "tool", None) or rack_instrument("flock").tool
+            tool = getattr(detector, "tool", None)
             _started("flock", {"interface": detector.interface, "tool": tool,
                                 "command": detector.live_command(), "command_from": "process"})
         return {

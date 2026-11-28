@@ -48,7 +48,10 @@ def _row_html(html: str, key: str) -> str:
 
 
 def _codes(fragment: str) -> list[str]:
-    return [unescape(m) for m in re.findall(r"<code\b[^>]*>(.*?)</code>", fragment, re.S)]
+    return [
+        unescape(re.sub(r"<[^>]+>", "", m))
+        for m in re.findall(r"<code\b[^>]*>(.*?)</code>", fragment, re.S)
+    ]
 
 
 class _LiveStub:
@@ -122,7 +125,8 @@ def _all_start_routes(tmp_path):
     """The 12 command-backed API routes with real decoders backed by Child fakes."""
     items = [
         ("spectrum", "/api/spectrum", "sweeper_factory",
-         lambda: Sweeper(spawn=lambda cmd: Child(cmd), radio_present=_present)),
+         lambda: Sweeper(spawn=lambda cmd: Child([*cmd, "--from-the-child"]),
+                         radio_present=_present)),
     ]
     for path, factory_kw, build, _key, kind in ROUTES:
         argv = [kind, "--sample-flag", "1"]
@@ -152,7 +156,8 @@ def test_rows_match_all_17_instruments_in_order_and_never_run_shows_prompt(tmp_p
     assert SERVICE_STOP in html
     assert SERVICE_START in html
 
-    # All 12 command rows show their tool, the prompt line, and no <code>.
+    # All 12 command rows show their tool, the prompt line, honest chip, and no <code>.
+    assert "Not run yet" not in html
     sentence_keys = {"lora", "rayhunter", "flipper", "clock", "health"}
     for inst in INSTRUMENTS:
         row = _row_html(html, inst.key)
@@ -160,6 +165,7 @@ def test_rows_match_all_17_instruments_in_order_and_never_run_shows_prompt(tmp_p
         assert expected_label in unescape(row)
         if inst.key not in sentence_keys:
             assert inst.tool in unescape(row)
+            assert "No command on record" in unescape(row)
             assert PROMPT_LINE in unescape(row).lower()
             assert _codes(row) == []
 
@@ -289,11 +295,17 @@ def test_every_command_route_logs_live_command_and_command_from_process(tmp_path
             assert resp.status_code == 200, (kind, resp.text)
             live_cmd = resp.json()["command"]
             assert live_cmd, f"{kind} returned empty live command"
+            if kind == "spectrum":
+                # F1: live child argv must differ from settings-rebuilt sweeper.command().
+                assert "--from-the-child" in live_cmd
+                assert live_cmd != " ".join(client.app.state.sweeper.command())
         starts = [e for e in read_events(run_dir / "events.jsonl") if e["kind"] == f"{kind}_start"]
         assert len(starts) == 1, (kind, starts)
         payload = starts[0]["payload"]
         assert payload["command"] == live_cmd, kind
         assert payload["command_from"] == "process", kind
+        if kind == "spectrum":
+            assert "--from-the-child" in payload["command"]
         if kind == "flock":
             assert payload["tool"] == "tcpdump"
 
@@ -534,3 +546,92 @@ def test_rack_views_link_to_field_card(tmp_path):
             assert resp.status_code == 200
             assert 'href="/field"' in resp.text
             assert "FIELD" in resp.text
+
+
+def test_field_command_tokens_are_wrapped_in_field_tok_spans_with_unchanged_text(tmp_path):
+    # F2: hyphenated flags (--samplerate, -t) must sit in inline-block spans so browsers break
+    # between tokens rather than leaving a dangling hyphen at line end, keeping text unchanged.
+    cmd = "satdump live noaa_apt /tmp/out --source rtlsdr --samplerate 1024000 | multimon-ng -t raw"
+    events_path = tmp_path / "events.jsonl"
+    log_event(events_path, "apt_start",
+              {"command": cmd, "command_from": "process"},
+              clock=lambda: 1700000900.0)
+    with _client(tmp_path, **_strict_factories()) as client:
+        html = client.get("/field").text
+
+    row = _row_html(html, "apt")
+    match = re.search(r"<code\b[^>]*>(.*?)</code>", row, re.S)
+    assert match, row
+    inner = match.group(1)
+    spans = re.findall(r'<span class="field__tok">([^<]*)</span>', inner)
+    assert [unescape(s) for s in spans] == cmd.split(" ")
+    assert _codes(row) == [cmd]
+
+    tok_rule = _css_rule(".field__tok")
+    assert "display: inline-block" in tok_rule
+    assert "max-width: 100%" in tok_rule
+    assert "overflow-wrap: anywhere" in tok_rule
+
+
+def test_flock_start_does_not_fabricate_tcpdump_when_detector_has_no_tool(tmp_path):
+    # F4: a Flock detector without a .tool attribute must log tool=None, never "tcpdump",
+    # and /field must refuse untagged Flock start lines.
+    class _UntaggedFlock:
+        interface = "wlan1"
+        watch = type("_Watch", (), {"settling": lambda self: False})()
+
+        def __init__(self):
+            self.running = False
+            self._proc = None
+
+        def start(self):
+            self._proc = Child(["mystery-sniffer", "--iface", "wlan1"])
+            self.running = True
+
+        def live_command(self):
+            return command_line(self._proc) if self.running and self._proc else None
+
+        def detections(self, limit=None):
+            return []
+
+        def stop(self):
+            self.running = False
+
+        def shutdown(self):
+            self.running = False
+
+    with _client(tmp_path, flock_factory=_UntaggedFlock) as client:
+        resp = client.get("/api/flock")
+        assert resp.status_code == 200
+    starts = [e for e in read_events(tmp_path / "events.jsonl") if e["kind"] == "flock_start"]
+    assert len(starts) == 1
+    assert starts[0]["payload"]["tool"] is None
+
+    # Untagged flock_start must NOT match the tcpdump row on /field.
+    with _client(tmp_path, **_strict_factories()) as client:
+        html = client.get("/field").text
+    assert _codes(_row_html(html, "flock")) == []
+
+
+def test_health_view_lazy_sweep_start_logs_spectrum_start_with_live_command(tmp_path):
+    # F6: a sweep lazily started from the Health (/api/provenance) view must log spectrum_start
+    # with the live process command and command_from="process" so /field shows it after stop.
+    sweeper = Sweeper(
+        spawn=lambda cmd: Child([*cmd, "--from-health"]),
+        radio_present=_present,
+    )
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: sweeper) as client:
+        resp = client.get("/api/provenance")
+        assert resp.status_code == 200
+        live_cmd = sweeper.live_command()
+        assert live_cmd and "--from-health" in live_cmd
+        sweeper.stop()
+        html = client.get("/field").text
+
+    starts = [e for e in read_events(tmp_path / "events.jsonl") if e["kind"] == "spectrum_start"]
+    assert len(starts) == 1
+    assert starts[0]["payload"]["command"] == live_cmd
+    assert starts[0]["payload"]["command_from"] == "process"
+    wf_row = _row_html(html, "waterfall")
+    assert "Last run" in wf_row
+    assert _codes(wf_row) == [live_cmd]

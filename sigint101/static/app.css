@@ -3072,6 +3072,11 @@ body {
   font-size: 18px;
   overflow-wrap: anywhere;
 }
+.field__tok {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
 
 /* ===== M5 legal card sort (try stage) ==================================== */
 /* Fits 800x480 with three 80 px choice buttons and a pinned 72 px footer (no page scroll). */

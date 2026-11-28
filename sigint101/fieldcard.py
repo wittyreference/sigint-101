@@ -80,15 +80,16 @@ def _utc_time(ts) -> datetime | None:
         return None
 
 
-def _tool_matches(payload: dict, current_tool: str) -> bool:
+def _tool_matches(payload: dict, current_tool: str, *, require_tool: bool = False) -> bool:
     named = payload.get("tool")
     if named is None or named == "":
-        return True
+        return not require_tool
     return named == current_tool
 
 
 def _latest_logged(events: list, start_kind: str, reception_inst: str | None,
-                   current_tool: str) -> tuple[str, datetime | None] | None:
+                   current_tool: str, *, require_tool: bool = False
+                   ) -> tuple[str, datetime | None] | None:
     """Newest matching real command from events (already ordered oldest first by read_events)."""
     for event in reversed(events):
         if not isinstance(event, dict):
@@ -106,7 +107,7 @@ def _latest_logged(events: list, start_kind: str, reception_inst: str | None,
         )
         if not matched:
             continue
-        if not _tool_matches(payload, current_tool):
+        if not _tool_matches(payload, current_tool, require_tool=require_tool):
             continue
         cmd = _nonblank(payload.get("command"))
         if cmd is not None:
@@ -196,7 +197,9 @@ def build_field_rows(app_state, events: list, stamps: list) -> list[dict]:
             })
             continue
 
-        logged = _latest_logged(events, start_kind, reception_inst, tool)
+        logged = _latest_logged(
+            events, start_kind, reception_inst, tool, require_tool=(inst.key == "flock")
+        )
         if logged is not None:
             cmd, when = logged
             rows.append({
@@ -241,7 +244,7 @@ def build_field_rows(app_state, events: list, stamps: list) -> list[dict]:
             "sentence": None,
             "command": None,
             "state": "prompt",
-            "state_label": "Not run yet",
+            "state_label": "No command on record",
             "when": None,
             "prompt": PROMPT_LINE,
             "note": note,
