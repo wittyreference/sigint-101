@@ -29,6 +29,7 @@ RECALL = REPO / "tools" / "render" / "render_recall.py"
 LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 FIELD = REPO / "tools" / "render" / "render_field.py"
 BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
+CLOSING = REPO / "tools" / "render" / "render_closing.py"
 EVAL = REPO / "tools" / "render" / "render_eval.py"
 CHECK = REPO / "tools" / "render" / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
@@ -182,6 +183,7 @@ class FakeDevTools:
                              b"Connection: Upgrade\r\n\r\n")
                 with self.idle:
                     self.sessions += 1
+                    self.calls.append(("<open>", {}))
                 try:
                     self._websocket(conn, rest)
                 finally:
@@ -563,10 +565,8 @@ def render_make(tmp_path, console_url, devtools, strays):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (
-        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD, BANDMAP
-    ):
-        (screen / script.name).write_text(
+    for name in _runner_check_names():
+        (screen / name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
             "from urllib.request import urlopen\n"
@@ -649,12 +649,12 @@ def _proxy_url(proc):
     "failing",
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name, CLOSING.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails",
+        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails", "closing-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -675,6 +675,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {LIVE_FIND.name} {proxy}",
         f"ran {FIELD.name} {proxy}",
         f"ran {BANDMAP.name} {proxy}",
+        f"ran {CLOSING.name} {proxy}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -717,7 +718,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 11, proc.stdout
+    assert len(urls) == 12, proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -786,6 +787,7 @@ API_TOOLS = {
     "live-find": (LIVE_FIND, ["http://127.0.0.1:9"], {}),
     "field": (FIELD, ["http://127.0.0.1:9"], {}),
     "bandmap": (BANDMAP, ["http://127.0.0.1:9"], {}),
+    "closing": (CLOSING, ["http://127.0.0.1:9"], {}),
 }
 
 
@@ -845,7 +847,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 11, methods
+    assert len(marks) == 12, methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -1043,9 +1045,13 @@ def test_an_unreadable_proc_never_counts_as_the_group_gone(tmp_path, monkeypatch
             os.kill(int(child_pid.read_text()), 9)
 
 
-# The checks make render-check runs, as run_checks names them (the scripts that load pages).
-RUNNER_CHECKS = (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD,
-                 BANDMAP)
+def _runner_check_names(runner=CHECK):
+    """The scripts a runner runs, read from its own check list (render_check.check_list)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"runner_{abs(hash(str(runner)))}", runner)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return [entry[0] for entry in module.check_list("http://127.0.0.1:9", Path("/out"))]
 
 
 def _pages_loaded_from(proxy, calls):
@@ -1058,35 +1064,104 @@ def _pages_loaded_from(proxy, calls):
     return pages
 
 
-def test_every_page_the_real_checks_load_is_walked(render_make):
-    # The real checks, run by the runner against the fake DevTools, navigate to their pages
-    # through the runner's proxy; every one of them must be in the GET guard's walk. Recall
-    # loads its pages from scratch consoles of its own, behind proxies of its own.
+def _coverage_problems(proc, calls, names):
+    """What keeps the route coverage from being whole; empty when it is.
+
+    Every check the runner lists must start (open its DevTools session, in order, after the
+    runner's own) and navigate to at least one page, and every page loaded from the runner's
+    proxy must be in the GET guard's walk. Recall's pages come from scratch consoles of its own,
+    behind proxies of its own, so they count as navigations but not as pages of the target.
+    """
     from tests.render_routes import RENDER_CHECK_PAGES
-    proc = render_make(real=RUNNER_CHECKS, timeout=240)
     proxy, _ = _proxy_url(proc)
-    loaded = _pages_loaded_from(proxy, render_make.calls())
-    assert len(loaded) >= 10, (loaded, proc.stdout[-2000:], proc.stderr[-2000:])
-    assert sorted(loaded - set(RENDER_CHECK_PAGES)) == [], proc.stderr[-2000:]
+    sessions, problems = [], []
+    for method, params in calls:
+        if method == "<open>":
+            sessions.append([])
+        elif sessions:
+            sessions[-1].append((method, params))
+    checks = sessions[1:]          # the first session is the runner's own block
+    if len(checks) != len(names):
+        problems.append(f"{len(checks)} checks started a DevTools session; the runner lists "
+                        f"{len(names)}: {names}")
+    for name, session in zip(names, checks):
+        if not any(method == "Page.navigate" and params.get("url") != "about:blank"
+                   for method, params in session):
+            problems.append(f"{name} navigated to no page")
+    for page in sorted(_pages_loaded_from(proxy, calls) - set(RENDER_CHECK_PAGES)):
+        problems.append(f"{page} is not in the GET walk")
+    return problems
+
+
+def _runner_copy(render_make, edit):
+    """Replace the fixture's runner with a copy of the real one, changed by `edit`."""
+    text = CHECK.read_text(encoding="utf-8")
+    text = text.replace("HERE = Path(__file__).resolve().parent",
+                        f"HERE = Path({str(CHECK.parent)!r})")
+    runner = render_make.screen / "render_check.py"
+    runner.unlink()
+    runner.write_text(edit(text), encoding="utf-8")
+    return runner
+
+
+def _add_check(text, line):
+    old = '        ("render_closing.py", console),\n'
+    assert old in text
+    return text.replace(old, old + line)
+
+
+def test_every_check_the_runner_lists_starts_and_its_pages_are_walked(render_make):
+    # Driven from the runner's own list: each check it names runs for real against the fake
+    # DevTools, must start and navigate, and every page it loads from the target must be walked.
+    names = _runner_check_names()
+    proc = render_make(real=[CHECK.parent / name for name in names], timeout=300)
+    calls = render_make.calls()
+    assert _coverage_problems(proc, calls, names) == [], (proc.stdout[-1500:],
+                                                         proc.stderr[-1500:])
+    assert len(_pages_loaded_from(_proxy_url(proc)[0], calls)) >= 10
 
 
 def test_a_page_the_walk_lacks_is_caught_however_its_url_is_written(render_make):
     # The case that slipped past the source scan: a check given an unwalked page in a single-
     # quoted f-string. Read from the navigations, it is caught.
-    from tests.render_routes import RENDER_CHECK_PAGES
-    runner = render_make.screen / "render_check.py"
-    text = CHECK.read_text(encoding="utf-8")
     old = '("render_fit.py", f"{console}/lesson/29",'
-    assert old in text
-    text = text.replace(old, "(\"render_fit.py\", f'{console}/lesson/28',")
-    text = text.replace("HERE = Path(__file__).resolve().parent",
-                        f"HERE = Path({str(CHECK.parent)!r})")
-    runner.unlink()
-    runner.write_text(text, encoding="utf-8")
+    runner = _runner_copy(render_make, lambda text: text.replace(
+        old, "(\"render_fit.py\", f'{console}/lesson/28',"))
+    names = _runner_check_names(runner)
     proc = render_make(real=(FIT,), timeout=120)
-    proxy, _ = _proxy_url(proc)
-    missing = sorted(_pages_loaded_from(proxy, render_make.calls()) - set(RENDER_CHECK_PAGES))
-    assert missing == ["/lesson/28"], (missing, proc.stdout, proc.stderr)
+    problems = _coverage_problems(proc, render_make.calls(), names)
+    assert "/lesson/28 is not in the GET walk" in problems, (problems, proc.stderr)
+
+
+EXTRA_CHECK = (
+    "import sys\n"
+    "sys.path.insert(0, {real!r})\n"
+    "from render_scroll import connect, fence, leave_page\n"
+    "browser = connect()\n"
+    "browser.call('Page.navigate', {{'url': fence(sys.argv[1] + '/unwalked')}})\n"
+    "leave_page(browser)\n"
+)
+
+
+@pytest.mark.parametrize("present", [True, False], ids=["unwalked-page", "never-started"])
+def test_a_check_added_to_the_runner_is_measured_too(render_make, present):
+    # The case the hand-kept list missed: a new check in the runner. Whether it loads an
+    # unwalked page, or never starts at all, the coverage measure must say so.
+    runner = _runner_copy(render_make, lambda text: _add_check(
+        text, '        ("render_extra.py", console),\n'))
+    if present:
+        (render_make.screen / "render_extra.py").write_text(
+            EXTRA_CHECK.format(real=str(CHECK.parent)), encoding="utf-8")
+    names = _runner_check_names(runner)
+    assert names[-1] == "render_extra.py"
+    # Absent, it is the one check that cannot start, so every other one runs for real.
+    real = () if present else [CHECK.parent / name for name in names[:-1]]
+    proc = render_make(real=real, timeout=300)
+    problems = _coverage_problems(proc, render_make.calls(), names)
+    if present:
+        assert "/unwalked is not in the GET walk" in problems, (problems, proc.stderr)
+    else:
+        assert any("checks started a DevTools session" in p for p in problems), problems
 
 
 def _fake_browser(tmp_path):
@@ -2228,5 +2303,75 @@ def test_bandmap_render_fails_on_layout_or_shape_defects(devtools, kind, defect)
         "VERDICT: FAIL - bandmap home red-night"
         if kind == "home"
         else "VERDICT: FAIL - bandmap red-night"
+    )
+    assert expected in _verdicts(proc)
+
+
+CLOSING_PREDICT_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "chipsFit": True,
+    "commitFit": True,
+    "commitBottom": 477,
+}
+CLOSING_UNSEALED_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "codePx": 18,
+    "noOverflow": True,
+    "cmdVisibleAtTop": True,
+    "noSplitHyphens": True,
+    "operateFoot": True,
+    "observeFoot": True,
+    "explainFoot": True,
+    "completeVisible": True,
+}
+
+
+def _closing_pages(*, predict_defect=None, stages_defect=None):
+    pages = {}
+    for theme in THEMES:
+        pred = {**CLOSING_PREDICT_FITS, "theme": theme}
+        stages = {**CLOSING_UNSEALED_FITS, "theme": theme}
+        if theme == "red-night":
+            pred.update(predict_defect or {})
+            stages.update(stages_defect or {})
+        pages[f"measureClosingPredict({json.dumps(theme)})"] = pred
+        pages[f"measureClosingUnsealed({json.dumps(theme)},"] = stages
+    return pages
+
+
+def test_closing_render_checks_all_stages_in_all_three_themes(devtools):
+    port = devtools(_closing_pages())
+    proc = run(CLOSING, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - closing-predict dark",
+        "VERDICT: PASS - closing-stages dark",
+        "VERDICT: PASS - closing-predict sunlight",
+        "VERDICT: PASS - closing-stages sunlight",
+        "VERDICT: PASS - closing-predict red-night",
+        "VERDICT: PASS - closing-stages red-night",
+    ]
+
+
+@pytest.mark.parametrize("kind, defect", [
+    ("predict", {"chipsFit": False}),
+    ("predict", {"commitFit": False}),
+    ("stages", {"cmdVisibleAtTop": False}),
+    ("stages", {"noSplitHyphens": False}),
+    ("stages", {"noOverflow": False}),
+    ("stages", {"codePx": 17}),
+    ("stages", {"completeVisible": False}),
+])
+def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devtools, kind, defect):
+    kwargs = {f"{kind}_defect": defect}
+    port = devtools(_closing_pages(**kwargs))
+    proc = run(CLOSING, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    expected = (
+        "VERDICT: FAIL - closing-predict red-night"
+        if kind == "predict"
+        else "VERDICT: FAIL - closing-stages red-night"
     )
     assert expected in _verdicts(proc)

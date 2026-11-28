@@ -30,10 +30,22 @@ def console():
     class Console(BaseHTTPRequestHandler):
         def _answer(self):
             hits.append((self.command, self.path))
-            if self.path == "/operate":
-                self.send_response(303)
-                self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}"
-                                             "/operate/waterfall")
+            port = self.server.server_port
+            redirects = {
+                "/operate": (303, f"http://127.0.0.1:{port}/operate/waterfall"),
+                # The same console, spelled another way: case and an explicit default-less port.
+                "/mixed/": (307, f"HTTP://LocalHost:{port}/mixed"),
+                "/relative": (302, "/lesson/1?x=1"),
+                # Elsewhere: another port, another host, another scheme, a sneaky userinfo.
+                "/elsewhere-port": (302, "http://127.0.0.1:9/lesson/1"),
+                "/elsewhere-host": (302, "http://example.invalid/lesson/1"),
+                "/elsewhere-scheme": (302, f"https://127.0.0.1:{port}/lesson/1"),
+                "/elsewhere-protocol-relative": (302, "//example.invalid/x"),
+            }
+            if self.path in redirects:
+                status, location = redirects[self.path]
+                self.send_response(status)
+                self.send_header("Location", location)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
@@ -65,7 +77,7 @@ def _request(proxy, method, path):
     try:
         conn.request(method, path, body=b"x" if method in ("POST", "PUT", "PATCH") else None)
         reply = conn.getresponse()
-        return reply.status, dict(reply.getheaders()), reply.read()
+        return reply.status, reply.headers, reply.read()   # headers: case-insensitive names
     finally:
         conn.close()
 
@@ -110,6 +122,74 @@ def test_every_write_is_refused_with_405(console, method, path):
     assert headers["Allow"] == "GET, HEAD"
     assert b"read only" in body
     assert hits == []
+
+
+@pytest.mark.parametrize("path", ["/API", "/Api/decode", "/aPi/opened?lesson_id=1", "/%41PI/stage",
+                                  "/static/../API/complete", "//ApI/rack/place"])
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_the_api_is_refused_in_any_case(console, path, method):
+    upstream, hits = console
+    proxy = _module("render_proxy").serve_in_thread(upstream)
+    assert _request(proxy, method, path)[0] == 403
+    assert hits == []
+
+
+@pytest.mark.parametrize("method", ["PROPFIND", "MKCOL", "LOCK", "SEARCH", "BREW", "TRACE",
+                                    "CONNECT"])
+def test_any_other_method_gets_405_with_allow(console, method):
+    upstream, hits = console
+    proxy = _module("render_proxy").serve_in_thread(upstream)
+    status, headers, _ = _request(proxy, method, "/lesson/1")
+    assert status == 405
+    assert headers["Allow"] == "GET, HEAD"
+    assert hits == []
+
+
+@pytest.mark.parametrize("path, kept", [("/mixed/", "/mixed"), ("/relative", "/lesson/1?x=1")])
+def test_a_redirect_to_the_same_console_is_kept_on_the_proxy(console, path, kept):
+    # The upstream is addressed in mixed case, as the reviewer's LOCALHOST was; the console's
+    # redirect names it in another case. Either way the browser stays on the proxy.
+    upstream, hits = console
+    port = upstream.rsplit(":", 1)[1]
+    proxy = _module("render_proxy").serve_in_thread(f"http://LOCALHOST:{port}")
+    status, headers, _ = _request(proxy, "GET", path)
+    assert 300 <= status < 400
+    assert headers["Location"] == f"{proxy}{kept}"
+    assert hits == [("GET", path)]
+
+
+@pytest.mark.parametrize("path", ["/elsewhere-port", "/elsewhere-host", "/elsewhere-scheme",
+                                  "/elsewhere-protocol-relative"])
+def test_a_redirect_away_from_the_console_is_refused(console, path):
+    upstream, _ = console
+    proxy = _module("render_proxy").serve_in_thread(upstream)
+    status, headers, body = _request(proxy, "GET", path)
+    assert status == 502
+    assert "Location" not in headers
+    assert b"redirect away from the console" in body
+
+
+def test_the_stock_consoles_slash_redirect_stays_on_the_proxy(tmp_path):
+    # The reviewer's case on the real console: a page asked for with a trailing slash answers
+    # 307 to the same page without it, naming the console's host. With the console addressed in
+    # mixed case, the redirect must still land on the proxy, and following it must reach the
+    # page there; the console must see nothing but those GETs.
+    render_check = _module("render_check")
+    with render_check.scratch_console(tmp_path / "console") as url:
+        port = url.rsplit(":", 1)[1]
+        before = (tmp_path / "console" / "events.jsonl").read_bytes() if (
+            tmp_path / "console" / "events.jsonl").exists() else b""
+        proxy = _module("render_proxy").serve_in_thread(f"http://LOCALHOST:{port}")
+        status, headers, _ = _request(proxy, "GET", "/lesson/29/")
+        assert status == 307, (status, headers)
+        assert headers["Location"].startswith(proxy + "/lesson/29"), headers["Location"]
+        landed = headers["Location"][len(proxy):]
+        assert _request(proxy, "GET", landed)[0] == 200
+        assert _request(proxy, "POST", "/api/opened?lesson_id=29")[0] == 405
+        assert _request(proxy, "GET", "/API/decode")[0] == 403
+        after = (tmp_path / "console" / "events.jsonl").read_bytes() if (
+            tmp_path / "console" / "events.jsonl").exists() else b""
+        assert after == before
 
 
 def _listening(port):

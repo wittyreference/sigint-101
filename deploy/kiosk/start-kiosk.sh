@@ -10,6 +10,8 @@ RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # Exit SIGINT 101 writes this flag before it closes the browser. XDG_RUNTIME_DIR is a tmpfs, so a
 # reboot clears it and the box boots back into the course.
 FLAG="$RUNTIME/sigint101-kiosk-exited"
+# The watchdog holds a flock on this for as long as it runs; install.sh finds it by it.
+LOCK="$RUNTIME/sigint101-kiosk-watch.lock"
 
 usage() {
   echo "usage: $(basename "$0") watch|open" >&2
@@ -21,7 +23,8 @@ wait_for_server() {
   if ! curl -sf "$COURSE_URL/api/hardware" >/dev/null 2>&1; then
     systemctl --user start sigint101.service 2>/dev/null || true
   fi
-  for _ in $(seq 1 60); do
+  # A brace range, not $(seq): no forked shell while the watchdog holds its lock.
+  for _ in {1..60}; do
     curl -sf "$COURSE_URL/api/hardware" >/dev/null 2>&1 && break
     sleep 1
   done
@@ -34,10 +37,15 @@ kiosk_alive() {
 # The output's logical size as WxH, from wlr-randr when it answers (the first enabled output's
 # current mode, divided by its scale, turned for a 90/270 transform), else the reference panel's
 # 800x480. No window list is needed, and the reference box has no tool for one.
+# It sets OUTPUT_SIZE rather than printing, and reads the pipeline's answer back from a file: run
+# under the watchdog's lock, a $(...) subshell would be a forked shell holding the lock's backup
+# for as long as wlr-randr takes, so a watchdog killed meanwhile would keep the next one out.
+OUTPUT_SIZE=""
 output_size() {
-  local size=""
+  local size="" answer="$RUNTIME/sigint101-kiosk-size.$$"
   if command -v wlr-randr >/dev/null 2>&1; then
-    size="$(timeout 5 wlr-randr 2>/dev/null | awk '
+    # -k: a wlr-randr that ignores TERM is killed, so it can never hold up a launch.
+    timeout -k 2 5 wlr-randr 2>/dev/null | awk '
       function emit() {
         if (on && w > 0 && h > 0) {
           if (tr ~ /^(flipped-)?(90|270)$/) { t = w; w = h; h = t }
@@ -52,7 +60,9 @@ output_size() {
       / px, .*current/ { split($1, m, "x"); w = m[1] + 0; h = m[2] + 0 }
       /^[ \t]+Scale:/ { sc = $2 + 0 }
       /^[ \t]+Transform:/ { tr = $2 }
-      END { if (!found) emit() }')"
+      END { if (!found) emit() }' > "$answer" 2>/dev/null
+    read -r size < "$answer" 2>/dev/null || size=""
+    rm -f "$answer"
   fi
   [[ "$size" =~ ^[1-9][0-9]{0,5}x[1-9][0-9]{0,5}$ ]] || size="800x480"
   # A size no screen has (an odd scale, a bad mode) would make a worse window than the panel's own,
@@ -63,7 +73,7 @@ output_size() {
   then
     size="800x480"
   fi
-  printf '%s\n' "$size"
+  OUTPUT_SIZE="$size"
 }
 
 # Chromium restores the window bounds it saved at the last close, and a window that does not go
@@ -122,7 +132,8 @@ launch() {
   local size
   rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonCookie" "$PROFILE/SingletonSocket" 2>/dev/null
   forget_window_placement
-  size="$(output_size)"
+  output_size
+  size="$OUTPUT_SIZE"
   chromium --kiosk --start-fullscreen --ozone-platform=wayland --user-data-dir="$PROFILE" \
     --app="$COURSE_URL" --window-position=0,0 --window-size="${size%x*},${size#*x}" \
     --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
@@ -145,8 +156,33 @@ watch() {
     exit 1
   fi
   # One watchdog per session, however often autostart runs.
-  exec 9>"$RUNTIME/sigint101-kiosk-watch.lock"
-  flock -n 9 || exit 0
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    exec 9>&-
+    echo "sigint101-course: a watchdog is already running (lock $LOCK open in: $(lock_holders));" \
+      "not watching" >&2
+    exit 0
+  fi
+  # Run the loop with fd 9 closed. Bash keeps the lock in a close-on-exec copy of it for the
+  # length of the call, so no command the loop starts (sleep, curl, systemctl, pgrep, Chromium)
+  # inherits it: a killed watchdog's lock dies with it, and the next one can start at once. A
+  # forked shell would keep that copy, so the loop runs no $(...) or other subshell of its own.
+  watch_loop 9>&-
+}
+
+# The processes that have the lock file open, as "PID (name)", for the stand-down message.
+lock_holders() {
+  local fd pid name out=""
+  while IFS= read -r fd; do
+    pid="${fd#/proc/}"
+    pid="${pid%%/*}"
+    name="$(cat "/proc/$pid/comm" 2>/dev/null)"
+    out+="${out:+, }$pid (${name:-gone})"
+  done < <(find /proc/[0-9]*/fd -maxdepth 1 -lname "$LOCK" 2>/dev/null)
+  printf '%s\n' "${out:-none found}"
+}
+
+watch_loop() {
   wait_for_server
   # The loop ends with the session: an orphaned watchdog must not outlive its compositor.
   while [ -S "$RUNTIME/$WAYLAND_DISPLAY" ]; do
