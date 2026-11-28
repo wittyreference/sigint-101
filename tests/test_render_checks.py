@@ -2680,6 +2680,62 @@ def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devto
     assert expected in _verdicts(proc)
 
 
+POWER_NOTICE_OK = {
+    "doc": [800, 480],
+    "roleAlert": True,
+    "initialHidden": True,
+    "countdownOk": True,
+    "failedOk": True,
+    "hiddenAfterClear": True,
+    "aboveFigure": True,
+    "countdownH": 68,
+    "failedH": 88,
+    "noticeTop": 75,
+    "backBottom": 75,
+    "headlinePx": 20,
+    "detailPx": 18,
+}
+
+
+def _power_notice_pages(*, defect=None):
+    pages = {}
+    for theme in THEMES:
+        def _answer(url, t=theme):
+            m = {**POWER_NOTICE_OK, "theme": t}
+            if t == "red-night" and url.endswith("/exam/review/T6C02") and defect:
+                m.update(defect)
+            return m
+        pages[f"measurePowerNotice({json.dumps(theme)},"] = _answer
+    return pages
+
+
+def test_power_notice_render_checks_all_four_screens_in_all_three_themes(devtools):
+    port = devtools(_power_notice_pages())
+    proc = run(render_tool("power_notice"), "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    expected = [
+        f"VERDICT: PASS - power-notice {name} {theme}"
+        for theme in THEMES
+        for name in ("home", "lesson1", "predict29", "figure")
+    ]
+    assert _verdicts(proc) == expected
+
+
+@pytest.mark.parametrize("defect", [
+    {"countdownOk": False},
+    {"failedOk": False},
+    {"hiddenAfterClear": False},
+    {"aboveFigure": False},
+    {"initialHidden": False},
+    {"roleAlert": False},
+])
+def test_power_notice_render_fails_on_banner_or_zindex_defects(devtools, defect):
+    port = devtools(_power_notice_pages(defect=defect))
+    proc = run(render_tool("power_notice"), "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "VERDICT: FAIL - power-notice figure red-night" in _verdicts(proc)
+
+
 METEOR_FITS = {
     "doc": [800, 480],
     "back": True,

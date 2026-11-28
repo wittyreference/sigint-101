@@ -683,8 +683,11 @@ step_power() {
     "$p/__init__.py"
     "$p/battery.py"
     "$p/power.py"
+    "$p/power_desktop.py"
     "$d/sigint101-power.service"
     "$d/sigint101-power"
+    "$d/sigint101-power-notice.service"
+    "$d/sigint101-power-notice"
     "$d/50-sigint101-power.rules"
     "$d/sigint101-power.sysusers.conf"
   )
@@ -709,28 +712,35 @@ step_power() {
   fi
 
   local unit_dst="/usr/local/lib/systemd/system/sigint101-power.service"
-  local unit_existed=0 changed=0 unit_changed=0
+  local unit_existed=0 changed=0 unit_changed=0 notice_changed=0
   # Use cmp -s against itself as an existence check so sysroot cmp stubs redirect it cleanly.
   if cmp -s "$unit_dst" "$unit_dst" 2>/dev/null; then
     unit_existed=1
   fi
 
   local pairs=(
-    "0644|$d/sigint101-power.sysusers.conf|/usr/local/lib/sysusers.d/sigint101-power.conf|power watcher sysusers"
-    "0644|$p/__init__.py|/usr/local/lib/sigint101-power/sigint101/__init__.py|power watcher package init"
-    "0644|$p/battery.py|/usr/local/lib/sigint101-power/sigint101/battery.py|power watcher battery helper"
-    "0644|$p/power.py|/usr/local/lib/sigint101-power/sigint101/power.py|power watcher module"
-    "0755|$d/sigint101-power|/usr/local/bin/sigint101-power|power watcher launcher"
-    "0644|$d/50-sigint101-power.rules|/etc/polkit-1/rules.d/50-sigint101-power.rules|power watcher polkit rule"
-    "0644|$d/sigint101-power.service|$unit_dst|power watcher unit"
+    "0644|$d/sigint101-power.sysusers.conf|/usr/local/lib/sysusers.d/sigint101-power.conf|power watcher sysusers|watcher"
+    "0644|$p/__init__.py|/usr/local/lib/sigint101-power/sigint101/__init__.py|power watcher package init|both"
+    "0644|$p/battery.py|/usr/local/lib/sigint101-power/sigint101/battery.py|power watcher battery helper|watcher"
+    "0644|$p/power.py|/usr/local/lib/sigint101-power/sigint101/power.py|power watcher module|both"
+    "0644|$p/power_desktop.py|/usr/local/lib/sigint101-power/sigint101/power_desktop.py|power desktop notice module|notice"
+    "0755|$d/sigint101-power|/usr/local/bin/sigint101-power|power watcher launcher|watcher"
+    "0755|$d/sigint101-power-notice|/usr/local/bin/sigint101-power-notice|power desktop notice launcher|notice"
+    "0644|$d/50-sigint101-power.rules|/etc/polkit-1/rules.d/50-sigint101-power.rules|power watcher polkit rule|watcher"
+    "0644|$d/sigint101-power.service|$unit_dst|power watcher unit|watcher"
   )
-  local entry mode src dst label
+  local entry mode src dst label owner
   for entry in "${pairs[@]}"; do
-    IFS='|' read -r mode src dst label <<< "$entry"
+    IFS='|' read -r mode src dst label owner <<< "$entry"
     if cmp -s "$src" "$dst" 2>/dev/null; then
       ok "$dst"
     else
-      changed=1
+      if [ "$owner" = "watcher" ] || [ "$owner" = "both" ]; then
+        changed=1
+      fi
+      if [ "$owner" = "notice" ] || [ "$owner" = "both" ]; then
+        notice_changed=1
+      fi
       [ "$dst" != "$unit_dst" ] || unit_changed=1
       apply "install $label ($dst)" sudo install -D -m "$mode" "$src" "$dst"
     fi
@@ -806,7 +816,13 @@ step_power() {
     state="$(systemctl is-enabled sigint101-power.service 2>/dev/null || true)"
     if [ "$state" != "enabled" ]; then
       if [ "$unit_changed" = 1 ]; then
-        apply "reload systemd units" sudo systemctl daemon-reload
+        if [ "$CHECK" = 1 ]; then
+          would "reload systemd units"
+        elif sudo systemctl daemon-reload; then
+          did "reload systemd units"
+        else
+          warn "could not reload systemd units (systemctl daemon-reload failed)"
+        fi
       fi
       skip "sigint101-power.service turned off by the owner (${state:-unknown})"
     elif [ "$changed" = 1 ]; then
@@ -822,6 +838,133 @@ step_power() {
       fi
     else
       ok "sigint101-power.service enabled and up to date"
+    fi
+  fi
+
+  # Learner-session desktop notice: reads /run/sigint101-power/notice.json as the learner so a
+  # user who left the course for the desktop or Terminal still sees the low-battery countdown.
+  local notice_pre_state=""
+  notice_pre_state="$(systemctl --user is-enabled sigint101-power-notice.service 2>/dev/null || true)"
+  if [ "$notice_pre_state" = "masked" ] || [ "$notice_pre_state" = "masked-runtime" ]; then
+    skip "sigint101-power-notice.service turned off by the owner ($notice_pre_state)"
+    return 0
+  fi
+
+  local notice_unit_dst="$HOME/.config/systemd/user/sigint101-power-notice.service"
+  local notice_pending="$HOME/.config/systemd/user/.sigint101-power-notice.enable-pending"
+  local notice_existed=0 notice_unit_changed=0
+  if [ -f "$notice_unit_dst" ]; then
+    notice_existed=1
+  elif [ "$CHECK" = 0 ]; then
+    # Record first-start intent before installing the unit so an interruption mid-install
+    # or mid-enable cannot later look like an owner-disabled unit (F5).
+    mkdir -p "$(dirname "$notice_pending")"
+    touch "$notice_pending"
+  fi
+  if cmp -s "$d/sigint101-power-notice.service" "$notice_unit_dst" 2>/dev/null; then
+    ok "$notice_unit_dst"
+  else
+    notice_changed=1
+    notice_unit_changed=1
+    apply "install power desktop notice unit ($notice_unit_dst)" \
+      install -D -m 0644 "$d/sigint101-power-notice.service" "$notice_unit_dst"
+  fi
+
+  local notice_needs_enable=0
+  local notice_needs_start=0
+  local notice_state=""
+  if [ "$notice_existed" = 0 ]; then
+    notice_needs_enable=1
+  else
+    notice_state="$(systemctl --user is-enabled sigint101-power-notice.service 2>/dev/null || true)"
+    if [ -f "$notice_pending" ]; then
+      if [ "$notice_state" = "enabled" ]; then
+        if systemctl --user is-active --quiet sigint101-power-notice.service 2>/dev/null; then
+          if [ "$CHECK" = 0 ]; then
+            rm -f "$notice_pending"
+          fi
+        else
+          notice_needs_start=1
+        fi
+      else
+        notice_needs_enable=1
+      fi
+    fi
+  fi
+
+  if [ "$notice_needs_enable" = 1 ]; then
+    if [ "$CHECK" = 1 ]; then
+      would "enable and start sigint101-power-notice.service"
+    else
+      if systemctl --user daemon-reload; then
+        did "reload user systemd units"
+      else
+        warn "could not reload user systemd units (systemctl --user daemon-reload failed)"
+      fi
+      if systemctl --user enable --now sigint101-power-notice.service; then
+        rm -f "$notice_pending"
+        did "enable and start sigint101-power-notice.service"
+      else
+        mkdir -p "$(dirname "$notice_pending")"
+        touch "$notice_pending"
+        warn "sigint101-power-notice.service did not start; will retry on the next run (see systemctl --user status sigint101-power-notice)"
+      fi
+    fi
+  elif [ "$notice_needs_start" = 1 ]; then
+    if [ "$CHECK" = 1 ]; then
+      if [ "$notice_unit_changed" = 1 ]; then
+        would "reload user systemd units"
+      fi
+      would "start sigint101-power-notice.service"
+    else
+      if [ "$notice_unit_changed" = 1 ]; then
+        if systemctl --user daemon-reload; then
+          did "reload user systemd units"
+        else
+          warn "could not reload user systemd units (systemctl --user daemon-reload failed)"
+        fi
+      fi
+      if systemctl --user start sigint101-power-notice.service; then
+        rm -f "$notice_pending"
+        did "start sigint101-power-notice.service"
+      else
+        warn "sigint101-power-notice.service did not start; will retry on the next run (see systemctl --user status sigint101-power-notice)"
+      fi
+    fi
+  else
+    if [ "$notice_state" != "enabled" ]; then
+      if [ "$notice_unit_changed" = 1 ]; then
+        if [ "$CHECK" = 1 ]; then
+          would "reload user systemd units"
+        elif systemctl --user daemon-reload; then
+          did "reload user systemd units"
+        else
+          warn "could not reload user systemd units (systemctl --user daemon-reload failed)"
+        fi
+      fi
+      skip "sigint101-power-notice.service turned off by the owner (${notice_state:-unknown})"
+    elif [ "$notice_changed" = 1 ]; then
+      if [ "$CHECK" = 1 ]; then
+        if [ "$notice_unit_changed" = 1 ]; then
+          would "reload user systemd units"
+        fi
+        would "restart sigint101-power-notice.service"
+      else
+        if [ "$notice_unit_changed" = 1 ]; then
+          if systemctl --user daemon-reload; then
+            did "reload user systemd units"
+          else
+            warn "could not reload user systemd units (systemctl --user daemon-reload failed)"
+          fi
+        fi
+        if systemctl --user restart sigint101-power-notice.service; then
+          did "restart sigint101-power-notice.service"
+        else
+          warn "sigint101-power-notice.service did not restart; see systemctl --user status sigint101-power-notice"
+        fi
+      fi
+    else
+      ok "sigint101-power-notice.service enabled and up to date"
     fi
   fi
 }
