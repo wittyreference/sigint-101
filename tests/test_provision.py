@@ -1195,3 +1195,66 @@ def test_step_power_respects_disabled_or_masked_desktop_notice_user_unit(box, tm
         assert "--user restart sigint101-power-notice.service" not in b.calls()
         if state == "masked":
             assert user_unit.read_text(encoding="utf-8") == "# owner copy\n"
+
+
+def test_f5_failed_first_notice_enable_retries_on_next_run_without_blaming_owner(box, tmp_path):
+    """F5: a refused first enable of sigint101-power-notice.service records a pending install and
+    retries on the next run rather than mistaking it for an owner disable."""
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        fail_systemctl_actions=("--user enable --now sigint101-power-notice.service",),
+    )
+    first = box.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    sec1 = _power_section(first.stdout)
+    assert "  WARN   " in sec1 and "sigint101-power-notice.service" in sec1
+    assert "Hand-over hygiene" in first.stdout
+
+    # Restore enable on the next run (unit is still reported disabled until enable succeeds).
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        user_exists=True,
+        fail_systemctl_actions=(),
+    )
+    box.log.write_text("", encoding="utf-8")
+    second = box.run()
+    assert second.returncode == 0, second.stdout + second.stderr
+    sec2 = _power_section(second.stdout)
+    assert "--user enable --now sigint101-power-notice.service" in box.calls()
+    assert "turned off by the owner" not in sec2
+    assert "enable and start sigint101-power-notice.service" in sec2
+
+    # Once the initial enable succeeded, a later disabled state IS attributed to the owner.
+    box.log.write_text("", encoding="utf-8")
+    third = box.run()
+    assert third.returncode == 0, third.stdout + third.stderr
+    sec3 = _power_section(third.stdout)
+    assert "sigint101-power-notice.service turned off by the owner" in sec3
+    assert "--user enable --now sigint101-power-notice.service" not in box.calls()
+
+
+def test_f6_refused_user_daemon_reload_on_disabled_update_warns_and_continues(box, tmp_path):
+    """F6: updating a disabled user unit when `systemctl --user daemon-reload` fails warns and
+    lets the rest of provision.sh finish."""
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        user_exists=True,
+        fail_systemctl_actions=("--user daemon-reload",),
+    )
+    user_unit = box.home / ".config/systemd/user/sigint101-power-notice.service"
+    user_unit.parent.mkdir(parents=True, exist_ok=True)
+    user_unit.write_text("# older unit copy\n", encoding="utf-8")
+
+    res = box.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    sec = _power_section(res.stdout)
+    assert "  WARN   " in sec and "daemon-reload" in sec
+    assert "Meshtastic LoRa defaults" in res.stdout
+    assert "Stock Recon pieces" in res.stdout
+    assert "Hand-over hygiene" in res.stdout

@@ -86,3 +86,74 @@ test("zero-second retry renders RETRYING NOW", () => {
     "LOW BATTERY · AUTOMATIC POWER-OFF FAILED · RETRYING NOW · SAVE AND SHUT DOWN NOW",
   );
 });
+
+test("F2: superseded late reply cannot resurrect a cleared warning", () => {
+  const ctrl = p.createPowerNoticeController({ lifetimeMs: 15000 });
+  const seq1 = ctrl.startPoll();
+  const seq2 = ctrl.startPoll();
+
+  // Newer poll delivers inactive -> clears banner.
+  const v2 = ctrl.applyReply(seq2, { active: false }, 1000);
+  assert.equal(v2.visible, false);
+
+  // Older held poll arrives late with a failed countdown -> MUST be ignored!
+  const v1 = ctrl.applyReply(
+    seq1,
+    { active: true, failed: true, retry_in_s: 42, voltage: 9.18, threshold_v: 9.5 },
+    1500,
+  );
+  assert.equal(v1, null);
+  assert.equal(ctrl.renderAt(1500).visible, false);
+});
+
+test("F2: monotonic countdown advances during unanswered polls and drops past lifetime", () => {
+  const ctrl = p.createPowerNoticeController({ lifetimeMs: 15000 });
+  const seq1 = ctrl.startPoll();
+  const initial = ctrl.applyReply(
+    seq1,
+    { active: true, failed: true, retry_in_s: 15, voltage: 9.18, threshold_v: 9.5 },
+    1000,
+  );
+  assert.equal(initial.visible, true);
+  assert.equal(initial.failed, true);
+  assert.match(initial.headline, /RETRYING IN 15 s/);
+
+  // 5 s later with failed/unanswered polls: countdown advances monotonically to 10 s.
+  const seq2 = ctrl.startPoll();
+  const at5 = ctrl.applyError(seq2, 6000);
+  assert.equal(at5.visible, true);
+  assert.match(at5.headline, /RETRYING IN 10 s/);
+
+  // 15 s later (at lifetime boundary): countdown reaches 0 s.
+  const at15 = ctrl.renderAt(16000);
+  assert.equal(at15.visible, true);
+  assert.match(at15.headline, /RETRYING NOW/);
+
+  // 24 s later (past 15 s lifetime with no fresh reply): keep warning, drop countdown, say status
+  // cannot be read.
+  const at24 = ctrl.renderAt(25000);
+  assert.equal(at24.visible, true);
+  assert.equal(at24.failed, true);
+  assert.doesNotMatch(at24.headline, /RETRYING IN \d+ s|RETRYING NOW/);
+  assert.match(at24.headline + " " + at24.detail, /status.*unreadable|cannot read/i);
+
+  // Non-failed countdown behaves the same when replies stop arriving.
+  const ctrl2 = p.createPowerNoticeController({ lifetimeMs: 15000 });
+  const s1 = ctrl2.startPoll();
+  ctrl2.applyReply(
+    s1,
+    { active: true, failed: false, remaining_s: 30, voltage: 9.21, threshold_v: 9.5 },
+    1000,
+  );
+  assert.match(ctrl2.renderAt(7000).headline, /POWERING OFF IN 24 s/);
+  const expired = ctrl2.renderAt(20000);
+  assert.equal(expired.visible, true);
+  assert.equal(expired.failed, false);
+  assert.doesNotMatch(expired.headline, /POWERING OFF IN \d+ s|POWERING OFF NOW/);
+  assert.match(expired.headline + " " + expired.detail, /status.*unreadable|cannot read/i);
+
+  // Fresh inactive reply clears the expired warning cleanly.
+  const s2 = ctrl2.startPoll();
+  const cleared = ctrl2.applyReply(s2, { active: false }, 21000);
+  assert.equal(cleared.visible, false);
+});

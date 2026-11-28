@@ -13,7 +13,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .power import DEFAULT_NOTICE_PATH, NOTICE_POLL_S, read_power_notice
+from .power import DEFAULT_NOTICE_PATH, NOTICE_POLL_S, _to_finite_float, read_power_notice
 
 LOGGER = logging.getLogger("sigint101.power_desktop")
 
@@ -23,6 +23,7 @@ NOTIFY_TIMEOUT_S = 5.0
 NOTIFY_EXPIRE_MS = 6000  # Refreshed every 2 s; auto-expires cleanly if notifier crashes.
 
 _UINT32_RE = re.compile(r"\buint32\s+(\d+)\b")
+_BUSCTL_U_RE = re.compile(r"^\s*u\s+(\d+)\s*$")
 
 
 def format_desktop_notice(notice: dict | None) -> tuple[str, str] | None:
@@ -32,19 +33,16 @@ def format_desktop_notice(notice: dict | None) -> tuple[str, str] | None:
     failed = notice.get("failed")
     if not isinstance(failed, bool):
         return None
-    voltage = notice.get("voltage")
-    threshold_v = notice.get("threshold_v")
+    voltage = _to_finite_float(notice.get("voltage"))
+    threshold_v = _to_finite_float(notice.get("threshold_v"))
     volts = (
-        f"Pack {float(voltage):.2f} V (limit {float(threshold_v):.2f} V). "
-        if isinstance(voltage, (int, float))
-        and not isinstance(voltage, bool)
-        and isinstance(threshold_v, (int, float))
-        and not isinstance(threshold_v, bool)
+        f"Pack {voltage:.2f} V (limit {threshold_v:.2f} V). "
+        if voltage is not None and threshold_v is not None
         else ""
     )
     if failed:
-        retry = notice.get("retry_in_s")
-        if not isinstance(retry, (int, float)) or isinstance(retry, bool):
+        retry = _to_finite_float(notice.get("retry_in_s"))
+        if retry is None:
             return None
         sec = max(0, int(retry))
         when = "RETRYING NOW" if sec == 0 else f"RETRYING IN {sec} s"
@@ -52,8 +50,8 @@ def format_desktop_notice(notice: dict | None) -> tuple[str, str] | None:
         body = f"Automatic power-off failed. {volts}Save your work and shut down now."
         return summary, body
 
-    rem = notice.get("remaining_s")
-    if not isinstance(rem, (int, float)) or isinstance(rem, bool):
+    rem = _to_finite_float(notice.get("remaining_s"))
+    if rem is None:
         return None
     sec = max(0, int(rem))
     when = "POWERING OFF NOW" if sec == 0 else f"POWERING OFF IN {sec} s"
@@ -169,51 +167,36 @@ class GdbusNotifier:
             LOGGER.warning("gdbus CloseNotification failed: %s", exc)
 
 
-class NotifySendNotifier:
-    """Fallback desktop notifier using notify-send when gdbus is unavailable."""
+class BusctlNotifier:
+    """Close-capable fallback notifier using systemd's busctl over the user session D-Bus."""
 
-    def __init__(self, *, notify_send_bin: str, runner=subprocess.run):
-        self._bin = notify_send_bin
+    def __init__(self, *, busctl_bin: str, runner=subprocess.run):
+        self._busctl = busctl_bin
         self._runner = runner
         self._notify_id: int = 0
-        self._supports_replace = True
 
     def show(self, summary: str, body: str, *, failed: bool) -> bool:
-        base_cmd = [
-            self._bin,
-            "--urgency=critical",
-            f"--app-name={APP_NAME}",
-            f"--icon={NOTIFY_ICON}",
-            f"--expire-time={NOTIFY_EXPIRE_MS}",
+        cmd = [
+            self._busctl,
+            "--user",
+            "call",
+            "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
+            "susssasa{sv}i",
+            APP_NAME,
+            str(self._notify_id),
+            NOTIFY_ICON,
+            summary,
+            body,
+            "0",
+            "1",
+            "urgency",
+            "y",
+            "2",
+            str(NOTIFY_EXPIRE_MS),
         ]
-        if self._supports_replace:
-            cmd = [*base_cmd, "--print-id"]
-            if self._notify_id > 0:
-                cmd.append(f"--replace-id={self._notify_id}")
-            cmd.extend(["--", summary, body])
-            try:
-                res = self._runner(
-                    cmd,
-                    check=False,
-                    timeout=NOTIFY_TIMEOUT_S,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    close_fds=True,
-                    env=_session_env(),
-                )
-            except (OSError, subprocess.SubprocessError) as exc:
-                LOGGER.warning("notify-send failed: %s", exc)
-                return False
-            if res.returncode == 0:
-                out = (res.stdout or "").strip()
-                if out.isdigit():
-                    self._notify_id = int(out)
-                return True
-            # Older libnotify lacks --replace-id / --print-id; retry once without them.
-            self._supports_replace = False
-
-        cmd = [*base_cmd, "--", summary, body]
         try:
             res = self._runner(
                 cmd,
@@ -226,24 +209,64 @@ class NotifySendNotifier:
                 env=_session_env(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            LOGGER.warning("notify-send fallback failed: %s", exc)
+            LOGGER.warning("busctl notify failed: %s", exc)
             return False
-        return res.returncode == 0
+        if res.returncode != 0:
+            LOGGER.warning(
+                "busctl notify exited %d: %s",
+                res.returncode,
+                (res.stderr or res.stdout or "").strip(),
+            )
+            return False
+        match = _BUSCTL_U_RE.match(res.stdout or "")
+        if match:
+            self._notify_id = int(match.group(1))
+        return True
 
     def clear(self) -> None:
+        if self._notify_id <= 0:
+            return
+        nid = self._notify_id
         self._notify_id = 0
+        cmd = [
+            self._busctl,
+            "--user",
+            "call",
+            "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "CloseNotification",
+            "u",
+            str(nid),
+        ]
+        try:
+            self._runner(
+                cmd,
+                check=False,
+                timeout=NOTIFY_TIMEOUT_S,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                close_fds=True,
+                env=_session_env(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOGGER.warning("busctl CloseNotification failed: %s", exc)
 
 
 class NullNotifier:
-    """Log-only fallback when neither gdbus nor notify-send is installed."""
+    """Log-only fallback when no close-capable freedesktop transport (gdbus/busctl) is installed."""
 
     def __init__(self):
         self._warned = False
 
     def show(self, summary: str, body: str, *, failed: bool) -> bool:
         if not self._warned:
-            LOGGER.warning("no desktop notification tool (gdbus/notify-send) found: %s — %s",
-                           summary, body)
+            LOGGER.warning(
+                "no close-capable desktop notification transport (gdbus/busctl) found: %s — %s",
+                summary,
+                body,
+            )
             self._warned = True
         return False
 
@@ -252,13 +275,13 @@ class NullNotifier:
 
 
 def build_notifier():
-    """Choose the best available learner-session notification backend."""
+    """Choose a close-capable learner-session freedesktop notification backend (gdbus or busctl)."""
     gdbus = shutil.which("gdbus")
     if gdbus:
         return GdbusNotifier(gdbus_bin=gdbus)
-    notify_send = shutil.which("notify-send")
-    if notify_send:
-        return NotifySendNotifier(notify_send_bin=notify_send)
+    busctl = shutil.which("busctl")
+    if busctl:
+        return BusctlNotifier(busctl_bin=busctl)
     return NullNotifier()
 
 

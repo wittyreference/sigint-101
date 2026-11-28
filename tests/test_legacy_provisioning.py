@@ -85,28 +85,28 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "usr/local/lib/sigint101-power/sigint101/battery.py",
         "33e91635e86833a459f812bcadb51a90337734779c7d5e7d221fec0b08562451",
     ),
-    # Safe shutdown slice 2b: low-battery watcher; lifts slice 2a arming lock (still ships
-    # disarmed until /etc/sigint101/power.conf sets a threshold) and adds format_power_notice.
+    # Safe shutdown slice 2b (round 3 F1/F3): watcher reads /etc/sigint101/power.conf directly
+    # (rejecting duplicate threshold lines and ignoring env vars) and validates notice invariants.
     (
         "sigint101/power.py",
         "sysroot",
         "usr/local/lib/sigint101-power/sigint101/power.py",
-        "77aeb2084f307e4358a410c329ed22ae14ef8af814781ca340e62873537f6c51",
+        "f74b88bcc52704bf6a04a35bd5a2f1179b9ab6334b8325eab5e1c45d7cb3e66b",
     ),
-    # Safe shutdown slice 2b: learner-session desktop notice consumer reading notice.json only.
+    # Safe shutdown slice 2b (round 3 F4): desktop notice uses close-capable gdbus/busctl D-Bus.
     (
         "sigint101/power_desktop.py",
         "sysroot",
         "usr/local/lib/sigint101-power/sigint101/power_desktop.py",
-        "5f1cc2090729cc134dec4d22785a677e947f708c543f8ec305356918859225c9",
+        "356014cea2e6e43eaaa7c0dc2599bb6bc93e1f35a3db7baa2e4442438ca215a6",
     ),
-    # Safe shutdown slice 2a (round 2 F2): hardened non-root unit installed under
-    # /usr/local/lib/systemd/system so owner masks in /etc/systemd/system work and win.
+    # Safe shutdown slice 2b (round 3 F1): hardened non-root unit under /usr/local/lib/systemd/
+    # system without EnvironmentFile (watcher reads power.conf itself).
     (
         "deploy/system/sigint101-power.service",
         "sysroot",
         "usr/local/lib/systemd/system/sigint101-power.service",
-        "b63f4ea7d457355c1c082c2075c27b8b6f60e5ba6718f9b562607d240df71d2a",
+        "fc0d643bcedde97b8a85be3f8cbd26c0f6e8a7485588e659e876d8ce68bf0c81",
     ),
     # Safe shutdown slice 2a: self-locating python3 -I launcher for the power watcher.
     (
@@ -416,8 +416,16 @@ class StatefulLegacyBox:
             "LANG": "C.UTF-8",
         }
         notice_path = self.sysroot / "run" / "sigint101-power" / "notice.json"
+        missing_conf = self.sysroot / "etc" / "sigint101" / "power.conf"
         proc = subprocess.run(
-            [str(launcher), "--startup-only", "--notice-path", str(notice_path)],
+            [
+                str(launcher),
+                "--startup-only",
+                "--config-path",
+                str(missing_conf),
+                "--notice-path",
+                str(notice_path),
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -429,11 +437,39 @@ class StatefulLegacyBox:
         assert "battery.py sha256=" in combined, combined
         assert "disarmed (unset)" in combined, combined
 
-        # Out-of-range threshold also stays disarmed without touching I2C or polkit.
-        bad_env = {**env, "SIGINT101_POWER_THRESHOLD_V": "96"}
+        # Environment variable with no power.conf NEVER arms (F1).
+        env_only = {**env, "SIGINT101_POWER_THRESHOLD_V": "9.50"}
+        proc_env = subprocess.run(
+            [
+                str(launcher),
+                "--startup-only",
+                "--config-path",
+                str(missing_conf),
+                "--notice-path",
+                str(notice_path),
+            ],
+            env=env_only,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert proc_env.returncode == 0, (proc_env.stdout, proc_env.stderr)
+        combined_env = proc_env.stdout + proc_env.stderr
+        assert "disarmed (unset)" in combined_env and "armed at" not in combined_env, combined_env
+
+        # Out-of-range threshold in power.conf also stays disarmed without touching I2C or polkit.
+        bad_conf = self.root / "bad-power.conf"
+        bad_conf.write_text("SIGINT101_POWER_THRESHOLD_V=96\n", encoding="utf-8")
         proc_bad = subprocess.run(
-            [str(launcher), "--startup-only", "--notice-path", str(notice_path)],
-            env=bad_env,
+            [
+                str(launcher),
+                "--startup-only",
+                "--config-path",
+                str(bad_conf),
+                "--notice-path",
+                str(notice_path),
+            ],
+            env=env,
             capture_output=True,
             text=True,
             timeout=15,

@@ -21,6 +21,8 @@ from .battery import V_FULL, BatteryReading, ConversionNotReadyError, INA219Conf
 LOGGER = logging.getLogger("sigint101.power")
 
 DEFAULT_NOTICE_PATH = Path("/run/sigint101-power/notice.json")
+DEFAULT_CONFIG_PATH = Path("/etc/sigint101/power.conf")
+CONFIG_MAX_BYTES = 16384
 ENV_THRESHOLD_V = "SIGINT101_POWER_THRESHOLD_V"
 ENV_RECOVER_V = "SIGINT101_POWER_RECOVER_V"
 
@@ -123,6 +125,106 @@ def parse_recover_v(raw: str | None) -> tuple[float, str]:
     return value, ""
 
 
+def _strip_matching_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
+def load_power_config(
+    path: Path = DEFAULT_CONFIG_PATH,
+) -> tuple[float | None, str, float, list[str]]:
+    """Read /etc/sigint101/power.conf directly; never arm on absent, malformed, or duplicate keys.
+
+    Returns (threshold_v, disarmed_reason, recover_v, diagnostics).
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None, "unset", 0.0, []
+    except OSError as exc:
+        msg = f"cannot read config {path}: {exc}"
+        return None, msg, 0.0, [msg]
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            msg = f"config {path} is not a regular file"
+            return None, msg, 0.0, [msg]
+        if st.st_size > CONFIG_MAX_BYTES:
+            msg = f"config {path} exceeds {CONFIG_MAX_BYTES} bytes"
+            return None, msg, 0.0, [msg]
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, CONFIG_MAX_BYTES + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > CONFIG_MAX_BYTES:
+                msg = f"config {path} exceeds {CONFIG_MAX_BYTES} bytes"
+                return None, msg, 0.0, [msg]
+    except OSError as exc:
+        msg = f"cannot read config {path}: {exc}"
+        return None, msg, 0.0, [msg]
+    finally:
+        os.close(fd)
+
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        msg = f"config {path} is not valid UTF-8: {exc}"
+        return None, msg, 0.0, [msg]
+
+    threshold_values: list[str] = []
+    recover_values: list[str] = []
+    diagnostics: list[str] = []
+
+    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if "=" not in line:
+            diagnostics.append(f"{path}:{lineno}: ignoring malformed line (missing '=')")
+            continue
+        raw_key, raw_val = line.split("=", 1)
+        key = raw_key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        val = _strip_matching_quotes(raw_val.strip())
+        if key == ENV_THRESHOLD_V:
+            threshold_values.append(val)
+        elif key == ENV_RECOVER_V:
+            recover_values.append(val)
+
+    recover_v = 0.0
+    if len(recover_values) > 1:
+        diagnostics.append(
+            f"duplicate {ENV_RECOVER_V} assignments ({len(recover_values)}) in {path}; using 0.0 V"
+        )
+    elif len(recover_values) == 1:
+        recover_v, recover_warn = parse_recover_v(recover_values[0])
+        if recover_warn:
+            diagnostics.append(recover_warn)
+
+    if len(threshold_values) == 0:
+        return None, "unset", recover_v, diagnostics
+    if len(threshold_values) > 1:
+        msg = (
+            f"duplicate {ENV_THRESHOLD_V} assignments ({len(threshold_values)}) in {path}; "
+            "refusing to arm"
+        )
+        diagnostics.append(msg)
+        return None, msg, recover_v, diagnostics
+
+    threshold_v, reason = parse_threshold(threshold_values[0])
+    if threshold_v is None and reason != "unset":
+        diagnostics.append(reason)
+    return threshold_v, reason, recover_v, diagnostics
+
+
 def adc_time_s(code: int) -> float:
     """Return TI SBOS448G Table 5 typical conversion time (seconds) for a 4-bit ADC code."""
     return _ADC_CONVERSION_TIME_S[code & 0x0F]
@@ -145,8 +247,18 @@ def is_plausible_reading(reading: BatteryReading | None) -> bool:
     return PLAUSIBLE_MIN_V <= reading.voltage <= PLAUSIBLE_MAX_V
 
 
+def _to_finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        val = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return val if math.isfinite(val) else None
+
+
 def _is_finite_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    return _to_finite_float(value) is not None
 
 
 def read_power_notice(
@@ -182,7 +294,7 @@ def read_power_notice(
 
     try:
         data = json.loads(b"".join(chunks).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return inactive
     if not isinstance(data, dict) or data.get("active") is not True:
         return inactive
@@ -190,31 +302,52 @@ def read_power_notice(
     failed = data.get("failed")
     if not isinstance(failed, bool):
         return inactive
-    for field in ("voltage", "threshold_v", "started_mono", "deadline_mono", "updated_mono"):
-        if not _is_finite_number(data.get(field)):
-            return inactive
+
+    voltage = _to_finite_float(data.get("voltage"))
+    threshold_v = _to_finite_float(data.get("threshold_v"))
+    started_mono = _to_finite_float(data.get("started_mono"))
+    deadline_mono = _to_finite_float(data.get("deadline_mono"))
+    updated_mono = _to_finite_float(data.get("updated_mono"))
+    if (
+        voltage is None
+        or threshold_v is None
+        or started_mono is None
+        or deadline_mono is None
+        or updated_mono is None
+    ):
+        return inactive
+
+    # Enforce the writer's invariants on voltage, threshold, and monotonic timestamps (F3).
+    if not (PLAUSIBLE_MIN_V <= voltage <= PLAUSIBLE_MAX_V):
+        return inactive
+    if not (THRESHOLD_MIN_V < threshold_v < THRESHOLD_MAX_V):
+        return inactive
+    if started_mono < 0.0 or updated_mono < started_mono or deadline_mono <= started_mono:
+        return inactive
+    if deadline_mono > started_mono + NOTICE_S + NOTICE_FUTURE_TOLERANCE_S:
+        return inactive
 
     now = float(clock())
-    updated_mono = float(data["updated_mono"])
     age = now - updated_mono
     if age > NOTICE_STALE_S or age < -NOTICE_FUTURE_TOLERANCE_S:
         return inactive
 
-    voltage = float(data["voltage"])
-    threshold_v = float(data["threshold_v"])
     if failed:
-        retry_deadline = data.get("retry_deadline_mono")
-        if not _is_finite_number(retry_deadline):
+        retry_deadline = _to_finite_float(data.get("retry_deadline_mono"))
+        if retry_deadline is None:
+            return inactive
+        if retry_deadline <= started_mono or retry_deadline < deadline_mono:
+            return inactive
+        if retry_deadline > updated_mono + POWEROFF_RETRY_S + NOTICE_FUTURE_TOLERANCE_S:
             return inactive
         return {
             "active": True,
             "failed": True,
-            "retry_in_s": max(0, math.ceil(float(retry_deadline) - now)),
+            "retry_in_s": max(0, math.ceil(retry_deadline - now)),
             "voltage": voltage,
             "threshold_v": threshold_v,
         }
 
-    deadline_mono = float(data["deadline_mono"])
     return {
         "active": True,
         "failed": False,
@@ -657,6 +790,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Run startup checks (log digests and armed/disarmed status) and exit 0.",
     )
     parser.add_argument(
+        "--config-path",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to the operator power.conf file (sole arming input).",
+    )
+    parser.add_argument(
         "--notice-path",
         type=Path,
         default=DEFAULT_NOTICE_PATH,
@@ -666,10 +805,15 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    threshold_v, disarmed_reason = parse_threshold(os.environ.get(ENV_THRESHOLD_V))
-    recover_v, recover_warn = parse_recover_v(os.environ.get(ENV_RECOVER_V))
-    if recover_warn:
-        LOGGER.warning("%s", recover_warn)
+    if ENV_THRESHOLD_V in os.environ or ENV_RECOVER_V in os.environ:
+        LOGGER.warning(
+            "ignoring environment power settings; only %s can arm the watcher",
+            args.config_path,
+        )
+
+    threshold_v, disarmed_reason, recover_v, diagnostics = load_power_config(args.config_path)
+    for diag in diagnostics:
+        LOGGER.warning("%s", diag)
 
     watcher = PowerWatcher(
         threshold_v=threshold_v,
