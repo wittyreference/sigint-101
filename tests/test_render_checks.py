@@ -7,11 +7,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import struct
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -24,6 +26,8 @@ from tools.render.check_specs import Check, discover_checks
 REPO = Path(__file__).resolve().parent.parent
 CHECK = RENDER_DIR / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
+# Upper bound (never a sleep) for make render-check runs that execute every check under load.
+RENDER_MAKE_TIMEOUT_S = 60
 
 def render_tool(stem):
     return RENDER_DIR / f"render_{stem}.py"
@@ -510,7 +514,7 @@ def console_url():
 
 
 @pytest.fixture
-def render_make(tmp_path, console_url, devtools, strays):
+def render_make(tmp_path, console_url, devtools, strays, request):
     """Exercise the repo's Makefile and runner with stand-ins for the browser and checks."""
     screen = tmp_path / "tools" / "render"
     screen.mkdir(parents=True)
@@ -543,26 +547,30 @@ def render_make(tmp_path, console_url, devtools, strays):
     chromium = path / "chromium"
     chromium.write_text(
         f"#!{sys.executable}\n"
-        "import os, subprocess, sys, time\n"
-        "from pathlib import Path\n"
+        "import os, sys, time\n"
         "profile = next(arg.split('=', 1)[1] for arg in sys.argv[1:]\n"
         "               if arg.startswith('--user-data-dir='))\n"
         "if os.environ.get('CHROMIUM_EXITS'):\n"
         "    sys.exit(3)\n"
-        "Path(profile).mkdir()\n"
+        "os.mkdir(profile)\n"
         "if os.environ.get('CHROMIUM_FORKS'):\n"
-        "    Path(os.environ['CHROMIUM_FORKS'] + '.wrapper').write_text(str(os.getpid()))\n"
+        "    import subprocess\n"
+        "    with open(os.environ['CHROMIUM_FORKS'] + '.wrapper', 'w', encoding='utf-8') as f:\n"
+        "        f.write(str(os.getpid()))\n"
         f"    subprocess.Popen([sys.executable, {str(browser)!r}, profile,\n"
         "                      os.environ['CHROMIUM_FORKS']],\n"
         "                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
         "if os.environ.get('MARK_STOP'):\n"
-        "    import signal, urllib.request\n"
+        "    import signal, socket\n"
         "    def stopped(*_):\n"
-        "        urllib.request.urlopen('http://127.0.0.1:' + os.environ['FAKE_CDP_PORT']\n"
-        "                               + '/mark/chromium-stopped', timeout=5).close()\n"
+        "        with socket.create_connection(\n"
+        "                ('127.0.0.1', int(os.environ['FAKE_CDP_PORT'])), 5) as sock:\n"
+        "            sock.sendall(b'GET /mark/chromium-stopped HTTP/1.0\\r\\n\\r\\n')\n"
+        "            sock.recv(64)\n"
         "        os._exit(0)\n"
         "    signal.signal(signal.SIGTERM, stopped)\n"
-        "(Path(profile) / 'DevToolsActivePort').write_text(os.environ['FAKE_CDP_PORT'] + '\\n')\n"
+        "with open(os.path.join(profile, 'DevToolsActivePort'), 'w', encoding='utf-8') as f:\n"
+        "    f.write(os.environ['FAKE_CDP_PORT'] + '\\n')\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
@@ -573,18 +581,21 @@ def render_make(tmp_path, console_url, devtools, strays):
         (screen / check.path.name).write_text(
             f"RENDER_CHECK = {declaration!r}\n"
             "import os, sys\n"
-            "from pathlib import Path\n"
-            "from urllib.request import urlopen\n"
-            "name = Path(__file__).name\n"
+            "name = os.path.basename(__file__)\n"
             "assert os.environ['CDP_PORT'] == os.environ['FAKE_CDP_PORT']\n"
             "if name == 'render_scroll.py':\n"
             "    assert sys.argv[2] == 'home'\n"
             "assert 'RENDER_URL' not in os.environ\n"
             "assert ('RENDER_FENCE' not in os.environ) == RENDER_CHECK['scratch']\n"
             "print('ran', name, *sys.argv[1:2], flush=True)\n"
-            "fake = 'http://127.0.0.1:' + os.environ['FAKE_CDP_PORT']\n"
-            "urlopen(f'{fake}/mark/{name}', timeout=10).close()\n"
+            "if os.environ.get('MARK_CHECKS'):\n"
+            "    import socket\n"
+            "    with socket.create_connection(\n"
+            "            ('127.0.0.1', int(os.environ['FAKE_CDP_PORT'])), 10) as sock:\n"
+            "        sock.sendall(f'GET /mark/{name} HTTP/1.0\\r\\n\\r\\n'.encode())\n"
+            "        sock.recv(64)\n"
             "if name == 'render_scroll.py' and os.environ.get('PROBE_CONSOLE'):\n"
+            "    from urllib.request import urlopen\n"
             "    with urlopen(sys.argv[1], timeout=10) as page:\n"
             "        print('console', page.status, b'SIGINT 101' in page.read(), flush=True)\n"
             "if name == os.environ.get('STALL_CHECK'):\n"
@@ -609,8 +620,8 @@ def render_make(tmp_path, console_url, devtools, strays):
                 env[name] = value
         return env
 
-    def run_make(*, has_chromium=True, fit_answers=None, timeout=15, blank_fails=False,
-                 errors=(), real=(), **overrides):
+    def run_make(*, has_chromium=True, fit_answers=None, timeout=RENDER_MAKE_TIMEOUT_S,
+                 blank_fails=False, errors=(), real=(), **overrides):
         """Run make render-check with these stand-ins; the scripts in `real` run for real."""
         if not has_chromium:
             chromium.unlink()
@@ -620,9 +631,29 @@ def render_make(tmp_path, console_url, devtools, strays):
             (screen / script.name).unlink()
             (screen / script.name).symlink_to(script)
         env = environment(fit_answers, overrides, blank_fails, errors)
-        return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
-                               "render-check"], cwd=tmp_path, env=env, capture_output=True,
-                              text=True, timeout=timeout)
+        cmd = [make, "--no-print-directory", "-f", str(REPO / "Makefile"), "render-check"]
+        started = time.monotonic()
+        proc = subprocess.Popen(cmd, cwd=tmp_path, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            elapsed = time.monotonic() - started
+            for sig, wait_s in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 5.0)):
+                try:
+                    os.killpg(proc.pid, sig)
+                except ProcessLookupError:
+                    break
+                try:
+                    proc.wait(timeout=wait_s)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+            raise AssertionError(
+                f"render_make timed out in {request.node.name} after {elapsed:.2f}s "
+                f"(limit {timeout}s)"
+            ) from exc
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
     def start(**overrides):
         """Start the runner itself, as make would, and hand back the process to signal."""
@@ -737,6 +768,19 @@ def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make
     assert proc.returncode != 0
     assert "Cannot reach the console" in proc.stderr, proc.stderr
     assert "ran " not in proc.stdout
+
+
+def test_render_make_timeout_reports_case_name_and_elapsed_time(render_make):
+    import inspect
+
+    default_timeout = inspect.signature(render_make).parameters["timeout"].default
+    assert default_timeout >= 60, f"full-check render_make bound too tight: {default_timeout}s"
+    with pytest.raises(AssertionError) as failed:
+        render_make(STALL_CHECK=CHECKS[0].path.name, timeout=1.0)
+    message = str(failed.value)
+    assert "test_render_make_timeout_reports_case_name_and_elapsed_time" in message, message
+    assert re.search(r"after \d+\.\d+s", message), message
+    assert "limit 1.0s" in message, message
 
 
 # --- C49: a check run starts nothing and writes nothing on the console it measures ---------------
@@ -924,7 +968,7 @@ def test_every_render_tool_leaves_its_page_on_about_blank_before_it_closes(devto
 def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     # Between one tool's close and the next one's attach no tool's block exists. The runner's
     # own session blocks /api/* from before the first check until after the last.
-    proc = render_make()
+    proc = render_make(MARK_CHECKS="1")
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     calls = render_make.calls()
     methods = [method for method, _ in calls]
