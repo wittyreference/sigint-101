@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS challenge_passes (
 );
 """
 
+# The separate replay ledger records first evidence and a count without changing live stamps.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS replays_seen (
+    instrument TEXT PRIMARY KEY,
+    first_ts   REAL NOT NULL,
+    count      INTEGER NOT NULL,
+    recording  TEXT NOT NULL,
+    digest     TEXT NOT NULL
+);
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
@@ -629,6 +640,29 @@ class Progress:
             )
             self._conn.commit()
         return new_box
+
+    def record_replay_seen(self, instrument, *, recording, digest, ts) -> bool:
+        """Count one replay with output and retain the first recording as its evidence."""
+        with self._lock:
+            if self._closed:
+                return False
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO replays_seen(instrument, first_ts, count, recording, digest) "
+                    "VALUES(?, ?, 1, ?, ?) ON CONFLICT(instrument) DO UPDATE SET "
+                    "count=replays_seen.count + 1",
+                    (instrument, ts, recording, digest),
+                )
+            return True
+
+    def replays_seen(self) -> dict:
+        """Read the separate replay ledger, keyed by instrument."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT instrument, first_ts, count, recording, digest FROM replays_seen"
+            ).fetchall()
+        return {row["instrument"]: {key: row[key] for key in ("first_ts", "count", "recording",
+                                                             "digest")} for row in rows}
 
     def close(self) -> None:
         """Close the database and fence any late reception writes under the same lock."""
