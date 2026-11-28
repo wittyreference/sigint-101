@@ -1,0 +1,49 @@
+<!-- ABOUTME: Pre-lesson retrieval card (/lesson/{id} on a fresh opening when a prior check is due).
+     ABOUTME: Sits outside stage_order and off the rail; Skip is always present and writes nothing. -->
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+{% set fb = recall_feedback|default(none) %}
+<section class="stage-panel" data-stage="recall" aria-label="Pre-lesson recall card">
+  <div class="stage-panel__eyebrow">RECALL &middot; CARD {{ card_num }} OF {{ card_total }} &middot; FROM LESSON {{ source.id }}</div>
+  <h1 class="stage-panel__title">&#9773; {{ source.check.prompt }}</h1>
+  <form class="predict{% if fb %} predict--committed{% endif %}" novalidate data-choice-commit
+        method="post" action="{{ commit_url|default('#') }}">
+    <fieldset class="predict-chips">
+      <legend class="sr-only">Tap to choose, then commit &mdash; no typing</legend>
+      {% for c in source.check.choices %}
+        {% set is_answer = fb and not fb.correct and c.key == source.check.answer %}
+        <label class="predict-chip{% if is_answer %} predict-chip--answer{% endif %}">
+          <input type="radio" name="choice" value="{{ c.key }}"
+                 {% if recall_choice|default(none) == c.key %}checked{% endif %}
+                 {% if fb %}disabled{% endif %}
+                 {% if loop.first %}required{% endif %}>
+          <span class="predict-chip__key" aria-hidden="true">{{ "ABCDEFGH"[loop.index0] }}</span>
+          <span class="predict-chip__label">{{ c.label }}{% if is_answer %}<span class="predict-chip__mark">&#10003; Answer</span>{% endif %}</span>
+        </label>
+      {% endfor %}
+    </fieldset>
+    {% if fb %}
+    <div class="verdict verdict--{{ 'hit' if fb.correct else 'miss' }} check__result">
+      <div class="verdict__why"><span class="verdict__tag">{{ 'Right' if fb.correct else 'Missed' }}</span> <b>{{ fb.chosen.label }}:</b> {{ fb.chosen.why }}</div>
+      {% if not fb.correct %}
+      <div class="verdict__why"><b>{{ fb.key.label }}:</b> {{ fb.key.why }}</div>
+      {% endif %}
+    </div>
+    {% endif %}
+    <div class="predict__actions">
+      <a class="btn btn--secondary recall__skip" href="{{ skip_url }}">Skip</a>
+      {% if fb %}
+        <a class="btn btn--primary" href="{{ next_url }}">{{ next_label }}</a>
+      {% else %}
+        <span class="predict__hint" role="status" data-choice-status data-ready-text="Choice set. Ready to commit.">Choose one, comrade</span>
+        <button class="btn btn--primary btn-commit" type="submit" disabled>Commit answer</button>
+      {% endif %}
+    </div>
+  </form>
+</section>
+{% endblock %}
+
+{% block scripts %}<script src="/static/lesson-nav.js"></script>{% endblock %}

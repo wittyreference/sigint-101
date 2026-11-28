@@ -24,6 +24,7 @@ LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
 LORA = REPO / "tools" / "render" / "render_lora.py"
 CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
 SURVEY = REPO / "tools" / "render" / "render_survey.py"
+RECALL = REPO / "tools" / "render" / "render_recall.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -433,7 +434,7 @@ def render_make(tmp_path, console_url, devtools):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -474,10 +475,11 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
 
 @pytest.mark.parametrize(
     "failing",
-    ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name, SURVEY.name],
+    ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name, SURVEY.name,
+     RECALL.name],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
-        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
+        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails", "recall-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -490,6 +492,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {LORA.name} {console_url}",
         f"ran {CARD_SORT.name} {console_url}",
         f"ran {SURVEY.name} {console_url}",
+        f"ran {RECALL.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
