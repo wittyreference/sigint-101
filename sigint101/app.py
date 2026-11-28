@@ -96,6 +96,7 @@ from .operate import (
 )
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
+from .power import DEFAULT_NOTICE_PATH, format_power_notice, read_power_notice
 from .ppm import PpmCalibration, PpmUnavailable, measure_pilot_ppm
 from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress, RecallNotDue
 from .provenance import (
@@ -714,6 +715,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                recordings_dir=RECORDINGS_DIR, replay_factory=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None,
+               power_notice_path=DEFAULT_NOTICE_PATH, power_clock=time.monotonic,
                clock=time.time, managed: bool = False) -> FastAPI:
     """Build the console with its collaborators injectable.
 
@@ -743,8 +745,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         detector = getattr(request.app.state, "flock", None)
         return {"flock_tool": getattr(detector, "tool", None) or rack_instrument("flock").tool}
 
+    def power_notice_context(_request: Request) -> dict:
+        """Read-only low-battery notice for base.html; writes nothing and never touches I2C."""
+        notice = read_power_notice(power_notice_path, clock=power_clock)
+        return {
+            "power_notice": format_power_notice(notice),
+            "power_notice_state": notice,
+        }
+
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
-                                context_processors=[status_bar, flock_tool])
+                                context_processors=[status_bar, flock_tool, power_notice_context])
 
     receiver_factories, radio_census = build_receiver_factories(
         data_dir=data_dir,
@@ -2645,6 +2655,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reading is None:
             return {"present": False, "reason": battery.reason}
         return reading.as_dict()
+
+    @app.get("/api/power")
+    def power_notice():
+        """Read-only low-battery shutdown notice written by sigint101-power.service.
+
+        Reads only notice.json (never touches I2C, SQLite, or the event log) and returns
+        {"active": False} whenever the file is absent, stale, corrupt, or non-regular.
+        """
+        return read_power_notice(power_notice_path, clock=power_clock)
 
     @app.post("/api/tune")
     def tune(request: Request, payload: dict = Body(default={})):

@@ -847,8 +847,11 @@ POWER_SOURCE_FILES = (
     "sigint101/__init__.py",
     "sigint101/battery.py",
     "sigint101/power.py",
+    "sigint101/power_desktop.py",
     "deploy/system/sigint101-power.service",
     "deploy/system/sigint101-power",
+    "deploy/system/sigint101-power-notice.service",
+    "deploy/system/sigint101-power-notice",
     "deploy/system/50-sigint101-power.rules",
     "deploy/system/sigint101-power.sysusers.conf",
 )
@@ -862,6 +865,7 @@ def _setup_power_box(
     i2c_gid: int = 998,
     has_i2c_group: bool = True,
     unit_state: str = "enabled",
+    notice_unit_state: str = "enabled",
     user_exists: bool = False,
     fail_systemctl_actions: tuple[str, ...] = (),
 ):
@@ -931,6 +935,9 @@ def _setup_power_box(
         '  "is-enabled sigint101-power.service")\n'
         f'    echo "{unit_state}"\n'
         f'    [ "{unit_state}" = "enabled" ] ;;\n'
+        '  "--user is-enabled sigint101-power-notice.service")\n'
+        f'    echo "{notice_unit_state}"\n'
+        f'    [ "{notice_unit_state}" = "enabled" ] ;;\n'
         f'{fail_cases}\n'
         '  *) exit 0 ;;\n'
         'esac\n',
@@ -965,7 +972,7 @@ def _setup_power_box(
         'fi\n'
         'exit 2',
     )
-    for extra in ("mktemp", "touch"):
+    for extra in ("install", "mktemp", "touch"):
         found = shutil.which(extra)
         assert found
         if not (box.bin / extra).exists():
@@ -1001,17 +1008,21 @@ def test_step_power_installs_files_is_idempotent_and_preserves_power_conf(box, t
     expected_installed = [
         "usr/local/lib/systemd/system/sigint101-power.service",
         "usr/local/bin/sigint101-power",
+        "usr/local/bin/sigint101-power-notice",
         "usr/local/lib/sigint101-power/sigint101/__init__.py",
         "usr/local/lib/sigint101-power/sigint101/battery.py",
         "usr/local/lib/sigint101-power/sigint101/power.py",
+        "usr/local/lib/sigint101-power/sigint101/power_desktop.py",
         "etc/polkit-1/rules.d/50-sigint101-power.rules",
         "usr/local/lib/sysusers.d/sigint101-power.conf",
     ]
     for rel in expected_installed:
         assert (sysroot / rel).is_file(), f"missing installed {rel}"
+    assert (box.home / ".config/systemd/user/sigint101-power-notice.service").is_file()
     assert not (sysroot / "etc/systemd/system/sigint101-power.service").exists()
     assert not (sysroot / "etc/sigint101/power.conf").exists()
     assert "enable --now sigint101-power.service" in box.calls()
+    assert "--user enable --now sigint101-power-notice.service" in box.calls()
 
     # Plant an operator power.conf and confirm a second run makes 0 changes and preserves it.
     conf = sysroot / "etc/sigint101/power.conf"
@@ -1172,3 +1183,267 @@ def test_step_power_preserves_masked_unit_symlink_without_overwriting(box, tmp_p
     assert etc_mask.is_symlink() and etc_mask.resolve() == mask_target.resolve()
     assert vendor_unit.read_text(encoding="utf-8") == "# pre-existing\n"
     assert not (sysroot / "usr/local/bin/sigint101-power").exists()
+
+
+def test_step_power_respects_disabled_or_masked_desktop_notice_user_unit(box, tmp_path):
+    for state in ("disabled", "masked"):
+        d = tmp_path / f"notice-{state}"
+        d.mkdir()
+        b = ProvisionBox(d)
+        _setup_power_box(b, d, notice_unit_state=state, user_exists=True)
+        user_unit = b.home / ".config/systemd/user/sigint101-power-notice.service"
+        user_unit.parent.mkdir(parents=True, exist_ok=True)
+        user_unit.write_text("# owner copy\n", encoding="utf-8")
+        res = b.run()
+        assert res.returncode == 0, res.stdout + res.stderr
+        sec = _power_section(res.stdout)
+        assert "sigint101-power-notice.service turned off by the owner" in sec
+        assert state in sec
+        assert "--user enable --now sigint101-power-notice.service" not in b.calls()
+        assert "--user restart sigint101-power-notice.service" not in b.calls()
+        if state == "masked":
+            assert user_unit.read_text(encoding="utf-8") == "# owner copy\n"
+
+
+def test_f5_failed_first_notice_enable_retries_on_next_run_without_blaming_owner(box, tmp_path):
+    """F5: a refused first enable of sigint101-power-notice.service records a pending install and
+    retries on the next run rather than mistaking it for an owner disable."""
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        fail_systemctl_actions=("--user enable --now sigint101-power-notice.service",),
+    )
+    first = box.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    sec1 = _power_section(first.stdout)
+    assert "  WARN   " in sec1 and "sigint101-power-notice.service" in sec1
+    assert "Hand-over hygiene" in first.stdout
+
+    # Restore enable on the next run (unit is still reported disabled until enable succeeds).
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        user_exists=True,
+        fail_systemctl_actions=(),
+    )
+    box.log.write_text("", encoding="utf-8")
+    second = box.run()
+    assert second.returncode == 0, second.stdout + second.stderr
+    sec2 = _power_section(second.stdout)
+    assert "--user enable --now sigint101-power-notice.service" in box.calls()
+    assert "turned off by the owner" not in sec2
+    assert "enable and start sigint101-power-notice.service" in sec2
+
+    # Once the initial enable succeeded, a later disabled state IS attributed to the owner.
+    box.log.write_text("", encoding="utf-8")
+    third = box.run()
+    assert third.returncode == 0, third.stdout + third.stderr
+    sec3 = _power_section(third.stdout)
+    assert "sigint101-power-notice.service turned off by the owner" in sec3
+    assert "--user enable --now sigint101-power-notice.service" not in box.calls()
+
+
+def test_f6_refused_user_daemon_reload_on_disabled_update_warns_and_continues(box, tmp_path):
+    """F6: updating a disabled user unit when `systemctl --user daemon-reload` fails warns and
+    lets the rest of provision.sh finish."""
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        user_exists=True,
+        fail_systemctl_actions=("--user daemon-reload",),
+    )
+    user_unit = box.home / ".config/systemd/user/sigint101-power-notice.service"
+    user_unit.parent.mkdir(parents=True, exist_ok=True)
+    user_unit.write_text("# older unit copy\n", encoding="utf-8")
+
+    res = box.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    sec = _power_section(res.stdout)
+    assert "  WARN   " in sec and "daemon-reload" in sec
+    assert "Meshtastic LoRa defaults" in res.stdout
+    assert "Stock Recon pieces" in res.stdout
+    assert "Hand-over hygiene" in res.stdout
+
+
+def test_r4_f5_partially_enabled_notice_keeps_pending_marker_and_retries_start(box, tmp_path):
+    """F5: if enable --now created links before starting failed, is-enabled returns enabled while
+    the service is stopped; provision must keep the pending marker and retry start until start
+    succeeds or active state is confirmed."""
+    def _configure_notice_state(
+        *, enabled: bool, active: bool, fail_actions: tuple[str, ...] = ()
+    ):
+        _setup_power_box(
+            box,
+            tmp_path,
+            notice_unit_state="enabled" if enabled else "disabled",
+            user_exists=True,
+            fail_systemctl_actions=fail_actions,
+        )
+        # Override systemctl stub to model is-active --quiet independently of is-enabled.
+        fail_cases = "\n".join(f'  "{act}") exit 1 ;;' for act in fail_actions)
+        is_active_rc = 0 if active else 3
+        _stub(
+            box.bin / "systemctl",
+            f'echo "systemctl $*" >> "{box.log}"\n'
+            'case "$*" in\n'
+            '  "get-default") echo graphical.target; exit 0 ;;\n'
+            '  "is-enabled sigint101-power.service") echo "enabled"; exit 0 ;;\n'
+            '  "--user is-enabled sigint101-power-notice.service")\n'
+            f'    echo "{"enabled" if enabled else "disabled"}"\n'
+            f'    exit {0 if enabled else 1} ;;\n'
+            '  "--user is-active --quiet sigint101-power-notice.service")\n'
+            f'    exit {is_active_rc} ;;\n'
+            f'{fail_cases}\n'
+            '  *) exit 0 ;;\n'
+            'esac\n',
+        )
+
+    pending = box.home / ".config/systemd/user/.sigint101-power-notice.enable-pending"
+
+    # Run 1: initial enable --now fails (links created, start failed) -> leaves pending marker.
+    _configure_notice_state(
+        enabled=False,
+        active=False,
+        fail_actions=("--user enable --now sigint101-power-notice.service",),
+    )
+    r1 = box.run()
+    assert r1.returncode == 0, r1.stdout + r1.stderr
+    assert pending.is_file()
+
+    # Run 2: is-enabled is now 'enabled', service still stopped, and start fails too -> marker
+    # stays in place, warns, and does NOT claim "enabled and up to date".
+    box.log.write_text("", encoding="utf-8")
+    _configure_notice_state(
+        enabled=True,
+        active=False,
+        fail_actions=("--user start sigint101-power-notice.service",),
+    )
+    r2 = box.run()
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    sec2 = _power_section(r2.stdout)
+    assert "--user start sigint101-power-notice.service" in box.calls(), box.calls()
+    assert pending.is_file(), "pending marker was removed even though start failed"
+    assert "sigint101-power-notice.service enabled and up to date" not in sec2, sec2
+    assert "  WARN   " in sec2, sec2
+
+    # Run 3: start succeeds -> clears pending marker and reports start.
+    box.log.write_text("", encoding="utf-8")
+    _configure_notice_state(enabled=True, active=False, fail_actions=())
+    r3 = box.run()
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    sec3 = _power_section(r3.stdout)
+    assert "--user start sigint101-power-notice.service" in box.calls(), box.calls()
+    assert not pending.exists(), "pending marker should clear once start succeeds"
+    assert "start sigint101-power-notice.service" in sec3, sec3
+
+    # Run 4: after completed install, owner disables unit -> respected (never re-enabled/started).
+    box.log.write_text("", encoding="utf-8")
+    _configure_notice_state(enabled=False, active=False, fail_actions=())
+    r4 = box.run()
+    assert r4.returncode == 0, r4.stdout + r4.stderr
+    sec4 = _power_section(r4.stdout)
+    assert "turned off by the owner" in sec4, sec4
+    assert "--user start sigint101-power-notice.service" not in box.calls()
+    assert "--user enable --now sigint101-power-notice.service" not in box.calls()
+
+
+def test_r4_f6_refused_user_reload_warns_on_both_enabled_and_disabled_updates(box, tmp_path):
+    """F6: refused --user daemon-reload warns on BOTH enabled and disabled unit updates, reports
+    reload and restart outcomes separately, and lets the rest of provision.sh succeed."""
+    for state in ("enabled", "disabled"):
+        d = tmp_path / f"f6-{state}"
+        d.mkdir()
+        b = ProvisionBox(d)
+        _setup_power_box(
+            b,
+            d,
+            notice_unit_state=state,
+            user_exists=True,
+            fail_systemctl_actions=("--user daemon-reload",),
+        )
+        user_unit = b.home / ".config/systemd/user/sigint101-power-notice.service"
+        user_unit.parent.mkdir(parents=True, exist_ok=True)
+        user_unit.write_text("# older unit copy\n", encoding="utf-8")
+
+        res = b.run()
+        assert res.returncode == 0, res.stdout + res.stderr
+        sec = _power_section(res.stdout)
+        assert "  WARN   " in sec and "daemon-reload" in sec, (state, sec)
+        assert "reload and restart" not in sec, (
+            f"{state}: must report reload and restart separately when reload failed:\n{sec}"
+        )
+        if state == "enabled":
+            assert "restart sigint101-power-notice.service" in sec, sec
+        else:
+            assert "--user restart sigint101-power-notice.service" not in b.calls()
+        assert "Meshtastic LoRa defaults" in res.stdout
+        assert "Stock Recon pieces" in res.stdout
+        assert "Hand-over hygiene" in res.stdout
+
+
+def test_r5_f5_interrupted_enable_preserves_first_start_intent_and_respects_later_disable(
+    box, tmp_path
+):
+    """F5: if provision.sh is interrupted after installing the user unit and during first-time
+    `systemctl --user enable --now`, the durable pending marker is already on disk so the next
+    run retries enable --now instead of treating the service as owner-disabled."""
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        user_exists=True,
+    )
+    user_unit = box.home / ".config/systemd/user/sigint101-power-notice.service"
+    pending = box.home / ".config/systemd/user/.sigint101-power-notice.enable-pending"
+
+    # --check on a fresh box must never write the pending marker.
+    chk = box.run("--check")
+    assert chk.returncode == 0, chk.stdout + chk.stderr
+    assert not pending.exists(), "--check must not create the pending marker"
+
+    # Run 1: stub systemctl kills provision.sh mid-enable (before any post-failure fallback runs).
+    _stub(
+        box.bin / "systemctl",
+        f'echo "systemctl $*" >> "{box.log}"\n'
+        'case "$*" in\n'
+        '  "get-default") echo graphical.target; exit 0 ;;\n'
+        '  "is-enabled sigint101-power.service") echo "enabled"; exit 0 ;;\n'
+        '  "--user is-enabled sigint101-power-notice.service") echo "disabled"; exit 1 ;;\n'
+        '  "--user enable --now sigint101-power-notice.service")\n'
+        '    kill -TERM "$PPID"\n'
+        '    exit 143 ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n',
+    )
+    r1 = box.run()
+    assert r1.returncode != 0, "expected interrupted provision.sh to exit non-zero"
+    assert user_unit.is_file(), "unit file should be installed before enable --now"
+    assert pending.is_file(), "first-start pending marker must exist before enable --now runs"
+
+    # Run 2: service is still disabled; provision.sh must retry enable --now and clear marker.
+    box.log.write_text("", encoding="utf-8")
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        user_exists=True,
+    )
+    r2 = box.run()
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    sec2 = _power_section(r2.stdout)
+    assert "--user enable --now sigint101-power-notice.service" in box.calls(), (
+        f"interrupted first-start was misread as owner-disabled:\n{sec2}\n{box.calls()}"
+    )
+    assert "turned off by the owner" not in sec2, sec2
+    assert not pending.exists(), "pending marker should clear once enable --now succeeds"
+
+    # Run 3: after a completed install, owner disables unit -> respected.
+    box.log.write_text("", encoding="utf-8")
+    r3 = box.run()
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    sec3 = _power_section(r3.stdout)
+    assert "turned off by the owner" in sec3, sec3
+    assert "--user enable --now sigint101-power-notice.service" not in box.calls()
