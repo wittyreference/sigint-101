@@ -2,8 +2,10 @@
 # ABOUTME: pins each PID with a pidfd, checks it after the pin, and sends TERM or KILL through it.
 """Usage (install.sh runs it as `python3 -I`, with an emptied environment):
 
-    watchdog_helper.py FIND LOCK INSTALLED CHECKOUT PID...
-        prints "PID:START" for each PID that is the watchdog.
+    watchdog_helper.py HOLDERS LOCK INSTALLED CHECKOUT
+        prints each PID holding the flock on LOCK.
+    watchdog_helper.py FIND LOCK INSTALLED CHECKOUT [PID...]
+        prints "PID:START" for each PID that is the watchdog (with no PID, each holder).
     watchdog_helper.py TERM|KILL LOCK INSTALLED CHECKOUT PID:START...
         pins every PID with a pidfd, then signals through it each pinned process that is still
         that watchdog (same start time). Prints each PID signalled. Under KILL, a watchdog not
@@ -222,11 +224,41 @@ def kill_refusal(pid, argv_path):
     return None
 
 
+def lock_holders(lock):
+    """The PIDs holding the flock on LOCK: an fd on that file whose fdinfo lists the lock. A
+    process that has merely opened the file holds nothing."""
+    found = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"/proc/{pid}/fd/{fd}") != lock:
+                    continue
+                with open(f"/proc/{pid}/fdinfo/{fd}", encoding="utf-8") as f:
+                    if any(ln.startswith("lock:") and "FLOCK" in ln for ln in f):
+                        found.append(pid)
+                        break
+            except OSError:
+                continue
+    return found
+
+
 def main(args):
     name, lock, installed, checkout, *targets = args
     launchers = (installed, checkout)
+    if name == "HOLDERS":
+        for pid in lock_holders(lock):
+            print(pid)
+        return 0
     if name == "FIND":
-        for pid in targets:
+        # With no PIDs given, the lock's holders: one process does the whole scan, so one
+        # timeout bounds all of it.
+        for pid in targets or lock_holders(lock):
             start = watchdog_start(pid, lock, launchers)
             if start is not None:
                 print(f"{pid}:{start}")

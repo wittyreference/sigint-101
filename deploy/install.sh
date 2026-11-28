@@ -11,19 +11,37 @@ COURSE_BIN="/usr/local/bin/sigint101-course"
 # The running course watchdog holds a flock on this (deploy/kiosk/start-kiosk.sh).
 WATCH_LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sigint101-kiosk-watch.lock"
 
-# The processes holding the watchdog's flock, one PID a line: those with an fd on the lock file
-# whose fdinfo lists the lock. A process that has merely opened the file holds nothing.
+# One install at a time: two at once raced in their `install -D` steps (the user's files and the
+# desktop theme), and the loser stopped half done. The lock is the user's own file in the user's
+# runtime dir, apart from the watchdog's, taken before anything is installed and held to the end
+# by this shell alone: sudo closes inherited fds, and every lasting child gets it closed
+# (7>&-), so it never outlives this run. Another install waits for it, up to INSTALL_WAIT_S.
+INSTALL_LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sigint101-install.lock"
+INSTALL_WAIT_S=300
+if [ ! -d "${INSTALL_LOCK%/*}" ] || [ ! -w "${INSTALL_LOCK%/*}" ]; then
+  # No runtime dir yet (a console login before linger): the home directory is the user's too.
+  mkdir -p "$HOME/.cache"
+  INSTALL_LOCK="$HOME/.cache/sigint101-install.lock"
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo "install: stopped: flock (from util-linux) is missing, and it keeps two installs from" \
+    "running at once; nothing was changed" >&2
+  exit 1
+fi
+exec 7>>"$INSTALL_LOCK"
+if ! flock -n 7; then
+  echo "install: another install.sh is running; waiting for it (up to ${INSTALL_WAIT_S} s)" >&2
+  if ! flock -w "$INSTALL_WAIT_S" 7; then
+    echo "install: stopped: another install.sh still holds $INSTALL_LOCK after" \
+      "${INSTALL_WAIT_S} s; nothing was changed. Run it again once that one has finished." >&2
+    exit 1
+  fi
+fi
+
+# The processes holding the watchdog's flock, one PID a line (the helper's HOLDERS scan).
 lock_holders() {
   [ -e "$WATCH_LOCK" ] || return 0
-  local fd pid seen=" "
-  while IFS= read -r fd; do
-    pid="${fd#/proc/}"
-    pid="${pid%%/*}"
-    case "$seen" in *" $pid "*) continue ;; esac
-    grep -q '^lock:.*FLOCK' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null || continue
-    seen+="$pid "
-    printf '%s\n' "$pid"
-  done < <(within_scan_limit find /proc/[0-9]*/fd -maxdepth 1 -lname "$WATCH_LOCK" 2>/dev/null)
+  watchdog_helper HOLDERS
 }
 
 # Run a command, cut off after SCAN_LIMIT seconds when that is set (wait_for_lock's time left).
@@ -49,12 +67,11 @@ watchdog_helper() {
 
 NO_PIDFD="the course watchdog could not be pinned (no pidfd: Linux 5.3+ and Python 3.9+ are needed)"
 
-# The running watchdogs, as "PID:START", from the lock's holders.
+# The running watchdogs, as "PID:START", from the lock's holders: one helper process for the
+# whole scan, holders and their fdinfo included, so one SCAN_LIMIT bounds all of it.
 watchdogs() {
-  local -a holders
-  mapfile -t holders < <(lock_holders)
-  [ "${#holders[@]}" -gt 0 ] || return 0
-  watchdog_helper FIND "${holders[@]}"
+  [ -e "$WATCH_LOCK" ] || return 0
+  watchdog_helper FIND
 }
 
 # Does PID descend from one of the watchdogs given (as "PID:START"), or has it already exited?
@@ -111,6 +128,8 @@ wait_for_lock() {
     SCAN_LIMIT="$(cs_to_s "$left")"
     mapfile -t now < <(watchdogs)
     SCAN_LIMIT=""
+    # A scan that ended at or after the deadline counts for nothing: the time ran out first.
+    [ "$(uptime_cs)" -lt "$deadline" ] || return 1
     for w in "${now[@]}"; do
       [[ " ${found[*]} " == *" $w "* ]] || return 2
     done
@@ -152,8 +171,15 @@ restart_watchdog() {
   mapfile -t found < <(watchdogs)
   if [ "${#found[@]}" -eq 0 ]; then
     # Held, yet no watchdog holds it: a lookalike, or a kernel whose fdinfo lists no locks. Say
-    # so, or the launcher change would go unapplied without a word.
+    # so, or the launcher change would go unapplied without a word. But look once more first:
+    # the old watchdog may have exited during that scan with a new one just started (by another
+    # install, or the session's autostart), and that one is the hand-over done, not a problem.
     if [ -e "$WATCH_LOCK" ] && ! flock -n "$WATCH_LOCK" true; then
+      mapfile -t found < <(watchdogs)
+      if [ "${#found[@]}" -gt 0 ]; then
+        echo "$HANDED_OVER"
+        return 0
+      fi
       echo "install: WARN the course watchdog's lock is held, but no watchdog holding it was" \
         "found; it was not restarted, and the new launcher applies at the next login" >&2
     fi
@@ -223,7 +249,8 @@ restart_watchdog() {
   if command -v systemd-cat >/dev/null 2>&1; then
     run=(systemd-cat -t sigint101-course "${run[@]}")
   fi
-  setsid -f env -i "${session_env[@]}" "${run[@]}" </dev/null >/dev/null 2>&1
+  # The new watchdog outlives this run, so it must not keep the install lock (fd 7).
+  setsid -f env -i "${session_env[@]}" "${run[@]}" </dev/null >/dev/null 2>&1 7>&-
 }
 
 # A provision run can pull this checkout and keep its loaded build recipes. It invokes

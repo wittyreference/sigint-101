@@ -18,6 +18,8 @@ BASH = shutil.which("bash")
 CORE_UTILS = (
     "awk", "basename", "bash", "cat", "cut", "dirname", "grep", "head", "install", "ls",
     "mkdir", "paste", "readlink", "rm", "sed", "seq", "sha256sum", "sleep", "sort", "timeout",
+    # install.sh takes its own lock with flock (util-linux, on every box), C83.
+    "flock",
 )
 
 # Frozen SHA-256 digests of every legacy-installed file from origin/main (updated only on a
