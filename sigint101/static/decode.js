@@ -218,7 +218,18 @@
 
   keys.forEach(function (key) { key.addEventListener("click", toggle); });
   listRecordings().catch(function () {});
+
+  // On a lesson page the first live poll waits for the lesson's tuning (lesson-tuning.js), so it
+  // reads the lesson's frequency, not the one the rack left; past the timeout it polls anyway
+  // and the page says the radios are still being tuned. The rack starts at once. The replay
+  // status read claims no radio, so it does not wait: a replay under way shows at once.
+  var tuned = root.LessonTuning ? root.LessonTuning.ready : Promise.resolve();
   var initial = generation;
+  function goLive() {
+    tuned.then(function () {
+      if (generation === initial) poll(initial);
+    });
+  }
   read(initial, "/api/replay/ism").then(function (result) {
     if (!result) return;
     if (result.body.state === "replaying") {
@@ -226,9 +237,7 @@
       paint(result.body, result.ok);
       later(gen, 500);
     } else {
-      poll(initial);
+      goLive();
     }
-  }).catch(function () {
-    if (generation === initial) poll(initial);
-  });
+  }).catch(goLive);
 })(this);
