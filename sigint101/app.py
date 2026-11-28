@@ -87,7 +87,7 @@ from .operate import (
 )
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
-from .ppm import PpmUnavailable, measure_pilot_ppm
+from .ppm import PpmCalibration, PpmUnavailable, measure_pilot_ppm
 from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress, RecallNotDue
 from .provenance import (
     BaselineLog,
@@ -467,7 +467,11 @@ def initialize_console_state(
         state.exam_store = ExamStore(
             resolved_data / "exam.db", managed=managed, read_only=read_only
         )
-        state.ppm_measure = ppm_measure or measure_pilot_ppm
+        if trial:
+            state.ppm_measure = ppm_measure or measure_pilot_ppm
+        else:
+            state.ppm_calibration = PpmCalibration()
+            state.ppm_measure = ppm_measure or state.ppm_calibration.measure
         state.receptions = None
         state.reception_error = None
         state.stamp_error = None
@@ -522,10 +526,13 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
         for name in names
         if (receiver := getattr(state, name))
     ]
+    receivers.append(("ppm", state.ppm_calibration.stop))
     stores = [("progress", state.progress.close), ("exam", state.exam_store.close)]
     state.shutdown_errors = await finish_console(
         receivers, stores, state.reception_sink, SHUTDOWN_TOTAL_S
     )
+    if ppm_failure := state.ppm_calibration.release_failure():
+        state.shutdown_errors.append(f"ppm: {ppm_failure}")
     for reason in state.shutdown_errors:
         logging.getLogger(__name__).error("console shutdown: %s", reason)
     return state.shutdown_errors
@@ -1438,12 +1445,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         row is None with no radio, and until the sweep running now has finished a pass: a row kept
         from before a gain step, a retune or a restart was swept under other settings. It is None,
         too, while the newest row is stale: too old to be a reading, or one of the first two rows
-        after a stall (Sweeper.newest).
+        after a stall (Sweeper.newest). Respect a prior release to another receiver when polling.
         """
         sweeper = app.state.sweeper
-        if not sweeper.running:
+        if not sweeper.running and not getattr(sweeper, "released", False):
             try:
-                sweeper.start()
+                _claim_sdr("sweeper", sweeper.start, reclaim=False)
             except SpectrumUnavailable:
                 pass
             else:
@@ -1511,8 +1518,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """Measure the receiver's crystal error against a station's 19 kHz stereo pilot.
 
         rtl_fm needs the dongle to itself, so the measurement claims it like any other tenant and
-        holds the claim until rtl_fm is done: a waterfall poll arriving mid-capture waits rather
-        than taking the radio back (the next spectrum poll after it brings the sweep back). ppm is
+        holds the reservation during capture. A waterfall poll that arrives mid-capture waits,
+        and an unconfirmed exit blocks subsequent claims until reap. ppm is
         None with a reason whenever no pilot is there to measure against — a mono station carries
         none, and a weak one reads the same — never a guessed ppm. It is None with a reason, too,
         when the capture held nothing to measure: rtl_fm stalled and was cut off at its deadline,
@@ -1562,7 +1569,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
     }
 
-    def _claim_sdr(target: str, start=None):
+    def _claim_sdr(target: str, start=None, *, reclaim=True):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
         deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
         refusal = unavailable[target]
@@ -1570,7 +1577,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         receiver = consumers.get(target)
         intent = None
         prepare = getattr(receiver, "prepare_start", None)
+        calibration = app.state.ppm_calibration
         try:
+            if reason := calibration.release_failure():
+                raise refusal(reason)
             for consumer in consumers.values():
                 failure = getattr(consumer, "release_failure", None)
                 if failure and (reason := failure()):
@@ -1578,6 +1588,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if prepare is not None:
                 intent = prepare(for_claim=True, deadline=deadline)
             with app.state.radio_arbiter.reserve(target, refusal, deadline):
+                # PPM may have failed to reap since this request joined the queue.
+                if reason := calibration.release_failure():
+                    raise refusal(reason)
+                if not reclaim and getattr(receiver, "released", False):
+                    raise refusal("the radio was released to another program")
                 if prepare is not None:
                     receiver.validate_start(intent)
                 for name, consumer in consumers.items():
@@ -1588,7 +1603,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                             raise refusal(reason)
                 if prepare is not None:
                     return receiver.launch_start(intent, claimed=True)
-                if receiver is not None:
+                if receiver is not None and reclaim:
                     receiver.resume()
                 return start() if start is not None else None
         finally:
@@ -2150,7 +2165,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         elif not radio.present:
             state = "absent"
         else:
-            busy = app.state.radio_arbiter.busy
+            busy = (app.state.radio_arbiter.busy
+                    or app.state.ppm_calibration.release_failure() is not None)
             for name in sdr_consumers:
                 if busy:
                     break
