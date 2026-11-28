@@ -173,6 +173,153 @@ def test_a_second_watchdog_in_the_same_session_stands_down(box):
     assert box.calls("sleep") == []
 
 
+# --- the watchdog's lock stays with the watchdog ----------------------------------
+# On the reference Recon a restarted watchdog's `flock -n` failed and it exited without a word: a
+# process the killed watchdog had started still held the lock it took on fd 9.
+
+
+def _lock(box):
+    return box.runtime / "sigint101-kiosk-watch.lock"
+
+
+def _holding(box, name, body):
+    """A stub that first notes, in holders.log, whether it has the watchdog's lock file open."""
+    probe = (f'find /proc/$$/fd -maxdepth 1 -lname "{_lock(box)}" 2>/dev/null | grep -q . && '
+             f'echo "{name}" >> "{box.log.parent / "holders.log"}"')
+    _stub(box.bin, name, probe + "\n" + body)
+
+
+def _holders(box):
+    path = box.log.parent / "holders.log"
+    return sorted(set(path.read_text().split())) if path.exists() else []
+
+
+def test_no_process_the_watchdog_starts_holds_its_lock(box):
+    """Every command a watch pass runs, on the slowest path: the server is down at first (curl
+    fails, systemctl starts it), no kiosk is alive (the output size is read, the saved bounds are
+    cleared, Chromium is started), then the pass sleeps."""
+    up = box.log.parent / "server-up"
+    _holding(box, "curl", f'[ -e {up} ] && exit 0; touch {up}; exit 7')
+    _holding(box, "systemctl", f'echo "systemctl $*" >> {box.log}')
+    _holding(box, "pgrep", f'echo "pgrep $*" >> {box.log}; [ -e {box.alive} ]')
+    _holding(box, "wlr-randr", "exit 1")
+    _holding(box, "python3", "cat >/dev/null; exit 0")
+    _holding(box, "chromium", f'echo "chromium $*" >> {box.log}')
+    _holding(box, "sleep", f'echo "sleep $*" >> {box.log}; rm -f {box.runtime}/wayland-9')
+    prefs = _prefs(box)
+    prefs.parent.mkdir(parents=True)
+    prefs.write_text('{"browser": {"window_placement": {}}}', encoding="utf-8")
+    box.start_session()
+    result = box.run(LAUNCHER, "watch")
+    assert result.returncode == 0, result.stderr
+    assert box.launches(), "the pass never reached the launch"
+    assert box.calls("systemctl") and box.calls("sleep") == ["sleep 10"]
+    holders = _holders(box)
+    assert holders == [], f"these inherited the lock: {' '.join(holders)}"
+
+
+def _wait_for(check, timeout=10.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if check():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A killed child the test has not reaped yet is a zombie: it is gone.
+    stat = Path(f"/proc/{pid}/stat").read_text()
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+def _lock_is_free(box):
+    import fcntl
+    with open(_lock(box), "a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return True
+
+
+class _LongSleep:
+    """The watchdog's `sleep 10`, made long and real while the hold file exists, so a test can
+    kill the watchdog in the middle of it. Without the hold file it ends the session."""
+
+    def __init__(self, box):
+        self.box = box
+        self.hold = box.log.parent / "hold"
+        self.pids = box.log.parent / "sleep-pids"
+        real = shutil.which("sleep")
+        _stub(box.bin, "sleep",
+              f'if [ -e {self.hold} ]; then echo $$ >> {self.pids}; exec {real} 30; fi\n'
+              f'echo "sleep $*" >> {box.log}; rm -f {box.runtime}/wayland-9')
+        self.hold.touch()
+
+    def first_pid(self, timeout=10.0):
+        assert _wait_for(lambda: self.pids.exists() and self.pids.read_text().strip(), timeout)
+        return int(self.pids.read_text().split()[0])
+
+    def stop_all(self):
+        if self.pids.exists():
+            for pid in self.pids.read_text().split():
+                try:
+                    os.kill(int(pid), 9)
+                except ProcessLookupError:
+                    pass
+
+
+def test_a_restarted_watchdog_takes_the_lock_while_the_killed_ones_sleep_lives(box):
+    box.alive.touch()  # the course is open, so each pass only checks and sleeps
+    box.start_session()
+    sleeper = _LongSleep(box)
+    old = subprocess.Popen(["bash", str(LAUNCHER), "watch"], env=box.env(),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        sleep_pid = sleeper.first_pid()
+        assert not _lock_is_free(box)
+        old.kill()
+        old.wait(timeout=10)
+        assert _alive(sleep_pid), "the old watchdog's sleep must still be running for this test"
+        sleeper.hold.unlink()
+        result = box.run(LAUNCHER, "watch")
+        assert result.returncode == 0, result.stderr
+        # It took the lock and ran its pass, while the old sleep still ran.
+        assert box.calls("sleep") == ["sleep 10"], result.stderr
+        assert _alive(sleep_pid)
+    finally:
+        if old.poll() is None:
+            old.kill()
+        old.wait(timeout=10)
+        sleeper.stop_all()
+
+
+def test_a_watchdog_that_finds_the_lock_held_says_so_and_names_the_holder(box):
+    box.alive.touch()
+    box.start_session()
+    sleeper = _LongSleep(box)
+    first = subprocess.Popen(["bash", str(LAUNCHER), "watch"], env=box.env(),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        sleeper.first_pid()
+        second = box.run(LAUNCHER, "watch")
+        assert second.returncode == 0, second.stderr
+        assert box.calls("sleep") == []
+        [line] = second.stderr.splitlines()
+        assert line.startswith("sigint101-course: ") and "already" in line, line
+        assert str(first.pid) in line, line
+    finally:
+        first.kill()
+        first.wait(timeout=10)
+        sleeper.stop_all()
+
+
 # --- the kiosk window covers the whole panel, whatever the profile saved ----------
 # On the reference panel a reopened kiosk came back as the 780x460 window its profile had saved,
 # leaving a 20 px strip of the desktop showing down the right edge and along the bottom.

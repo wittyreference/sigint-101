@@ -10,6 +10,8 @@ RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # Exit SIGINT 101 writes this flag before it closes the browser. XDG_RUNTIME_DIR is a tmpfs, so a
 # reboot clears it and the box boots back into the course.
 FLAG="$RUNTIME/sigint101-kiosk-exited"
+# The watchdog holds a flock on this for as long as it runs; install.sh finds it by it.
+LOCK="$RUNTIME/sigint101-kiosk-watch.lock"
 
 usage() {
   echo "usage: $(basename "$0") watch|open" >&2
@@ -145,8 +147,32 @@ watch() {
     exit 1
   fi
   # One watchdog per session, however often autostart runs.
-  exec 9>"$RUNTIME/sigint101-kiosk-watch.lock"
-  flock -n 9 || exit 0
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    exec 9>&-
+    echo "sigint101-course: a watchdog is already running (lock $LOCK open in: $(lock_holders));" \
+      "not watching" >&2
+    exit 0
+  fi
+  # Run the loop with fd 9 closed. Bash keeps the lock in a close-on-exec copy of it for the
+  # length of the call, so no command the loop starts (sleep, curl, systemctl, pgrep, Chromium)
+  # inherits it: a killed watchdog's lock dies with it, and the next one can start at once.
+  watch_loop 9>&-
+}
+
+# The processes that have the lock file open, as "PID (name)", for the stand-down message.
+lock_holders() {
+  local fd pid name out=""
+  while IFS= read -r fd; do
+    pid="${fd#/proc/}"
+    pid="${pid%%/*}"
+    name="$(cat "/proc/$pid/comm" 2>/dev/null)"
+    out+="${out:+, }$pid (${name:-gone})"
+  done < <(find /proc/[0-9]*/fd -maxdepth 1 -lname "$LOCK" 2>/dev/null)
+  printf '%s\n' "${out:-none found}"
+}
+
+watch_loop() {
   wait_for_server
   # The loop ends with the session: an orphaned watchdog must not outlive its compositor.
   while [ -S "$RUNTIME/$WAYLAND_DISPLAY" ]; do
