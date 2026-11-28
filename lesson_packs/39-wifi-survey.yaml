@@ -40,7 +40,7 @@ stages:
 
 # Keyboard-free predict chips: {key, label}. Lengths stay within 2x and none are YAML booleans.
 choices:
-  - {key: "everything", label: "Open Wi-Fi payload is exempt radio"}
+  - {key: "everything", label: 'Open payload is exempt "radio"'}
   - {key: "envelope-only", label: 'Not "radio communication"; metadata only'}
   - {key: "nothing", label: "No Wi-Fi signal may be received"}
 
@@ -58,8 +58,8 @@ sources:
     url: "https://cdn.ca9.uscourts.gov/datastore/general/2013/12/27/11-17483_opinion122713.pdf"
     read: "2026-11-27"
   - title: "18 U.S.C. 2510(16) — Wiretap Act definition of 'readily accessible to the general public'"
-    url: "https://www.law.cornell.edu/uscode/text/18/2510"
-    read: "2026-11-27"
+    url: "https://www.govinfo.gov/content/pkg/USCODE-2024-title18/html/USCODE-2024-title18-partI-chap119-sec2510.htm"
+    read: "2026-11-28"
   - title: "18 U.S.C. 2511(1)(a) — Wiretap Act default ban on intentional interception"
     url: "https://www.law.cornell.edu/uscode/text/18/2511"
     read: "2026-11-27"

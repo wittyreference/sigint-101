@@ -759,6 +759,20 @@ def test_payload_radio_guard_rejects_bare_not_radio_and_accepts_the_statutory_te
         assert _check_joffe_overstatements(fair) == [], fair
 
 
+def _unquoted_radio_chips(labels) -> list[str]:
+    """Chips that use "radio" outside quote marks."""
+    return [label for label in labels
+            if re.search(r"\bradio\b", re.sub(r"\"[^\"]*\"|“[^”]*”", "", label), re.I)]
+
+
+def test_m39_chips_that_use_the_statutory_term_all_quote_it():
+    # Quote marks on the statute's term must not single out the scored chip: every chip that says
+    # "radio" quotes it, the distractors as much as the answer.
+    lesson = load_lesson_file(PACK_M39)
+    labels = [c["label"] for c in lesson.choices]
+    assert _unquoted_radio_chips(labels) == []
+
+
 def test_joffe_claim_probe_rejects_round1_overstatements_and_accepts_accurate_rewordings():
     round1_explain = (
         "In Joffe v. Google, Inc., 746 F.3d 920 (9th Cir. 2013), the Ninth Circuit held that "
@@ -835,7 +849,8 @@ def test_m39_legal_text_matches_amended_joffe_opinion_and_cites_primary_sources(
     assert any("cdn.ca9.uscourts.gov" in u and "11-17483_opinion122713.pdf" in u for u in urls), (
         urls
     )
-    assert any("law.cornell.edu" in u and "/18/2510" in u for u in urls), urls
+    # 2510(16) is cited from the official U.S. Code (govinfo or the House's uscode site).
+    assert any(("govinfo.gov" in u or "uscode.house.gov" in u) and "2510" in u for u in urls), urls
     assert any("law.cornell.edu" in u and "/18/2511" in u for u in urls), urls
     assert any("2511(1)(a)" in t for t in titles), titles
     assert any("supremecourt.gov" in u and "13-1181" in u for u in urls), urls
