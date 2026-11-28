@@ -179,6 +179,56 @@ def _write(parent, name, data, mount):
         os.close(fd)
 
 
+def _sync_marker(clip, mount):
+    _write(clip, PUBLISHING, b"", mount)
+    fsync_fd(clip)
+
+
+def _reclaim_marked(root, stem, clip, mount):
+    names = set(os.listdir(clip))
+    if PUBLISHING not in names:
+        return False
+    pair = _names(stem)
+    if names - {PUBLISHING, *pair}:
+        raise _invalid("marked capture contents")
+    with _entries(clip, names, mount) as files:
+        for name in pair:
+            if name in files:
+                if (not _still_named(root, stem, clip)
+                        or not _still_named(clip, PUBLISHING, files[PUBLISHING][0])
+                        or not _still_named(clip, name, files[name][0])):
+                    raise _invalid("marked capture identity")
+                os.unlink(name, dir_fd=clip)
+        # Make the absence of the pair durable before removing what hides it.
+        fsync_fd(clip)
+        if (not _still_named(root, stem, clip) or set(os.listdir(clip)) != {PUBLISHING}
+                or not _still_named(clip, PUBLISHING, files[PUBLISHING][0])):
+            raise _invalid("marked capture marker identity")
+        os.unlink(PUBLISHING, dir_fd=clip)
+        try:
+            os.rmdir(stem, dir_fd=root)
+        except OSError:
+            if _still_named(root, stem, clip):
+                _sync_marker(clip, mount)
+            raise
+    return True
+
+
+def _sweep_marked(root, mount):
+    for stem in os.listdir(root):
+        if not STEM.fullmatch(stem):
+            continue
+        try:
+            info = os.stat(stem, dir_fd=root, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            with _directory(root, stem, mount) as clip:
+                if _reclaim_marked(root, stem, clip, mount):
+                    fsync_fd(root)
+        except (OSError, SnapshotError) as exc:
+            _LOG.warning("Capture could not reclaim marked pair %s: %s", stem, exc)
+
+
 def _measure_files(parent):
     total = 0
     for name in os.listdir(parent):
@@ -231,6 +281,67 @@ def _storage_error(exc):
     return CaptureStorageError(f"Capture storage error: {exc}")
 
 
+def _restore_marker(clip, stem, mount, files, errors):
+    try:
+        _sync_marker(clip, mount)
+    except (OSError, SnapshotError) as exc:
+        errors.append(("restore its marker", exc))
+        try:
+            if PUBLISHING in os.listdir(clip):
+                with _entries(clip, [PUBLISHING], mount) as marker:
+                    fsync_fd(marker[PUBLISHING][0])
+            else:
+                # A full disk can refuse a new marker file. Use the failed pair's
+                # own metadata as the marker, so this can never be a complete pair.
+                meta = _names(stem)[1]
+                if not _still_named(clip, meta, files[meta][0]):
+                    raise _invalid("capture rollback metadata identity")
+                _rename_new(clip, meta, clip, PUBLISHING)
+                fsync_fd(files[meta][0])
+            fsync_fd(clip)
+        except (OSError, SnapshotError) as recovery_error:
+            errors.append(("hide the failed pair", recovery_error))
+
+
+def _commit_pair(root, stem, owner, payload, mount, files):
+    marker_removed = False
+    try:
+        # Keep the synced marker until both parents are durable.
+        fsync_fd(owner)
+        fsync_fd(root)
+        if (not _still_named(root, stem, payload)
+                or not _still_named(payload, PUBLISHING, files[PUBLISHING][0])):
+            raise _invalid("capture publication marker identity")
+        os.unlink(PUBLISHING, dir_fd=payload)
+        marker_removed = True
+        fsync_fd(payload)
+    except OSError as publication_error:
+        parent, name = root, stem
+        try:
+            if not _still_named(root, stem, payload):
+                raise _invalid("capture rollback identity")
+            _rename_new(root, stem, owner, PAYLOAD)
+            parent, name = owner, PAYLOAD
+            fsync_fd(root)
+            fsync_fd(owner)
+        except OSError as rollback_error:
+            errors = [("sync saved pair", publication_error), ("roll it back", rollback_error)]
+            if marker_removed:
+                try:
+                    if not _still_named(parent, name, payload):
+                        raise _invalid("capture marker restoration identity")
+                    _restore_marker(payload, stem, mount, files, errors)
+                except OSError as exc:
+                    errors.append(("restore its marker", exc))
+            full = any(_is_full(error) for _, error in errors)
+            label = "Capture storage is full" if full else "Capture storage error"
+            details = " or ".join(f"{action} ({error})" for action, error in errors)
+            raise CaptureStorageError(
+                f"{label}: could not {details}", full=full,
+            ) from rollback_error
+        raise
+
+
 class CaptureStore:
     def __init__(self, data_dir):
         self.data_dir = Path(data_dir)
@@ -266,6 +377,7 @@ class CaptureStore:
                         raise _invalid("capture store lock or root")
                     with _directory(root, STAGING, mount, create=True) as staging:
                         sweep_owners(staging, _empty_stage, _warn_stage)
+                        _sweep_marked(root, mount)
                         _space(root, staging, mount)
                         yield parent, root, staging, mount
                 finally:
@@ -287,6 +399,8 @@ class CaptureStore:
                         continue
                     try:
                         with _directory(root, stem, mount) as clip:
+                            # Skip only the pair whose final sync or recovery is in progress.
+                            fcntl.flock(clip, fcntl.LOCK_SH | fcntl.LOCK_NB)
                             if set(os.listdir(clip)) != set(names := _names(stem)):
                                 continue
                             with _entries(clip, names, mount) as files:
@@ -335,33 +449,9 @@ class CaptureStore:
                                 or not all(_still_named(payload, n, fd)
                                            for n, (fd, _) in files.items())):
                             raise _invalid("capture publish identity")
+                        fcntl.flock(payload, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         _rename_new(owner, PAYLOAD, root, stem)
-                        try:
-                            fsync_fd(owner)
-                            fsync_fd(root)
-                        except OSError as publication_error:
-                            try:
-                                if not _still_named(root, stem, payload):
-                                    raise _invalid("capture rollback identity")
-                                _rename_new(root, stem, owner, PAYLOAD)
-                                fsync_fd(root)
-                                fsync_fd(owner)
-                            except OSError as rollback_error:
-                                full = _is_full(publication_error) or _is_full(rollback_error)
-                                label = ("Capture storage is full" if full
-                                         else "Capture storage error")
-                                raise CaptureStorageError(
-                                    f"{label}: could not sync saved pair ({publication_error}) "
-                                    f"or roll it back ({rollback_error})", full=full,
-                                ) from rollback_error
-                            raise
-                        # The catalog requires exactly the two pair files. Keep the synced
-                        # marker until both parents are durable, even if rollback fails.
-                        if (not _still_named(root, stem, payload)
-                                or not _still_named(payload, PUBLISHING, files[PUBLISHING][0])):
-                            raise _invalid("capture publication marker identity")
-                        os.unlink(PUBLISHING, dir_fd=payload)
-                        fsync_fd(payload)
+                        _commit_pair(root, stem, owner, payload, mount, files)
                 return {"id": stem, "bytes": len(data) + len(meta)}
             finally:
                 try:

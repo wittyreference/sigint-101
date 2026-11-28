@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -825,3 +827,207 @@ def test_failed_capture_publication_stays_hidden_after_reopen(tmp_path, monkeypa
     assert reopened.catalog() == [first]
     following = reopened.save(b"third", b"{}")
     assert {row["id"] for row in reopened.catalog()} == {first["id"], following["id"]}
+
+
+@pytest.mark.parametrize("commit,rollback,restore", [
+    (errno.EIO, None, None), (errno.ENOSPC, None, None), (errno.EIO, errno.EIO, None),
+    (errno.ENOSPC, errno.EIO, None), (errno.EIO, errno.EDQUOT, None),
+    (errno.EIO, errno.EIO, errno.ENOSPC),
+])
+def test_failed_marker_removal_sync_never_exposes_capture(
+        tmp_path, monkeypatch, commit, rollback, restore):
+    from sigint101 import capture_store
+
+    store = _store(tmp_path)
+    first = store.save(b"previous", b"{}")
+    root = tmp_path / capture_store.ROOT
+    fsync = capture_store.fsync_fd
+    rename = capture_store._rename_new
+    write = capture_store._write
+    stem = None
+    seen = []
+
+    def publish(src, old, dst, new):
+        nonlocal stem
+        if old == stem and rollback is not None:
+            raise OSError(rollback, "fixture rollback rename failed")
+        rename(src, old, dst, new)
+        if stem is None:
+            stem = new
+
+    def fail_commit(fd):
+        clip = root / stem if stem else None
+        if (not seen and clip and clip.is_dir() and not (clip / capture_store.PUBLISHING).exists()
+                and os.path.samestat(os.fstat(fd), clip.stat())):
+            seen.append(_store(tmp_path).catalog())
+            raise OSError(commit, "fixture marker removal sync failed")
+        fsync(fd)
+
+    def fail_restore(fd, name, data, mount):
+        if seen and name == capture_store.PUBLISHING and restore is not None:
+            raise OSError(restore, "fixture marker recreation failed")
+        write(fd, name, data, mount)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(capture_store, "_rename_new", publish)
+        patch.setattr(capture_store, "fsync_fd", fail_commit)
+        patch.setattr(capture_store, "_write", fail_restore)
+        with pytest.raises(capture_store.CaptureStorageError) as refused:
+            store.save(b"failed", b"{}")
+
+    assert store.catalog() == _store(tmp_path).catalog() == [first]
+    assert seen == [[first]]
+    full = commit == errno.ENOSPC or rollback == errno.EDQUOT or restore == errno.ENOSPC
+    assert refused.value.full is full
+    if rollback is None:
+        assert not (root / stem).exists()
+    else:
+        assert f"[Errno {commit}] fixture marker removal sync failed" in str(refused.value)
+        assert f"[Errno {rollback}] fixture rollback rename failed" in str(refused.value)
+        if restore is not None:
+            assert f"[Errno {restore}] fixture marker recreation failed" in str(refused.value)
+        assert (root / stem / capture_store.PUBLISHING).is_file()
+        store.preflight()
+        assert not (root / stem).exists()
+
+
+def _crash_capture_writer(path, code):
+    script = """
+import os
+import sys
+from sigint101 import capture_store
+store = capture_store.CaptureStore(sys.argv[1])
+""" + code
+    result = subprocess.run([sys.executable, "-c", script, os.fspath(path)],
+                            capture_output=True, timeout=10)
+    assert result.returncode == 23, result.stderr.decode()
+
+
+@pytest.mark.parametrize("interruption", ["crash", "failed-rollback"])
+def test_capture_reclaims_abandoned_pair_before_checking_quota(tmp_path, monkeypatch, interruption):
+    from sigint101 import capture_store
+
+    store = _store(tmp_path)
+    first = store.save(b"keep", b"{}")
+    root = tmp_path / capture_store.ROOT
+    if interruption == "crash":
+        _crash_capture_writer(tmp_path, """
+rename = capture_store._rename_new
+def crash(*args):
+    rename(*args)
+    os._exit(23)
+capture_store._rename_new = crash
+store.save(b"abandoned", b"{}")
+""")
+    else:
+        rename, fsync = capture_store._rename_new, capture_store.fsync_fd
+        root_info = root.stat()
+        renamed = False
+
+        def fail_rollback(*args):
+            nonlocal renamed
+            if renamed:
+                raise OSError(errno.EIO, "fixture rollback rename failed")
+            rename(*args)
+            renamed = True
+
+        def fail_publish(fd):
+            if renamed and os.path.samestat(os.fstat(fd), root_info):
+                raise OSError(errno.EIO, "fixture publication sync failed")
+            fsync(fd)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(capture_store, "_rename_new", fail_rollback)
+            patch.setattr(capture_store, "fsync_fd", fail_publish)
+            with pytest.raises(capture_store.CaptureStorageError, match="roll it back"):
+                store.save(b"abandoned", b"{}")
+
+    abandoned, = (p for p in root.iterdir() if (p / capture_store.PUBLISHING).is_file())
+    reopened = _store(tmp_path)
+    assert reopened.catalog() == [first]
+    assert abandoned.is_dir()  # Catalog reads never reclaim.
+    monkeypatch.setattr(capture_store, "QUOTA", capture_store.PAIR_ALLOWANCE + first["bytes"])
+    following = reopened.save(b"next", b"{}")
+    assert not abandoned.exists()
+    assert set(row["id"] for row in reopened.catalog()) == {first["id"], following["id"]}
+    assert (root / first["id"] / capture_store._names(first["id"])[0]).read_bytes() == b"keep"
+
+
+def test_capture_reclaim_can_resume_after_a_crash_between_unlinks(tmp_path):
+    from sigint101 import capture_store
+
+    store = _store(tmp_path)
+    saved = store.save(b"data", b"{}")
+    clip = tmp_path / capture_store.ROOT / saved["id"]
+    marker = clip / capture_store.PUBLISHING
+    marker.touch(mode=0o600)
+    data, meta = (clip / name for name in capture_store._names(saved["id"]))
+
+    _crash_capture_writer(tmp_path, """
+unlink = os.unlink
+def crash(name, **kwargs):
+    unlink(name, **kwargs)
+    if name.endswith(".sigmf-data"):
+        os._exit(23)
+os.unlink = crash
+store.preflight()
+""")
+
+    assert not data.exists() and meta.exists() and marker.exists()
+    reopened = _store(tmp_path)
+    assert reopened.catalog() == []
+    reopened.preflight()
+    assert not clip.exists()
+
+
+@pytest.mark.parametrize("obstacle", ["unlink", "directory-sync", "rmdir", "extra", "symlink"])
+def test_capture_reclaim_warns_and_keeps_marker_when_it_cannot_finish(
+        tmp_path, monkeypatch, caplog, obstacle):
+    from sigint101 import capture_store
+
+    store = _store(tmp_path)
+    saved = store.save(b"data", b"{}")
+    clip = tmp_path / capture_store.ROOT / saved["id"]
+    marker = clip / capture_store.PUBLISHING
+    marker.touch(mode=0o600)
+    data, meta = (clip / name for name in capture_store._names(saved["id"]))
+    keep = tmp_path / "keep"
+    keep.write_bytes(b"keep")
+    if obstacle == "extra":
+        (clip / "unexpected").write_bytes(b"keep")
+    if obstacle == "symlink":
+        meta.unlink()
+        meta.symlink_to(keep)
+
+    unlink, fsync, rmdir = os.unlink, capture_store.fsync_fd, os.rmdir
+    clip_info = clip.stat()
+
+    def fail_unlink(name, **kwargs):
+        if obstacle == "unlink" and name == meta.name:
+            raise OSError(errno.EIO, "fixture removal failed")
+        unlink(name, **kwargs)
+
+    def fail_sync(fd):
+        if obstacle == "directory-sync" and os.path.samestat(os.fstat(fd), clip_info):
+            raise OSError(errno.EIO, "fixture reclaim sync failed")
+        fsync(fd)
+
+    def fail_rmdir(name, **kwargs):
+        if obstacle == "rmdir" and name == clip.name:
+            raise OSError(errno.EIO, "fixture rmdir failed")
+        rmdir(name, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "unlink", fail_unlink)
+        patch.setattr(capture_store, "fsync_fd", fail_sync)
+        patch.setattr(os, "rmdir", fail_rmdir)
+        store.preflight()
+    assert "Capture could not reclaim marked pair" in caplog.text
+    assert marker.exists() and store.catalog() == []
+    assert keep.read_bytes() == b"keep"
+    if obstacle in {"extra", "symlink"}:
+        assert data.read_bytes() == b"data"
+        assert os.path.lexists(meta)
+    else:
+        store.preflight()
+        assert not clip.exists()
