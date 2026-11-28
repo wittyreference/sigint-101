@@ -18,6 +18,11 @@ WATCH_LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sigint101-kiosk-watch.lock"
 # (7>&-), so it never outlives this run. Another install waits for it, up to INSTALL_WAIT_S.
 INSTALL_LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sigint101-install.lock"
 INSTALL_WAIT_S=300
+# Tests only: the wait can be cut short, and only when SIGINT101_TESTING=1 says this is a test.
+if [ "${SIGINT101_TESTING:-}" = 1 ] && [[ "${SIGINT101_TEST_INSTALL_WAIT_S:-}" =~ ^[1-9][0-9]*$ ]]
+then
+  INSTALL_WAIT_S="$SIGINT101_TEST_INSTALL_WAIT_S"
+fi
 if [ ! -d "${INSTALL_LOCK%/*}" ] || [ ! -w "${INSTALL_LOCK%/*}" ]; then
   # No runtime dir yet (a console login before linger): the home directory is the user's too.
   mkdir -p "$HOME/.cache"
@@ -160,26 +165,44 @@ a_new_watchdog() {
 
 HANDED_OVER="install: another install has already started the new course watchdog"
 
+# started_since CS PID:START...: did every one of these watchdogs start at or after CS (hundredths
+# of a second since boot, as uptime_cs gives)? Start times count clock ticks since boot.
+started_since() {
+  local since="$1" w ticks
+  shift
+  ticks="$(getconf CLK_TCK 2>/dev/null)" || ticks=100
+  [[ "$ticks" =~ ^[1-9][0-9]*$ ]] || ticks=100
+  for w in "$@"; do
+    (( ${w#*:} * 100 / ticks >= since )) || return 1
+  done
+  return 0
+}
+
 # A running watchdog keeps the launcher it started with in memory, so without this a launcher
 # change (the window bounds, say) waits for the next login. Stop it through a pidfd and start the
 # installed launcher's watchdog in the same desktop session, with that session's environment
 # (install.sh is often run over SSH, which has no WAYLAND_DISPLAY). The kiosk browser is never
 # touched: a learner may be mid-lesson, so new browser flags apply at its next launch.
 restart_watchdog() {
-  local pid w
+  local pid w scan_began
   local -a found holders session_env run
+  scan_began="$(uptime_cs)"
   mapfile -t found < <(watchdogs)
+  if [ "${#found[@]}" -eq 0 ] && [ -e "$WATCH_LOCK" ] && ! flock -n "$WATCH_LOCK" true; then
+    # Held, yet the scan found no watchdog. Look once more: the old one may have exited during
+    # that scan with a new one just started (by another install, or the session's autostart).
+    # A watchdog that started after the scan began is that new one, the hand-over done; one that
+    # is older is the old watchdog the first scan missed, and it is restarted as usual.
+    mapfile -t found < <(watchdogs)
+    if [ "${#found[@]}" -gt 0 ] && started_since "$scan_began" "${found[@]}"; then
+      echo "$HANDED_OVER"
+      return 0
+    fi
+  fi
   if [ "${#found[@]}" -eq 0 ]; then
     # Held, yet no watchdog holds it: a lookalike, or a kernel whose fdinfo lists no locks. Say
-    # so, or the launcher change would go unapplied without a word. But look once more first:
-    # the old watchdog may have exited during that scan with a new one just started (by another
-    # install, or the session's autostart), and that one is the hand-over done, not a problem.
+    # so, or the launcher change would go unapplied without a word.
     if [ -e "$WATCH_LOCK" ] && ! flock -n "$WATCH_LOCK" true; then
-      mapfile -t found < <(watchdogs)
-      if [ "${#found[@]}" -gt 0 ]; then
-        echo "$HANDED_OVER"
-        return 0
-      fi
       echo "install: WARN the course watchdog's lock is held, but no watchdog holding it was" \
         "found; it was not restarted, and the new launcher applies at the next login" >&2
     fi

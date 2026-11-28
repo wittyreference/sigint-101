@@ -1541,6 +1541,23 @@ def test_the_lock_wait_keeps_its_deadline_when_every_step_of_a_scan_is_slow(box)
     assert took < 2.3, took
 
 
+def test_the_lock_wait_cuts_off_a_scan_that_hangs_past_its_deadline(box):
+    """The scan's one time limit is what keeps the deadline: a holder scan that hangs for 20 s
+    must not hold up a two-second wait."""
+    _python_hook(box, "import time\nif sys.argv[1] in ('FIND', 'HOLDERS'):\n"
+                      "    time.sleep(20)\n")
+    held = _held_lock(box)
+    try:
+        start = time.monotonic()
+        run = subprocess.run(["bash", "-c", _wait_for_lock_script(box, 2)], env=box.env(),
+                             capture_output=True, text=True, timeout=60)
+        took = time.monotonic() - start
+    finally:
+        held.close()
+    assert run.stdout.strip() == "rc=1", (run.stdout, run.stderr)
+    assert took < 2.3, took
+
+
 def test_the_lock_wait_takes_no_scan_result_that_came_after_its_deadline(box):
     """A scan that answers "a new watchdog" only as the deadline passes is not a hand-over: the
     time ran out first, so the wait reports that (1), not the replacement (2)."""
@@ -1608,6 +1625,68 @@ def test_an_empty_first_scan_with_the_lock_held_looks_again_before_it_warns(box)
     finally:
         _end(old)
         _kill_all(_pids(pids))
+
+
+def test_a_first_scan_that_missed_the_old_watchdog_restarts_it_without_claiming_a_handover(box):
+    """When the second look finds a watchdog that is older than the first scan, it is the old
+    watchdog that scan missed, not a replacement: install.sh restarts it as usual and does not
+    say another install already did."""
+    box.alive.touch()
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    once = box.log.parent / "first-find"
+    _python_hook(box, "import os\n"
+                      f"if sys.argv[1] == 'FIND' and not os.path.exists({str(once)!r}):\n"
+                      f"    open({str(once)!r}, 'w').close()\n"
+                      "    sys.exit(0)\n")
+    old = _stubborn_watchdog(box, stubborn=False)
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box), timeout=40)
+        assert once.exists(), "the first scan was not the staged empty one"
+        assert "already started" not in result.stdout, result.stdout
+        assert "WARN" not in result.stderr, result.stderr
+        assert _sent(box) == [signal.SIGTERM]
+        old.wait(timeout=10)
+        _hands_over(box, result)
+    finally:
+        _end(old)
+
+
+def test_a_second_install_stops_and_says_why_when_the_wait_runs_out(box):
+    """The bounded wait's other end: the lock still held when the wait runs out (cut to 1 s, as
+    only a test may), so the second install stops before changing anything and says why."""
+    import fcntl
+    lock = box.runtime / "sigint101-install.lock"
+    with open(lock, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        start = time.monotonic()
+        result = box.run(INSTALL, SIGINT101_TESTING="1", SIGINT101_TEST_INSTALL_WAIT_S="1")
+        took = time.monotonic() - start
+    assert result.returncode == 1
+    assert box.calls("systemctl") == [] and box.calls("sudo") == []
+    assert "waiting for it (up to 1 s)" in result.stderr, result.stderr
+    assert (f"stopped: another install.sh still holds {lock} after 1 s; nothing was changed"
+            in result.stderr), result.stderr
+    assert took < 5, took
+
+
+def test_the_install_wait_is_cut_short_only_when_a_test_says_so(box):
+    """Without SIGINT101_TESTING=1 the shorter wait is ignored: the second install keeps
+    waiting for the first."""
+    import fcntl
+    lock = box.runtime / "sigint101-install.lock"
+    with open(lock, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.Popen(["bash", str(INSTALL)],
+                                env=box.env(SIGINT101_TEST_INSTALL_WAIT_S="1"),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(3)
+        assert proc.poll() is None, "it stopped instead of waiting"
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert "up to 300 s" in err, err
 
 
 def test_a_second_install_waits_for_the_first_and_says_so(box):
