@@ -4,10 +4,12 @@
 import errno
 import os
 import shlex
+import signal
 import socket
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,12 +55,6 @@ def _console(tmp_path, decoder, sweep=None):
                    sweeper_factory=lambda: sweep or _StubSweeper([]))
 
 
-def _port():
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.bind((HOST, 0))
-        return sock.getsockname()[1]
-
-
 def _wait_for(predicate):
     deadline = time.monotonic() + 3
     while not predicate():
@@ -87,13 +83,13 @@ def _badge(client):
                 if row["instrument"] == "ais")["count"]
 
 
-def test_ais_preflight_preserves_a_running_waterfall(tmp_path, monkeypatch, companion):
+def test_ais_preflight_preserves_a_running_waterfall(tmp_path, monkeypatch, companion, ais_port):
     launches = _fake_launch(monkeypatch)
     sweep = _StubSweeper([])
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as holder:
         holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        holder.bind((HOST, 0))
-        port = holder.getsockname()[1]
+        port = ais_port
+        holder.bind((HOST, port))
         receiver = _decoder(companion, port=port)
         with _console(tmp_path, receiver, sweep) as client:
             assert client.get("/api/spectrum").status_code == 200
@@ -110,9 +106,11 @@ def test_ais_preflight_preserves_a_running_waterfall(tmp_path, monkeypatch, comp
             assert len(launches) == 1 and not sweep.running
 
 
-def test_ais_launch_refuses_a_port_taken_after_preflight(tmp_path, monkeypatch, companion):
+def test_ais_launch_refuses_a_port_taken_after_preflight(
+    tmp_path, monkeypatch, companion, ais_port,
+):
     launches = _fake_launch(monkeypatch)
-    port = _port()
+    port = ais_port
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as holder:
         holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -152,9 +150,11 @@ def test_ais_launch_rejects_nonloopback_destination(tmp_path, monkeypatch, compa
         assert sweep.running and not launches and not binds
 
 
-def test_ais_unowned_datagrams_never_reach_the_assembler(tmp_path, monkeypatch, companion):
+def test_ais_unowned_datagrams_never_reach_the_assembler(
+    tmp_path, monkeypatch, companion, ais_port,
+):
     launches = _fake_launch(monkeypatch)
-    port = _port()
+    port = ais_port
     receiver = _decoder(companion, port=port)
     bind = socket.socket.bind
     pushed = []
@@ -203,9 +203,11 @@ def test_ais_unowned_datagrams_never_reach_the_assembler(tmp_path, monkeypatch, 
 @pytest.mark.parametrize(("data", "reason"), [
     (OWNED * 100, "truncated"), (b"wrong\r\n", "framing"),
 ])
-def test_ais_child_datagram_rejection_ends_the_run(tmp_path, monkeypatch, companion, data, reason):
+def test_ais_child_datagram_rejection_ends_the_run(
+    tmp_path, monkeypatch, companion, ais_port, data, reason,
+):
     launches = _fake_launch(monkeypatch)
-    port = _port()
+    port = ais_port
     receiver = _decoder(companion, port=port)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as stock_sender:
         with _console(tmp_path, receiver) as client:
@@ -262,6 +264,7 @@ def test_ais_sender_port_stays_reserved_until_natural_drain_finishes(monkeypatch
     sender_address = []
     destination = []
     reader_paused, resume = threading.Event(), threading.Event()
+    draining = threading.Event()
     heard = []
 
     def spawn(argv, *, stdout, **_):
@@ -288,13 +291,20 @@ def test_ais_sender_port_stays_reserved_until_natural_drain_finishes(monkeypatch
         receive_port.append(sock.getsockname()[1])
 
     read = receiver._read
+    drain_reader = receiver._drain_reader
 
     def gated(*args):
         reader_paused.set()
-        resume.wait(3)
+        resume.wait()
         return read(*args)
 
+    def record_drain(run):
+        # The supervisor calls this after stop_child returns, with the reader still gated.
+        draining.set()
+        drain_reader(run)
+
     receiver._read = gated
+    receiver._drain_reader = record_drain
     receiver.on_reception = lambda item, **_: heard.append(item["mmsi"])
     monkeypatch.setattr(socket.socket, "bind", record_bind)
     monkeypatch.setattr(ais, "spawn", spawn)
@@ -304,6 +314,8 @@ def test_ais_sender_port_stays_reserved_until_natural_drain_finishes(monkeypatch
         assert reader_paused.wait(3)
         children[0].code = 1
         run.wake.set()
+        _wait_for(lambda: children[0].sent)
+        assert draining.wait(3)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as other:
             with pytest.raises(OSError) as exc:
                 other.bind(sender_address[0])
@@ -320,8 +332,10 @@ def test_ais_sender_port_stays_reserved_until_natural_drain_finishes(monkeypatch
         receiver.shutdown()
 
 
-def test_ais_post_spawn_fault_keeps_child_under_supervision(tmp_path, monkeypatch, companion):
-    receiver = _decoder(companion, port=_port())
+def test_ais_post_spawn_fault_keeps_child_under_supervision(
+    tmp_path, monkeypatch, companion, ais_port,
+):
+    receiver = _decoder(companion, port=ais_port)
     sweep = _StubSweeper([])
     can_reap = threading.Event()
     fault_sockets = []
@@ -391,9 +405,9 @@ def test_ais_missing_companion_refuses_before_stand_down(tmp_path, monkeypatch, 
         assert len(launches) == 1 and not sweep.running
 
 
-def test_ais_command_strip_shows_a_shell_command(tmp_path, monkeypatch, companion):
+def test_ais_command_strip_shows_a_shell_command(tmp_path, monkeypatch, companion, ais_port):
     launches = _fake_launch(monkeypatch)
-    receiver = _decoder(companion, port=_port())
+    receiver = _decoder(companion, port=ais_port)
     with _console(tmp_path, receiver) as client:
         response = client.get("/api/ais")
         assert response.status_code == 200
@@ -405,26 +419,94 @@ def test_ais_command_strip_shows_a_shell_command(tmp_path, monkeypatch, companio
         assert kwargs["stdin"] == subprocess.DEVNULL and isinstance(kwargs["stdout"], socket.socket)
 
 
-def test_ais_timed_out_capability_is_killed_reaped_and_cached(tmp_path, monkeypatch, companion):
+@pytest.mark.parametrize("recovery", ["same-binary", "replacement"])
+def test_ais_timed_out_capability_is_killed_reaped_and_retried(
+    tmp_path, monkeypatch, companion, recovery,
+):
     launches = _fake_launch(monkeypatch)
     pid_log = tmp_path / "queries"
-    executable = _script(tmp_path / "hanging-companion",
-                         f'echo $$ >> "{pid_log}"\nwhile :; do :; done\n')
+    ready = tmp_path / "ready"
+    executable = _script(tmp_path / "slow-companion", f'echo $$ >> "{pid_log}"\n'
+                         f'if [ -f "{ready}" ]; then echo {CAPABILITY}; exit; fi\n'
+                         'while :; do :; done\n')
     receiver = _decoder(executable)
     sweep = _StubSweeper([])
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(ais, "time", SimpleNamespace(monotonic=lambda: clock.now, time=time.time))
     monkeypatch.setattr(ais, "AIS_CAPABILITY_TIMEOUT_S", 0.5, raising=False)
+    monkeypatch.setattr(ais, "AIS_CAPABILITY_RETRY_S", 30.0, raising=False)
+
+    def denied(client):
+        result = client.get("/api/ais")
+        assert result.status_code == 503
+        assert QUERY in result.json()["reason"] and "timed out" in result.json()["reason"]
+
+    def queries():
+        return pid_log.read_text(encoding="utf-8").splitlines()
+
     with _console(tmp_path, receiver, sweep) as client:
         assert client.get("/api/spectrum").status_code == 200
-        for _ in range(2):
-            denied = client.get("/api/ais")
-            assert denied.status_code == 503
-            assert QUERY in denied.json()["reason"] and "timed out" in denied.json()["reason"]
+        denied(client)
+        clock.now = 29.0
+        denied(client)
         assert sweep.running and not launches
-        [pid] = pid_log.read_text(encoding="utf-8").splitlines()
+        [pid] = queries()
         with pytest.raises(ChildProcessError):
             os.waitpid(int(pid), os.WNOHANG)
-        companion.replace(executable)
+        if recovery == "replacement":
+            companion.replace(executable)
+        else:
+            clock.now = 30.0
+            denied(client)
+            logged = queries()
+            assert len(logged) == 2, "the same executable was not queried after the cooldown"
+            first, second = logged
+            assert first == pid
+            with pytest.raises(ChildProcessError):
+                os.waitpid(int(second), os.WNOHANG)
+            ready.touch()
+            clock.now = 59.0
+            denied(client)
+            assert queries() == [first, second] and sweep.running and not launches
+            clock.now = 60.0
         assert client.get("/api/ais").status_code == 200 and len(launches) == 1
+        assert len(queries()) == (3 if recovery == "same-binary" else 1)
+
+
+@pytest.mark.parametrize("fault", ["exec-busy", "signalled"])
+def test_ais_capability_transient_query_failure_is_not_cached(monkeypatch, companion, fault):
+    receiver = _decoder(companion)
+
+    def fail(argv, **_kwargs):
+        if fault == "exec-busy":
+            raise OSError(errno.EAGAIN, os.strerror(errno.EAGAIN))
+        return subprocess.CompletedProcess(argv, -signal.SIGKILL, stdout=b"")
+
+    with monkeypatch.context() as m:
+        m.setattr(ais.subprocess, "run", fail)
+        with pytest.raises(ais.AisUnavailable):
+            receiver._companion()
+    assert receiver._companion() == str(companion)
+
+
+@pytest.mark.parametrize("query_result", ["wrong-reply", "nonzero", errno.ENOENT, errno.EACCES])
+def test_ais_capability_caches_definitive_refusals(monkeypatch, companion, query_result):
+    calls = []
+
+    def incompatible(argv, **_kwargs):
+        calls.append(argv)
+        if isinstance(query_result, int):
+            raise OSError(query_result, os.strerror(query_result))
+        if query_result == "wrong-reply":
+            return subprocess.CompletedProcess(argv, 0, stdout=b"wrong-version\n")
+        return subprocess.CompletedProcess(argv, 1, stdout=ais.AIS_CAPABILITY)
+
+    monkeypatch.setattr(ais.subprocess, "run", incompatible)
+    receiver = _decoder(companion)
+    for _ in range(2):
+        with pytest.raises(ais.AisUnavailable):
+            receiver._companion()
+    assert calls == [[str(companion), QUERY]]
 
 
 def test_ais_stop_sends_sigterm_to_a_companion_still_sending(monkeypatch, native):

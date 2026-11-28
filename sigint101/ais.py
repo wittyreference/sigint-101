@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shlex
 import shutil
@@ -54,6 +55,7 @@ AIS_MODE = "--sigint101-udp-stdout"
 AIS_CAPABILITY_QUERY = "--sigint101-capability"
 AIS_CAPABILITY = b"sigint101-ais-udp-v1\n"
 AIS_CAPABILITY_TIMEOUT_S = 1.0
+AIS_CAPABILITY_RETRY_S = 30.0
 
 # ITU-R M.1371 navigation-status enumeration (field at bits 38-41 of a type 1/2/3 report). The
 # code is stored as its text so the panel reads it the way a bridge officer would; 15 is the
@@ -558,6 +560,7 @@ class AisDecoder(SupervisedReceiver):
         self._spawn = spawn
         self._which = which
         self._capability = None
+        self._capability_retry = None
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._roster = VesselRoster()
         # Called with a vessel's dict the first time each MMSI is heard since the feed (re)started
@@ -593,22 +596,35 @@ class AisDecoder(SupervisedReceiver):
         except OSError as exc:
             reason = f"cannot check {AIS_COMPANION}: {exc}; run deploy/provision.sh"
             raise AisUnavailable(reason) from exc
-        key = stat.st_dev, stat.st_ino, stat.st_mtime_ns
-        if self._capability is None or self._capability[0] != key:
-            reason = None
+        key = stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
+        cached, retry = self._capability, self._capability_retry
+        if cached is not None and cached[0] == key:
+            reason = cached[1]
+        elif retry is not None and retry[0] == key and time.monotonic() < retry[1]:
+            reason = "timed out"
+        else:
+            self._capability_retry = None
             try:
                 result = subprocess.run([binary, AIS_CAPABILITY_QUERY], stdin=subprocess.DEVNULL,
                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                         timeout=AIS_CAPABILITY_TIMEOUT_S)
-                if result.returncode or result.stdout != AIS_CAPABILITY:
-                    reason = "did not return the required version"
             except subprocess.TimeoutExpired:
                 # subprocess.run kills the query and reaps it before returning this exception.
                 reason = "timed out"
+                self._capability_retry = key, time.monotonic() + AIS_CAPABILITY_RETRY_S
             except OSError as exc:
                 reason = str(exc)
-            self._capability = key, reason
-        if reason := self._capability[1]:
+                if exc.errno in (errno.ENOENT, errno.EACCES):
+                    self._capability = key, reason
+            else:
+                reason = None
+                if result.returncode < 0:
+                    reason = "was terminated before replying"
+                elif result.returncode or result.stdout != AIS_CAPABILITY:
+                    reason = "did not return the required version"
+                if result.returncode >= 0:
+                    self._capability = key, reason
+        if reason:
             raise AisUnavailable(
                 f"{AIS_COMPANION} {AIS_CAPABILITY_QUERY} {reason}; run deploy/provision.sh")
         return binary
