@@ -34,7 +34,9 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "deploy/kiosk/start-kiosk.sh",
         "sysroot",
         "usr/local/bin/sigint101-course",
-        "acb558c9cf59841776d2b2f05f79f30464369668ef0e2b1bc46b2950b557bbbd",
+        # Refrozen for C78-C80 (reviewed legacy deploy change): the watch loop runs with the
+        # lock's fd 9 closed so no child inherits it, and a watchdog that stands down says why.
+        "b2257b402a5e15ba1fbac6d7812db6393d3df4e91baa5831050bbc25d5e95785",
     ),
     (
         "deploy/kiosk/sigint101.svg",
