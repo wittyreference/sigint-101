@@ -66,11 +66,17 @@ def _sweeper():
 # --- the rack's pages ---------------------------------------------------------------------------
 
 
+def _pick(client, key):
+    """The picker's tap: operate.js posts the instrument the learner chose."""
+    return client.post("/api/rack/place", json={"instrument": key})
+
+
 def test_operate_opens_the_waterfall_until_another_instrument_is_used(tmp_path):
     with _client(tmp_path) as client:
         first = client.get("/operate", follow_redirects=False)
         assert first.status_code in (302, 303, 307)
         assert first.headers["location"] == "/operate/waterfall"
+        assert _pick(client, "aprs").status_code == 200
         assert client.get("/operate/aprs").status_code == 200
         again = client.get("/operate", follow_redirects=False)
         assert again.headers["location"] == "/operate/aprs"
@@ -78,10 +84,53 @@ def test_operate_opens_the_waterfall_until_another_instrument_is_used(tmp_path):
 
 def test_the_last_instrument_survives_a_restart(tmp_path):
     with _client(tmp_path) as client:
-        client.get("/operate/pager")
+        _pick(client, "pager")
     with _client(tmp_path) as client:
         assert client.get("/operate", follow_redirects=False).headers["location"] == \
             "/operate/pager"
+
+
+def test_showing_an_instrument_page_leaves_the_rack_place_unchanged(tmp_path):
+    # A GET has no side effect: a render check, a prefetch or a crawler that loads a rack page
+    # must not move where /operate reopens.
+    with _client(tmp_path) as client:
+        client.get("/operate/ism")
+        assert client.app.state.progress.get_place("rack") is None
+        assert client.get("/operate", follow_redirects=False).headers["location"] == \
+            "/operate/waterfall"
+        _pick(client, "pager")
+        for key in ("ism", "lora"):
+            assert client.get(f"/operate/{key}").status_code == 200
+        assert client.app.state.progress.get_place("rack") == "pager"
+        assert client.get("/operate", follow_redirects=False).headers["location"] == \
+            "/operate/pager"
+
+
+def test_picking_an_instrument_records_the_rack_place(tmp_path):
+    with _client(tmp_path) as client:
+        resp = _pick(client, "ism")
+        assert resp.status_code == 200
+        assert resp.json() == {"place": "ism"}
+        assert client.app.state.progress.get_place("rack") == "ism"
+
+
+@pytest.mark.parametrize("body", [{"instrument": "nope"}, {"instrument": ""}, {},
+                                  {"instrument": ["ism"]}, {"instrument": 7}])
+def test_picking_an_instrument_the_rack_lacks_changes_nothing(tmp_path, body):
+    with _client(tmp_path) as client:
+        _pick(client, "aprs")
+        resp = client.post("/api/rack/place", json=body)
+        assert resp.status_code == 404
+        assert client.app.state.progress.get_place("rack") == "aprs"
+
+
+def test_every_picker_entry_names_the_instrument_it_records(tmp_path):
+    with _client(tmp_path) as client:
+        html = client.get("/operate/waterfall").text
+    picks = re.findall(r'<a class="rack__pick[^"]*" href="/operate/([^"]+)"[^>]*'
+                       r'data-rack-pick="([^"]+)"', html)
+    assert sorted(href for href, _ in picks) == sorted(inst.key for inst in INSTRUMENTS)
+    assert all(href == key for href, key in picks)
 
 
 def test_an_unknown_instrument_is_a_404(tmp_path):

@@ -1,5 +1,5 @@
 # ABOUTME: Checks the LoRa rack's Send strip and antenna notice at 800x480.
-# ABOUTME: Measures the longest outcome in each theme with LoRa network requests blocked.
+# ABOUTME: Measures the longest outcome in each theme with the console's API blocked (connect).
 
 import json
 import sys
@@ -68,8 +68,6 @@ def main(console):
     browser = connect()
     try:
         browser.call("Page.enable")
-        browser.call("Network.enable")
-        browser.call("Network.setBlockedURLs", {"urls": ["*/api/lora*"]})
         browser.call("Emulation.setDeviceMetricsOverride",
                      {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False})
         url = f"{console}/operate/lora"

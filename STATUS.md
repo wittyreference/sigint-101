@@ -369,8 +369,10 @@ Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live
 
 ## Render-verify (the UI test; no browser on the droplet)
 - **Harness:** `tools/render/` (stdlib CDP websocket, viewport forced to 800x480).
-  - `make render-check`: runs all three checks against the console with a separate headless
-    Chromium. Set `RENDER_URL` if the console is away from the default loopback address.
+  - `make render-check`: runs the checks with a separate headless Chromium against a scratch
+    console it starts on a free port with its own data folder; `RENDER_URL` names a running
+    console instead. Every check blocks the console's `/api/*`, so none starts a receiver or
+    writes learner state.
   - `render_scroll.py`: explain scroll + Complete, home tile clipping.
   - `render_fit.py`: demo/predict button bottom.
   - `render_figure.py`: exam diagram.

@@ -2089,9 +2089,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         key = last if rack_instrument(last or "") else DEFAULT_INSTRUMENT
         return RedirectResponse(f"/operate/{key}", status_code=303)
 
+    @app.post("/api/rack/place")
+    def rack_place(payload: dict = Body(default={})):
+        """Remember the instrument the learner picked, so /operate reopens on it.
+
+        The picker posts this when tapped (operate.js). Showing a rack page records nothing, so a
+        render check, a prefetch or a crawler cannot move the learner's place. A key the rack
+        does not have is refused (404) and changes nothing.
+        """
+        key = payload.get("instrument")
+        inst = rack_instrument(key) if isinstance(key, str) else None
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"the rack has no instrument {key!r}")
+        app.state.progress.record_place(RACK_PLACE, inst.key)
+        return {"place": inst.key}
+
     @app.get("/operate/{key}", response_class=HTMLResponse)
     def operate_view(request: Request, key: str):
-        """One instrument in the rack, remembered so /operate reopens on it.
+        """One instrument in the rack. Showing it writes nothing; the picker records the place.
 
         The panel's own poll claims the dongle through _claim_sdr exactly as a lesson's does, so
         switching instruments hands the radio over the same way. The page renders the receiver's
@@ -2100,7 +2115,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         inst = rack_instrument(key)
         if inst is None:
             raise HTTPException(status_code=404, detail=f"the rack has no instrument '{key}'")
-        app.state.progress.record_place(RACK_PLACE, inst.key)
         receiver = getattr(app.state, inst.receiver) if inst.receiver else None
         freq_hz = None
         if inst.api == "spectrum":

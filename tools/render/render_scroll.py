@@ -26,6 +26,21 @@ def page_ws():
     ]
 
 
+# The console's whole API, which a check's pages never reach. A page's own polls start receivers
+# and claim the radio, and its posts write learner state: a check measures layout, nothing more.
+CONSOLE_API = "*/api/*"
+
+
+def block_console_api(c):
+    """Block every console API request on this page before it loads anything.
+
+    One list holds every blocked pattern, and a later Network.setBlockedURLs replaces it, so a
+    check never sets its own: this is the one place that does.
+    """
+    c.call("Network.enable")
+    c.call("Network.setBlockedURLs", {"urls": [CONSOLE_API]})
+
+
 def connect():
     """A CDP client on the browser's one page, attached through the browser endpoint, focused.
 
@@ -33,7 +48,8 @@ def connect():
     the page is brought to the front with focus emulation on, and a missing page is opened in
     a new window rather than as a background tab. Launch Chromium with --remote-allow-origins=*
     and --password-store=basic: on a box with a desktop keyring running, Chromium otherwise
-    blocks its first http page on a keyring password prompt nobody can answer.
+    blocks its first http page on a keyring password prompt nobody can answer. The console's API
+    is blocked before the client is handed back (block_console_api).
     """
     version = json.load(urllib.request.urlopen(f"http://{HOST}:{PORT}/json/version"))
     c = CDP(version["webSocketDebuggerUrl"])
@@ -48,6 +64,7 @@ def connect():
     c.session = attached["sessionId"]
     c.call("Page.bringToFront")
     c.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+    block_console_api(c)
     return c
 
 

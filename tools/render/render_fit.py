@@ -9,6 +9,10 @@ import sys
 import time
 import urllib.request
 
+# The real folder of this script, so a linked copy still imports the DevTools helpers beside it.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from render_scroll import block_console_api  # noqa: E402
+
 HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "9222"))
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8008/lesson/29"
 SHOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/flipper_m29_predict.png"
@@ -175,6 +179,7 @@ def fit_failures(stage, measurement):
 
 def main():
     cdp = CDP(page_ws())
+    block_console_api(cdp)
     cdp.call("Page.enable")
     cdp.call(
         "Emulation.setDeviceMetricsOverride",

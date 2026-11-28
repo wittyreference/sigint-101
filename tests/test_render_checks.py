@@ -23,6 +23,9 @@ FIT = REPO / "tools" / "render" / "render_fit.py"
 LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
 LORA = REPO / "tools" / "render" / "render_lora.py"
 CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
+EVAL = REPO / "tools" / "render" / "render_eval.py"
+CHECK = REPO / "tools" / "render" / "render_check.py"
+LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -90,6 +93,8 @@ class FakeDevTools:
     def __init__(self, answers, *, disconnect_at=None):
         self.answers = answers
         self.disconnect_at = disconnect_at
+        # Every DevTools command a check sent, in order, as (method, params).
+        self.calls = []
         self.server = socket.create_server(("127.0.0.1", 0))
         self.port = self.server.getsockname()[1]
         threading.Thread(target=self._serve, daemon=True).start()
@@ -173,6 +178,7 @@ class FakeDevTools:
 
     def _result(self, msg):
         method, params = msg["method"], msg.get("params", {})
+        self.calls.append((method, params))
         if method == "Target.getTargets":
             return {"targetInfos": [{"type": "page", "targetId": "page-1"}]}
         if method == "Target.attachToTarget":
@@ -202,6 +208,7 @@ def devtools():
         made.append(fake)
         return fake.port
 
+    make.made = made
     yield make
     for fake in made:
         fake.close()
@@ -412,21 +419,45 @@ def render_make(tmp_path, console_url, devtools):
     screen = tmp_path / "tools" / "render"
     screen.mkdir(parents=True)
     (screen / "render_check.py").symlink_to(REPO / "tools" / "render" / "render_check.py")
-    venv_bin = tmp_path / ".venv" / "bin"
-    venv_bin.mkdir(parents=True)
-    (venv_bin / "python").symlink_to(sys.executable)
+    # The environment running this suite stands in for the checkout's .venv, whole: the scratch
+    # console needs its packages, which a lone link to the interpreter would not find.
+    (tmp_path / ".venv").symlink_to(sys.prefix, target_is_directory=True)
+    assert (tmp_path / ".venv" / "bin" / "python").exists()
     path = tmp_path / "bin"
     path.mkdir()
+    # The browser a chromium wrapper launches: it keeps writing into the profile until signalled,
+    # the way the real one does after its wrapper has gone.
+    browser = tmp_path / "browser_child.py"
+    browser.write_text(
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "default = Path(sys.argv[1]) / 'Default'\n"
+        "Path(sys.argv[2]).write_text(str(os.getpid()))\n"
+        "end, n = time.monotonic() + 20, 0\n"
+        "while time.monotonic() < end:\n"
+        "    try:\n"
+        "        default.mkdir(parents=True, exist_ok=True)\n"
+        "        (default / f'cache{n % 50}').write_text('x')\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    n += 1\n"
+        "    time.sleep(0.005)\n",
+        encoding="utf-8",
+    )
     chromium = path / "chromium"
     chromium.write_text(
         f"#!{sys.executable}\n"
-        "import os, sys, time\n"
+        "import os, subprocess, sys, time\n"
         "from pathlib import Path\n"
         "profile = next(arg.split('=', 1)[1] for arg in sys.argv[1:]\n"
         "               if arg.startswith('--user-data-dir='))\n"
         "if os.environ.get('CHROMIUM_EXITS'):\n"
         "    sys.exit(3)\n"
         "Path(profile).mkdir()\n"
+        "if os.environ.get('CHROMIUM_FORKS'):\n"
+        f"    subprocess.Popen([sys.executable, {str(browser)!r}, profile,\n"
+        "                      os.environ['CHROMIUM_FORKS']],\n"
+        "                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
         "(Path(profile) / 'DevToolsActivePort').write_text(os.environ['FAKE_CDP_PORT'] + '\\n')\n"
         "time.sleep(30)\n",
         encoding="utf-8",
@@ -436,18 +467,23 @@ def render_make(tmp_path, console_url, devtools):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
+            "from urllib.request import urlopen\n"
             "name = Path(__file__).name\n"
             "assert os.environ['CDP_PORT'] == os.environ['FAKE_CDP_PORT']\n"
             "if name == 'render_scroll.py':\n"
             "    assert sys.argv[2] == 'home'\n"
             "print('ran', name, sys.argv[1], flush=True)\n"
+            "if name == 'render_scroll.py' and os.environ.get('PROBE_CONSOLE'):\n"
+            "    with urlopen(sys.argv[1], timeout=10) as page:\n"
+            "        print('console', page.status, b'SIGINT 101' in page.read(), flush=True)\n"
             "sys.exit(7 if name == os.environ.get('FAILING_CHECK') else 0)\n",
             encoding="utf-8",
         )
     make = shutil.which("make")
     assert make, "the render-check tests require make"
 
-    def run_make(*, has_chromium=True, fit_answers=None, **overrides):
+    def run_make(*, has_chromium=True, fit_answers=None, timeout=15, **overrides):
+        """Run make render-check; an override of None removes that variable."""
         if not has_chromium:
             chromium.unlink()
         if fit_answers is not None:
@@ -456,10 +492,14 @@ def render_make(tmp_path, console_url, devtools):
         env = dict(os.environ, PATH=str(path), RENDER_URL=console_url, TMPDIR=str(tmp_path),
                    FAKE_CDP_PORT=str(devtools(fit_answers or {})),
                    no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
-        env.update(overrides)
+        for name, value in overrides.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
         return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
                                "render-check"], cwd=tmp_path, env=env, capture_output=True,
-                              text=True, timeout=15)
+                              text=True, timeout=timeout)
 
     return run_make
 
@@ -514,6 +554,113 @@ def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make
     assert proc.returncode != 0
     assert "Cannot reach the console" in proc.stderr, proc.stderr
     assert "ran " not in proc.stdout
+
+
+# --- C49: a check run starts nothing and writes nothing on the console it measures ---------------
+
+
+def _ran_urls(proc):
+    return [line.split()[2] for line in proc.stdout.splitlines() if line.startswith("ran ")]
+
+
+def test_render_check_without_render_url_measures_a_scratch_console_not_the_kiosks(render_make):
+    # The kiosk's own console (make run, port 8008) holds the learner's state and the radio. With
+    # no RENDER_URL the check must measure a console it started itself, on another port.
+    proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    urls = _ran_urls(proc)
+    assert len(urls) == 6, proc.stdout
+    origins = {url.split("/")[2] for url in urls}
+    assert len(origins) == 1, urls
+    host, port = origins.pop().split(":")
+    assert host == "127.0.0.1"
+    assert int(port) != LIVE_CONSOLE_PORT
+    # The checks measured a real SIGINT 101 console, which is gone once the run ends.
+    assert "console 200 True" in proc.stdout.splitlines(), proc.stdout
+    with pytest.raises(OSError):
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=2):
+            pass
+
+
+def _load_render_check():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("render_check_under_test", CHECK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_scratch_console_keeps_its_state_in_its_own_folder_and_stops(tmp_path):
+    from urllib.request import urlopen
+    render_check = _load_render_check()
+    data = tmp_path / "console"
+    with render_check.scratch_console(data) as url:
+        assert int(url.rsplit(":", 1)[1]) != LIVE_CONSOLE_PORT
+        with urlopen(f"{url}/operate/ism", timeout=10) as page:
+            assert page.status == 200
+        assert (data / "progress.db").is_file()
+    with pytest.raises(OSError):
+        urlopen(f"{url}/", timeout=2)
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_render_check_stops_the_whole_browser_before_removing_its_profile(render_make, tmp_path):
+    # A chromium wrapper that dies on the signal leaves its browser writing into the profile:
+    # the check must stop that browser too, and only then remove the profile.
+    pidfile = tmp_path / "browser.pid"
+    try:
+        proc = render_make(CHROMIUM_FORKS=str(pidfile))
+        assert pidfile.is_file(), (proc.stdout, proc.stderr)
+        pid = int(pidfile.read_text())
+        assert not _alive(pid), "the browser outlived the render check"
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert list(tmp_path.glob("sigint101-render-*")) == []
+    finally:
+        if pidfile.is_file() and _alive(int(pidfile.read_text())):
+            os.kill(int(pidfile.read_text()), 9)
+
+
+API_TOOLS = {
+    "fit": (FIT, ["http://127.0.0.1:1/lesson/29", "{tmp}/predict.png"],
+            {DEMO_FIT: DEMO_FITS, PREDICT_FIT: PREDICT_FITS}),
+    "scroll": (SCROLL, ["http://127.0.0.1:1/", "home"], {HOME: HOME_OK}),
+    "figure": (FIGURE, ["http://127.0.0.1:1/exam/review/T6C02", "dark", "{tmp}/fig"],
+               {CARD: CARD_OK, OVERLAY: OVERLAY_OK}),
+    "logbook": (LOGBOOK, ["http://127.0.0.1:9"], {}),
+    "lora": (LORA, ["http://127.0.0.1:9"], {}),
+    "card-sort": (CARD_SORT, ["http://127.0.0.1:9"], {}),
+    "eval": (EVAL, ["http://127.0.0.1:1/operate/ism", "1"], {}),
+}
+
+
+@pytest.mark.parametrize("tool", API_TOOLS.values(), ids=API_TOOLS.keys())
+def test_every_render_tool_blocks_the_console_api_before_it_loads_a_page(devtools, tmp_path,
+                                                                         tool):
+    # A page's own polls (/api/<receiver>, /api/receptions, ...) start receivers and claim the
+    # radio; the rack's and the lessons' posts write learner state. Blocking /api/* before the
+    # first navigation keeps a check to layout alone.
+    script, args, answers = tool
+    run(script, *(arg.format(tmp=tmp_path) for arg in args), port=devtools(answers))
+    calls = devtools.made[-1].calls
+    methods = [method for method, _ in calls]
+    assert "Page.navigate" in methods, methods
+    first_load = methods.index("Page.navigate")
+    blocks = [i for i, (method, params) in enumerate(calls)
+              if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
+    assert blocks and blocks[0] < first_load, methods[:first_load]
+    assert "Network.enable" in methods[:blocks[0]], methods[:first_load]
+    # Nothing narrows the block afterwards: every later list still covers the whole API.
+    for method, params in calls:
+        if method == "Network.setBlockedURLs":
+            assert "*/api/*" in params.get("urls", []), params
 
 
 LOGBOOK_FITS = {"back": True, "doc": [800, 480], "scrolls": True, "lastVisible": True,
