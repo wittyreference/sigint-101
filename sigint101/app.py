@@ -27,7 +27,7 @@ from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -41,6 +41,7 @@ from .bandmap import CAPTION as BANDMAP_CAPTION
 from .bandmap import KEY_LINE as BANDMAP_KEY_LINE
 from .bandmap import build_map as build_band_map
 from .battery import BatteryGauge
+from .capture import Capture, CaptureUnavailable
 from .challenges import (
     CHALLENGE_KIND,
     RESERVED_EVENT_FLAGS,
@@ -182,7 +183,7 @@ def start_replay(state, recording: Recording) -> None:
 # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
 SDR_CONSUMERS = (
     "sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
-    "apt", "sstv", "meteor",
+    "apt", "sstv", "meteor", "capture",
 )
 
 # The line glyph a home tile falls back to. The waterfall glyph is the one every lesson earns —
@@ -392,6 +393,7 @@ def build_receiver_factories(
     apt_factory=None,
     sstv_factory=None,
     meteor_factory=None,
+    capture_factory=None,
     flock_factory=None,
     rayhunter_factory=None,
     flipper_factory=None,
@@ -453,6 +455,7 @@ def build_receiver_factories(
                 sync_assets=managed,
             )
         ),
+        "capture": capture_factory or (lambda: Capture(data_dir, **_sdr_kwargs())),
         "flock": flock_factory or configured_flock_detector,
         "rayhunter": rayhunter_factory or RayhunterMonitor,
         "flipper": flipper_factory or FlipperConsole,
@@ -699,7 +702,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
-               apt_factory=None, sstv_factory=None, meteor_factory=None,
+               apt_factory=None, sstv_factory=None, meteor_factory=None, capture_factory=None,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
                recordings_dir=RECORDINGS_DIR, replay_factory=None,
@@ -764,6 +767,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         apt_factory=apt_factory,
         sstv_factory=sstv_factory,
         meteor_factory=meteor_factory,
+        capture_factory=capture_factory,
         flock_factory=flock_factory,
         rayhunter_factory=rayhunter_factory,
         flipper_factory=flipper_factory,
@@ -793,6 +797,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             logging.getLogger(__name__).error("recall enrolment backfill: %s", exc)
 
     def _attach_hooks(state) -> None:
+        def capture_event(kind, payload):
+            # The store syncs the saved pair. These events only describe the capture attempt.
+            try:
+                log_event(state.events_path, kind, payload)
+            except OSError as exc:
+                logging.getLogger(__name__).warning("could not log %s: %s", kind, exc)
+
+        state.capture.on_event = capture_event
         for attr, inst in RECEIVERS.items():
             receiver = getattr(state, attr)
             receiver.on_reception = _heard(inst, receiver)
@@ -1366,6 +1378,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _safe_back(back: str | None) -> tuple[str, str]:
         """Resolve an optional internal back path for /law and /operate, refusing external URLs."""
+        if back == "/capture":
+            return back, "Capture"
         if back and back.startswith("/") and not back.startswith("//"):
             if re.fullmatch(r"/lesson/\d+", back):
                 return back, f"Lesson {back.rsplit('/', 1)[-1]}"
@@ -1374,6 +1388,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if re.fullmatch(r"/unit/\d+/challenge", back):
                 return back, "Live find"
         return "/", "Home"
+
+    @app.get("/capture", response_class=HTMLResponse)
+    def capture_view(request: Request):
+        law = {section.id: section for section in LAW_SECTIONS}
+        return templates.TemplateResponse(request=request, name="capture.html", context={
+            "capture_status": capture_status(),
+            "back_href": "/operate/waterfall", "back_label": "Back",
+            "wiretap_cite": "18 USC " + law["wiretap-limits"].cite.rsplit(", ", 1)[1],
+            "disclosure_cite": law["divulge-605"].cite,
+        })
 
     @app.get("/law", response_class=HTMLResponse)
     def law_reference(request: Request, back: str | None = None):
@@ -1829,7 +1853,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return app.state.ppm_measure(hz=hz, seconds=PPM_SECONDS, device=_pinned_index())
 
         try:
-            result = _claim_sdr("ppm", measure)
+            result = _claim_sdr("ppm", measure, explicit=True)
         except (PpmUnavailable, DeviceSelectionError) as exc:
             reason = str(exc)
             log_event(app.state.events_path, "ppm_measure",
@@ -1863,7 +1887,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "rds": RDSUnavailable, "adsb": AdsbUnavailable, "aprs": AprsUnavailable,
         "pocsag": PocsagUnavailable, "acars": AcarsUnavailable, "ais": AisUnavailable,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
-        "meteor": MeteorUnavailable,
+        "meteor": MeteorUnavailable, "capture": CaptureUnavailable,
     }
     claim_receipt_lock = threading.Lock()
     claim_receipts: OrderedDict[str, OwnedRun] = OrderedDict()
@@ -1910,7 +1934,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return claim_receipts.get(receipt_id)
 
     def _claim_sdr_owned(
-        target: str, start=None, *, reclaim=True
+        target: str, start=None, *, reclaim=True, explicit=False
     ) -> tuple[object, OwnedRun | None]:
         """Reserve the radio through stand-down and start, without holding the arbiter mutex.
 
@@ -1924,6 +1948,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         prepare = getattr(receiver, "prepare_start", None)
         calibration = app.state.ppm_calibration
         gate = app.state.tuning_gate
+        def protect_capture():
+            if target != "capture" and not explicit:
+                retry_in = app.state.capture.protection()
+                if retry_in is not None:
+                    exc = refusal("Capturing a SigMF clip")
+                    exc.capture_retry = retry_in
+                    raise exc
+
         # A lesson's tuning restore must not run while a receiver launches, or the tool opens on
         # the frequency the rack left (C81). The claim's waits on restores share one budget.
         budget = gate.claim_budget()
@@ -1937,6 +1969,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     failure = getattr(consumer, "release_failure", None)
                     if failure and (reason := failure()):
                         raise refusal(reason)
+                protect_capture()
                 # Then any restore under way, bounded and refused with the reason. It comes after
                 # the refusals above, which need no wait, and before the queue's own deadline
                 # starts, so it is not taken from the arbiter's wait. A failure that arises
@@ -1957,6 +1990,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     # PPM may have failed to reap since this request joined the queue.
                     if reason := calibration.release_failure():
                         raise refusal(reason)
+                    protect_capture()
                     # A replay of a recording holds the ISM panel; the live decoder waits for it.
                     if target == "decoder" and app.state.replay.running:
                         raise refusal(REPLAY_RUNNING)
@@ -2060,9 +2094,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 if intent is not None:
                     receiver.discard_start(intent)
 
-    def _claim_sdr(target: str, start=None, *, reclaim=True):
+    def _claim_sdr(target: str, start=None, *, reclaim=True, explicit=False):
         """Reserve the radio through stand-down and start, returning the start result."""
-        return _claim_sdr_owned(target, start, reclaim=reclaim)[0]
+        return _claim_sdr_owned(target, start, reclaim=reclaim, explicit=explicit)[0]
 
     # The last refusal logged per route. A route that cannot start answers every poll, and logging
     # every identical refusal is how events.jsonl grew by 42 lines a minute behind a dead Flock. A
@@ -2118,6 +2152,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "retrying now" for as long as the radio stayed away, though nothing was retrying.
         """
         reason = str(exc)
+        if (retry_in := getattr(exc, "capture_retry", None)) is not None:
+            return JSONResponse(status_code=503, content={
+                "available": False, "reason": reason, "command": None, **empty,
+                "cause": "capturing", "retry_in": retry_in,
+            })
         if last_refusal.get(kind) != reason:
             last_refusal[kind] = reason
             log_event(app.state.events_path, f"{kind}_blocked", {"reason": reason})
@@ -2220,9 +2259,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def decode(limit: int | None = None):
         """Recent rtl_433 decodes on the ISM band. No radio or no rtl_433 is a 503 with the reason.
 
-        The decoder holds the dongle rtl_power otherwise sweeps, so the sweep is released first and
-        stays released until a /api/spectrum poll takes it back. resume() clears any release left on
-        the decoder by that reclaim, so flipping between the two keeps working.
+        The decoder holds the dongle rtl_power otherwise sweeps, so _claim_sdr runs its supervised
+        preflight, stands the other consumers down, and starts it via a claimed launch that clears
+        any prior release, keeping turn-taking with the sweep working.
         """
         decoder = app.state.decoder
         if app.state.replay.running:
@@ -2652,6 +2691,39 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "images": decoder.images(limit),
         }
 
+    @app.get("/api/capture")
+    def capture_status():
+        state = app.state
+        return state.capture.snapshot(state.sweeper.capture_settings())
+
+    @app.post("/api/capture/start")
+    def capture_start(payload=Body(default={})):
+        state = app.state
+        try:
+            return state.capture.request_start(
+                payload, settings=state.sweeper.capture_settings,
+                ppm=lambda: state.last_ppm,
+                claim=lambda: _claim_sdr("capture", explicit=True),
+            )
+        except CaptureUnavailable as exc:
+            reason = str(exc)
+            state.capture.on_event("capture_refused", {"reason": reason})
+            return JSONResponse(status_code=exc.status, content={
+                **capture_status(), "reason": reason,
+            })
+
+    @app.post("/api/capture/stop")
+    def capture_stop():
+        try:
+            app.state.capture.stop()
+        except CaptureUnavailable as exc:
+            return JSONResponse(status_code=exc.status, content={
+                **capture_status(), "reason": str(exc),
+            })
+        if app.state.capture.release_failure(pending=True):
+            return JSONResponse(status_code=503, content=capture_status())
+        return capture_status()
+
     @app.get("/api/meteor")
     def meteor_status():
         return app.state.meteor.snapshot()
@@ -2659,10 +2731,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.post("/api/meteor/listen")
     def meteor_listen():
         decoder = app.state.meteor
-        if decoder.running:
+        if decoder.running and not decoder.handoff_in_progress():
             return decoder.snapshot()
         try:
-            launched = _claim_sdr("meteor")
+            if decoder.handoff_in_progress():
+                raise MeteorUnavailable(
+                    decoder.release_failure(pending=True)
+                    or "SatDump is still releasing the radio"
+                )
+            launched = _claim_sdr("meteor", explicit=True)
         except MeteorUnavailable as exc:
             empty = decoder.snapshot()
             for key in ("available", "reason", "command", "retry_in"):
@@ -2673,14 +2750,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             _started("meteor", {"freq_hz": status["freq_hz"], "mode": status["mode"]})
         return status
 
-    # The image decoders (APT, SSTV) write their decoded PNGs under data/apt and data/sstv; this
-    # serves those files to the panels and nothing else. The path is confined to those two folders
-    # and to .png files, so the console never serves the progress or events stores that also live
-    # under data/. A produced PNG is a real reception; there is no placeholder to serve.
+    # The image decoders (APT, SSTV, Meteor) write their decoded PNGs under data/; this serves
+    # those files to the panels and nothing else. Meteor images are restricted to files named by
+    # each pass's verified manifest and opened with O_NOFOLLOW descriptor traversal.
     media_roots = tuple((Path(data_dir) / name).resolve() for name in ("apt", "sstv"))
 
     @app.get("/media/{path:path}")
     def media(path: str):
+        if path.startswith("meteor/"):
+            data = app.state.meteor.read_media(path)
+            if data is not None:
+                return Response(content=data, media_type="image/png")
+            raise HTTPException(status_code=404, detail="no such image")
         target = (Path(data_dir) / path).resolve()
         if (target.suffix.lower() == ".png" and target.is_file()
                 and any(target.is_relative_to(root) for root in media_roots)):
@@ -2979,9 +3060,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 continue
             _credit_attempts(entry.kind, progress, stamps, qualifies_fn=entry.qualifies)
 
-    def _claim_sdr_run(target: str, start=None, *, reclaim: bool = True) -> OwnedRun | None:
+    def _claim_sdr_run(
+        target: str, start=None, *, reclaim: bool = True, explicit: bool = False
+    ) -> OwnedRun | None:
         """Claim an SDR receiver and return its OwnedRun handle, or None if borrowed."""
-        return _claim_sdr_owned(target, start, reclaim=reclaim)[1]
+        return _claim_sdr_owned(target, start, reclaim=reclaim, explicit=explicit)[1]
 
     app.state.claim_sdr = _claim_sdr_run
     app.state.owned_run_for_response = _owned_run_for_response

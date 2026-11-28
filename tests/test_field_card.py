@@ -113,6 +113,7 @@ def _strict_factories(overrides=None):
         "dmr_factory": lambda: _LiveStub(),
         "apt_factory": lambda: _LiveStub(),
         "sstv_factory": lambda: _LiveStub(),
+        "meteor_factory": lambda: _LiveStub(),
         "flock_factory": lambda: _LiveStub(tool="tcpdump"),
         "rayhunter_factory": lambda: _LiveStub(),
         "flipper_factory": lambda: _LiveStub(),
@@ -146,7 +147,7 @@ def test_rows_match_all_17_instruments_in_order_and_never_run_shows_prompt(tmp_p
 
     found_keys = re.findall(r'data-field-instrument="([^"]+)"', html)
     assert found_keys == [inst.key for inst in INSTRUMENTS]
-    assert len(found_keys) == 17
+    assert len(found_keys) == 18
 
     # Back link goes to /operate ("Rack").
     assert 'href="/operate"' in html

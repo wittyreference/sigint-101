@@ -18,7 +18,7 @@ from typing import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from sigint101 import acars, adsb, ais, aprs, childproc, dmr, flock, pocsag, rds, sstv
+from sigint101 import acars, adsb, ais, aprs, childproc, decode, dmr, flock, pocsag, rds, sstv
 from sigint101.app import create_app
 from sigint101.childproc import ChildWatch, Pipeline
 from sigint101.childproc import spawn as spawn_child
@@ -44,6 +44,17 @@ ACARS_2 = (
 
 APRS_1 = "APRS: KD2ABC-9>APU25N,WIDE1-1:!4042.00N/07400.00W>Test de KD2ABC"
 APRS_2 = "APRS: N0CALL>APRS,WIDE1-1*:>Monitoring 146.52"
+
+DECODE_1 = (
+    '{"time":"2026-10-27 13:04:11","model":"Acurite-Tower","id":12345,'
+    '"channel":"A","battery_ok":1,"temperature_C":18.0,"humidity":51,'
+    '"mod":"ASK","freq":433.950,"snr":36.2}'
+)
+DECODE_2 = (
+    '{"time":"2026-10-27 13:10:02","model":"LaCrosse-TX141THBv2","id":252,'
+    '"channel":0,"battery_ok":1,"temperature_C":21.3,"humidity":45,'
+    '"mod":"FSK","freq1":433.882,"freq2":433.958,"snr":22.4}'
+)
 
 DMR_1 = (
     "16:00:15 Sync: +DMR  slot1 [slot2]  | Color Code=03 | VLC SLOT 2 "
@@ -179,6 +190,22 @@ SPECS = (
         listed=lambda dec: [s["source"] for s in dec.stations()],
         hold_target=lambda dec: (dec._roster, "absorb"),
         make_proc=_retune_proc("rtl_fm"),
+    ),
+    DecoderSpec(
+        name="decode",
+        build=lambda s: decode.Decoder(spawn=s, **_common()),
+        unavailable=decode.DecodeUnavailable,
+        tool="rtl_433",
+        home_hz=decode.DEFAULT_DECODE_HZ,
+        other_hz=315_000_000,
+        line1=DECODE_1,
+        key1=12345,
+        line2=DECODE_2,
+        key2=252,
+        item_key=lambda d: d["readings"]["id"],
+        listed=lambda dec: [r.readings["id"] for r in dec.recent()],
+        hold_target=lambda dec: (dec._repeats, "is_repeat"),
+        make_proc=lambda _run_no, cmd: LateProc(cmd),
     ),
     DecoderSpec(
         name="dmr",
@@ -551,6 +578,21 @@ def _park_supervisor_diagnostic(dec, procs, found, go_on):
     return returned
 
 
+def _is_supervised(dec) -> bool:
+    return hasattr(dec, "_runs")
+
+
+def _guard_lock(dec):
+    return dec._runs.lock if _is_supervised(dec) else dec._lock
+
+
+def _set_guard_lock(dec, lock) -> None:
+    if _is_supervised(dec):
+        dec._runs.lock = lock
+    else:
+        dec._lock = lock
+
+
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
 def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(late_factory, spec):
     dec, procs, heard, clock = late_factory(spec)
@@ -565,7 +607,7 @@ def test_old_readers_death_record_landing_after_next_start_is_not_the_new_runs(l
         return reason
 
     diagnostic_done = None
-    if hasattr(dec, "_run"):
+    if _is_supervised(dec):
         diagnostic_done = _park_supervisor_diagnostic(dec, procs, found, go_on)
     else:
         dec.watch.ended = ended
@@ -606,7 +648,7 @@ def _restart_while_held(dec, lock, clock, spec: DecoderSpec) -> list:
 def test_read_on_its_way_in_at_restart_is_not_listed_or_logged(late_factory, spec):
     dec, procs, heard, clock = late_factory(spec)
     lock = _HeldLock()
-    dec._runs.lock = lock
+    _set_guard_lock(dec, lock)
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
@@ -623,7 +665,7 @@ def test_read_on_its_way_in_at_restart_is_not_listed_or_logged(late_factory, spe
 def test_pipe_failure_on_its_way_in_at_restart_is_not_the_new_runs(late_factory, spec):
     dec, procs, heard, clock = late_factory(spec)
     lock = _HeldLock()
-    dec._runs.lock = lock
+    _set_guard_lock(dec, lock)
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
@@ -642,12 +684,12 @@ def test_pipe_failure_on_its_way_in_at_restart_is_not_the_new_runs(late_factory,
 def test_death_on_its_way_in_at_restart_is_not_the_new_runs(late_factory, spec):
     dec, procs, heard, clock = late_factory(spec)
     lock = _HeldLock()
-    dec._runs.lock = lock
+    _set_guard_lock(dec, lock)
     dec.start()
     procs[0].feed(spec.line1)
     heard.wait_for(1)
     lock.hold(procs[0].reader)
-    if hasattr(dec, "_run"):
+    if _is_supervised(dec):
         # Hold the exit observation as well as the old reader's notification. This is the
         # stop-first interleaving, so the supervisor must see cancellation before the exit.
         ticket = dec._run
@@ -671,7 +713,7 @@ def test_stop_moves_the_run_on_inside_the_buffer_lock(late_factory, spec):
     # for the in-flight update: the reception logs under the old run's provenance.
     dec, procs, heard, _ = late_factory(spec)
     lock = _TellingLock()
-    dec._runs.lock = lock
+    _set_guard_lock(dec, lock)
     inside, go_on = threading.Event(), threading.Event()
     armed = [False]
 
@@ -786,7 +828,7 @@ def test_run_after_retune_still_records_its_own_failure(late_factory, spec, end,
     end(procs[1])
     procs[1].reader.join(5)
     assert not procs[1].reader.is_alive()
-    if hasattr(dec, "_run") and procs[1].poll() is not None:
+    if _is_supervised(dec) and procs[1].poll() is not None:
         assert dec._run.ready.wait(5)
     assert dec.error is not None and reason in dec.error
     dec.stop()
@@ -859,9 +901,10 @@ def test_reader_stalled_after_unlocking_still_logs_old_runs_frequency_and_comman
     def gated_hook(item, **kw):
         if armed[0]:
             armed[0] = False
-            free = dec._runs.lock.acquire(blocking=False)
+            guard = _guard_lock(dec)
+            free = guard.acquire(blocking=False)
             if free:
-                dec._runs.lock.release()
+                guard.release()
             lock_free_at_hook.append(free)
             paused.set()
             go_on.wait(5)
@@ -914,17 +957,19 @@ def test_app_reception_hook_logs_old_provenance_when_reader_stalls_past_retune(t
 
     def present():
         return RadioProbe(True, "lsusb", "RTL2832U 0bda:2838 on USB bus")
+    state_attr = "decoder" if spec.name == "decode" else spec.name
+    factory_key = "decoder_factory" if spec.name == "decode" else f"{spec.name}_factory"
     app = create_app(
         pack_dir=FIXTURE_PACKS, data_dir=tmp_path, probe=present,
-        **{f"{spec.name}_factory": factory},
+        **{factory_key: factory},
     )
     first_done = threading.Event()
     paused, go_on = threading.Event(), threading.Event()
     seen = [0]
-    instrument = "pager" if spec.name == "pocsag" else spec.name
+    instrument = {"pocsag": "pager", "decode": "ism"}.get(spec.name, spec.name)
     try:
         with TestClient(app) as client:
-            dec = getattr(app.state, spec.name)
+            dec = getattr(app.state, state_attr)
             real_hook = dec.on_reception
 
             def gated_hook(item, **kw):
@@ -981,7 +1026,7 @@ def test_natural_death_lets_retiring_reader_drain_complete_item_with_its_provena
     # dead run's provenance when no replacement starts.
     dec, procs, heard, _ = late_factory(spec)
     lock = _HeldLock()
-    dec._runs.lock = lock
+    _set_guard_lock(dec, lock)
     dec.STOP_WAIT_S = 2.0
     dec.start()
     procs[0].feed(spec.line1)
@@ -989,10 +1034,7 @@ def test_natural_death_lets_retiring_reader_drain_complete_item_with_its_provena
 
     lock.hold(procs[0].reader)
     procs[0].feed(spec.line2)
-    procs[0].die(1)
-    procs[0].close_pipe()
     assert lock.arrived.wait(5)
-
     real_thread = dec._thread
     joined = threading.Event()
 
@@ -1003,6 +1045,8 @@ def test_natural_death_lets_retiring_reader_drain_complete_item_with_its_provena
             return real_thread.join(timeout)
 
     dec._thread = _ReleaseOnJoin()
+    procs[0].die(1)
+    procs[0].close_pipe()
 
     with pytest.raises(spec.unavailable, match="status 1"):
         dec.start()
@@ -1026,18 +1070,31 @@ def test_eof_during_stop_cannot_commit_retry_and_block_retuned_start(late_factor
     procs[0].feed(spec.line1)
     heard.wait_for(1)
 
-    plain_end = dec._runs.end
     old = procs[0]
+    if _is_supervised(dec):
+        plain_end = dec._runs.end
 
-    def end_with_eof(*args, **kw):
-        result = plain_end(*args, **kw)
-        dec._runs.end = plain_end
-        old.die(1)
-        old.close_pipe()
-        old.reader.join(5)
-        return result
+        def end_with_eof(*args, **kw):
+            result = plain_end(*args, **kw)
+            dec._runs.end = plain_end
+            old.die(1)
+            old.close_pipe()
+            old.reader.join(5)
+            return result
 
-    dec._runs.end = end_with_eof
+        dec._runs.end = end_with_eof
+    else:
+        plain_stopping = dec.watch.stopping
+
+        def stopping_with_eof(*args, **kw):
+            result = plain_stopping(*args, **kw)
+            dec.watch.stopping = plain_stopping
+            old.die(1)
+            old.close_pipe()
+            old.reader.join(5)
+            return result
+
+        dec.watch.stopping = stopping_with_eof
     _stand_down_for_restart(dec, spec)
     assert not old.reader.is_alive()
     assert dec.watch.stopped is False
@@ -1058,7 +1115,7 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
     # status while stop/retune/release runs. Computing exit diagnostics must not hold the buffer
     # lock, and once the stop invalidates the run and watch, the old reader cannot commit a retry.
     dec, procs, heard, _ = late_factory(spec)
-    if hasattr(dec, "_run"):
+    if _is_supervised(dec):
         read = dec._read
 
         def finish_old_read(proc, *args):
@@ -1078,9 +1135,10 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
 
     def slow_wait(timeout=None):
         if threading.current_thread() is old.reader:
-            free = dec._runs.lock.acquire(blocking=False)
+            guard = _guard_lock(dec)
+            free = guard.acquire(blocking=False)
             if free:
-                dec._runs.lock.release()
+                guard.release()
             lock_free_during_wait.append(free)
             waiting.set()
             release.wait(5)
@@ -1088,7 +1146,7 @@ def test_retuned_start_succeeds_when_old_reader_was_waiting_on_exit_status_durin
             return 1
         return plain_wait(timeout=timeout)
 
-    if not hasattr(dec, "_run"):
+    if not _is_supervised(dec):
         old.wait = slow_wait
     old.close_pipe()
     assert waiting.wait(5)
@@ -1992,7 +2050,7 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
         return reason
 
     diagnostic_done = None
-    if hasattr(dec, "_run"):
+    if _is_supervised(dec):
         diagnostic_done = _park_supervisor_diagnostic(dec, procs, found, go_on)
     else:
         dec.watch.ended = ended
@@ -2022,10 +2080,12 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
     assert dec.running
 
 
+@pytest.mark.parametrize("name", ["aprs", "decode"])
 def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_drops_queued_item(
-        monkeypatch):
+        monkeypatch, name):
     # A failed diagnostic leaves a usable exit reason. Reap and fence the old reader so a queued
     # item cannot publish after the drain deadline or leave an error on the replacement run.
+    spec = SPEC_BY_NAME[name]
     procs = []
 
     class _TrackedLateProc(LateProc):
@@ -2037,16 +2097,18 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
             self.terminated = True
             super().terminate()
 
-    def spawn(freq_hz, device):
-        proc = _TrackedLateProc(["multimon-ng", "-f", str(freq_hz), "-d", str(device)])
+    def spawn(*args):
+        argv = args[0] if name == "decode" else ["multimon-ng", "-f", str(args[0]),
+                                                 "-d", str(args[1])]
+        proc = _TrackedLateProc(argv)
         procs.append(proc)
         return proc
 
-    dec = aprs.AprsDecoder(spawn=spawn, **_common())
+    dec = spec.build(spawn)
     dec.STOP_WAIT_S = 0.15
     clock = _Clock()
     dec.watch = ChildWatch(dec.watch.tool, clock=clock)
-    heard = _Heard(dec, lambda d: d["source"], default_freq=aprs.DEFAULT_APRS_HZ)
+    heard = _Heard(dec, spec.item_key, default_freq=spec.home_hz)
     paused, go_on = threading.Event(), threading.Event()
     first = [True]
 
@@ -2060,19 +2122,19 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
     dec.on_reception = gated
     try:
         dec.start()
-        procs[0].feed(APRS_1)
+        procs[0].feed(spec.line1)
         assert paused.wait(5)
 
         # Queue a second complete packet and mark the child exited, then fail exit diagnostics.
-        procs[0].feed(APRS_2)
+        procs[0].feed(spec.line2)
         def boom(_stage):
             raise OSError("stderr read failed")
 
         monkeypatch.setattr(childproc, "stderr_tail", boom)
-        procs[0].die(1)
         real_thread = dec._thread
+        procs[0].die(1)
 
-        with pytest.raises(aprs.AprsUnavailable, match="exit status 1.*stderr read failed"):
+        with pytest.raises(spec.unavailable, match="exit status 1.*stderr read failed"):
             dec.start()
         assert procs[0].terminated is True
         assert "exit status 1" in dec.watch.reason and "stderr read failed" in dec.watch.reason
@@ -2088,8 +2150,8 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
         assert not real_thread.is_alive()
         assert dec.running and dec.watch.stopped is False
         assert dec.error is None
-        assert [s["source"] for s in dec.stations()] == ["KD2ABC-9"]
-        assert heard.log == [("KD2ABC-9", aprs.DEFAULT_APRS_HZ, _line(procs[0]))]
+        assert spec.listed(dec) == [spec.key1]
+        assert heard.log == [(spec.key1, spec.home_hz, _line(procs[0]))]
     finally:
         go_on.set()
         for proc in procs:

@@ -23,7 +23,8 @@ from tests.child_fakes import LateProc
 from tests.test_operate_routes import _client
 from tests.test_sstv import PNG_BYTES, _finish
 
-KEYS = ("ism", "adsb", "aprs", "pager", "acars", "ais", "rds", "dmr", "apt", "sstv", "lora")
+KEYS = ("ism", "adsb", "aprs", "pager", "acars", "ais", "rds", "dmr", "apt", "sstv", "meteor",
+        "lora")
 RADIO = {"kind": "rtl-sdr", "index": 0, "serial": None}
 RX = {"model": "Test sensor", "readings": {"temperature_C": 20.0}}
 
@@ -72,18 +73,43 @@ def test_mint_refuses_non_live_or_incomplete_events(event):
 def test_catalog_matches_receiver_keys_and_uses_instrument_specific_provenance():
     from sigint101.stamps import STAMP_INSTRUMENTS
 
-    # Meteor has badge eligibility before its rack and gallery are registered.
-    assert "meteor" in STAMP_INSTRUMENTS
-    assert tuple(key for key in STAMP_INSTRUMENTS if key != "meteor") == KEYS
+    assert STAMP_INSTRUMENTS == KEYS
     assert tuple(inst.key for inst in INSTRUMENTS if inst.key in KEYS) == KEYS
     for key in KEYS:
         fields = {}
         if key == "ais":
             fields["freq_hz"] = [161_975_000, 162_025_000]
+        if key == "meteor":
+            fields.update(tool="satdump", command="satdump live meteor_m2-x_lrpt",
+                          freq_hz=137_900_000,
+                          item={"path": "meteor/pass-1/MSU-MR-1.png", "product": "1",
+                                "pass_id": "pass-1"})
         if key == "lora":
             fields.update(tool="meshtasticd", radio={"kind": "meshtasticd", "host": "bridge:4403"},
                           command=None, freq_hz=None)
         assert _mint(_event(key, **fields))["instrument"] == key
+
+
+def test_apt_replay_picker_preserves_the_earned_apt_logbook_label(tmp_path):
+    with _client(tmp_path) as client:
+        client.app.state.apt.on_reception(
+            {"path": "apt/noaa.png", "meta": {"filename": "noaa.png"}},
+            command="satdump live noaa_apt /tmp --source rtlsdr",
+            freq_hz=137_100_000,
+            radio=RADIO,
+        )
+        stamps = {row["instrument"]: row for row in _stamps(client)["stamps"]}
+        assert stamps["apt"]["label"] == "APT"
+        assert stamps["apt"]["count"] == 1
+        assert stamps["meteor"]["label"] == "Meteor"
+        logbook = client.get("/logbook").text
+        rack = client.get("/operate/apt").text
+    assert "APT replay" in rack
+    assert "APT replay" not in logbook
+    assert 'data-logbook-instrument="apt"' in logbook
+    assert "<strong>APT</strong>" in logbook
+    assert 'data-logbook-instrument="meteor"' in logbook
+    assert "<strong>Meteor</strong>" in logbook
 
 
 def test_legacy_pager_digest_and_provenance_are_both_sanitized():
