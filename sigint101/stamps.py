@@ -6,11 +6,12 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from pathlib import PurePosixPath
 
 from .operate import without_page_words
 
 STAMP_INSTRUMENTS = ("ism", "adsb", "aprs", "pager", "acars", "ais", "rds", "dmr",
-                     "apt", "sstv", "lora")
+                     "apt", "sstv", "meteor", "lora")
 
 # Exclusive upper bound of a UTC datetime, so every accepted timestamp can be displayed.
 _END_OF_YEAR_9999 = 253_402_300_800
@@ -55,6 +56,15 @@ def _recorded(fields) -> bool:
                 or fields.get("source") in ("replay", "sample"))
 
 
+def _meteor_picture(item):
+    path, product, pass_id = item.get("path"), item.get("product"), item.get("pass_id")
+    if _recorded(item) or not all(_nonblank(value) for value in (path, product, pass_id)):
+        return False
+    image = PurePosixPath(path)
+    return (image.parts[:2] == ("meteor", pass_id) and len(image.parts) >= 3
+            and ".." not in image.parts and image.suffix == ".png")
+
+
 def mint(event) -> dict | None:
     """Copy a logged reception's first-heard evidence, or refuse incomplete or recorded data."""
     if not isinstance(event, dict) or event.get("kind") != "reception":
@@ -66,6 +76,8 @@ def mint(event) -> dict | None:
         return None
     instrument = payload.get("instrument")
     if instrument not in STAMP_INSTRUMENTS or not _complete_provenance(instrument, payload):
+        return None
+    if instrument == "meteor" and not _meteor_picture(payload["item"]):
         return None
     # The withheld words affect neither the stored evidence nor its digest. Reading the JSON
     # back also copies nested radio and item details, so later mutations cannot change them.

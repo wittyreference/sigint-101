@@ -86,6 +86,7 @@ class SupervisedReceiver:
 
     STOP_WAIT_S = 3.0
     EOF_WAIT_S = STREAM_EOF_S
+    RETIRE_BEFORE_FENCE = False
 
     def _init_lifecycle(self):
         self._life = threading.RLock()
@@ -220,7 +221,7 @@ class SupervisedReceiver:
         if not reported:
             raise self._unavailable(f"{self.watch.tool} shutdown reports still pending")
 
-    def _cancel(self):
+    def _cancel_intent(self):
         self._control += 1
         intent = self._intent
         if intent:
@@ -228,6 +229,10 @@ class SupervisedReceiver:
         if intent and not intent.spawning:
             self.discard_start(intent)
             intent = None
+        return intent
+
+    def _cancel(self):
+        intent = self._cancel_intent()
         run = self._run
         if run:
             if run.watch.finite and not run.cancel.is_set() and not run.physical.is_set():
@@ -484,6 +489,18 @@ class SupervisedReceiver:
         else:
             stop()
 
+    def _stop_run(self, run):
+        self._stop_child(run.proc)
+
+    def _notify_physical(self, run):
+        run.physical.set()
+
+    def _unreaped_reason(self, run):
+        return f"{run.watch.tool} survived kill; the dongle may still be held"
+
+    def _retire_reaped(self, run, observed_at):
+        """Finish run-specific retirement before making this run ready for replacement."""
+
     def _close_transport(self, proc):
         close = getattr(proc, "close_transport", None)
         if close is not None:
@@ -511,9 +528,9 @@ class SupervisedReceiver:
                 run.wake.wait()
 
     def _supervise(self, run):
-        ended = []
+        ended, observed_at = [], None
         try:
-            ended, _ = self._observe_exit(run)
+            ended, observed_at = self._observe_exit(run)
             if self._needs_diagnostics(run):
                 daemon(self._diagnose, run, ended, run.watch.reason,
                        name=f"sigint101-{run.watch.tool}-diagnostics")
@@ -529,18 +546,19 @@ class SupervisedReceiver:
                 # The process must still be stopped. The final close verifies the transport.
                 run.failure = f"{run.watch.tool} transport could not close: {exc}"
         try:
-            self._stop_child(run.proc)
+            self._stop_run(run)
             reaped = all(code is not None for _, code in self._statuses(run))
             if reaped and not hasattr(run.proc, "close_transport"):
                 run.reaped = True
-                run.physical.set()
+                self._notify_physical(run)
             if reaped and (ended or run.preserve_drain):
                 self._drain_reader(run)
         except Exception as exc:
             reaped = False
             run.failure = f"{run.watch.tool} cleanup failed: {exc}"
         finally:
-            self._fence(run)
+            if not self.RETIRE_BEFORE_FENCE or not reaped:
+                self._fence(run)
             try:
                 self._close_transport(run.proc)
             except Exception as exc:
@@ -549,12 +567,17 @@ class SupervisedReceiver:
             run.reaped = reaped
             run.reap_failed = not reaped
             if not reaped and not run.failure:
-                run.failure = f"{run.watch.tool} survived kill; the dongle may still be held"
-            run.physical.set()
-        if not run.reaped:
-            self._retry(run)
+                run.failure = self._unreaped_reason(run)
+            self._notify_physical(run)
         try:
+            if not run.reaped:
+                self._retry(run)
             if run.reaped:
+                try:
+                    self._retire_reaped(run, observed_at)
+                finally:
+                    if self.RETIRE_BEFORE_FENCE:
+                        self._fence(run)
                 self._report(run)
         finally:
             run.ready.set()
@@ -592,27 +615,33 @@ class SupervisedReceiver:
             except (OSError, ValueError):
                 pass
 
+    def _retry_reap(self, run, timeout):
+        deadline = time.monotonic() + timeout
+        try:
+            for stage, code in self._statuses(run):
+                if code is None:
+                    stage.kill()
+            for stage, code in self._statuses(run):
+                if code is None:
+                    stage.wait(timeout=max(0, deadline - time.monotonic()))
+            if all(code is not None for _, code in self._statuses(run)):
+                self._close_transport(run.proc)
+                run.reaped = True
+                self._notify_physical(run)
+                return True
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        except Exception as exc:
+            run.failure = f"{run.watch.tool} cleanup retry failed: {exc}"
+        return False
+
     def _retry(self, run):
         while not self._closing:
             run.wake.clear()
-            if run.wake.wait(REAP_RETRY_MIN_S):
-                continue
-            deadline = time.monotonic() + REAP_RETRY_WAIT_S
-            try:
-                for stage, code in self._statuses(run):
-                    if code is None:
-                        stage.kill()
-                for stage, code in self._statuses(run):
-                    if code is None:
-                        stage.wait(timeout=max(0, deadline - time.monotonic()))
-                if all(code is not None for _, code in self._statuses(run)):
-                    self._close_transport(run.proc)
-                    run.reaped = True
-                    return
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-            except Exception as exc:
-                run.failure = f"{run.watch.tool} cleanup retry failed: {exc}"
+            if self._closing:
+                return
+            if not run.wake.wait(REAP_RETRY_MIN_S) and self._retry_reap(run, REAP_RETRY_WAIT_S):
+                return
 
     def _report(self, run):
         """Streaming receivers already report each item from their reader."""
