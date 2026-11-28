@@ -23,7 +23,8 @@ wait_for_server() {
   if ! curl -sf "$COURSE_URL/api/hardware" >/dev/null 2>&1; then
     systemctl --user start sigint101.service 2>/dev/null || true
   fi
-  for _ in $(seq 1 60); do
+  # A brace range, not $(seq): no forked shell while the watchdog holds its lock.
+  for _ in {1..60}; do
     curl -sf "$COURSE_URL/api/hardware" >/dev/null 2>&1 && break
     sleep 1
   done
@@ -36,12 +37,15 @@ kiosk_alive() {
 # The output's logical size as WxH, from wlr-randr when it answers (the first enabled output's
 # current mode, divided by its scale, turned for a 90/270 transform), else the reference panel's
 # 800x480. No window list is needed, and the reference box has no tool for one.
+# It sets OUTPUT_SIZE rather than printing, and reads the pipeline's answer back from a file: run
+# under the watchdog's lock, a $(...) subshell would be a forked shell holding the lock's backup
+# for as long as wlr-randr takes, so a watchdog killed meanwhile would keep the next one out.
+OUTPUT_SIZE=""
 output_size() {
-  local size=""
+  local size="" answer="$RUNTIME/sigint101-kiosk-size.$$"
   if command -v wlr-randr >/dev/null 2>&1; then
-    # -k: a wlr-randr that ignores TERM is killed, so it can never hold up a launch (or, under
-    # the watchdog, keep its lock in this subshell).
-    size="$(timeout -k 2 5 wlr-randr 2>/dev/null | awk '
+    # -k: a wlr-randr that ignores TERM is killed, so it can never hold up a launch.
+    timeout -k 2 5 wlr-randr 2>/dev/null | awk '
       function emit() {
         if (on && w > 0 && h > 0) {
           if (tr ~ /^(flipped-)?(90|270)$/) { t = w; w = h; h = t }
@@ -56,7 +60,9 @@ output_size() {
       / px, .*current/ { split($1, m, "x"); w = m[1] + 0; h = m[2] + 0 }
       /^[ \t]+Scale:/ { sc = $2 + 0 }
       /^[ \t]+Transform:/ { tr = $2 }
-      END { if (!found) emit() }')"
+      END { if (!found) emit() }' > "$answer" 2>/dev/null
+    read -r size < "$answer" 2>/dev/null || size=""
+    rm -f "$answer"
   fi
   [[ "$size" =~ ^[1-9][0-9]{0,5}x[1-9][0-9]{0,5}$ ]] || size="800x480"
   # A size no screen has (an odd scale, a bad mode) would make a worse window than the panel's own,
@@ -67,7 +73,7 @@ output_size() {
   then
     size="800x480"
   fi
-  printf '%s\n' "$size"
+  OUTPUT_SIZE="$size"
 }
 
 # Chromium restores the window bounds it saved at the last close, and a window that does not go
@@ -126,7 +132,8 @@ launch() {
   local size
   rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonCookie" "$PROFILE/SingletonSocket" 2>/dev/null
   forget_window_placement
-  size="$(output_size)"
+  output_size
+  size="$OUTPUT_SIZE"
   chromium --kiosk --start-fullscreen --ozone-platform=wayland --user-data-dir="$PROFILE" \
     --app="$COURSE_URL" --window-position=0,0 --window-size="${size%x*},${size#*x}" \
     --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
@@ -158,7 +165,8 @@ watch() {
   fi
   # Run the loop with fd 9 closed. Bash keeps the lock in a close-on-exec copy of it for the
   # length of the call, so no command the loop starts (sleep, curl, systemctl, pgrep, Chromium)
-  # inherits it: a killed watchdog's lock dies with it, and the next one can start at once.
+  # inherits it: a killed watchdog's lock dies with it, and the next one can start at once. A
+  # forked shell would keep that copy, so the loop runs no $(...) or other subshell of its own.
   watch_loop 9>&-
 }
 

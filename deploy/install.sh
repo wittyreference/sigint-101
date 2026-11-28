@@ -36,17 +36,105 @@ start_time() {
   printf '%s\n' "${f[19]}"
 }
 
-# Is PID this user's watchdog? Its command line is exactly "bash|sh <launcher> watch". Never a
-# pattern match on names.
+# The launchers a watchdog may run: the installed one, or this checkout's own.
+CHECKOUT_LAUNCHER="$HERE/kiosk/start-kiosk.sh"
+
+# Is PID this user's watchdog? Its command line is exactly "bash|sh <launcher> watch", where the
+# launcher is the same file as one of the two above (a relative path read from the process's own
+# working directory). Never a match on names: a start-kiosk.sh elsewhere is not the watchdog.
 is_watchdog() {
+  local script
   local -a argv
   [ -O "/proc/$1" ] || return 1
   mapfile -d '' argv 2>/dev/null < "/proc/$1/cmdline" || return 1
   [ "${#argv[@]}" -eq 3 ] && [ "${argv[2]}" = watch ] || return 1
   case "${argv[0]##*/}" in bash | sh) ;; *) return 1 ;; esac
-  case "${argv[1]##*/}" in sigint101-course | start-kiosk.sh) return 0 ;; esac
-  return 1
+  script="${argv[1]}"
+  [[ "$script" = /* ]] || script="/proc/$1/cwd/$script"
+  [ "$script" -ef "$COURSE_BIN" ] || [ "$script" -ef "$CHECKOUT_LAUNCHER" ]
 }
+
+# signal_watchdogs TERM|KILL PID:START... sends the signal through a pidfd, so it can only reach
+# the process found. It first pins every PID with a pidfd, then checks each pinned process is
+# still that watchdog (owner, command line and launcher, start time, holding the lock), and
+# signals only those. It prints each PID signalled. Exit 4: no pidfd here (Linux 5.3+ and Python
+# 3.9+ are needed), and nothing was signalled. Never a signal by number.
+signal_watchdogs() {
+  env -i PATH="$PATH" LANG=C.UTF-8 python3 -I - "$1" "$WATCH_LOCK" "$COURSE_BIN" \
+    "$CHECKOUT_LAUNCHER" "${@:2}" <<'PY'
+import os
+import signal
+import sys
+
+name, lock, installed, checkout, *targets = sys.argv[1:]
+signum = {"TERM": signal.SIGTERM, "KILL": signal.SIGKILL}[name]
+if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+    sys.exit(4)
+
+
+def same_file(path, other):
+    try:
+        return os.path.samefile(path, other)
+    except OSError:
+        return False
+
+
+def still_the_watchdog(pid, start):
+    proc = f"/proc/{pid}"
+    try:
+        if os.stat(proc).st_uid != os.getuid():
+            return False
+        with open(f"{proc}/stat", encoding="utf-8", errors="replace") as f:
+            fields = f.read().rpartition(") ")[2].split()
+        if len(fields) < 20 or fields[19] != start:
+            return False
+        with open(f"{proc}/cmdline", "rb") as f:
+            argv = f.read().split(b"\0")[:-1]
+        if len(argv) != 3 or argv[2] != b"watch":
+            return False
+        if os.path.basename(argv[0]) not in (b"bash", b"sh"):
+            return False
+        script = os.fsdecode(argv[1])
+        if not script.startswith("/"):
+            script = f"{proc}/cwd/{script}"
+        if not (same_file(script, installed) or same_file(script, checkout)):
+            return False
+        for fd in os.listdir(f"{proc}/fd"):
+            try:
+                if os.readlink(f"{proc}/fd/{fd}") != lock:
+                    continue
+                with open(f"{proc}/fdinfo/{fd}", encoding="utf-8") as f:
+                    if any(ln.startswith("lock:") and "FLOCK" in ln for ln in f):
+                        return True
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return False
+
+
+# Pin all first: without a pidfd nothing at all is signalled.
+pinned = []
+for target in targets:
+    pid, _, start = target.partition(":")
+    try:
+        pinned.append((os.pidfd_open(int(pid)), pid, start))
+    except ProcessLookupError:
+        continue  # already gone
+    except OSError:
+        sys.exit(4)
+for fd, pid, start in pinned:
+    if not still_the_watchdog(pid, start):
+        continue
+    try:
+        signal.pidfd_send_signal(fd, signum)
+    except OSError:
+        continue  # it exited after the check
+    print(pid)
+PY
+}
+
+NO_PIDFD="the course watchdog could not be pinned (no pidfd: Linux 5.3+ and Python 3.9+ are needed)"
 
 # The running watchdogs, as "PID:START", from the lock's holders.
 watchdogs() {
@@ -79,19 +167,23 @@ passing_holder() {
   return 1
 }
 
-# Is PID the kiosk browser? Its command line names the kiosk's profile.
+# Is PID the kiosk browser? Its command line names the kiosk's profile, as an argument of its own
+# or as a word of one joined string (Chromium rewrites its title that way).
 is_kiosk() {
-  local a
-  local -a argv
+  local a word
+  local -a argv words
   mapfile -d '' argv 2>/dev/null < "/proc/$1/cmdline" || return 1
   for a in "${argv[@]}"; do
-    [ "$a" = "--user-data-dir=$HOME/.config/chromium-kiosk" ] && return 0
+    read -r -a words <<< "$a"
+    for word in "${words[@]}"; do
+      [ "$word" = "--user-data-dir=$HOME/.config/chromium-kiosk" ] && return 0
+    done
   done
   return 1
 }
 
 # A running watchdog keeps the launcher it started with in memory, so without this a launcher
-# change (the window bounds, say) waits for the next login. Stop it by PID and start the
+# change (the window bounds, say) waits for the next login. Stop it through a pidfd and start the
 # installed launcher's watchdog in the same desktop session, with that session's environment
 # (install.sh is often run over SSH, which has no WAYLAND_DISPLAY). The kiosk browser is never
 # touched: a learner may be mid-lesson, so new browser flags apply at its next launch.
@@ -123,18 +215,19 @@ restart_watchdog() {
     echo "install: WARN could not read the course watchdog's session; it restarts at the next login" >&2
     return 0
   fi
-  for w in "${found[@]}"; do kill -TERM "${w%%:*}" 2>/dev/null || true; done
+  # Through pidfds only. Without one, nothing is signalled and the working watchdog stays.
+  if ! signal_watchdogs TERM "${found[@]}" >/dev/null; then
+    echo "install: WARN $NO_PIDFD; it was left running and restarts at the next login" >&2
+    return 0
+  fi
   # The lock frees when the watchdog has exited. An older launcher let its sleep or curl inherit
   # the lock, which then lasts up to that command's end, so allow it some seconds.
   if ! flock -w 15 "$WATCH_LOCK" true; then
-    # Only what is still the same watchdog: same PID and start time, the lock, the command line.
-    mapfile -t holders < <(watchdogs)
-    for w in "${found[@]}"; do
-      for pid in "${holders[@]}"; do
-        # It may exit between the re-check and the kill, so a failed kill is not an error.
-        if [ "$pid" = "$w" ]; then kill -KILL "${w%%:*}" 2>/dev/null || true; fi
-      done
-    done
+    # Re-checked after a fresh pin: only what is still the same watchdog is killed.
+    if ! signal_watchdogs KILL "${found[@]}" >/dev/null; then
+      echo "install: WARN $NO_PIDFD for its SIGKILL; it restarts at the next login" >&2
+      return 0
+    fi
     if ! flock -w 5 "$WATCH_LOCK" true; then
       echo "install: WARN the course watchdog's lock is still held; it restarts at the next login" >&2
       return 0

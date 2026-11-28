@@ -4,6 +4,7 @@
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -334,6 +335,24 @@ def test_a_watchdog_that_finds_the_lock_held_says_so_and_names_the_holder(box):
         sleeper.stop_all()
 
 
+def test_a_watchdog_killed_while_it_reads_the_output_size_frees_its_lock_at_once(box):
+    """Reading the output size is shell work under the lock. Done in a forked $(...) shell, that
+    shell kept the lock's close-on-exec backup until wlr-randr ended, so a new watchdog could not
+    start for that long after the old one was killed."""
+    box.start_session()  # no kiosk alive, so the pass launches one and reads the output size
+    asked, real_sleep = box.log.parent / "wlr-asked", shutil.which("sleep")
+    _wlr_randr(box, f"echo $$ > {asked}; exec {real_sleep} 4")
+    old = _watchdog(box, LAUNCHER)
+    try:
+        assert _wait_for(lambda: asked.exists() and asked.read_text().strip())
+        old.kill()
+        old.wait(timeout=10)
+        assert _lock_is_free(box), "something the killed watchdog forked still holds its lock"
+    finally:
+        _end(old)
+        _kill_all(_pids(asked))
+
+
 # --- the kiosk window covers the whole panel, whatever the profile saved ----------
 # On the reference panel a reopened kiosk came back as the 780x460 window its profile had saved,
 # leaving a 20 px strip of the desktop showing down the right edge and along the bottom.
@@ -592,6 +611,24 @@ def _fake_kiosk(box):
     return proc, signals
 
 
+def _install(box):
+    """install.sh run from a copy of the checkout in the box. Its deploy/kiosk/start-kiosk.sh is
+    the checkout launcher install.sh accepts a watchdog as running (besides the installed one at
+    /usr/local/bin, which a test cannot write), so a test can put an older launcher there."""
+    deploy = box.log.parent / "checkout" / "deploy"
+    if not deploy.exists():
+        shutil.copytree(REPO / "deploy", deploy, symlinks=True)
+        # The desktop theme step installs the course's bundled fonts.
+        fonts = deploy.parent / "sigint101" / "static" / "fonts"
+        fonts.parent.mkdir(parents=True)
+        fonts.symlink_to(REPO / "sigint101" / "static" / "fonts")
+    return deploy / "install.sh"
+
+
+def _checkout_launcher(box):
+    return _install(box).parent / "kiosk" / "start-kiosk.sh"
+
+
 def _quiet_desktop(box):
     """Only the watchdog's kiosk check finds anything: no labwc or bar for the theme to reload."""
     _stub(box.bin, "pgrep", f'echo "pgrep $*" >> {box.log}\n'
@@ -611,8 +648,9 @@ class _Deploy:
         box.start_session()
         self.sleeper = _LongSleep(box)
         _installed_launcher(box)
-        self.old = subprocess.Popen(["bash", str(LAUNCHER), "watch"], env=box.env(),
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.old = subprocess.Popen(["bash", str(_checkout_launcher(box)), "watch"],
+                                    env=box.env(), stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
         self.kiosk = None
         try:
             self.sleeper.first_pid()
@@ -621,7 +659,7 @@ class _Deploy:
                 os.path.realpath(f"/proc/{self.kiosk.pid}/fd/{fd}") == str(_lock(box))
                 for fd in os.listdir(f"/proc/{self.kiosk.pid}/fd")))
             self.sleeper.hold.unlink()  # sleeps from here on end the session
-            self.result = box.run(INSTALL)
+            self.result = box.run(_install(box))
         except BaseException:
             self.close()
             raise
@@ -712,9 +750,8 @@ def _watchdog(box, launcher):
 
 
 def _old_install(box, text):
-    """An older launcher at its installed name, as the Recon runs it."""
-    path = box.log.parent / "old" / "sigint101-course"
-    path.parent.mkdir()
+    """An older launcher where install.sh looks for a running watchdog's: the checkout's."""
+    path = _checkout_launcher(box)
     path.write_text(text, encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -734,7 +771,7 @@ def test_install_hands_over_from_the_deployed_launcher_whose_sleep_holds_the_loc
         assert _wait_for(lambda: _pids(pids))
         assert not _lock_is_free(box)
         hold.unlink()
-        result = box.run(INSTALL)
+        result = box.run(_install(box))
         assert result.returncode == 0, result.stderr
         assert "WARN" not in result.stderr, result.stderr
         old.wait(timeout=10)
@@ -749,10 +786,12 @@ def test_install_hands_over_from_the_deployed_launcher_whose_sleep_holds_the_loc
         _kill_all(_pids(pids))
 
 
-def test_install_leaves_the_watchdog_running_when_the_kiosk_holds_its_lock(box):
+@pytest.mark.parametrize("title", ["separate", "joined"])
+def test_install_leaves_the_watchdog_running_when_the_kiosk_holds_its_lock(box, title):
     """A kiosk Chromium started by a launcher without `9>&-` holds the lock for as long as it
     runs. Stopping the watchdog then would leave none, since no new one could take the lock, so
-    install.sh leaves the working one alone, says so, and does not touch the browser."""
+    install.sh leaves the working one alone, says so, and does not touch the browser. Chromium
+    may show its arguments one by one, or rewrite its title into one joined string."""
     _quiet_desktop(box)
     box.start_session()
     hold, pids = _sleep_stub(box, 30)
@@ -762,18 +801,25 @@ def test_install_leaves_the_watchdog_running_when_the_kiosk_holds_its_lock(box):
                                             "--password-store=basic &"))
     signals, kiosk_pid = box.log.parent / "kiosk-signals", box.log.parent / "kiosk-pid"
     real_sleep = shutil.which("sleep")
-    _stub(box.bin, "chromium",
-          f'echo $$ > {kiosk_pid}; touch {box.alive}\n'
-          'for s in TERM INT HUP QUIT USR1 USR2 ALRM PIPE CONT; do\n'
-          f'  trap "echo $s >> {signals}" "$s"\n'
-          'done\n'
-          f'while :; do {real_sleep} 0.1; done')
+    browser_loop = box.log.parent / "browser-loop.sh"
+    browser_loop.write_text('for s in TERM INT HUP QUIT USR1 USR2 ALRM PIPE CONT; do\n'
+                            f'  trap "echo $s >> {signals}" "$s"\n'
+                            'done\n'
+                            f'while :; do {real_sleep} 0.1; done\n', encoding="utf-8")
+    joined = (f"/usr/lib/chromium/chromium --kiosk --ozone-platform=wayland "
+              f"--user-data-dir={box.home}/.config/chromium-kiosk --app=http://127.0.0.1:8008")
+    run = (f'exec -a "{joined}" {shutil.which("bash")} {browser_loop}' if title == "joined"
+           else f'. {browser_loop}')
+    _stub(box.bin, "chromium", f'echo $$ > {kiosk_pid}; touch {box.alive}\n{run}')
     _installed_launcher(box)
     old = _watchdog(box, legacy)
     try:
         assert _wait_for(lambda: kiosk_pid.exists() and _pids(pids))
         browser = int(kiosk_pid.read_text())
-        result = box.run(INSTALL)
+        if title == "joined":
+            assert _wait_for(lambda: Path(f"/proc/{browser}/cmdline").read_bytes()
+                             .startswith(joined.encode() + b"\0"))
+        result = box.run(_install(box))
         assert result.returncode == 0, result.stderr
         assert old.poll() is None, "install.sh stopped the only watchdog that can run"
         assert box.calls("setsid") == []
@@ -806,7 +852,7 @@ def test_install_never_kills_a_pid_that_is_no_longer_the_watchdog(box):
     child = box.log.parent / "child-pid"
     try:
         assert _wait_for(lambda: child.exists() and child.read_text().strip())
-        result = box.run(INSTALL, timeout=40)
+        result = box.run(_install(box), timeout=40)
         assert result.returncode == 0, result.stderr
         assert old.poll() is None, "install.sh killed a PID that was no longer the watchdog"
         cmdline = Path(f"/proc/{old.pid}/cmdline").read_bytes().split(b"\0")
@@ -839,7 +885,7 @@ def test_install_leaves_a_lock_holder_alone_unless_bash_runs_the_launcher(box):
                             stdout=subprocess.PIPE, text=True)
     try:
         assert proc.stdout.readline().strip() == "locked"
-        result = box.run(INSTALL)
+        result = box.run(_install(box))
         assert result.returncode == 0, result.stderr
         assert proc.poll() is None and not signals.exists()
         assert box.calls("setsid") == []
@@ -852,90 +898,241 @@ def test_install_leaves_a_lock_holder_alone_unless_bash_runs_the_launcher(box):
         proc.wait(timeout=10)
 
 
-def _stubborn_watchdog(box, extra=""):
-    """A watchdog by its command line that holds the lock and ignores TERM, so install.sh falls
-    back to SIGKILL after its 15 s wait."""
+def _stubborn_watchdog(box, extra="", stubborn=True):
+    """A watchdog by its command line (bash, the checkout launcher, watch) that holds the lock.
+    Stubborn, it ignores TERM, so install.sh falls back to SIGKILL after its 15 s wait. On USR1
+    it becomes another program under the same PID ("imposter", which notes the signals it gets),
+    as a test hook's stand-in for a process whose identity changes."""
     real_sleep = shutil.which("sleep")
-    return _watchdog(box, _old_install(box,
-                                       "#!/bin/bash\n"
-                                       f'exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
-                                       "trap '' TERM\n"
-                                       f"{extra}"
-                                       f'echo started > {box.log.parent / "stubborn"}\n'
-                                       f'while :; do {real_sleep} 0.2; done\n'))
+    imposter = box.log.parent / "imposter.sh"
+    imposter.write_text('for s in TERM INT HUP QUIT USR2; do\n'
+                        f'  trap "echo $s >> {box.log.parent / "imposter-signals"}" "$s"\n'
+                        'done\n'
+                        f'while :; do {real_sleep} 0.1; done\n', encoding="utf-8")
+    return _watchdog(box, _old_install(
+        box,
+        "#!/bin/bash\n"
+        f'exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
+        + ("trap '' TERM\n" if stubborn else "")
+        + f"trap 'exec 9>&-; exec -a imposter {shutil.which('bash')} {imposter}' USR1\n"
+        + extra
+        + f'echo started > {box.log.parent / "stubborn"}\n'
+        f'while :; do {real_sleep} 0.2; done\n'))
 
 
-def _bash_env(box, body):
-    """Shell functions every bash of the run loads first (BASH_ENV), standing in for the kernel:
-    install.sh defines neither `kill` nor `cat`, so these take the builtin's or binary's place."""
-    path = box.log.parent / "bash-env.sh"
-    path.write_text(body, encoding="utf-8")
-    return str(path)
+def _is_imposter(pid):
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().startswith(b"imposter\0")
+    except OSError:
+        return False
 
 
-def test_install_hands_over_when_the_watchdog_exits_just_before_its_sigkill(box):
-    """The watchdog passes the re-check, then exits before SIGKILL lands, so `kill` fails. Under
-    `set -e` that must not end install.sh: it still hands over and prints its message."""
+def _python_hook(box, prelude):
+    """python3 for install.sh's pidfd helper (`python3 -I - SIGNAL ...`): the real interpreter,
+    with `prelude` run first, standing in for the kernel. It logs every pidfd signal it sends as
+    "pidfd-send N". Other python3 calls run the real interpreter untouched."""
+    real = shutil.which("python3")
+    hook = box.log.parent / "pidfd-hook.py"
+    hook.write_text(
+        "import signal as _signal, sys\n"
+        "_send = _signal.pidfd_send_signal\n"
+        "def _logged(fd, sig, *rest):\n"
+        f"    open({str(box.log)!r}, 'a').write(f'pidfd-send {{int(sig)}}\\n')\n"
+        "    return _send(fd, sig, *rest)\n"
+        "_signal.pidfd_send_signal = _logged\n"
+        + prelude +
+        "\n_src = sys.stdin.read()\n"
+        "sys.argv = ['-'] + sys.argv[1:]\n"
+        "exec(compile(_src, '<pidfd helper>', 'exec'), {'__name__': '__main__'})\n",
+        encoding="utf-8")
+    _stub(box.bin, "python3",
+          f'if [ "$1" = -I ] && [ "$2" = - ]; then shift 2; exec {real} -I {hook} "$@"; fi\n'
+          f'exec {real} "$@"')
+
+
+# Runs inside the hook: on the pin for SIGNAL, the pinned process turns into the imposter (USR1)
+# before the helper checks it, so the check sees another program under the pinned PID.
+_CHANGE_AFTER_PIN = """
+import os, time
+_pidfd_open = os.pidfd_open
+def _pin(pid, flags=0):
+    fd = _pidfd_open(pid, flags)
+    if sys.argv[1] == {signal!r}:
+        os.kill(pid, _signal.SIGUSR1)
+        end = time.time() + 5
+        while time.time() < end:
+            with open(f"/proc/{{pid}}/cmdline", "rb") as f:
+                if f.read().startswith(b"imposter\\0"):
+                    break
+            time.sleep(0.05)
+    return fd
+os.pidfd_open = _pin
+"""
+
+
+def _sent(box):
+    return [int(ln.split()[1]) for ln in box.calls("pidfd-send")]
+
+
+def _hands_over(box, result):
+    assert result.returncode == 0, result.stderr
+    assert len(box.calls("setsid")) == 1, box.log.read_text()
+    assert _wait_for(lambda: box.calls("sleep") == ["sleep 10"]), box.log.read_text()
+    assert len([ln for ln in result.stdout.splitlines() if "next launch" in ln]) == 1
+
+
+def _end(old):
+    if old.poll() is None:
+        old.kill()
+    old.wait(timeout=10)
+
+
+def test_install_signals_nothing_when_the_identity_changes_after_the_pin_before_term(box):
     box.alive.touch()
     _quiet_desktop(box)
     box.start_session()
     _installed_launcher(box)
-    old = _stubborn_watchdog(box)
+    _python_hook(box, _CHANGE_AFTER_PIN.format(signal="TERM"))
+    old = _stubborn_watchdog(box, stubborn=False)
     try:
         assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
-        env = _bash_env(box,
-                        'kill() {\n'
-                        '  if [ "$1" = -KILL ]; then\n'
-                        f'    builtin kill "$@"; echo "kill $*" >> {box.log}; return 1\n'
-                        '  fi\n'
-                        '  builtin kill "$@"\n'
-                        '}\n')
-        result = box.run(INSTALL, timeout=40, BASH_ENV=env)
-        assert result.returncode == 0, result.stderr
-        assert box.calls("kill -KILL") == [f"kill -KILL {old.pid}"]
-        old.wait(timeout=10)
-        assert len(box.calls("setsid")) == 1
-        assert _wait_for(lambda: box.calls("sleep") == ["sleep 10"]), box.log.read_text()
-        assert len([ln for ln in result.stdout.splitlines() if "next launch" in ln]) == 1
+        result = box.run(_install(box), timeout=40)
+        assert _sent(box) == [], "a signal went to a process that was no longer the watchdog"
+        assert _is_imposter(old.pid) and old.poll() is None
+        assert not (box.log.parent / "imposter-signals").exists()
+        # The imposter let the lock go, so the new watchdog took over.
+        _hands_over(box, result)
     finally:
-        if old.poll() is None:
-            old.kill()
-        old.wait(timeout=10)
+        _end(old)
 
 
-def test_install_never_kills_a_reused_pid_whose_start_time_differs(box):
-    """A reused PID cannot be staged without privileges, so the start time stands in: after the
-    TERM, /proc/PID/stat reports another start time for the watchdog's PID, as it would for a new
-    process there. Command line and lock still match; install.sh must still not kill it."""
+def test_install_sends_no_sigkill_when_the_identity_changes_at_the_rescan(box):
+    box.alive.touch()
     _quiet_desktop(box)
     box.start_session()
     _installed_launcher(box)
+    _python_hook(box, _CHANGE_AFTER_PIN.format(signal="KILL"))
     old = _stubborn_watchdog(box)
-    mark = box.log.parent / "start-read"
     try:
         assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
-        env = _bash_env(box,
-                        'cat() {\n'
-                        f'  if [ "$#" -eq 1 ] && [ "$1" = /proc/{old.pid}/stat ]; then\n'
-                        '    local s; s="$(command cat "$1")" || return 1\n'
-                        f'    if [ ! -e {mark} ]; then\n'
-                        f'      : > {mark}; printf "%s\\n" "$s"; return 0\n'
-                        '    fi\n'
-                        '    local -a f; read -r -a f <<< "${s##*) }"; f[19]=$((f[19] + 1))\n'
-                        '    printf "%s) %s\\n" "${s%) *}" "${f[*]}"; return 0\n'
-                        '  fi\n'
-                        '  command cat "$@"\n'
-                        '}\n')
-        result = box.run(INSTALL, timeout=40, BASH_ENV=env)
-        assert mark.exists(), "the start time was never read"
+        result = box.run(_install(box), timeout=40)
+        assert _sent(box) == [signal.SIGTERM], box.log.read_text()  # TERM, ignored; no KILL
+        assert _is_imposter(old.pid) and old.poll() is None
+        _hands_over(box, result)
+    finally:
+        _end(old)
+
+
+@pytest.mark.parametrize("missing", ["python", "kernel"])
+def test_install_without_a_pidfd_signals_nothing_and_keeps_the_watchdog(box, missing):
+    """Python without os.pidfd_open (before 3.9), or a kernel without pidfd_open (before 5.3):
+    nothing is signalled, never a PID by number, and the working watchdog stays."""
+    box.alive.touch()
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "import os\ndel os.pidfd_open\n" if missing == "python" else
+                 "import errno, os\n"
+                 "def _enosys(*a, **k):\n"
+                 "    raise OSError(errno.ENOSYS, 'Function not implemented')\n"
+                 "os.pidfd_open = _enosys\n")
+    old = _stubborn_watchdog(box, stubborn=False)
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box))
         assert result.returncode == 0, result.stderr
+        assert old.poll() is None and not _is_imposter(old.pid)
+        assert _sent(box) == [] and box.calls("setsid") == []
+        [warn] = [ln for ln in result.stderr.splitlines() if "WARN" in ln]
+        assert "pidfd" in warn and "left running" in warn, warn
+    finally:
+        _end(old)
+
+
+def test_install_hands_over_when_the_watchdog_exits_just_before_its_sigkill(box):
+    """The watchdog passes the re-check, then exits before SIGKILL lands, so the send fails.
+    Under `set -e` that must not end install.sh: it still hands over and prints its message."""
+    box.alive.touch()
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "_inner = _signal.pidfd_send_signal\n"
+                      "def _late(fd, sig, *rest):\n"
+                      "    _inner(fd, sig, *rest)\n"
+                      "    if sig == _signal.SIGKILL:\n"
+                      "        raise ProcessLookupError(3, 'No such process')\n"
+                      "_signal.pidfd_send_signal = _late\n")
+    old = _stubborn_watchdog(box)
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box), timeout=40)
+        assert _sent(box) == [signal.SIGTERM, signal.SIGKILL]
+        old.wait(timeout=10)
+        _hands_over(box, result)
+    finally:
+        _end(old)
+
+
+def test_install_never_kills_a_reused_pid_whose_start_time_differs(box):
+    """A reused PID cannot be staged without privileges, so the start time stands in: at the
+    SIGKILL re-check, /proc/PID/stat reports another start time for the pinned PID, as it would
+    for a new process there. Command line and lock still match; it must not be killed."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "import builtins, io\n"
+                      "_open = builtins.open\n"
+                      "_pid = sys.argv[5].partition(':')[0]\n"
+                      "def _reopened(path, *a, **k):\n"
+                      "    f = _open(path, *a, **k)\n"
+                      "    if sys.argv[1] != 'KILL' or str(path) != f'/proc/{_pid}/stat':\n"
+                      "        return f\n"
+                      "    head, sep, rest = f.read().rpartition(') ')\n"
+                      "    fields = rest.split()\n"
+                      "    fields[19] = str(int(fields[19]) + 1)\n"
+                      "    return io.StringIO(head + sep + ' '.join(fields))\n"
+                      "builtins.open = _reopened\n")
+    old = _stubborn_watchdog(box)
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box), timeout=40)
+        assert result.returncode == 0, result.stderr
+        assert _sent(box) == [signal.SIGTERM], box.log.read_text()
         assert old.poll() is None, "install.sh killed a PID whose start time had changed"
         assert box.calls("setsid") == []
         assert any("still held" in ln for ln in result.stderr.splitlines()), result.stderr
     finally:
-        if old.poll() is None:
-            old.kill()
-        old.wait(timeout=10)
+        _end(old)
+
+
+@pytest.mark.parametrize("name", ["start-kiosk.sh", "sigint101-course"])
+def test_install_never_signals_a_launcher_of_the_same_name_elsewhere(box, name):
+    """Only the installed launcher, or this checkout's, is the watchdog's. A bash running some
+    other file of the same name with `watch`, and holding the lock, gets no signal at all."""
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "")
+    signals = box.log.parent / "elsewhere-signals"
+    other = box.log.parent / "elsewhere" / name
+    other.parent.mkdir()
+    other.write_text("#!/bin/bash\n"
+                     f'exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
+                     'for s in TERM INT HUP QUIT USR1 USR2; do\n'
+                     f'  trap "echo $s >> {signals}" "$s"\n'
+                     'done\n'
+                     f'echo started > {box.log.parent / "stubborn"}\n'
+                     f'while :; do {shutil.which("sleep")} 0.1; done\n', encoding="utf-8")
+    old = _watchdog(box, other)
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box))
+        assert result.returncode == 0, result.stderr
+        assert old.poll() is None and not signals.exists() and _sent(box) == []
+        assert box.calls("setsid") == []
+        [warn] = [ln for ln in result.stderr.splitlines() if "WARN" in ln]
+        assert "no watchdog" in warn, warn
+    finally:
+        _end(old)
 
 
 def test_install_leaves_the_watchdog_running_when_an_orphan_holds_its_lock(box):
@@ -951,7 +1148,7 @@ def test_install_leaves_the_watchdog_running_when_an_orphan_holds_its_lock(box):
         assert _wait_for(lambda: orphan.exists() and orphan.read_text().strip())
         pid = int(orphan.read_text())
         assert _alive(pid)
-        result = box.run(INSTALL, timeout=40)
+        result = box.run(_install(box), timeout=40)
         assert result.returncode == 0, result.stderr
         assert old.poll() is None, "install.sh stopped the only watchdog that can run"
         assert box.calls("setsid") == []
