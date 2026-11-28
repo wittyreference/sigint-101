@@ -1644,13 +1644,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def _claim_sdr(target: str, start=None, *, reclaim=True):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
         refusal = unavailable[target]
-        # A lesson's tuning restore runs first: a tool started now would open on the frequency
-        # the rack left (C81). The wait is bounded, then refused with the reason.
-        try:
-            app.state.tuning_gate.wait_idle()
-        except TuningBusy as exc:
-            raise refusal(str(exc)) from exc
-        deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
         consumers = {name: getattr(app.state, name) for name in sdr_consumers}
         receiver = consumers.get(target)
         intent = None
@@ -1663,6 +1656,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 failure = getattr(consumer, "release_failure", None)
                 if failure and (reason := failure()):
                     raise refusal(reason)
+            # Then a lesson's tuning restore, if one is running: a tool started now would open on
+            # the frequency the rack left (C81). The wait is bounded, then refused with the reason.
+            # It comes after the refusals above, which need no wait, and before the queue's own
+            # deadline starts, so the time spent here is not taken from the arbiter's wait. A
+            # failure that arises meanwhile is caught by the checks under the arbiter below.
+            try:
+                app.state.tuning_gate.wait_idle()
+            except TuningBusy as exc:
+                raise refusal(str(exc)) from exc
+            deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
             if prepare is not None:
                 intent = prepare(for_claim=True, deadline=deadline)
             with app.state.radio_arbiter.reserve(target, refusal, deadline):
