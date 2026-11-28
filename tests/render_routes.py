@@ -10,4 +10,4 @@ RENDER_CHECK_PAGES = ("/lesson/29", "/", "/exam/review/T6C02", "/operate/ism", "
                       "/lesson/1", "/lesson/1?recall=card&card=2", "/unit/4", "/unit/5",
                       "/unit/4/challenge", "/unit/5/challenge",
                       "/operate/ism?back=/unit/4/challenge", "/operate/waterfall",
-                      "/field")
+                      "/field", "/bands")
