@@ -328,6 +328,51 @@
               </div>
 {% endmacro %}
 
+{# ---- Passive NOAA APT rack placeholder: NOAA APT retired in August 2025, so the rack never
+   starts a live APT capture. Lesson 24 keeps its recorded-APT teaching panel; live 137 MHz weather
+   satellites live on Meteor-M LRPT. ---- #}
+{% macro apt_replay_placeholder() %}
+              <div class="decoder" data-apt-replay-panel aria-label="NOAA APT retired replay notice">
+                <div class="decoder__head">
+                  <span class="decoder__title">satdump &middot; NOAA APT</span>
+                  <span class="decoder__status">REPLAY ONLY</span>
+                </div>
+                <div class="apt-replay">
+                  <p class="apt-replay__note">NOAA APT retired in August 2025. No live NOAA satellite transmits APT on 137 MHz.</p>
+                  <p class="apt-replay__note">Use Lesson 24 for recorded APT imagery, or switch to Meteor for live 137 MHz weather satellites.</p>
+                  <div class="apt-replay__actions">
+                    <a class="btn btn--primary apt-replay__link" href="/operate/meteor">Open Meteor</a>
+                    <a class="btn btn--secondary apt-replay__link" href="/lesson/24">Open Lesson 24</a>
+                  </div>
+                </div>
+              </div>
+{% endmacro %}
+
+{# ---- Meteor-M LRPT weather satellite panel: Listen now starts a live SatDump LRPT pass on
+   137.900 or 137.100 MHz via POST /api/meteor/listen; passive GET /api/meteor reads state and
+   past decoded passes without ever claiming the SDR. ---- #}
+{% macro meteor(head_command=true) %}
+              <div class="decoder meteor" data-meteor-panel aria-label="Live Meteor-M LRPT weather image">
+                <div class="decoder__head">
+                  <span class="decoder__title">satdump &middot; METEOR-M LRPT</span>
+                  {% if head_command %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status" data-meteor-badge>CHECKING</span>
+                </div>
+                <div class="meteor__bar">
+                  <button class="btn btn--primary meteor__listen" type="button" data-meteor-listen>Listen now</button>
+                  <div class="meteor__status">
+                    <div class="meteor__phase" data-meteor-phase role="status">Checking receiver…</div>
+                    <div class="meteor__note" data-meteor-note hidden></div>
+                  </div>
+                </div>
+                <div class="meteor__gallery" data-meteor-gallery>
+                  <div class="meteor__gallery-head" data-meteor-gallery-head>Past pictures</div>
+                  <ul class="meteor__passes" data-meteor-passes></ul>
+                  <div class="meteor__empty" data-meteor-empty>No pictures decoded yet.</div>
+                </div>
+              </div>
+{% endmacro %}
+
 {# ---- SSTV image (M25): a picture sent as audio tones (the ISS downlink), which a waterfall shows
    only as a warbling FM signal. rtl_fm|sox|sstv decodes it to a PNG; sstv.js polls /api/sstv and
    shows the newest image (served from /media). No radio / no tools / nothing decoded shows an

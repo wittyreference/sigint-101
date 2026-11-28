@@ -1,0 +1,6 @@
+#!/bin/sh
+# ABOUTME: Self-locating launcher for the learner-session low-battery desktop notice.
+# ABOUTME: Runs sigint101.power_desktop under python3 -I reading /run/sigint101-power/notice.json.
+set -eu
+LIB_DIR="$(dirname "$(readlink -f "$0")")/../lib/sigint101-power"
+exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); sys.argv = [sys.argv[0], *sys.argv[2:]]; from sigint101.power_desktop import main; sys.exit(main())' "$LIB_DIR" "$@"

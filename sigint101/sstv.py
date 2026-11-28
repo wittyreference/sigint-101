@@ -3,17 +3,14 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
-import re
 import shutil
 import stat
 import subprocess
 import threading
 import time
-import uuid
 import weakref
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -34,6 +31,16 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
+from .staging import _CREATE_LOCK as _CREATE_LOCK
+from .staging import (
+    _CREATE_WAIT_S,
+    _DIR_FLAGS,
+    _OWNER_LOCK,
+    _close_all,
+    _UntrustedStaging,
+    create_owner,
+    sweep_owners,
+)
 from .storage import fsync_dir, fsync_file
 
 # The colaclanth/sstv command-line decoder. It turns one WAV of SSTV audio into one PNG, printing
@@ -71,32 +78,13 @@ _log = logging.getLogger(__name__)
 # and held under an exclusive flock on the lock file inside it for as long as the decoder lives.
 # The lock, not any file name, says whether the owner is gone. A subfolder is only ever given its
 # owner's name once its lock is held, so no sweep can find it unlocked while its owner is alive.
-_OWNER_NAME = re.compile(r"[0-9a-f]{32}")
-_OWNER_LOCK = ".owner.lock"
-# A subfolder is made as .new-<name> and renamed once locked. Every console holds this lock shared
-# across that window, so a sweep that takes it exclusively knows any .new- folder is a crash's.
-_PENDING_NAME = re.compile(r"\.new-[0-9a-f]{32}")
-_CREATE_LOCK = ".create.lock"
-# How long a start tries for the shared creation lock while a sweeper holds it exclusively. A
-# sweeper holds it only for its short tidy; one frozen there must not hang every other start.
-_CREATE_WAIT_S = 1.5
-_CREATE_RETRY_S = 0.05
 # Retired captures queue here (a sibling of the owners' subfolders) until they are unlinked.
 _DISCARD = ".discard"
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _SHARED_WRITE = stat.S_IWGRP | stat.S_IWOTH
 
 
 class SstvUnavailable(RuntimeError):
     """The SSTV stream cannot be read. Never a reason to emit a placeholder — gallery stays bare."""
-
-
-class _UntrustedStaging(OSError):
-    """A staging folder or subfolder this console cannot identify as its own to clean."""
-
-
-class _StagingBusy(OSError):
-    """Another console held the creation lock exclusively for longer than a start waits."""
 
 
 def _require_private_dir(info: os.stat_result, what: str) -> None:
@@ -175,78 +163,6 @@ def _empty_owned(staging_fd: int, name: str, sub_fd: int, sub_info: os.stat_resu
         os.rmdir(name, dir_fd=staging_fd)
 
 
-def _sweep_retired(staging_fd: int, name: str) -> None:
-    """Remove one subfolder of the staging folder if its owner is gone: its lock is free."""
-    sub_fd = os.open(name, _DIR_FLAGS, dir_fd=staging_fd)
-    try:
-        sub_info = os.fstat(sub_fd)
-        _require_private_dir(sub_info, f"staging subfolder {name}")
-        # O_NONBLOCK: a FIFO in the lock's place must not hold up the console's start.
-        lock_fd = os.open(_OWNER_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                          dir_fd=sub_fd)
-        try:
-            lock = os.fstat(lock_fd)
-            if not stat.S_ISREG(lock.st_mode) or lock.st_uid != os.geteuid():
-                raise _UntrustedStaging(f"the lock in staging subfolder {name} is not this "
-                                        "account's regular file")
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return  # Its owner, or a stage of its owner's, is alive.
-            if not os.path.samestat(
-                    os.stat(_OWNER_LOCK, dir_fd=sub_fd, follow_symlinks=False), lock):
-                return  # Another sweep retired it first.
-            _empty_owned(staging_fd, name, sub_fd, sub_info)
-        finally:
-            os.close(lock_fd)
-    finally:
-        os.close(sub_fd)
-
-
-def _open_lock_file(dir_fd: int, name: str, *, create: bool) -> int:
-    """Open a lock file in a verified folder, without following links: this account's, regular."""
-    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    fd = os.open(name, flags | (os.O_CREAT if create else 0), 0o600, dir_fd=dir_fd)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-            raise _UntrustedStaging(f"{name} is not this account's regular file")
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
-
-
-def _still_named(dir_fd: int, name: str, fd: int) -> bool:
-    """True while `name` in the folder still refers to the file this descriptor has open."""
-    try:
-        return os.path.samestat(os.stat(name, dir_fd=dir_fd, follow_symlinks=False), os.fstat(fd))
-    except FileNotFoundError:
-        return False
-
-
-def _take_create_lock_shared(fd: int) -> None:
-    """Take the creation lock shared, retrying briefly; refuse if a sweeper keeps it."""
-    deadline = time.monotonic() + _CREATE_WAIT_S
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise _StagingBusy("another console is tidying the staging folder; "
-                                   "try SSTV again") from None
-            time.sleep(_CREATE_RETRY_S)
-
-
-def _close_all(fds: tuple) -> None:
-    for fd in fds:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-
-
 class _StagingOwner:
     """One decoder's own staging subfolder, held under its flock until the decoder retires.
 
@@ -267,92 +183,22 @@ class _StagingOwner:
     @classmethod
     def create(cls, parent: Path, staging_name: str, gallery_name: str) -> _StagingOwner:
         staging_fd, gallery = _open_staging(parent, staging_name, gallery_name)
-        name = uuid.uuid4().hex
-        pending = f".new-{name}"
-        create_fd = sub_fd = lock_fd = None
         try:
-            # Held shared from before .new- exists until it has its owner's name (see sweep).
-            create_fd = _open_lock_file(staging_fd, _CREATE_LOCK, create=True)
-            _take_create_lock_shared(create_fd)
-            if not _still_named(staging_fd, _CREATE_LOCK, create_fd):
-                raise _UntrustedStaging(f"{_CREATE_LOCK} was replaced while it was taken")
-            os.mkdir(pending, 0o700, dir_fd=staging_fd)
-            sub_fd = os.open(pending, _DIR_FLAGS, dir_fd=staging_fd)
-            lock_fd = os.open(_OWNER_LOCK, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-                              | os.O_CLOEXEC, 0o600, dir_fd=sub_fd)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            os.rename(pending, name, src_dir_fd=staging_fd, dst_dir_fd=staging_fd)
-            _close_all((create_fd,))
-            return cls(staging_fd, gallery, name, sub_fd, lock_fd)
+            name, sub_fd, lock_fd = create_owner(staging_fd, "SSTV", wait_s=_CREATE_WAIT_S)
         except BaseException:
-            if lock_fd is not None:
-                _close_all((lock_fd,))
-                try:
-                    os.unlink(_OWNER_LOCK, dir_fd=sub_fd)
-                except OSError:
-                    pass
-            if sub_fd is not None:
-                _close_all((sub_fd,))
-                try:
-                    os.rmdir(pending, dir_fd=staging_fd)
-                except OSError:
-                    pass
-            if create_fd is not None:
-                _close_all((create_fd,))
-            _close_all((staging_fd,))
+            os.close(staging_fd)
             raise
+        return cls(staging_fd, gallery, name, sub_fd, lock_fd)
 
     def sweep(self) -> None:
-        """Remove every other subfolder whose owner is gone, and creations cut short by a crash.
+        def cleanup(staging_fd, name, sub_fd, info):
+            _require_private_dir(info, f"staging subfolder {name}")
+            _empty_owned(staging_fd, name, sub_fd, info)
 
-        A live owner's lock cannot be taken. A .new- folder is removed only while the creation
-        lock is held exclusively: every console holds it shared from before its .new- folder
-        exists until that folder has its owner's name, so none is being made.
-        """
-        names = os.listdir(self.staging_fd)
-        for name in names:
-            if name == self.name or not _OWNER_NAME.fullmatch(name):
-                continue
-            try:
-                _sweep_retired(self.staging_fd, name)
-            except FileNotFoundError:
-                pass  # Retired by another sweep, or never an owner's.
-            except OSError as exc:
-                _log.warning("SSTV left staging subfolder %s in place: %s", name, exc)
-        pending = [name for name in names if _PENDING_NAME.fullmatch(name)]
-        if pending:
-            self._tidy_pending(pending)
+        def warn(name, exc):
+            _log.warning("SSTV left staging subfolder %s in place: %s", name, exc)
 
-    def _tidy_pending(self, names: list) -> None:
-        try:
-            create_fd = _open_lock_file(self.staging_fd, _CREATE_LOCK, create=True)
-        except OSError as exc:
-            _log.warning("SSTV left interrupted staging folders in place: %s", exc)
-            return
-        try:
-            try:
-                fcntl.flock(create_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return  # A console is making its subfolder now; a later sweep tries again.
-            if not _still_named(self.staging_fd, _CREATE_LOCK, create_fd):
-                _log.warning("SSTV left interrupted staging folders in place: %s was replaced",
-                             _CREATE_LOCK)
-                return
-            for name in names:
-                try:
-                    sub_fd = os.open(name, _DIR_FLAGS, dir_fd=self.staging_fd)
-                    try:
-                        sub_info = os.fstat(sub_fd)
-                        _require_private_dir(sub_info, f"staging folder {name}")
-                        _empty_owned(self.staging_fd, name, sub_fd, sub_info)
-                    finally:
-                        os.close(sub_fd)
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    _log.warning("SSTV left staging folder %s in place: %s", name, exc)
-        finally:
-            os.close(create_fd)
+        sweep_owners(self.staging_fd, cleanup, warn, own=self.name)
 
     def _open_discard(self, *, create: bool) -> int | None:
         """The discard queue's descriptor once it is proved private and not the gallery, or None.

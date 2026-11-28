@@ -4,6 +4,12 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-11-28: Private capture directories inherit a parent's setgid bit
+**Finding.** A mkdir requesting 0700 under a setgid data directory is born 02700 on Linux.
+A strict private-mode check refused the capture store on its first open.
+**How to apply.** Verify the newly created directory by descriptor, set its exact mode there,
+and sync the directory and parent. Test both ordinary and setgid parents.
+
 ## 2026-11-28: keep a failed calibration reap visible after the request
 **Finding.** A queued spectrum request can pass the release checks while ppm is still capturing.
 When the request wakes, the calibration may have returned with its child still alive.

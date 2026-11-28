@@ -670,3 +670,75 @@ def test_missing_tool_refusals_name_the_correct_provision_command(
     if kind in ("apt", "dmr", "sstv"):
         command += " --with-optional"
     assert body["next_step"] == command
+
+
+def test_capture_routes_have_one_explicit_start_and_keep_result(tmp_path):
+    from tests.test_capture import TUNE, Recorder, capture, client
+
+    proc = Recorder(tmp_path)
+    launches = []
+    cap = capture(tmp_path, spawn=lambda *args, **_: (launches.append(args), proc)[1])
+    with client(tmp_path, cap) as c:
+        assert c.get("/api/capture").json()["state"] == "idle"
+        assert not (tmp_path / "captures").exists() and not launches
+        page = c.get("/capture")
+        assert page.status_code == 200 and 'href="/law' in page.text
+        for cite in ("2511(1)(a)", "605(a)"):
+            assert cite in page.text
+        assert c.post("/api/capture/start", json=TUNE).status_code == 200
+        assert c.post("/api/capture/start", json=TUNE).status_code == 409
+        assert len(launches) == 1
+        proc.feed().join(3)
+        cap.drain()
+        saved = c.get("/api/capture").json()["last_saved"]
+        assert saved
+        assert c.post("/api/capture/start", json={"gain": None}).status_code == 400
+        assert c.post("/api/capture/stop").json()["last_saved"] == saved
+        assert c.post("/api/capture/stop").json()["last_saved"] == saved
+    assert _kinds(tmp_path).count("capture_start") == 1
+    assert _kinds(tmp_path).count("capture_end") == _kinds(tmp_path).count("capture_saved") == 1
+    assert _kinds(tmp_path).count("capture_refused") == 2
+
+
+def test_cancelled_capture_spawn_has_no_start_event_or_managed_sync(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sigint101 import app
+    from tests.test_capture import TUNE, Recorder, capture, client
+    from tests.test_updater_validation import _make_managed_generation
+
+    entered, return_child = threading.Event(), threading.Event()
+    generation = _make_managed_generation(tmp_path)
+    generation.chmod(0o700)
+    proc = Recorder(generation)
+
+    def spawn(*_args, **_kwargs):
+        entered.set()
+        assert return_child.wait(5)
+        return proc
+
+    events = []
+    log = app.log_event
+
+    def spy(path, kind, payload, **kwargs):
+        if kind.startswith("capture_"):
+            events.append((kind, kwargs.get("sync", False)))
+        return log(path, kind, payload, **kwargs)
+
+    monkeypatch.setattr(app, "log_event", spy)
+    cap = capture(generation, spawn=spawn)
+    with client(generation, cap, managed=True) as c, ThreadPoolExecutor(2) as pool:
+        starting = pool.submit(c.post, "/api/capture/start", json=TUNE)
+        try:
+            assert entered.wait(3), starting.result(1).json().get("reason")
+            ticket = cap._ticket
+            stopping = pool.submit(c.post, "/api/capture/stop")
+            assert ticket.cancelled.wait(3)
+        finally:
+            return_child.set()
+        assert starting.result(5).json()["state"] == "stopped"
+        assert stopping.result(5).status_code == 200
+        cap.drain()
+    assert proc.poll() is not None and not cap.store.catalog()
+    assert events == [("capture_end", False)]
+    assert "capture_start" not in _kinds(generation)
