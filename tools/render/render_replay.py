@@ -10,6 +10,13 @@ from fastapi.testclient import TestClient
 from render_logbook import THEMES, load_page, verdict
 from render_scroll import connect, leave_page
 
+RENDER_CHECK = {
+    "name": "replay",
+    "pages": ("/operate/ism", "/lesson/10", "/logbook"),
+    "scratch": False,
+    "order": 130,
+}
+
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
