@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from render_logbook import THEMES, load_page, verdict
-from render_scroll import connect
+from render_scroll import connect, leave_page
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
@@ -242,10 +242,9 @@ def main(console):
                      and m.get("marks") == marks and min(m["contrast"]) >= 4.5
                      for m, marks in zip(measured, (["REPLAY"], ["STAMP", "REPLAY"]), strict=True))
             failed |= verdict(ok, f"replay logbook {theme}", measured)
-        load_page(browser, "about:blank")
         return int(failed)
     finally:
-        browser.s.close()
+        leave_page(browser)
 
 
 if __name__ == "__main__":

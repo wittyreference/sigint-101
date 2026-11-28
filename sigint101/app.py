@@ -666,10 +666,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             logging.getLogger(__name__).warning("could not log LoRa %s: %s", kind, exc)
 
     def _run_startup_backfill(state) -> None:
+        """The public console's startup writes; the read-only trial never runs this hook."""
         try:
             _backfill_stamps(state.progress, _stamp_window())
         except (OSError, sqlite3.Error) as exc:
             _stamp_failed(exc)
+        # Check lessons completed before enrolment moved to the completion post have no recall
+        # row yet: enrol them once here, at startup, so no page load ever has to write one.
+        try:
+            sources = [lid for lid, item in state.lessons.items()
+                       if item.check and (state.progress.get(lid) or {}).get("completed")]
+            state.progress.enroll_recall(sources, now=clock())
+        except (OSError, sqlite3.Error) as exc:
+            logging.getLogger(__name__).error("recall enrolment backfill: %s", exc)
 
     def _attach_hooks(state) -> None:
         for attr, inst in RECEIVERS.items():
@@ -972,20 +981,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         is what the template uses to decide which stages it emits, so the sealed bodies are never
         put into the HTML before the commit. Lesson.reveal() is asked for the sealed material only
         once committed — it refuses otherwise — as the code-level backstop behind the template.
-        Opening a lesson counts as progress but never as completion. It opens on the stage the
-        learner last reached (a reload or a power cut resumes in place), and Back leads to the
-        lesson's unit rather than skipping it.
+        Opening a lesson counts as progress but never as completion; the page records it once
+        shown (POST /api/opened), so this GET writes no learner state. Nor does it touch a
+        receiver: the page puts the radios on the lesson's frequencies itself (POST /api/tuning)
+        before its panels start polling. It opens on the stage the learner last reached (a reload
+        or a power cut resumes in place), and Back leads to the lesson's unit rather than skipping
+        it.
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
-        _restore_lesson_tuning(lesson)
-        app.state.progress.mark_opened(lesson_id)
         saved_stage = app.state.progress.get_stage(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
         unit = unit_for_lesson(lesson_id)
+        # Read-only: a completed check lesson is enrolled for recall when it is completed (POST
+        # /api/complete) or, for older completions, when the console starts; never by a GET.
         sources = _recall_sources()
         now = clock()
-        app.state.progress.enroll_recall(sources, now=now)
         if saved_stage is None and prediction is None:
             recall_page = _recall_response(request, lesson, unit, sources, now)
             if recall_page is not None:
@@ -1225,6 +1236,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "caution": LAW_CAUTION, "sections": LAW_SECTIONS},
         )
 
+    @app.post("/api/tuning")
+    def lesson_tuning(lesson_id: int):
+        """Put the radios where this lesson expects them, whatever the rack left them on.
+
+        The lesson page posts this as it loads, ahead of its panel scripts (lesson-tuning.js), so
+        the panels' first polls find their receivers on the lesson's frequencies. Loading the page
+        retunes nothing, so a render check or a prefetch cannot move a running receiver. An
+        unknown lesson is refused (404) like every lesson route.
+        """
+        _require_lesson(lesson_id)
+        _restore_lesson_tuning(app.state.lessons[lesson_id])
+        return {"tuned": True, "lesson_id": lesson_id}
+
+    @app.post("/api/opened")
+    def opened(lesson_id: int):
+        """Mark a lesson opened: the lesson page posts this once it is shown (lesson-nav.js).
+
+        Loading the page records nothing, so a render check, a prefetch or a crawler cannot mark
+        a lesson opened. An unknown lesson is refused (404) like every lesson route.
+        """
+        _require_lesson(lesson_id)
+        app.state.progress.mark_opened(lesson_id)
+        return {"opened": True, "lesson_id": lesson_id}
+
     @app.post("/api/stage")
     async def stage(lesson_id: int, request: Request):
         """Remember the stage the learner is on, so a reload or a power cut resumes there.
@@ -1260,6 +1295,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"lesson": lesson_id, "reason": reason})
             return JSONResponse(status_code=400, content={"completed": False, "reason": reason})
         app.state.progress.mark_completed(lesson_id)
+        # A completed lesson with a check becomes a pre-lesson recall source from now (box 1).
+        if app.state.lessons[lesson_id].check:
+            app.state.progress.enroll_recall([lesson_id], now=clock())
         try:
             log_event(app.state.events_path, "completed", {"lesson": lesson_id}, sync=managed)
         except OSError as exc:
@@ -2801,9 +2839,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         key = last if rack_instrument(last or "") else DEFAULT_INSTRUMENT
         return RedirectResponse(f"/operate/{key}", status_code=303)
 
+    @app.post("/api/rack/place")
+    def rack_place(payload: dict = Body(default={})):
+        """Remember the instrument the learner picked, so /operate reopens on it.
+
+        The picker posts this when tapped (operate.js). Showing a rack page records nothing, so a
+        render check, a prefetch or a crawler cannot move the learner's place. A key the rack
+        does not have is refused (404) and changes nothing.
+        """
+        key = payload.get("instrument")
+        inst = rack_instrument(key) if isinstance(key, str) else None
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"the rack has no instrument {key!r}")
+        app.state.progress.record_place(RACK_PLACE, inst.key)
+        return {"place": inst.key}
+
     @app.get("/operate/{key}", response_class=HTMLResponse)
     def operate_view(request: Request, key: str, back: str | None = None):
-        """One instrument in the rack, remembered so /operate reopens on it.
+        """One instrument in the rack. Showing it writes nothing; the picker records the place.
 
         The panel's own poll claims the dongle through _claim_sdr exactly as a lesson's does, so
         switching instruments hands the radio over the same way. The page renders the receiver's
@@ -2812,7 +2865,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         inst = rack_instrument(key)
         if inst is None:
             raise HTTPException(status_code=404, detail=f"the rack has no instrument '{key}'")
-        app.state.progress.record_place(RACK_PLACE, inst.key)
         receiver = getattr(app.state, inst.receiver) if inst.receiver else None
         freq_hz = None
         if inst.api == "spectrum":

@@ -369,8 +369,17 @@ Every pipeline below is HIL-proven "honest-empty" on the reference Recon. A live
 
 ## Render-verify (the UI test; no browser on the droplet)
 - **Harness:** `tools/render/` (stdlib CDP websocket, viewport forced to 800x480).
-  - `make render-check`: runs all three checks against the console with a separate headless
-    Chromium. Set `RENDER_URL` if the console is away from the default loopback address.
+  - `make render-check`: runs the checks with a separate headless Chromium against a scratch
+    console it starts on a free port with its own data folder; `RENDER_URL` names a running
+    console instead. The browser loads every page through a loopback render proxy
+    (`render_proxy.py`, started by the runner, or by a check run on its own) that forwards GET
+    and HEAD of pages and refuses `/api/*` and every write, so no page can reach the console's
+    API whatever becomes of DevTools. The DevTools `/api/*` block is a second layer: each check
+    leaves its page on about:blank, the runner holds its own block for the run, a page that
+    cannot leave fails the run, and a browser group that will not stop (or cannot be checked)
+    keeps its folder. The scratch console is built with no radio. Loading a page writes no
+    learner state and retunes no receiver: the rack place, a lesson's open and its tuning are
+    posts from the page.
   - `render_scroll.py`: explain scroll + Complete, home tile clipping.
   - `render_fit.py`: demo/predict button bottom.
   - `render_figure.py`: exam diagram.
