@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 
 # How long stop() waits for a tool to exit after asking (SIGTERM), and again after insisting
 # (SIGKILL). rtl_* tools release the USB interface in well under a second when they obey.
@@ -143,6 +144,7 @@ class GroupPopen(subprocess.Popen):
 
     A leader that exits is kept unreaped until SIGKILL has reached any helpers in its group.
     The child then keeps its own exit status, and its PID is safe to release.
+    App-level reaping of these children must use the same waitpid lock.
     """
 
     def _exit_pending(self) -> os.waitid_result | None:
@@ -326,6 +328,108 @@ def _wait_stopped(proc, timeout: float) -> bool:
 def _stages(proc) -> tuple:
     procs = getattr(proc, "procs", None)
     return tuple(procs) if procs else (proc,)
+
+
+@dataclass(frozen=True)
+class StopResult:
+    reaped: bool
+    timed_out: bool = False
+    error: Exception | None = None
+
+    def reason(self, tool: str) -> str | None:
+        if self.reaped:
+            return None
+        if self.timed_out:
+            return f"{tool} survived kill; the dongle may still be held"
+        detail = self.error if self.error is not None else "no exit status"
+        return f"{tool} could not be confirmed stopped ({detail}); the dongle may still be held"
+
+
+def _wait_for_reap(stage, deadline, clock, *, killed=False):
+    try:
+        stage.wait(timeout=max(0, deadline - clock()))
+    except subprocess.TimeoutExpired:
+        return StopResult(False, timed_out=killed)
+    except Exception as exc:
+        return StopResult(False, error=exc)
+    try:
+        return StopResult(stage.poll() is not None)
+    except Exception as exc:
+        return StopResult(False, error=exc)
+
+
+def _signal_kill(stage, before_kill):
+    """Return an already known outcome, or None once KILL was accepted."""
+    try:
+        if stage.poll() is not None:
+            return StopResult(True)
+    except Exception as exc:
+        # GroupPopen checks ownership independently under the waitpid lock.
+        if not isinstance(stage, GroupPopen):
+            return StopResult(False, error=exc)
+    try:
+        if before_kill is not None:
+            before_kill()
+        stage.kill()
+    except Exception as exc:
+        return StopResult(False, error=exc)
+    return None
+
+
+def stop_and_confirm(proc, *, wait_s=None, kill_only=False, deadline=None,
+                     retry_kill_wait=False, before_kill=None, clock=time.monotonic) -> StopResult:
+    """Stop exact owned stages with one wait budget per signal phase.
+
+    Keep the failure of a KILL signal separate from a timeout waiting after an accepted KILL.
+    A successful wait still needs a readable terminal status.
+    """
+    if wait_s is None:
+        wait_s = STOP_WAIT_S
+    stages = _stages(proc)
+
+    def phase_end():
+        end = clock() + wait_s
+        return end if deadline is None else min(end, deadline)
+
+    term_error = None
+    if not kill_only:
+        end = phase_end()
+        for stage in reversed(stages):
+            _quietly(stage.terminate)
+        for stage in stages:
+            result = _wait_for_reap(stage, end, clock)
+            if not result.reaped:
+                term_error = result.error
+                break
+        else:
+            return StopResult(True)
+
+    end = phase_end()
+    signalled = [(stage, _signal_kill(stage, before_kill)) for stage in reversed(stages)]
+    failures = []
+    for stage, result in signalled:
+        if result is None:
+            result = _wait_for_reap(stage, end, clock, killed=True)
+            if result.error is not None:
+                fault = result
+                if kill_only and retry_kill_wait:
+                    result = _signal_kill(stage, before_kill)
+                    if result is None:
+                        result = _wait_for_reap(stage, end, clock, killed=True)
+                else:
+                    # A wait can fail after another waiter has confirmed this exact exit.
+                    try:
+                        if stage.poll() is not None:
+                            result = StopResult(True, error=fault.error)
+                    except Exception:
+                        pass
+                if term_error is None:
+                    term_error = fault.error
+        if not result.reaped:
+            failures.append(result)
+    if failures:
+        return next((result for result in failures if not result.timed_out), failures[0])
+    return StopResult(True, error=term_error)
 
 
 def _name(proc, fallback: str) -> str:

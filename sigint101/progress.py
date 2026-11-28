@@ -508,13 +508,13 @@ class Progress:
         return out
 
     @staticmethod
-    def _prepare_pass_insert(
+    def _pass_columns_and_values(
         kind: AttemptKind,
         key,
         started_at: float,
         slot,
         pass_row: dict,
-    ) -> tuple[str, tuple]:
+    ) -> tuple[list[str], list]:
         if kind.slot_column is not None and slot is None:
             raise ValueError(f"attempt kind {kind.kind!r} requires a slot value")
         if kind.slot_column is None and slot is not None:
@@ -534,12 +534,61 @@ class Progress:
             cols.append(col)
             val = pass_row[col]
             vals.append(json.dumps(val) if col in json_cols else val)
+        return cols, vals
+
+    @staticmethod
+    def _prepare_pass_insert(
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+    ) -> tuple[str, tuple]:
+        cols, vals = Progress._pass_columns_and_values(kind, key, started_at, slot, pass_row)
         placeholders = ", ".join("?" for _ in cols)
         sql = (
             f"INSERT INTO {kind.passes_table}({', '.join(cols)}) "
             f"VALUES({placeholders}) ON CONFLICT DO NOTHING"
         )
         return sql, tuple(vals)
+
+    @staticmethod
+    def _prepare_guarded_pass_insert(
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        slot,
+        pass_row: dict,
+    ) -> tuple[str, tuple]:
+        """Build an atomic insert-once pass SQL guarded on the matching attempt row."""
+        cols, vals = Progress._pass_columns_and_values(kind, key, started_at, slot, pass_row)
+        placeholders = ", ".join("?" for _ in cols)
+        sql = (
+            f"INSERT INTO {kind.passes_table}({', '.join(cols)}) "
+            f"SELECT {placeholders} "
+            f"WHERE EXISTS ("
+            f"  SELECT 1 FROM {kind.attempts_table} "
+            f"  WHERE {kind.key_column}=? AND started_at=?"
+            f") ON CONFLICT DO NOTHING"
+        )
+        return sql, (*vals, key, started_at)
+
+    @staticmethod
+    def _validate_attempt_extra(kind: AttemptKind, extra: dict) -> None:
+        expected = set(kind.attempt_columns)
+        provided = set(extra.keys())
+        if provided != expected:
+            missing = sorted(expected - provided)
+            unexpected = sorted(provided - expected)
+            raise ValueError(
+                f"attempt kind {kind.kind!r} attempt columns mismatch "
+                f"(missing={missing}, unexpected={unexpected})"
+            )
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
 
     def _insert_attempt_pass_unlocked(
         self,
@@ -552,6 +601,48 @@ class Progress:
         sql, params = self._prepare_pass_insert(kind, key, started_at, slot, pass_row)
         return bool(self._conn.execute(sql, params).rowcount)
 
+    def stage_attempt(
+        self,
+        kind: AttemptKind,
+        key,
+        started_at: float,
+        window_s: int,
+        *,
+        extra: dict | None = None,
+        on_staged=None,
+    ) -> bool:
+        """Upsert an attempt in an uncommitted transaction; commit only if `on_staged` succeeds."""
+        extra_cols = dict(extra or {})
+        self._validate_attempt_extra(kind, extra_cols)
+        cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
+        update_cols = ["started_at", "window_s", *kind.attempt_columns]
+        placeholders = ", ".join("?" for _ in cols)
+        updates = ", ".join(f"{col}=excluded.{col}" for col in update_cols)
+        values = (key, started_at, window_s, *(extra_cols[col] for col in kind.attempt_columns))
+        with self._lock:
+            if self._closed:
+                return False
+            if self._conn.in_transaction:
+                self._conn.commit()
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    f"INSERT INTO {kind.attempts_table}({', '.join(cols)}) VALUES({placeholders}) "
+                    f"ON CONFLICT({kind.key_column}) DO UPDATE SET {updates}",
+                    values,
+                )
+                if on_staged is not None:
+                    on_staged()
+                self._conn.commit()
+            except BaseException:
+                try:
+                    if self._conn.in_transaction:
+                        self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
+            return True
+
     def start_attempt(
         self,
         kind: AttemptKind,
@@ -561,15 +652,7 @@ class Progress:
         **extra,
     ) -> bool:
         """Upsert one attempt row (including any kind.attempt_columns) without altering passes."""
-        expected = set(kind.attempt_columns)
-        provided = set(extra.keys())
-        if provided != expected:
-            missing = sorted(expected - provided)
-            unexpected = sorted(provided - expected)
-            raise ValueError(
-                f"attempt kind {kind.kind!r} attempt columns mismatch "
-                f"(missing={missing}, unexpected={unexpected})"
-            )
+        self._validate_attempt_extra(kind, extra)
         cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
         update_cols = ["started_at", "window_s", *kind.attempt_columns]
         placeholders = ", ".join("?" for _ in cols)
@@ -692,8 +775,8 @@ class Progress:
         slot,
         pass_row: dict,
     ) -> bool:
-        """Insert one pass row (insert-once via ON CONFLICT DO NOTHING); True only if inserted."""
-        sql, params = self._prepare_pass_insert(kind, key, started_at, slot, pass_row)
+        """Insert one pass row atomically only if the matching attempt still exists."""
+        sql, params = self._prepare_guarded_pass_insert(kind, key, started_at, slot, pass_row)
         with self._lock:
             if self._closed:
                 return False

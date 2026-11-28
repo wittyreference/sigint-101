@@ -896,3 +896,64 @@ def test_all_solo_gets_write_nothing_audit_hides_tile_and_rack_preserves_back_li
         assert unsafe.status_code == 303
         assert "evil.example" not in unsafe.headers["location"]
         assert "?back=" not in unsafe.headers["location"]
+
+
+def test_solo_stand_down_honors_tuning_gate_launch_permit_and_replay_refusal(
+    tmp_path, monkeypatch
+):
+    """Solo Start obeys C81 tuning gate + launch permit, C76a release_for_claim, and 5a-2 replay."""
+    from sigint101.radio_control import TuningBusy
+
+    with _solo_client(tmp_path / "gate", probe=_present) as client:
+        # 1. While a SigMF replay is running, solo Start refuses with 503 and does NOT stop replay.
+        replay = client.app.state.replay
+        stopped_replay = [False]
+        with monkeypatch.context() as mp:
+            mp.setattr(type(replay), "running", property(lambda _self: True))
+            mp.setattr(replay, "stop", lambda: stopped_replay.__setitem__(0, True))
+            r_rep = client.post("/api/solos/u4-solo/start")
+        assert r_rep.status_code == 503
+        assert console.REPLAY_RUNNING in (r_rep.json().get("error") or "")
+        assert stopped_replay[0] is False
+
+    with _solo_client(tmp_path / "permit", probe=_present) as client:
+        gate = client.app.state.tuning_gate
+        # 2. If a lesson tuning restore holds the gate past budget, solo Start refuses with 503.
+        real_wait = gate.wait_idle
+        monkeypatch.setattr(
+            gate,
+            "wait_idle",
+            lambda **kw: (_ for _ in ()).throw(TuningBusy("lesson tuning restore in progress")),
+        )
+        r_busy = client.post("/api/solos/u4-solo/start")
+        assert r_busy.status_code == 503
+        assert "restore" in (r_busy.json().get("error") or "").lower()
+        monkeypatch.setattr(gate, "wait_idle", real_wait)
+
+        # 3. Normal stand-down acquires launch permit and uses release_for_claim inside it.
+        events_seen: list[str] = []
+        real_admit = gate.admit_claim
+        real_end = gate.end_claim
+
+        def spy_admit(owner=None):
+            events_seen.append(f"admit:{owner}")
+            return real_admit(owner)
+
+        def spy_end(owner=None):
+            events_seen.append(f"end:{owner}")
+            return real_end(owner)
+
+        monkeypatch.setattr(gate, "admit_claim", spy_admit)
+        monkeypatch.setattr(gate, "end_claim", spy_end)
+
+        dec = client.app.state.decoder
+        real_rfc = getattr(dec, "release_for_claim", dec.release)
+
+        def spy_rfc():
+            events_seen.append("release_for_claim")
+            return real_rfc()
+
+        monkeypatch.setattr(dec, "release_for_claim", spy_rfc)
+        r_ok = client.post("/api/solos/u4-solo/start")
+        assert r_ok.status_code == 200
+        assert events_seen == ["admit:solo", "release_for_claim", "end:solo"]
