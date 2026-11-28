@@ -1,6 +1,8 @@
 # ABOUTME: Pins the Meteor site settings, SatDump command, and decoder telemetry.
 # ABOUTME: Uses a gated fake child and a synthetic file signature, with no radio or SatDump.
 
+import io
+import os
 import subprocess
 import threading
 import time
@@ -12,8 +14,6 @@ from sigint101.hardware import RtlSdrDevice
 from tests.child_fakes import LateProc
 
 MARKER = "[12:00:00 - 28/11/2026] (I) Stop processing"
-VITERBI = "[12:00:00 - 28/11/2026] (D) Viterbi: SYNCED"
-DEFRAMER = "[12:00:00 - 28/11/2026] (D) Deframer: SYNCED"
 
 
 class MeteorChild(LateProc):
@@ -29,7 +29,9 @@ class MeteorChild(LateProc):
 
     def readline(self, _size):
         line = next(self.stdout, None)
-        return line + "\n" if line is not None else ""
+        if line is None:
+            return b""
+        return line.encode("utf-8") + b"\n"
 
     def close(self):
         self.closed.set()
@@ -162,20 +164,77 @@ def test_meteor_satdump_argv_uses_snapshot_and_absolute_local_tle(rig, tmp_path,
     assert decoder.snapshot()["radio"]["serial"] == ("rx" if selector else None)
 
 
+def progress_line(viterbi="SYNCED", deframer="SYNCED"):
+    # SatDump 1.2.2 M2-x LRPT decoder progress format, with the stderr logger's color prefix.
+    return ("[12:00:00 - 28/11/2026] \x1b[32m(I) Progress 31.42%, "
+            f"Viterbi : {viterbi} BER : 0.012, Deframer : {deframer}\x1b[m")
+
+
 def test_meteor_lock_requires_both_sync_reports(rig):
-    decoder, made, _ = rig
+    decoder, made, settings = rig
+    settings["now"] = 100
     decoder.start()
+    settings["now"] += 2
     proc = made[0][0]
+    proc.feed("log says Stop processing now", "Progress 31.42%, Viterbi BER : 0.012%, Lock : 1")
+    eventually(lambda: decoder._run.args[0].tail
+               and "Lock : 1" in decoder._run.args[0].tail[-1])
     assert decoder.snapshot()["lock"] == "unknown"
-    proc.feed("log says Stop processing now", "Viterbi: NOSYNC", DEFRAMER)
+    proc.feed(progress_line("NOSYNC", "SYNCED"))
     eventually(lambda: decoder.snapshot()["lock"] == "searching")
     assert not decoder._run.physical.is_set()
-    assert decoder.snapshot()["state"] == "starting"
-    proc.feed(VITERBI)
-    eventually(lambda: decoder.snapshot()["state"] == "receiving")
-    assert decoder.snapshot()["lock"] == "locked"
+    assert not decoder.snapshot()["lock_ever"]
+    proc.feed(progress_line("SYNCED", "SYNCING"))
+    eventually(lambda: "SYNCING" in decoder._run.args[0].tail[-1])
+    assert decoder.snapshot()["lock"] == "searching"
+    assert not decoder.snapshot()["lock_ever"]
+    proc.feed(progress_line())
+    eventually(lambda: decoder.snapshot()["lock"] == "locked")
+    assert decoder.snapshot()["state"] == "receiving"
     assert decoder.snapshot()["lock_ever"]
-    proc.feed("Deframer: NOSYNC", "unrelated")
+    proc.feed(progress_line("SYNCED", "NOSYNC"))
     eventually(lambda: decoder.snapshot()["lock"] == "searching")
-    assert decoder.snapshot()["state"] != "receiving"
     assert decoder.snapshot()["lock_ever"]
+    proc.feed(MARKER)
+    proc.die(0)
+    proc.close_pipe()
+    assert decoder._run.complete.wait(2)
+    assert decoder.snapshot()["reason"] == "The signal locked but no picture was decoded."
+
+
+def test_meteor_spawn_error_closes_its_stage_and_is_typed(rig, monkeypatch):
+    from sigint101.meteor import MeteorUnavailable
+
+    decoder, _, _ = rig
+    opened = {}
+
+    def fail(argv, *, pass_fds, **kwargs):
+        opened.update(stage=Path(argv[3]), fd=pass_fds[0])
+        raise subprocess.SubprocessError("Exception occurred in preexec_fn")
+
+    monkeypatch.setattr(decoder, "_spawn", fail)
+    with pytest.raises(MeteorUnavailable, match="preexec_fn"):
+        decoder.start()
+    assert not opened["stage"].exists()
+    with pytest.raises(OSError):
+        os.fstat(opened["fd"])
+
+
+def test_meteor_invalid_stderr_bytes_do_not_end_the_drain(rig, monkeypatch):
+    decoder, made, _ = rig
+    spawn = decoder._spawn
+    output = b"undecodable \xff line\n" + (progress_line() + "\n" + MARKER + "\n").encode()
+
+    def emit(argv, **kwargs):
+        proc = spawn(argv, **kwargs)
+        stderr = io.BytesIO(output)
+        proc.stderr = io.TextIOWrapper(stderr, encoding="utf-8") if kwargs.get("text") else stderr
+        proc.die(0)
+        return proc
+
+    monkeypatch.setattr(decoder, "_spawn", emit)
+    decoder.start()
+    assert decoder._run.complete.wait(2)
+    assert decoder.snapshot()["lock_ever"]
+    assert decoder.snapshot()["reason"] == "The signal locked but no picture was decoded."
+    assert made[0][0].stderr.closed

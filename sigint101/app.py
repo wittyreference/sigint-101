@@ -2156,15 +2156,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.post("/api/meteor/listen")
     def meteor_listen():
         decoder = app.state.meteor
+        if decoder.running:
+            return decoder.snapshot()
         try:
-            _claim_sdr("meteor")
+            launched = _claim_sdr("meteor")
         except MeteorUnavailable as exc:
             empty = decoder.snapshot()
             for key in ("available", "reason", "command", "retry_in"):
                 empty.pop(key, None)
             return _refused("meteor", exc, empty, decoder.watch)
         status = decoder.snapshot()
-        _started("meteor", {"freq_hz": status["freq_hz"], "mode": status["mode"]})
+        if launched:
+            _started("meteor", {"freq_hz": status["freq_hz"], "mode": status["mode"]})
         return status
 
     # The image decoders (APT, SSTV) write their decoded PNGs under data/apt and data/sstv; this

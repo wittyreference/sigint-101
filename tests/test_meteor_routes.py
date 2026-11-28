@@ -12,7 +12,7 @@ from tests.test_ais_launch import _decoder as make_ais
 from tests.test_ais_launch import _fake_launch
 from tests.test_ais_launch import companion as companion
 from tests.test_app import FIXTURE_PACKS, _present, _StubSweeper
-from tests.test_meteor import MARKER
+from tests.test_meteor import MARKER, eventually, progress_line
 from tests.test_meteor import meteor_rig as meteor_rig
 
 LISTEN = "/api/meteor/listen"
@@ -214,8 +214,6 @@ def test_meteor_listen_refuses_unreaped_rtl433(rig, tmp_path):
     child = Child(["rtl_433"], unkillable=True)
     rtl433 = Decoder(spawn=lambda *_: child, which=lambda name: name, radio_present=lambda: True)
     with meteor_client(tmp_path, decoder, decoder_factory=lambda: rtl433) as client:
-        if not hasattr(rtl433, "release_failure"):
-            pytest.skip("requires PR 148's retained rtl_433 release failure")
         rtl433.start()
         try:
             result = client.post(LISTEN)
@@ -240,9 +238,7 @@ def test_meteor_listen_honors_a_ppm_failure_published_while_queued(rig, tmp_path
 
     failed = threading.Event()
     with meteor_client(tmp_path, decoder, ppm_measure=measure, list_devices=lambda: ()) as client:
-        calibration = getattr(client.app.state, "ppm_calibration", None)
-        if calibration is None:
-            pytest.skip("requires C73's retained ppm release failure")
+        calibration = client.app.state.ppm_calibration
         monkeypatch.setattr(calibration, "release_failure",
                             lambda: "rtl_fm survived kill" if failed.is_set() else None)
         prepare = decoder.prepare_start
@@ -273,8 +269,6 @@ def test_meteor_listen_honors_a_ppm_failure_published_while_queued(rig, tmp_path
 def test_meteor_provenance_poll_does_not_reclaim_the_radio(rig, tmp_path):
     decoder, made, _ = rig
     with meteor_client(tmp_path, decoder) as client:
-        if not hasattr(client.app.state, "ppm_calibration"):
-            pytest.skip("requires C73's passive provenance claim")
         assert client.get("/api/spectrum").status_code == 200
         assert client.post(LISTEN).status_code == 200
         for finishing in (False, True):
@@ -330,3 +324,73 @@ def test_meteor_unsafe_staging_refuses_before_standdown(rig, tmp_path):
         assert refusal.status_code == 503 and "cannot prepare Meteor" in refusal.json()["reason"]
         assert client.app.state.sweeper.running and not made
         assert list(other.iterdir()) == []
+
+
+@pytest.mark.parametrize("hz", ["137900000", "137100000"])
+def test_meteor_settles_then_searches_until_current_lock(rig, tmp_path, monkeypatch, hz):
+    decoder, made, settings = rig
+    settings["now"] = 100.0
+    monkeypatch.setenv("SIGINT101_METEOR_HZ", hz)
+    with meteor_client(tmp_path, decoder) as client:
+        assert client.post(LISTEN).json()["state"] == "starting"
+        settings["now"] += 1.9
+        assert client.get(STATUS).json()["state"] == "starting"
+        settings["now"] = 102
+        waiting = client.get(STATUS).json()
+        assert waiting["state"] == "searching" and waiting["lock"] == "unknown"
+        assert waiting["reason"] == f"Listening on {int(hz) / 1e6:.3f} MHz · searching"
+        proc = made[0][0]
+        proc.feed(progress_line("NOSYNC", "SYNCED"))
+        eventually(lambda: client.get(STATUS).json()["lock"] == "searching")
+        assert client.get(STATUS).json()["state"] == "searching"
+        proc.feed(progress_line())
+        eventually(lambda: client.get(STATUS).json()["state"] == "receiving")
+        proc.feed(progress_line("SYNCED", "SYNCING"))
+        eventually(lambda: client.get(STATUS).json()["state"] == "searching")
+        assert client.get(STATUS).json()["lock_ever"]
+
+
+def test_repeat_meteor_listen_does_not_log_or_release_twice(rig, tmp_path):
+    decoder, made, _ = rig
+    with meteor_client(tmp_path, decoder) as client:
+        assert client.post(LISTEN).status_code == 200
+        assert client.post(LISTEN).status_code == 200
+        assert len(made) == 1
+        starts = [e for e in read_events(tmp_path / "events.jsonl") if e["kind"] == "meteor_start"]
+        assert len(starts) == 1
+        assert client.app.state.sweeper.releases == 1
+
+
+def test_meteor_read_only_trial_constructs_an_idle_receiver(tmp_path, monkeypatch):
+    from sigint101.migrations import migrate_store_copy
+    from sigint101.trial import create_trial_app
+
+    data = tmp_path / "data"
+    data.mkdir()
+    for store in ("progress", "exam"):
+        migrate_store_copy(tmp_path / f"missing-{store}.db", data / f"{store}.db",
+                           store=store, allow_missing_source=True,
+                           scratch_dir=tmp_path / f"scratch-{store}")
+    before = sorted(path.name for path in data.iterdir())
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("trial touched the radio or tried to start SatDump")
+
+    monkeypatch.setattr(app.MeteorDecoder, "start", forbidden)
+    monkeypatch.setattr(app.MeteorDecoder, "_prepare_launch", forbidden)
+    trial = create_trial_app(pack_dir=FIXTURE_PACKS, data_dir=data, probe=forbidden)
+    with TestClient(trial) as client:
+        assert trial.state.initialized is True
+        assert trial.state.meteor.snapshot()["state"] == "idle"
+        assert client.post(LISTEN).status_code == 404
+    assert sorted(path.name for path in data.iterdir()) == before
+
+
+def test_public_console_shutdown_reaps_meteor(rig, tmp_path):
+    decoder, made, _ = rig
+    with meteor_client(tmp_path, decoder) as client:
+        assert client.post(LISTEN).status_code == 200
+        run = decoder._run
+        assert made[0][0].poll() is None
+    assert run.complete.is_set() and run.reaped
+    assert made[0][0].sent == ["KILL"]

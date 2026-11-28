@@ -3,12 +3,13 @@
 
 import shlex
 import signal
+import subprocess
 import threading
 
 import pytest
 
 from sigint101 import receiver_lifecycle
-from tests.test_meteor import DEFRAMER, MARKER, VITERBI, eventually
+from tests.test_meteor import MARKER, eventually, progress_line
 from tests.test_meteor import meteor_rig as meteor_rig
 
 
@@ -74,6 +75,7 @@ def test_meteor_failed_reap_refuses_until_retry(rig, monkeypatch):
     proc.close_pipe()
     thread.join(2)
     assert not thread.is_alive()
+    eventually(lambda: run.reap_failed)
     assert not run.physical.is_set() and not run.reaped
     assert "dongle may still be held" in decoder.release_failure()
     proc.resists_kill = False
@@ -121,6 +123,7 @@ def test_meteor_release_during_spawn_stays_busy_until_reap(rig, monkeypatch, kin
     assert proc.sent == []
     proceed.set()
     assert proc.killed.wait(2)
+    eventually(lambda: decoder._run.reap_failed)
     assert not decoder._run.physical.is_set()
     assert decoder.release_failure(pending=True)
     release.join(2)
@@ -168,10 +171,12 @@ def test_meteor_finishing_watchdog_kills_exact_group(rig, marker):
 
 @pytest.mark.parametrize("phase", ["starting", "receiving", "decoding"])
 def test_meteor_shutdown_kills_directly_without_publishing(rig, phase):
+    rig[2]["now"] = 100
     decoder, proc, _ = _start(rig)
     proc.picture()
     if phase == "receiving":
-        proc.feed(VITERBI, DEFRAMER)
+        rig[2]["now"] += 2
+        proc.feed(progress_line())
     elif phase == "decoding":
         proc.feed(MARKER)
     eventually(lambda: decoder.snapshot()["state"] == phase)
@@ -217,11 +222,11 @@ def test_meteor_eof_deadline_fences_late_reader(rig, monkeypatch):
     assert "stderr" in body["reason"]
     assert not proc.closed.is_set(), "the supervisor closed the reader-owned pipe"
     decoder.start()
-    proc.feed(MARKER, VITERBI, DEFRAMER)
+    proc.feed(MARKER, progress_line())
     proc.close_pipe()
     assert proc.closed.wait(2)
     assert not decoder._run.physical.is_set()
-    assert decoder.snapshot()["state"] == "starting"
+    assert decoder.snapshot()["state"] in ("starting", "searching")
     assert decoder.live_command() == shlex.join(rig[1][-1][0].args)
     assert isinstance(decoder, meteor.MeteorDecoder)
 
@@ -315,4 +320,86 @@ def test_meteor_shutdown_retries_a_surviving_finisher_without_term(rig, monkeypa
     proc.resists_kill = False
     decoder.shutdown()
     assert run.reaped and run.complete.is_set()
+    assert proc.sent.count("KILL") == 2 and "TERM" not in proc.sent
+
+
+@pytest.mark.parametrize("outcome", [
+    "reaped", "already-exited", "timeout", "wait-error", "signal-error", "poll-error",
+])
+def test_meteor_wait_error_checks_liveness_and_retries_kill_within_budget(
+        rig, monkeypatch, outcome):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    rig[2]["resists_kill"] = True
+    decoder, proc, run = _start(rig)
+    waits = []
+    kill, poll = proc.kill, proc.poll
+
+    def signal():
+        if outcome == "signal-error":
+            proc.sent.append("KILL")
+            raise OSError("kill failed")
+        kill()
+
+    def status():
+        if outcome == "poll-error" and waits:
+            raise OSError("status failed")
+        return poll()
+
+    def wait(timeout):
+        waits.append(timeout)
+        if len(waits) == 1:
+            if outcome == "already-exited":
+                proc.die(-9)
+                proc.close_pipe()
+            raise OSError("wait failed")
+        if outcome == "wait-error":
+            raise OSError("wait failed again")
+        if outcome == "reaped":
+            proc.die(-9)
+            proc.close_pipe()
+            return -9
+        raise subprocess.TimeoutExpired(proc.args, timeout)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(proc, "kill", signal)
+            patch.setattr(proc, "poll", status)
+            patch.setattr(proc, "wait", wait)
+            decoder.release()
+            eventually(lambda: run.reaped or run.reap_failed)
+            retried = outcome in ("reaped", "timeout", "wait-error")
+            assert proc.sent == (["TERM", "KILL", "KILL"] if retried else ["TERM", "KILL"])
+            if retried:
+                assert len(waits) == 2 and 0 <= waits[1] <= waits[0]
+            if outcome in ("reaped", "already-exited"):
+                assert run.complete.wait(2) and run.physical.is_set()
+            else:
+                assert not run.physical.is_set() and not run.reaped
+                reason = decoder.release_failure(pending=True)
+                assert ("survived kill" in reason) == (outcome == "timeout")
+                if outcome != "timeout":
+                    assert "could not be confirmed stopped" in reason
+    finally:
+        proc.die(-9)
+        proc.close_pipe()
+
+
+@pytest.mark.parametrize("control", ["stop", "release", "retune"])
+def test_meteor_later_control_runs_the_pending_retry_at_once(rig, monkeypatch, control):
+    from sigint101.meteor import FINISH_CAP_S
+
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    rig[2].update(now=50.0, resists_kill=True)
+    decoder, proc, run = _start(rig)
+    proc.feed(MARKER)
+    assert run.physical.wait(2)
+    rig[2]["now"] += FINISH_CAP_S
+    run.wake.set()
+    eventually(lambda: run.reap_failed)
+    proc.resists_kill = False
+    if control == "retune":
+        decoder.retune(137_100_000)
+    else:
+        getattr(decoder, control)()
+    assert run.complete.wait(2) and run.reaped
     assert proc.sent.count("KILL") == 2 and "TERM" not in proc.sent

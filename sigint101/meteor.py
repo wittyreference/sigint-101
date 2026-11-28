@@ -45,7 +45,10 @@ FINISH_NICE = 10
 _CLOSE_MARKER = "Stop processing"
 _LOG_PREFIX = re.compile(r"^\[\d{2}:\d{2}:\d{2}(?: - \d{2}/\d{2}/\d{4})?\] \([TDIWEC]\) ")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
-_STATUS = re.compile(r"(Viterbi|Deframer)(?:\s+(?:State|Status))?\s*:\s*(SYNCED|NOSYNC)")
+_STATUS = re.compile(
+    r"Progress [^,]+%,\s*Viterbi\s*:\s*(SYNCED|NOSYNC)\s+BER\s*:\s*[^,]+,"
+    r"\s*Deframer\s*:\s*(NOSYNC|SYNCING|SYNCED)"
+)
 _PRODUCT = re.compile(r"MSU[-_]MR[-_]([A-Za-z0-9][A-Za-z0-9 _-]{0,95})\.png")
 _DIR_FLAGS = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _PNG = b"\x89PNG\r\n\x1a\n"
@@ -212,6 +215,7 @@ class _Capture:
     control: threading.Lock = field(default_factory=threading.Lock)
     eof: threading.Event = field(default_factory=threading.Event)
     handoff_done: threading.Event = field(default_factory=threading.Event)
+    retry_now: threading.Event = field(default_factory=threading.Event)
     handoff_deadline: float | None = None
     kill_deadline: float | None = None
     term_sent: bool = False
@@ -219,7 +223,7 @@ class _Capture:
     ended_at: float | None = None
     ended_by: str | None = None
     interrupted: str | None = None
-    reports: dict = field(default_factory=dict)
+    reports: tuple[str, str] | None = None
     lock_ever: bool = False
     tail: deque = field(default_factory=lambda: deque(maxlen=3))
     result: tuple | None = None
@@ -231,7 +235,7 @@ class _Capture:
 
     @property
     def lock(self):
-        if all(self.reports.get(block) == "SYNCED" for block in ("Viterbi", "Deframer")):
+        if self.reports == ("SYNCED", "SYNCED"):
             return "locked"
         return "searching" if self.reports else "unknown"
 
@@ -258,6 +262,7 @@ class MeteorDecoder(SupervisedReceiver):
                  spawn=childproc.spawn, which=shutil.which, clock=time.time,
                  monotonic=time.monotonic, sync_assets=False):
         self.data_dir = Path(data_dir).resolve()
+        self.freq_hz = DEFAULT_HZ  # The next launch reads the site settings.
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._list_devices = list_devices
         self._spawn = spawn
@@ -315,17 +320,23 @@ class MeteorDecoder(SupervisedReceiver):
                 capture.started_at = self._clock()
                 capture.deadline = capture.launched + CAPTURE_S + FINISH_CAP_S
                 proc = self._spawn(capture.argv, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                    pass_fds=(capture.stage.lock_fd,))
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 self._discard_stage(capture)
                 raise MeteorUnavailable(f"cannot run SatDump: {exc}") from exc
             try:
-                return _SatDumpProcess(proc)
+                child = _SatDumpProcess(proc)
             except (AttributeError, ValueError) as exc:
                 raise PartialLaunch(proc, exc) from exc
+            self.freq_hz = hz
+            return child
 
         return launch, (capture,)
+
+    def launch_start(self, intent, *, claimed=False):
+        super().launch_start(intent, claimed=claimed)
+        return intent is not None
 
     def _read(self, *_):
         """The supervisor calls the run-aware reader below."""
@@ -336,14 +347,14 @@ class MeteorDecoder(SupervisedReceiver):
             stream = run.proc.stdout
             while line := stream.readline(_MAX_LINE + 1):
                 if len(line) > _MAX_LINE:
-                    while line and not line.endswith("\n"):
+                    while line and not line.endswith(b"\n"):
                         line = stream.readline(_MAX_LINE + 1)
                     if not line:
                         break
                     continue
-                self._line(run, capture, line)
+                self._line(run, capture, line.decode("utf-8", errors="replace"))
             capture.eof.set()
-        except (OSError, ValueError, UnicodeError) as exc:
+        except (OSError, ValueError) as exc:
             with capture.control:
                 capture.tail.append(f"stderr read failed: {exc}"[:160])
         finally:
@@ -368,7 +379,7 @@ class MeteorDecoder(SupervisedReceiver):
                     capture.handoff_done.set()
                     run.wake.set()
             elif match := _STATUS.fullmatch(message):
-                capture.reports[match[1]] = match[2]
+                capture.reports = match.groups()
                 capture.lock_ever |= capture.lock == "locked"
 
     def release(self):
@@ -385,6 +396,8 @@ class MeteorDecoder(SupervisedReceiver):
                         capture.handoff_deadline = deadline - KILL_GRACE_S
                     if capture.handoff_deadline is not None:
                         deadline = min(deadline, capture.handoff_deadline + KILL_GRACE_S)
+                if run.reap_failed:
+                    capture.retry_now.set()
                 run.wake.set()
         if intent:
             intent.done.wait(max(0, deadline - self._monotonic()))
@@ -399,9 +412,6 @@ class MeteorDecoder(SupervisedReceiver):
         if run and not run.physical.is_set():
             if run.failure:
                 return run.failure
-            deadline = run.args[0].kill_deadline
-            if deadline is not None and self._monotonic() >= deadline:
-                return self._unreaped_reason(run)
             if pending:
                 return "SatDump is still releasing the radio"
 
@@ -416,6 +426,8 @@ class MeteorDecoder(SupervisedReceiver):
                     self._interrupt(run, capture, "shutdown", "Console shut down.")
                 else:
                     self._interrupt(run, capture, "stopped", "SatDump was stopped.")
+            if run.reap_failed:
+                capture.retry_now.set()
             run.wake.set()
         return run, intent
 
@@ -464,33 +476,65 @@ class MeteorDecoder(SupervisedReceiver):
             if lower_priority:
                 priority_set = True
                 try:
+                    # Linux applies this priority to SatDump's leader thread.
                     run.proc.lower_priority(FINISH_NICE)
                 except (OSError, ValueError) as exc:
                     run.diagnostic_fault = f"SatDump priority could not be lowered: {exc}"[:160]
             run.wake.wait(min(receiver_lifecycle.SUPERVISOR_POLL_S,
                               max(0, deadline - self._monotonic())))
 
+    def _statuses(self, run):
+        try:
+            return super()._statuses(run)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            run.failure = f"{self._unreaped_reason(run)}: {str(exc)[:160]}"
+            return [(run.proc, None)]
+
     def _stop_run(self, run):
         capture, = run.args
-        try:
-            if run.proc.poll() is None:
-                with capture.control:
-                    if capture.interrupted is None:
-                        self._interrupt(run, capture, "handoff", "SatDump cleanup was interrupted.")
-                    deadline = capture.kill_deadline
-                    if deadline is None:
-                        deadline = self._monotonic() + KILL_GRACE_S
-                run.proc.kill()
-                run.proc.wait(timeout=max(0, deadline - self._monotonic()))
-        except subprocess.TimeoutExpired:
-            run.failure = self._unreaped_reason(run)
-        except (OSError, ValueError) as exc:
-            run.failure = f"{self._unreaped_reason(run)}: {str(exc)[:160]}"
+        deadline = capture.kill_deadline
+        if deadline is None:
+            deadline = self._monotonic() + KILL_GRACE_S
+        self._kill_and_reap(run, deadline)
 
-    def _unreaped_reason(self, run):
+    def _wait_for_kill(self, run, deadline):
+        try:
+            run.proc.wait(timeout=max(0, deadline - self._monotonic()))
+        except subprocess.TimeoutExpired:
+            run.failure = self._unreaped_reason(run, timed_out=True)
+            return False
+        if run.proc.poll() is not None:
+            return True
+        run.failure = self._unreaped_reason(run)
+        return False
+
+    def _kill_and_reap(self, run, deadline):
+        proc = run.proc
+        try:
+            if proc.poll() is not None:
+                return True
+            capture, = run.args
+            with capture.control:
+                if capture.interrupted is None:
+                    self._interrupt(run, capture, "handoff", "SatDump cleanup was interrupted.")
+            proc.kill()
+            try:
+                return self._wait_for_kill(run, deadline)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                # The first wait failed. Recheck ownership before signalling the exact child.
+                if proc.poll() is not None:
+                    return True
+                proc.kill()
+                return self._wait_for_kill(run, deadline)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            run.failure = f"{self._unreaped_reason(run)}: {str(exc)[:160]}"
+            return False
+
+    def _unreaped_reason(self, run, *, timed_out=False):
+        result = "survived kill" if timed_out else "could not be confirmed stopped"
         if run.physical.is_set():
-            return "SatDump finisher cleanup failed"
-        return "SatDump survived kill; the dongle may still be held"
+            return f"SatDump finisher {result}"
+        return f"SatDump {result}; the dongle may still be held"
 
     def _notify_physical(self, run):
         capture, = run.args
@@ -499,9 +543,22 @@ class MeteorDecoder(SupervisedReceiver):
         if run.reaped or run.reap_failed:
             capture.handoff_done.set()
 
+    def _retry_reap(self, run, timeout):
+        if not self._kill_and_reap(run, self._monotonic() + timeout):
+            return False
+        run.reaped = True
+        self._notify_physical(run)
+        return True
+
     def _retry(self, run):
-        super()._retry(run)
-        if self._closing and not run.reaped:
+        # Only controls expedite a reap. Reader wakes and status polls leave the cadence alone.
+        pending = run.args[0].retry_now
+        while not self._closing:
+            pending.wait(receiver_lifecycle.REAP_RETRY_MIN_S)
+            pending.clear()
+            if not self._closing and self._retry_reap(run, receiver_lifecycle.REAP_RETRY_WAIT_S):
+                return
+        if not run.reaped:
             self._retry_reap(run, KILL_GRACE_S)
 
     def _drain_reader(self, _run):
@@ -593,11 +650,17 @@ class MeteorDecoder(SupervisedReceiver):
         capture, = run.args
         with capture.control:
             lock = capture.lock
-            state, reason = capture.result or (
-                ("decoding", None) if capture.marker_at is not None else
-                ("receiving", None) if lock == "locked" else ("starting", None))
-            if state == "starting" and lock == "searching":
-                reason = "Listening · searching"
+            if capture.result is not None:
+                state, reason = capture.result
+            elif capture.marker_at is not None:
+                state, reason = "decoding", None
+            elif self.watch.settling():
+                state, reason = "starting", None
+            elif lock == "locked":
+                state, reason = "receiving", None
+            else:
+                state = "searching"
+                reason = f"Listening on {capture.hz / 1e6:.3f} MHz · searching"
             now = self._monotonic()
             elapsed = ((now - capture.marker_at) if state == "decoding" else
                        (now - capture.launched)) if capture.result is None else None
