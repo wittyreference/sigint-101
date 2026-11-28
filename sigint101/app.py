@@ -64,7 +64,7 @@ from .exam import (
     next_sim_question,
     score_exam,
 )
-from .fieldcard import build_field_rows
+from .fieldcard import LESSON_PROMPT_LINE, build_field_rows, field_row_for
 from .flipper import FlipperError, FlipperSelectionError
 from .flipperconsole import FlipperConsole
 from .flock import FlockUnavailable, configured_flock_detector
@@ -977,6 +977,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                          if answered else None)
         if lesson.sort:
             context["sort_answers"] = app.state.progress.get_sort_answers(lesson_id)
+        if lesson.field_instrument and committed:
+            events, earned, field_error = _read_field_sources()
+            context["field_row"] = field_row_for(
+                lesson.field_instrument, app.state, events, earned
+            )
+            context["field_lesson_prompt"] = LESSON_PROMPT_LINE
+            context["field_error"] = field_error
         # A lesson that names its own band starts the instrument there instead of the default FM
         # sweep: the dial reads its centre and step, and the live waterfall carries the band edges
         # the console retunes the sweep to. A lesson with no band leaves these unset, so the
@@ -2576,13 +2583,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "stamps": rows, "stamp_error": error},
         )
 
-    @app.get("/field", response_class=HTMLResponse)
-    def field_card(request: Request):
-        """Show each rack instrument's real tool and the exact command the console ran.
-
-        Strictly read-only: starts nothing, claims nothing, logs nothing, never calls .command(),
-        and leaves the rack's remembered instrument untouched.
-        """
+    def _read_field_sources():
+        """Read events and earned stamps for /field and field-command lessons without mutations."""
         error = app.state.stamp_error
         try:
             events = read_events(app.state.events_path)
@@ -2594,6 +2596,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         except (OSError, sqlite3.Error) as exc:
             earned = []
             error = error or f"the logbook could not be read: {exc}"
+        return events, earned, error
+
+    @app.get("/field", response_class=HTMLResponse)
+    def field_card(request: Request):
+        """Show each rack instrument's real tool and the exact command the console ran.
+
+        Strictly read-only: starts nothing, claims nothing, logs nothing, never calls .command(),
+        and leaves the rack's remembered instrument untouched.
+        """
+        events, earned, error = _read_field_sources()
         rows = build_field_rows(app.state, events, earned)
         return templates.TemplateResponse(
             request=request, name="field.html",

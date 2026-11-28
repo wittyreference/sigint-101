@@ -41,6 +41,8 @@ UNITS: tuple = (
     # nomad console as a live mirror over USB. M29 intro, M30-M36 one per capability, M37 rig
     # rescue, M38 capstone. Lesson ids are planned; a lesson appears once its pack has loaded.
     Unit(10, "flipper", "Flipper", "flipper", (29, 30, 31, 32, 33, 34, 35, 36, 37, 38)),
+    # U11 closing unit: leave the garden and run the field card's real tool in Terminal.
+    Unit(11, "field", "Field", "field", (40,)),
 )
 
 

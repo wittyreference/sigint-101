@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from .fieldcard import COMMAND_SOURCES
 from .spectrum import (
     MAX_SPAN_HZ,
     MIN_SPAN_HZ,
@@ -151,6 +152,7 @@ class Lesson:
     predict_kind: str = "instrument"
     sort: list | None = None
     band_map: dict | None = None
+    field_instrument: str | None = None
 
     @property
     def reveal_label(self) -> str:
@@ -641,6 +643,20 @@ def _parse_sort(data: dict, ctx: str) -> list | None:
     return cards
 
 
+def _parse_field_instrument(data: dict, ctx: str) -> str | None:
+    """Validate an optional `field_instrument:` key naming a command-backed /field row."""
+    raw = data.get("field_instrument")
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, str) or raw.strip() not in COMMAND_SOURCES:
+        known = ", ".join(sorted(COMMAND_SOURCES))
+        raise LessonError(
+            f"{ctx}: unknown field_instrument {raw!r} — must be a command-backed /field "
+            f"instrument ({known})"
+        )
+    return raw.strip()
+
+
 def parse_lesson(data: dict) -> Lesson:
     """Turn parsed YAML into a Lesson, refusing anything half-defined.
 
@@ -748,6 +764,7 @@ def parse_lesson(data: dict) -> Lesson:
         predict_kind=predict_kind,
         sort=_parse_sort(data, ctx),
         band_map=_parse_band_map(data, ctx),
+        field_instrument=_parse_field_instrument(data, ctx),
     )
 
 
