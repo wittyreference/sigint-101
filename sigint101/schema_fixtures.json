@@ -1,0 +1,1724 @@
+{
+  "exam": {
+    "v0": {
+      "empty": {
+        "tables": {},
+        "triggers": [],
+        "views": []
+      },
+      "v0_02c2095": {
+        "tables": {
+          "sim": {
+            "checks": [
+              "check(id=1)"
+            ],
+            "columns": [
+              [
+                0,
+                "id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "question_ids",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "answers",
+                "TEXT",
+                1,
+                "'{}'",
+                0
+              ],
+              [
+                3,
+                "created",
+                "REAL",
+                0,
+                null,
+                0
+              ],
+              [
+                4,
+                "skipped",
+                "TEXT",
+                1,
+                "'[]'",
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          },
+          "srs": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "question_id",
+                "TEXT",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "box",
+                "INTEGER",
+                1,
+                "1",
+                0
+              ],
+              [
+                2,
+                "last_seen",
+                "REAL",
+                0,
+                null,
+                0
+              ],
+              [
+                3,
+                "seen",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "question_id"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_32ec4a0": {
+        "tables": {
+          "sim": {
+            "checks": [
+              "check(id=1)"
+            ],
+            "columns": [
+              [
+                0,
+                "id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "question_ids",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "answers",
+                "TEXT",
+                1,
+                "'{}'",
+                0
+              ],
+              [
+                3,
+                "created",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          },
+          "srs": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "question_id",
+                "TEXT",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "box",
+                "INTEGER",
+                1,
+                "1",
+                0
+              ],
+              [
+                2,
+                "last_seen",
+                "REAL",
+                0,
+                null,
+                0
+              ],
+              [
+                3,
+                "seen",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "question_id"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_b90e589": {
+        "tables": {
+          "srs": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "question_id",
+                "TEXT",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "box",
+                "INTEGER",
+                1,
+                "1",
+                0
+              ],
+              [
+                2,
+                "last_seen",
+                "REAL",
+                0,
+                null,
+                0
+              ],
+              [
+                3,
+                "seen",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "question_id"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      }
+    },
+    "v1": {
+      "tables": {
+        "sim": {
+          "checks": [
+            "check(id=1)"
+          ],
+          "columns": [
+            [
+              0,
+              "id",
+              "INTEGER",
+              0,
+              null,
+              1
+            ],
+            [
+              1,
+              "question_ids",
+              "TEXT",
+              1,
+              null,
+              0
+            ],
+            [
+              2,
+              "answers",
+              "TEXT",
+              1,
+              "'{}'",
+              0
+            ],
+            [
+              3,
+              "created",
+              "REAL",
+              0,
+              null,
+              0
+            ],
+            [
+              4,
+              "skipped",
+              "TEXT",
+              1,
+              "'[]'",
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "without_rowid": false
+        },
+        "srs": {
+          "checks": [],
+          "columns": [
+            [
+              0,
+              "question_id",
+              "TEXT",
+              0,
+              null,
+              1
+            ],
+            [
+              1,
+              "box",
+              "INTEGER",
+              1,
+              "1",
+              0
+            ],
+            [
+              2,
+              "last_seen",
+              "REAL",
+              0,
+              null,
+              0
+            ],
+            [
+              3,
+              "seen",
+              "INTEGER",
+              1,
+              "0",
+              0
+            ],
+            [
+              4,
+              "correct",
+              "INTEGER",
+              1,
+              "0",
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "question_id"
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "unique": 1
+            }
+          ],
+          "without_rowid": false
+        }
+      },
+      "triggers": [],
+      "views": []
+    }
+  },
+  "progress": {
+    "v0": {
+      "empty": {
+        "tables": {},
+        "triggers": [],
+        "views": []
+      },
+      "v0_02c2095": {
+        "tables": {
+          "places": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "name",
+                "TEXT",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "value",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "name"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          },
+          "progress": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          },
+          "responses": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id"
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          },
+          "stages": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "stage",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "furthest",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_1a35a1a": {
+        "tables": {
+          "places": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "name",
+                "TEXT",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "value",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "name"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          },
+          "progress": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          },
+          "responses": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id"
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          },
+          "sort_answers": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1
+              ],
+              [
+                1,
+                "card_key",
+                "TEXT",
+                1,
+                null,
+                2
+              ],
+              [
+                2,
+                "choice",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                3,
+                "correct",
+                "INTEGER",
+                1,
+                null,
+                0
+              ],
+              [
+                4,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id"
+                  ],
+                  [
+                    1,
+                    1,
+                    "card_key"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          },
+          "stages": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "stage",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "furthest",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          },
+          "stamp_events": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "digest",
+                "BLOB",
+                1,
+                null,
+                1
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "digest"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": true
+          },
+          "stamps": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "instrument",
+                "TEXT",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "first_ts",
+                "REAL",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "count",
+                "INTEGER",
+                1,
+                null,
+                0
+              ],
+              [
+                3,
+                "provenance",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                4,
+                "digest",
+                "TEXT",
+                1,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "instrument"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_72ddf9c": {
+        "tables": {
+          "progress": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          },
+          "responses": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id"
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      },
+      "v0_e72c706": {
+        "tables": {
+          "places": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "name",
+                "TEXT",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "value",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "name"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          },
+          "progress": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "opened",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                2,
+                "completed",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          },
+          "responses": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                1,
+                null,
+                1
+              ],
+              [
+                1,
+                "kind",
+                "TEXT",
+                1,
+                null,
+                2
+              ],
+              [
+                2,
+                "body",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ],
+              [
+                4,
+                "correct",
+                "INTEGER",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "lesson_id"
+                  ],
+                  [
+                    1,
+                    1,
+                    "kind"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          },
+          "stages": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "lesson_id",
+                "INTEGER",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "stage",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "furthest",
+                "INTEGER",
+                1,
+                "0",
+                0
+              ],
+              [
+                3,
+                "updated",
+                "REAL",
+                0,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [],
+            "without_rowid": false
+          },
+          "stamp_events": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "digest",
+                "BLOB",
+                1,
+                null,
+                1
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "digest"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": true
+          },
+          "stamps": {
+            "checks": [],
+            "columns": [
+              [
+                0,
+                "instrument",
+                "TEXT",
+                0,
+                null,
+                1
+              ],
+              [
+                1,
+                "first_ts",
+                "REAL",
+                1,
+                null,
+                0
+              ],
+              [
+                2,
+                "count",
+                "INTEGER",
+                1,
+                null,
+                0
+              ],
+              [
+                3,
+                "provenance",
+                "TEXT",
+                1,
+                null,
+                0
+              ],
+              [
+                4,
+                "digest",
+                "TEXT",
+                1,
+                null,
+                0
+              ]
+            ],
+            "foreign_keys": [],
+            "indexes": [
+              {
+                "cols": [
+                  [
+                    0,
+                    0,
+                    "instrument"
+                  ]
+                ],
+                "origin": "pk",
+                "partial": 0,
+                "unique": 1
+              }
+            ],
+            "without_rowid": false
+          }
+        },
+        "triggers": [],
+        "views": []
+      }
+    },
+    "v1": {
+      "tables": {
+        "places": {
+          "checks": [],
+          "columns": [
+            [
+              0,
+              "name",
+              "TEXT",
+              0,
+              null,
+              1
+            ],
+            [
+              1,
+              "value",
+              "TEXT",
+              1,
+              null,
+              0
+            ],
+            [
+              2,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "name"
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "unique": 1
+            }
+          ],
+          "without_rowid": false
+        },
+        "progress": {
+          "checks": [],
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              0,
+              null,
+              1
+            ],
+            [
+              1,
+              "opened",
+              "INTEGER",
+              1,
+              "0",
+              0
+            ],
+            [
+              2,
+              "completed",
+              "INTEGER",
+              1,
+              "0",
+              0
+            ],
+            [
+              3,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "without_rowid": false
+        },
+        "responses": {
+          "checks": [],
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              1,
+              null,
+              1
+            ],
+            [
+              1,
+              "kind",
+              "TEXT",
+              1,
+              null,
+              2
+            ],
+            [
+              2,
+              "body",
+              "TEXT",
+              1,
+              null,
+              0
+            ],
+            [
+              3,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0
+            ],
+            [
+              4,
+              "correct",
+              "INTEGER",
+              0,
+              null,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "lesson_id"
+                ],
+                [
+                  1,
+                  1,
+                  "kind"
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "unique": 1
+            }
+          ],
+          "without_rowid": false
+        },
+        "sort_answers": {
+          "checks": [],
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              1,
+              null,
+              1
+            ],
+            [
+              1,
+              "card_key",
+              "TEXT",
+              1,
+              null,
+              2
+            ],
+            [
+              2,
+              "choice",
+              "TEXT",
+              1,
+              null,
+              0
+            ],
+            [
+              3,
+              "correct",
+              "INTEGER",
+              1,
+              null,
+              0
+            ],
+            [
+              4,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "lesson_id"
+                ],
+                [
+                  1,
+                  1,
+                  "card_key"
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "unique": 1
+            }
+          ],
+          "without_rowid": false
+        },
+        "stages": {
+          "checks": [],
+          "columns": [
+            [
+              0,
+              "lesson_id",
+              "INTEGER",
+              0,
+              null,
+              1
+            ],
+            [
+              1,
+              "stage",
+              "TEXT",
+              1,
+              null,
+              0
+            ],
+            [
+              2,
+              "furthest",
+              "INTEGER",
+              1,
+              "0",
+              0
+            ],
+            [
+              3,
+              "updated",
+              "REAL",
+              0,
+              null,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "without_rowid": false
+        },
+        "stamp_events": {
+          "checks": [],
+          "columns": [
+            [
+              0,
+              "digest",
+              "BLOB",
+              1,
+              null,
+              1
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "digest"
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "unique": 1
+            }
+          ],
+          "without_rowid": true
+        },
+        "stamps": {
+          "checks": [],
+          "columns": [
+            [
+              0,
+              "instrument",
+              "TEXT",
+              0,
+              null,
+              1
+            ],
+            [
+              1,
+              "first_ts",
+              "REAL",
+              1,
+              null,
+              0
+            ],
+            [
+              2,
+              "count",
+              "INTEGER",
+              1,
+              null,
+              0
+            ],
+            [
+              3,
+              "provenance",
+              "TEXT",
+              1,
+              null,
+              0
+            ],
+            [
+              4,
+              "digest",
+              "TEXT",
+              1,
+              null,
+              0
+            ]
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "cols": [
+                [
+                  0,
+                  0,
+                  "instrument"
+                ]
+              ],
+              "origin": "pk",
+              "partial": 0,
+              "unique": 1
+            }
+          ],
+          "without_rowid": false
+        }
+      },
+      "triggers": [],
+      "views": []
+    }
+  }
+}

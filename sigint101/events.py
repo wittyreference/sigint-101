@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+from .storage import fsync_dir, fsync_handle
+
 # The live log is rotated once it reaches this size: it becomes events.jsonl.1, the older
 # generations shift up one, and anything beyond KEEP_ROTATED is dropped. Rotation moves whole
 # files and never edits a line, so the log stays append-only; the cap keeps the SD card's share
@@ -34,22 +36,25 @@ def _rotated(path: Path) -> list:
     return list(reversed(found))
 
 
-def _rotate_if_full(path: Path, max_bytes: int, keep: int) -> None:
+def _rotate_if_full(path: Path, max_bytes: int, keep: int, *, sync: bool = False) -> bool:
     try:
         size = path.stat().st_size
     except FileNotFoundError:
-        return
+        return False
     if size < max_bytes:
-        return
+        return False
     for n in range(keep - 1, 0, -1):
         older = _generation(path, n)
         if older.exists():
             older.replace(_generation(path, n + 1))
     path.replace(_generation(path, 1))
+    if sync:
+        fsync_dir(path.parent)
+    return True
 
 
 def log_event(path, kind: str, payload: dict, *, clock=time.time,
-              max_bytes=None, keep=None, event_id=None) -> dict:
+              max_bytes=None, keep=None, event_id=None, sync: bool = False) -> dict:
     """Append one event and return it in the same form a JSONL reader sees."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,10 +63,19 @@ def log_event(path, kind: str, payload: dict, *, clock=time.time,
         event["event_id"] = event_id
     line = json.dumps(event, sort_keys=True) + "\n"
     with _WRITE_LOCK:
-        _rotate_if_full(path, MAX_LOG_BYTES if max_bytes is None else max_bytes,
-                        KEEP_ROTATED if keep is None else keep)
+        existed = path.exists()
+        rotated = _rotate_if_full(
+            path,
+            MAX_LOG_BYTES if max_bytes is None else max_bytes,
+            KEEP_ROTATED if keep is None else keep,
+            sync=sync,
+        )
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(line)
+            if sync:
+                fsync_handle(handle)
+        if sync and (rotated or not existed):
+            fsync_dir(path.parent)
     return json.loads(line)
 
 

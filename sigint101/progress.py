@@ -132,13 +132,24 @@ class Progress:
     field: a half-written row must not cost the learner their progress.
     """
 
-    def __init__(self, db_path=DEFAULT_DB_PATH):
+    def __init__(self, db_path=DEFAULT_DB_PATH, *, managed: bool = False, read_only: bool = False):
         self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False + a lock: the FastAPI threadpool touches this from
         # a different thread than the one that opened it. The lock serializes access.
         self._lock = threading.Lock()
         self._closed = False
+        if managed:
+            from .migrations import PROGRESS_SCHEMA_VERSION, reviewed_signatures
+            from .storage import open_managed_sqlite
+
+            self._conn = open_managed_sqlite(
+                self.db_path,
+                expected_version=PROGRESS_SCHEMA_VERSION,
+                expected_signature=reviewed_signatures("progress")["v1"],
+                read_only=read_only,
+            )
+            return
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:

@@ -29,6 +29,7 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
+from .storage import sync_media_asset
 
 # The colaclanth/sstv command-line decoder. It turns one WAV of SSTV audio into one PNG, printing
 # the mode it detected to stdout. Its binary name lives here, not in hardware.py, so parallel
@@ -158,7 +159,7 @@ class SstvDecoder(SupervisedReceiver):
     def __init__(self, *, freq_hz=DEFAULT_SSTV_HZ, device=0, spawn=_popen,
                  output_dir=DEFAULT_OUTPUT_DIR, data_dir=None,
                  radio_present=None, which=shutil.which, serial=None, list_devices=None,
-                 clock=time.time):
+                 clock=time.time, sync_assets: bool = False):
         self.freq_hz = int(freq_hz)
         self.device = device
         self.serial = serial or None
@@ -172,6 +173,7 @@ class SstvDecoder(SupervisedReceiver):
         self._spawn = spawn
         self._which = which
         self._clock = clock
+        self._sync_assets = bool(sync_assets)
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._runs = RunGuard()
         self._init_lifecycle()
@@ -358,9 +360,11 @@ class SstvDecoder(SupervisedReceiver):
                     json.dump({"mode": capture.mode, "freq_hz": capture.freq_hz,
                                "decoded_at": capture.decoded_at}, handle, sort_keys=True)
             os.link(capture.staged_path, png)
-            committed = True
             if staged_sidecar is not None:
                 os.link(staged_sidecar, sidecar)
+            if self._sync_assets:
+                sync_media_asset(png, sidecar_path=sidecar if staged_sidecar is not None else None)
+            committed = True
         except OSError as exc:
             if self.error is None:
                 self.error = str(exc)
