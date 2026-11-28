@@ -14,6 +14,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from sigint101 import childproc
+from sigint101 import survey as survey_mod
 from sigint101.app import create_app
 from sigint101.events import read_events
 from sigint101.hardware import RadioProbe
@@ -306,7 +307,80 @@ def test_wifi_survey_checks_radio_and_devices_then_runs_rescan_no_census():
     assert result["command"] == (
         "nmcli -t -f SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan no"
     )
+    assert result["cached"] is True
+    assert result["age_s"] == 0
     assert all(tuple(n.keys()) == ENVELOPE_FIELDS for n in result["networks"])
+
+
+def test_wifi_survey_tracks_cached_age_and_resets_when_cache_changes():
+    # F2: --rescan no reads NetworkManager's cache; age grows while the cached snapshot stays
+    # unchanged and resets to 0 once NetworkManager updates the list or after an outage.
+    now = [100.0]
+    current_list = [NMCLI_FIXTURE]
+    radio_on = [True]
+
+    def dynamic_spawn(argv):
+        cmd = tuple(argv)
+        if cmd == RADIO_COMMAND:
+            return _FakeScanChild(argv, stdout="enabled\n" if radio_on[0] else "disabled\n")
+        if cmd == DEVICE_COMMAND:
+            return _FakeScanChild(argv, stdout=NMCLI_DEVICES_READY)
+        if cmd == SURVEY_COMMAND:
+            return _FakeScanChild(argv, stdout=current_list[0])
+        raise AssertionError(f"unexpected nmcli argv: {argv!r}")
+
+    scanner = WifiSurvey(
+        spawn=dynamic_spawn,
+        which=lambda name: "/usr/bin/nmcli",
+        radio_present=lambda: True,
+        clock=lambda: now[0],
+    )
+    first = scanner.scan()
+    assert first["cached"] is True and first["age_s"] == 0
+
+    now[0] = 145.4
+    second = scanner.scan()
+    assert second["cached"] is True and second["age_s"] == 45
+
+    # NetworkManager ran a scan and the AP list changed -> cache age resets to 0, still cached.
+    now[0] = 160.0
+    current_list[0] = r"CafeNet:02\:00\:00\:00\:ee\:01:1:2412 MHz:90:WPA2"
+    changed = scanner.scan()
+    assert changed["cached"] is True and changed["age_s"] == 0
+
+    # Radio toggled off then back on -> age resets cleanly rather than carrying stale age across.
+    radio_on[0] = False
+    with pytest.raises(SurveyUnavailable):
+        scanner.scan()
+    radio_on[0] = True
+    now[0] = 300.0
+    recovered = scanner.scan()
+    assert recovered["cached"] is True and recovered["age_s"] == 0
+
+
+def test_nmcli_popen_forces_lc_all_c_locale(monkeypatch):
+    # F9: nmcli(1) localizes words like disabled/unmanaged/unavailable unless run with LC_ALL=C.
+    import sys
+
+    monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
+    captured = {}
+
+    def fake_spawn(argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["kwargs"] = kwargs
+        return _FakeScanChild(argv)
+
+    monkeypatch.setattr(survey_mod, "spawn", fake_spawn)
+    survey_mod._popen(list(RADIO_COMMAND))
+    assert captured["argv"] == list(RADIO_COMMAND)
+    assert captured["kwargs"]["env"]["LC_ALL"] == "C"
+
+    # End-to-end proof through childproc.spawn: a real child inherits LC_ALL=C, not fr_FR.UTF-8.
+    monkeypatch.setattr(survey_mod, "spawn", childproc.spawn)
+    proc = survey_mod._popen([sys.executable, "-c", "import os; print(os.environ['LC_ALL'])"])
+    out, _ = proc.communicate(timeout=5)
+    assert proc.returncode == 0
+    assert out.strip() == "C"
 
 
 def test_wifi_survey_refuses_honestly_when_wifi_radio_is_off_even_though_list_exits_0():
@@ -399,6 +473,8 @@ def test_api_survey_returns_census_with_envelope_fields_only(tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     assert body["available"] is True
+    assert body["cached"] is True
+    assert body["age_s"] == 0
     assert body["total"] == 8
     assert body["command"] == (
         "nmcli -t -f SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan no"
@@ -546,13 +622,19 @@ _JOFFE_CITE = re.compile(r"\b746\s+F\.?3d\s+920\b")
 _NINTH_CIRCUIT = re.compile(r"\bninth\s+circuit\b|\b9th\s+cir\.?\b", re.I)
 _STATUTE_2510 = re.compile(r"\b2510\(16\)")
 _STATUTE_2511 = re.compile(r"\b2511\(2\)\(g\)\(i\)")
+_STATUTE_2511_DEFAULT = re.compile(r"\b2511\(1\)\(a\)")
 _RADIO_COMM_HOLDING = re.compile(r"radio\s+communication", re.I)
-_MOTION_TO_DISMISS = re.compile(r"\bmotion\s+to\s+dismiss\b|\bpleading\s+stage\b", re.I)
+_DENIAL_MOTION_TO_DISMISS = re.compile(
+    r"\breviewed\s+the\s+denial\s+of\b[^.?!]*\bmotion\s+to\s+dismiss\b"
+    r"|\bdenial\s+of\b[^.?!]*\bmotion\s+to\s+dismiss\b",
+    re.I,
+)
 _ONE_CIRCUIT = re.compile(
     r"\bbinds?\s+(?:only\s+)?(?:the\s+)?(?:ninth|9th)\s+circuit\b"
     r"|\bone\s+circuit\b|\bno\s+other\s+(?:federal\s+)?(?:court\s+of\s+appeals|circuit)\b",
     re.I,
 )
+_AS_OF_2026 = re.compile(r"\bnone\s+had\s+ruled\s+as\s+of\s+2026\b|\bas\s+of\s+2026\b", re.I)
 _BEACON_SILENT = re.compile(
     r"\b(?:never\s+decided|did\s+not\s+decide|left\s+[^.?!]*undecided|silent)\b"
     r"[^.?!]*\b(?:beacon|metadata|ssid|header)\b"
@@ -563,7 +645,8 @@ _BEACON_SILENT = re.compile(
 # Defects that must NEVER appear anywhere in lesson 39 learner text:
 _OVERSTATES_VIOLATION = re.compile(
     r"\b(?:violates?|breaks?|broke)\s+the\s+wiretap\s+act\b"
-    r"|\bfound\s+(?:google\s+)?(?:liable|in\s+violation)\b",
+    r"|\bfound\s+(?:google\s+)?(?:liable|in\s+violation)\b"
+    r"|\bpayload\b[^.?!]*\bis\s+(?:illegal|unlawful|a\s+crime)\b",
     re.I,
 )
 _DELETED_SEPT_HOLDING = re.compile(
@@ -573,7 +656,10 @@ _DELETED_SEPT_HOLDING = re.compile(
     re.I,
 )
 _NATIONWIDE_OVERCLAIM = re.compile(
-    r"\bfederal\s+law\s+protects\b|\bwhere\s+does\s+federal\s+law\s+draw\b",
+    r"\bfederal\s+law\s+(?:protects|forbids|bars|prohibits)\b"
+    r"|\bwhere\s+does\s+federal\s+law\s+draw\b"
+    r"|\b(?:illegal|unlawful|a\s+crime)\s+(?:everywhere|nationwide)\b"
+    r"|\b(?:everywhere|nationwide)\b[^.?!]*\b(?:illegal|unlawful|a\s+crime)\b",
     re.I,
 )
 _FALSE_BEACON_HOLDING = re.compile(
@@ -596,17 +682,21 @@ def _check_joffe_explain(explain: str) -> list[str]:
         issues.append("missing 18 USC 2510(16) 'radio communication' holding")
     if not _STATUTE_2511.search(explain):
         issues.append("missing 18 USC 2511(2)(g)(i) exemption reference")
-    if not _MOTION_TO_DISMISS.search(explain):
-        issues.append("missing motion-to-dismiss / pleading-stage posture")
+    if not _STATUTE_2511_DEFAULT.search(explain):
+        issues.append("missing 18 USC 2511(1)(a) Wiretap Act default rule")
+    if not _DENIAL_MOTION_TO_DISMISS.search(explain):
+        issues.append("missing denial-of-motion-to-dismiss posture")
     if not _ONE_CIRCUIT.search(explain):
         issues.append("missing one-circuit scope")
+    if not _AS_OF_2026.search(explain):
+        issues.append("missing 'as of 2026' time-bounded circuit count")
     if not _BEACON_SILENT.search(explain):
         issues.append("missing statement that Joffe left beacon metadata undecided")
     return issues
 
 
 def _check_joffe_overstatements(all_text: str) -> list[str]:
-    """Check all learner-visible prose for the four round-1 legal overstatements."""
+    """Check all learner-visible prose for the legal overstatements."""
     issues = []
     if _OVERSTATES_VIOLATION.search(all_text):
         issues.append("overstates motion-to-dismiss ruling as a Wiretap Act violation")
@@ -636,12 +726,21 @@ def test_joffe_claim_probe_rejects_round1_overstatements_and_accepts_accurate_re
     )
     assert _check_joffe_overstatements(beacon_overclaim)
 
+    # F6: surviving mutation M8 must be rejected.
+    nationwide_everywhere = (
+        "So capturing open Wi-Fi payload is illegal everywhere."
+    )
+    assert _check_joffe_overstatements(nationwide_everywhere)
+    assert _check_joffe_overstatements("Federal law forbids capturing open Wi-Fi payload.")
+
     accurate_rewording = (
         "In the amended opinion in Joffe v. Google, 746 F.3d 920 (9th Cir. 2013), the Ninth "
-        "Circuit held on a motion to dismiss that Wi-Fi payload is not a 'radio communication' "
-        "under 18 USC 2510(16), so the unencrypted-radio rule does not reach 18 USC 2511(2)(g)(i). "
-        "The ruling binds only the Ninth Circuit, found no liability, and left beacon metadata "
-        "undecided."
+        "Circuit reviewed the denial of Google's motion to dismiss and held that Wi-Fi payload "
+        "is not a 'radio communication' under 18 USC 2510(16), so the unencrypted-radio rule does "
+        "not reach 18 USC 2511(2)(g)(i). The ruling binds only the Ninth Circuit (none had ruled "
+        "as of 2026 among other circuits), decided no liability, and left beacon metadata "
+        "undecided. Elsewhere the Act's default, 18 USC 2511(1)(a), forbids intercepting an "
+        "electronic communication unless an exemption applies."
     )
     assert _check_joffe_explain(accurate_rewording) == []
     assert _check_joffe_overstatements(accurate_rewording) == []
@@ -659,10 +758,13 @@ def test_m39_legal_text_matches_amended_joffe_opinion_and_cites_primary_sources(
     assert _check_joffe_overstatements(all_prose) == []
 
     raw = yaml.safe_load(PACK_M39.read_text(encoding="utf-8"))
-    urls = [str(s.get("url", "")) for s in (raw.get("sources") or []) if isinstance(s, dict)]
+    sources = [s for s in (raw.get("sources") or []) if isinstance(s, dict)]
+    urls = [str(s.get("url", "")) for s in sources]
+    titles = [str(s.get("title", "")) for s in sources]
     assert any("cdn.ca9.uscourts.gov" in u and "11-17483_opinion122713.pdf" in u for u in urls), (
         urls
     )
     assert any("law.cornell.edu" in u and "/18/2510" in u for u in urls), urls
     assert any("law.cornell.edu" in u and "/18/2511" in u for u in urls), urls
+    assert any("2511(1)(a)" in t for t in titles), titles
     assert any("supremecourt.gov" in u and "13-1181" in u for u in urls), urls

@@ -100,3 +100,26 @@ test("pollAnswer preserves honest radio-off refusals and rejects malformed repli
   assert.equal(offline.available, false);
   assert.match(offline.reason, /Lost contact/);
 });
+
+test("cached census badges CACHED with age and never claims LIVE or heard in this scan", () => {
+  assert.equal(panel.formatAge(0), "0s");
+  assert.equal(panel.formatAge(45), "45s");
+  assert.equal(panel.formatAge(90), "1m");
+  assert.equal(panel.formatAge(3600), "1h");
+  assert.equal(panel.formatAge(null), "");
+  assert.equal(panel.formatAge(-1), "");
+
+  assert.deepStrictEqual(panel.badgeState({ cached: true, age_s: 45 }), {
+    text: "CACHED · 45s",
+    cls: "decoder__status decoder__status--cached",
+  });
+  assert.deepStrictEqual(panel.badgeState({ cached: true }), {
+    text: "CACHED",
+    cls: "decoder__status decoder__status--cached",
+  });
+  assert.equal(
+    panel.emptyMessage({ cached: true, age_s: 12 }),
+    "NetworkManager's cached list is empty",
+  );
+  assert.ok(!/heard in this scan/i.test(panel.emptyMessage({ cached: true, age_s: 0 })));
+});

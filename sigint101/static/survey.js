@@ -52,6 +52,32 @@
     return parts.length ? parts.join(" · ") : "(no SSID)";
   }
 
+  function formatAge(ageSeconds) {
+    if (typeof ageSeconds !== "number" || !isFinite(ageSeconds) || ageSeconds < 0) return "";
+    var secs = Math.floor(ageSeconds);
+    if (secs < 60) return secs + "s";
+    if (secs < 3600) return Math.floor(secs / 60) + "m";
+    return Math.floor(secs / 3600) + "h";
+  }
+
+  function badgeState(body) {
+    if (body && body.cached === true) {
+      var age = formatAge(body.age_s);
+      return {
+        text: age ? "CACHED · " + age : "CACHED",
+        cls: "decoder__status decoder__status--cached",
+      };
+    }
+    return { text: "LIVE", cls: "decoder__status decoder__status--live" };
+  }
+
+  function emptyMessage(body) {
+    if (body && body.cached === true) {
+      return "NetworkManager's cached list is empty";
+    }
+    return "no Wi-Fi networks heard in this scan";
+  }
+
   function pollAnswer(status, body) {
     var ok = status >= 200 && status < 300;
     if (body && typeof body === "object") {
@@ -77,6 +103,9 @@
       countLabel: countLabel,
       signalLabel: signalLabel,
       summary: summary,
+      formatAge: formatAge,
+      badgeState: badgeState,
+      emptyMessage: emptyMessage,
       pollAnswer: pollAnswer,
     };
     return;
@@ -85,7 +114,7 @@
   var panels = Array.prototype.slice.call(document.querySelectorAll("[data-survey-panel]"));
   if (!panels.length) return;
 
-  var POLL_MS = 10000;     // nmcli caches scans ~30 s; a gentle poll refreshes without thrashing
+  var POLL_MS = 10000;     // polls NetworkManager's cached AP list (--rescan no); does not trigger a scan
   var RETRY_MS = 5000;     // when no Wi-Fi radio is ready, poll gently until one appears
   var stopped = false;
 
@@ -111,12 +140,22 @@
         '<span class="decoder__tone">' + esc(signalLabel(row)) + "</span>";
       list.appendChild(li);
     });
-    DecoderPanel.showLive(badge, body);
+    if (body && body.cached === true) {
+      if (badge) {
+        var state = badgeState(body);
+        badge.textContent = state.text;
+        badge.className = state.cls;
+      }
+    } else {
+      DecoderPanel.showLive(badge, body);
+    }
     DecoderPanel.showCommand(panel, body.command);
     if (empty) {
       empty.hidden = rows.length > 0;
       if (!rows.length) {
-        empty.textContent = DecoderPanel.quietText(body, "no Wi-Fi networks heard in this scan");
+        empty.textContent = body && body.cached === true
+          ? emptyMessage(body)
+          : DecoderPanel.quietText(body, emptyMessage(body));
       }
     }
   }

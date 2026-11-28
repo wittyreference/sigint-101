@@ -767,7 +767,7 @@ assert.equal(globalThis.window.fetch, origFetch, "window.fetch should be restore
 SURVEY_FITS = {
     "doc": [800, 480],
     "back": True,
-    "badge": "LIVE",
+    "badge": "CACHED · 45s",
     "rows": 11,
     "listScrolls": True,
     "noRowOverflow": True,
@@ -802,6 +802,8 @@ def test_survey_render_checks_populated_panel_in_all_three_themes(devtools):
     {"back": False},
     {"doc": [801, 480]},
     {"doc": [800, 481]},
+    {"badge": "LIVE"},
+    {"badge": "CACHED"},
     {"badge": "NO RADIO"},
     {"rows": 0},
     {"listScrolls": False},
@@ -816,3 +818,76 @@ def test_survey_render_fails_when_populated_panel_overflows_or_stays_empty(devto
     proc = run(SURVEY, "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - survey red-night"
+
+
+def test_survey_render_never_posts_predict_to_console_and_stubs_fetch():
+    # F1: render_survey.py must never POST /api/predict into the console it runs against.
+    # First prove the script blocks /api/predict at the network layer and never calls
+    # fetch('/api/predict') even when L39 is sealed on the target console.
+    import re
+
+    seen_evals = []
+    blocked_urls = []
+
+    class RecordingDevTools(FakeDevTools):
+        def _result(self, msg):
+            method = msg.get("method")
+            if method == "Network.setBlockedURLs":
+                blocked_urls.extend(msg.get("params", {}).get("urls", []))
+            if method == "Runtime.evaluate":
+                expr = msg.get("params", {}).get("expression", "")
+                seen_evals.append(expr)
+                if 'data-stage="operate"' in expr and "measureSurvey" not in expr:
+                    return {"result": {"type": "boolean", "value": False}}
+            return super()._result(msg)
+
+    fake = RecordingDevTools(_survey_pages())
+    try:
+        proc = run(SURVEY, "http://127.0.0.1:9", port=fake.port)
+    finally:
+        fake.close()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert any("/api/predict" in pattern for pattern in blocked_urls), blocked_urls
+    assert not any(
+        re.search(r"\bfetch\s*\(\s*['\"][^'\"]*/api/predict", expr) for expr in seen_evals
+    ), f"render_survey.py posted /api/predict into the console: {seen_evals!r}"
+
+    # Second, run the actual fetch_shim under node and prove both /api/predict POSTs and
+    # /api/survey GETs are stubbed without ever reaching origFetch.
+    node = shutil.which("node")
+    assert node, "node is required to test the SURVEY fetch shim"
+    sys.path.insert(0, str(SURVEY.parent))
+    try:
+        import render_survey  # noqa: PLC0415
+        shim = render_survey.fetch_shim(render_survey.populated_payload())
+    finally:
+        sys.path.remove(str(SURVEY.parent))
+    harness = f"""
+const assert = require("node:assert/strict");
+let origCalls = 0;
+function FakeResponse(body, init) {{
+  this.status = (init && init.status) || 200;
+  this.ok = this.status >= 200 && this.status < 300;
+  this._body = body;
+  this.json = () => Promise.resolve(JSON.parse(body));
+}}
+globalThis.Response = FakeResponse;
+const origFetch = () => {{ origCalls += 1; return Promise.resolve(new FakeResponse("{{}}")); }};
+globalThis.window = {{ fetch: origFetch }};
+{shim}
+(async () => {{
+  const pred = await window.fetch("/api/predict?lesson_id=39", {{
+    method: "POST",
+    body: "prediction=envelope-only",
+  }});
+  assert.equal(pred.status, 200);
+  const survey = await window.fetch("/api/survey");
+  const data = await survey.json();
+  assert.equal(data.available, true);
+  assert.equal(data.cached, true);
+  assert.equal(typeof data.age_s, "number");
+  assert.equal(origCalls, 0, "fetch_shim let a write or survey request reach the console");
+}})().catch(err => {{ console.error(err); process.exit(1); }});
+"""
+    node_proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
+    assert node_proc.returncode == 0, node_proc.stdout + node_proc.stderr

@@ -4,6 +4,7 @@
 import json
 import shlex
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from sigint101.survey import SURVEY_COMMAND, channel_census, parse_nmcli_wifi  #
 
 THEMES = ("dark", "sunlight", "red-night")
 FIXTURE = REPO / "tests" / "fixtures" / "survey" / "dense_nmcli.txt"
+SAMPLE_AGE_S = 45
+EXPECTED_BADGE = f"CACHED · {SAMPLE_AGE_S}s"
 
 
 def populated_payload() -> dict:
@@ -24,6 +27,8 @@ def populated_payload() -> dict:
     networks = parse_nmcli_wifi(FIXTURE.read_text(encoding="utf-8"))
     return {
         "available": True,
+        "cached": True,
+        "age_s": SAMPLE_AGE_S,
         "command": shlex.join(SURVEY_COMMAND),
         "total": len(networks),
         "channels": channel_census(networks),
@@ -32,15 +37,25 @@ def populated_payload() -> dict:
 
 
 def fetch_shim(payload: dict) -> str:
-    """Intercept /api/survey in Chromium so a host without nmcli renders the populated panel."""
+    """Stub /api/survey with the fixture and block state-writing POSTs (/api/predict, etc.)."""
     body = json.dumps(payload)
     return f"""
 (function () {{
   const origFetch = window.fetch.bind(window);
   window.fetch = function (input, init) {{
     const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const method = ((init && init.method) || 'GET').toUpperCase();
     if (url.indexOf('/api/survey') !== -1) {{
       return Promise.resolve(new Response({json.dumps(body)}, {{
+        status: 200,
+        headers: {{ 'content-type': 'application/json' }},
+      }}));
+    }}
+    if (method !== 'GET' ||
+        url.indexOf('/api/predict') !== -1 ||
+        url.indexOf('/api/stage') !== -1 ||
+        url.indexOf('/api/complete') !== -1) {{
+      return Promise.resolve(new Response('{{"stubbed":true}}', {{
         status: 200,
         headers: {{ 'content-type': 'application/json' }},
       }}));
@@ -49,6 +64,27 @@ def fetch_shim(payload: dict) -> str:
   }};
 }})();
 """
+
+
+def _render_unsealed_m39_html(shim: str) -> str:
+    """Render the real unsealed /lesson/39 HTML in an isolated temp app — zero console writes."""
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+
+    with tempfile.TemporaryDirectory(prefix="sigint101-survey-html-") as tmp:
+        app = create_app(
+            pack_dir=REPO / "lesson_packs",
+            data_dir=Path(tmp),
+            probe=lambda: RadioProbe(False, "lsusb", "render check"),
+        )
+        with TestClient(app) as client:
+            client.post("/api/predict?lesson_id=39", data={"prediction": "envelope-only"},
+                        follow_redirects=False)
+            html = client.get("/lesson/39").text
+    inject = f"<script>{shim}</script>"
+    return html.replace("<head>", f"<head>\n{inject}", 1) if "<head>" in html else inject + html
 
 
 SURVEY = """
@@ -138,29 +174,33 @@ def verdict(ok, label, measures):
 def main(console):
     browser = connect()
     try:
+        shim = fetch_shim(populated_payload())
         browser.call("Page.enable")
+        browser.call("Network.enable")
+        browser.call("Network.setBlockedURLs",
+                     {"urls": ["*/api/predict*", "*/api/stage*", "*/api/complete*"]})
         browser.call("Emulation.setDeviceMetricsOverride",
                      {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False})
-        browser.call("Page.addScriptToEvaluateOnNewDocument",
-                     {"source": fetch_shim(populated_payload())})
+        browser.call("Page.addScriptToEvaluateOnNewDocument", {"source": shim})
         lesson_url = f"{console}/lesson/39"
         load_page(browser, lesson_url)
-        # Unseal operate/observe/explain on a fresh console by committing M39's prediction in-page.
+        # Never POST /api/predict into the running console (F1): if L39 is sealed on the target,
+        # render the unsealed HTML once from an isolated temp app and write it into the page.
+        unsealed_html = None
         if browser.ev("!!document.querySelector('.stage-panel[data-stage=\"operate\"]')") is False:
-            browser.call("Runtime.evaluate", {
-                "expression": (
-                    "fetch('/api/predict?lesson_id=39', {"
-                    "method: 'POST', "
-                    "headers: {'content-type': 'application/x-www-form-urlencoded'}, "
-                    "body: 'prediction=envelope-only'})"
-                ),
-                "awaitPromise": True,
-            })
+            unsealed_html = _render_unsealed_m39_html(shim)
 
         failed = False
         for theme in THEMES:
             browser.ev(f"localStorage.setItem('sigint101.theme', {json.dumps(theme)})")
             load_page(browser, lesson_url)
+            if unsealed_html is not None:
+                browser.ev(
+                    f"document.open(); document.write({json.dumps(unsealed_html)}); "
+                    "document.close();"
+                )
+                browser.call("Runtime.evaluate", {"expression": "document.fonts.ready",
+                                                  "awaitPromise": True})
             for _ in range(20):
                 count = browser.ev("document.querySelectorAll('[data-survey-list] li').length")
                 if count is None or count > 0:
@@ -171,7 +211,7 @@ def main(console):
                 measures.get("theme") == theme
                 and measures.get("doc") == [800, 480]
                 and measures.get("back") is True
-                and measures.get("badge") == "LIVE"
+                and measures.get("badge") == EXPECTED_BADGE
                 and measures.get("rows", 0) >= 8
                 and measures.get("listScrolls") is True
                 and measures.get("noRowOverflow") is True
