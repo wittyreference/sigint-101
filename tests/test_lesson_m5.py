@@ -98,6 +98,42 @@ def test_m5_sort_carries_over_m15_pager_line_and_joffe_wifi_payload_line():
     assert all("2511(2)(g)(ii)(IV)" in c["cite"] for c in air_marine)
 
 
+_SCENARIO_STOPWORDS = frozenset(
+    "a an the to of on in it is you your with no and or all now that until do for at by from "
+    "without while this its any".split()
+)
+
+
+def _scenario_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9']+", text.lower().replace("’", "'"))
+            if w not in _SCENARIO_STOPWORDS}
+
+
+def test_m5_no_sort_card_restates_the_scored_predict():
+    # F7: the try comes before the predict and every tap shows its verdict at once, so a card that
+    # is the predict's own scenario hands the learner the scored answer one screen early.
+    lesson = load_lesson_file(PACK_M5)
+    predict = lesson.stages["predict"]
+    assert "repeater" in predict.lower(), "the predict's setting moved; update this guard"
+    predict_words = _scenario_words(predict)
+    for card in lesson.sort:
+        words = _scenario_words(card["text"])
+        assert not words & {"repeater", "repeaters"}, (card["key"], card["text"])
+        shared = predict_words & words
+        assert len(shared) <= 3, (card["key"], sorted(shared))
+
+    # The unlicensed amateur transmit case stays in the deck, on its primary authorities.
+    ham = next(c for c in lesson.sort if c["key"] == "ham-tx-unlicensed")
+    assert ham["answer"] == "illegal"
+    assert "47 USC 301" in ham["cite"] and "97.5(a)" in ham["cite"]
+    raw = yaml.safe_load(PACK_M5.read_text(encoding="utf-8"))
+    by_title = {s["title"].split(" — ")[0]: s["url"] for s in raw["sources"]}
+    assert by_title["47 U.S.C. 301"].startswith("https://www.govinfo.gov/content/pkg/USCODE-")
+    assert by_title["47 U.S.C. 301"].endswith("sec301.htm")
+    assert by_title["47 CFR 97.5"].startswith("https://www.ecfr.gov/current/title-47/")
+    assert by_title["47 CFR 97.5"].endswith("section-97.5")
+
+
 def test_m5_stages_agree_with_twelve_card_sort():
     # F3: observe and explain must not refer to "the four" as if the learner only saw four.
     lesson = load_lesson_file(PACK_M5)
