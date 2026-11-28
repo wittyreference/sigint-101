@@ -23,7 +23,17 @@ lock_holders() {
     grep -q '^lock:.*FLOCK' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null || continue
     seen+="$pid "
     printf '%s\n' "$pid"
-  done < <(find /proc/[0-9]*/fd -maxdepth 1 -lname "$WATCH_LOCK" 2>/dev/null)
+  done < <(within_scan_limit find /proc/[0-9]*/fd -maxdepth 1 -lname "$WATCH_LOCK" 2>/dev/null)
+}
+
+# Run a command, cut off after SCAN_LIMIT seconds when that is set (wait_for_lock's time left).
+SCAN_LIMIT=""
+within_scan_limit() {
+  if [ -n "$SCAN_LIMIT" ]; then
+    timeout -s KILL "$SCAN_LIMIT" "$@"
+  else
+    "$@"
+  fi
 }
 
 # The launchers a watchdog may run: the installed one, or this checkout's own.
@@ -33,8 +43,8 @@ CHECKOUT_LAUNCHER="$HERE/kiosk/start-kiosk.sh"
 # that decides what is the watchdog and the only way anything is signalled (through a pidfd,
 # never by number). Its docstring says what it checks and what window is left.
 watchdog_helper() {
-  env -i PATH="$PATH" LANG=C.UTF-8 python3 -I "$HERE/watchdog_helper.py" "$1" "$WATCH_LOCK" \
-    "$COURSE_BIN" "$CHECKOUT_LAUNCHER" "${@:2}"
+  within_scan_limit env -i PATH="$PATH" LANG=C.UTF-8 python3 -I "$HERE/watchdog_helper.py" "$1" \
+    "$WATCH_LOCK" "$COURSE_BIN" "$CHECKOUT_LAUNCHER" "${@:2}"
 }
 
 NO_PIDFD="the course watchdog could not be pinned (no pidfd: Linux 5.3+ and Python 3.9+ are needed)"
@@ -85,18 +95,51 @@ is_kiosk() {
 # wait_for_lock SECONDS, once the watchdogs in restart_watchdog's `found` were stopped: 0 when
 # the lock is free, 2 when a watchdog not among them already holds it (another install, run at
 # the same time, finished the hand-over first), 1 when the time ran out.
+# One deadline on the monotonic clock (/proc/uptime, in hundredths) covers the waits and the
+# scans, and each step gets at most the time left, so SECONDS is the whole wait.
 wait_for_lock() {
-  local i w
+  local deadline left step w
   local -a now
-  for ((i = 0; i < $1; i++)); do
-    flock -w 1 "$WATCH_LOCK" true && return 0
+  deadline=$(( $(uptime_cs) + $1 * 100 ))
+  while :; do
+    left=$(( deadline - $(uptime_cs) ))
+    [ "$left" -gt 0 ] || return 1
+    step=$(( left < 100 ? left : 100 ))
+    flock -w "$(cs_to_s "$step")" "$WATCH_LOCK" true && return 0
+    left=$(( deadline - $(uptime_cs) ))
+    [ "$left" -gt 0 ] || return 1
+    SCAN_LIMIT="$(cs_to_s "$left")"
     mapfile -t now < <(watchdogs)
+    SCAN_LIMIT=""
     for w in "${now[@]}"; do
       [[ " ${found[*]} " == *" $w "* ]] || return 2
     done
   done
+}
+
+# Hundredths of a second since boot, from the monotonic /proc/uptime.
+uptime_cs() {
+  local up rest
+  read -r up rest < /proc/uptime
+  printf '%s\n' "$(( 10#${up%.*} * 100 + 10#${up#*.} ))"
+}
+
+cs_to_s() {
+  printf '%d.%02d\n' "$(( $1 / 100 ))" "$(( $1 % 100 ))"
+}
+
+# Is PID a watchdog that is not one of `found`: the one another install just started?
+a_new_watchdog() {
+  local w
+  local -a seen
+  mapfile -t seen < <(watchdog_helper FIND "$1")
+  for w in "${seen[@]}"; do
+    [[ " ${found[*]} " == *" $w "* ]] || return 0
+  done
   return 1
 }
+
+HANDED_OVER="install: another install has already started the new course watchdog"
 
 # A running watchdog keeps the launcher it started with in memory, so without this a launcher
 # change (the window bounds, say) waits for the next login. Stop it through a pidfd and start the
@@ -121,6 +164,12 @@ restart_watchdog() {
   mapfile -t holders < <(lock_holders)
   for pid in "${holders[@]}"; do
     for w in "${found[@]}"; do [ "$pid" = "${w%%:*}" ] && continue 2; done
+    # A watchdog that was not there a moment ago: another install got here first and has
+    # already started the new one. Nothing to warn about, and nothing to stop.
+    if a_new_watchdog "$pid"; then
+      echo "$HANDED_OVER"
+      return 0
+    fi
     if is_kiosk "$pid" || ! passing_holder "$pid" "${found[@]}"; then
       echo "install: WARN the course watchdog was left running: $pid" \
         "($(cat "/proc/$pid/comm" 2>/dev/null)) holds its lock; it restarts at the next login" >&2
@@ -141,26 +190,28 @@ restart_watchdog() {
   local waited=0
   wait_for_lock 15 || waited=$?
   if [ "$waited" = 2 ]; then
-    echo "install: another install has already started the new course watchdog"
+    echo "$HANDED_OVER"
     return 0
   fi
   if [ "$waited" != 0 ]; then
     # Re-checked after a fresh pin: only what is still the same watchdog is killed, and only if
-    # the launcher it runs can never exec another program (the helper prints "kept PID" if not).
+    # it runs a reviewed launcher from a file its user cannot rewrite (else "kept PID REASON").
     local killed
     if ! killed="$(watchdog_helper KILL "${found[@]}")"; then
       echo "install: WARN $NO_PIDFD for its SIGKILL; it restarts at the next login" >&2
       return 0
     fi
     if [[ "$killed" == *kept* ]]; then
-      echo "install: WARN the course watchdog ignored TERM, and the launcher it runs could exec" \
-        "another program, so it was not killed; it restarts at the next login" >&2
+      local reason="${killed#*kept }"
+      reason="${reason#* }"
+      echo "install: WARN the course watchdog ignored TERM and was not killed: ${reason%%$'\n'*};" \
+        "it restarts at the next login" >&2
       return 0
     fi
     waited=0
     wait_for_lock 5 || waited=$?
     if [ "$waited" = 2 ]; then
-      echo "install: another install has already started the new course watchdog"
+      echo "$HANDED_OVER"
       return 0
     fi
     if [ "$waited" != 0 ]; then

@@ -6,9 +6,10 @@
         prints "PID:START" for each PID that is the watchdog.
     watchdog_helper.py TERM|KILL LOCK INSTALLED CHECKOUT PID:START...
         pins every PID with a pidfd, then signals through it each pinned process that is still
-        that watchdog (same start time). Prints each PID signalled. Under KILL, a watchdog whose
-        running launcher could exec another program is not killed: it is printed as
-        "kept PID". Exit 4: no pidfd here (Linux 5.3+ and Python 3.9+), nothing was signalled.
+        that watchdog (same start time). Prints each PID signalled. Under KILL, a watchdog not
+        running a reviewed, unwritable launcher (see `kill_refusal`) is not killed: it is
+        printed as "kept PID REASON". Exit 4: no pidfd here (Linux 5.3+ and Python 3.9+),
+        nothing was signalled.
 
 A watchdog is a process of this user whose executable is a trusted shell (bash or sh, found by
 the file /proc/PID/exe points at, not by argv[0]), whose command line is exactly
@@ -21,11 +22,13 @@ process exited and its PID was reused meanwhile, the checks may read the newcome
 goes through the pidfd, which still names the exited process, so it fails and reaches nobody.
 
 The window left: a watchdog that passed the last check can still exec another program before
-the signal lands, and that program then gets the signal. Only one of the kiosk user's own
-processes can do that. KILL is kept for launchers whose watch path never execs (see
-`can_exec`), so the window there needs a launcher that was not what it looked like.
+the signal lands, and that program then gets the TERM. Only one of the kiosk user's own
+processes can do that. KILL goes only to a watchdog running the bytes of a reviewed launcher
+(digests in deploy/reviewed-launchers.sha256) from a file that user cannot rewrite, and the
+reviewed launchers stay in bash once `watch` runs, so a KILL lands on the shell it was meant for.
 """
 
+import hashlib
 import os
 import re
 import signal
@@ -175,18 +178,48 @@ def can_exec(text):
     return bool(program_execs(watch_path(text)))
 
 
-def running_launcher_can_exec(pid, argv_path):
-    """Read the launcher PID actually runs (bash keeps its script open on fd 255, even after
-    install.sh replaced the file) and judge it. Unknown counts as "can exec"."""
+REVIEWED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reviewed-launchers.sha256")
+
+
+def reviewed_digests(path=REVIEWED):
+    """The frozen SHA-256 digests of the reviewed launchers (first field of each line)."""
+    digests = set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                word = line.split("#", 1)[0].split()[:1]
+                if word and re.fullmatch(r"[0-9a-f]{64}", word[0]):
+                    digests.add(word[0])
+    except OSError:
+        pass
+    return digests
+
+
+def kill_refusal(pid, argv_path):
+    """Why PID must not get SIGKILL, or None when it may. KILL is for a watchdog running a
+    reviewed launcher (its bytes, read through the fd 255 bash keeps its script on, have a frozen
+    digest) from a file its own user cannot rewrite (not that user's, not group- or world-
+    writable), so the bytes it runs are the reviewed ones. Anything else gets TERM only. The exec
+    scan is no gate: it only adds a hint to the reason."""
     link = f"/proc/{pid}/fd/255"
     try:
+        uid = os.stat(f"/proc/{pid}").st_uid
         target = os.readlink(link).removesuffix(" (deleted)")
         if target != os.path.realpath(argv_path):
-            return True
+            return "the file its shell runs is not its launcher"
         with open(link, "rb") as f:
-            return can_exec(f.read().decode("utf-8", errors="replace"))
+            info = os.fstat(f.fileno())
+            data = f.read()
     except OSError:
-        return True
+        return "the file its shell runs could not be read"
+    digest = hashlib.sha256(data).hexdigest()
+    if digest not in reviewed_digests():
+        hint = ", and it can exec another program" if can_exec(
+            data.decode("utf-8", errors="replace")) else ""
+        return f"it runs an unreviewed launcher (sha256 {digest[:12]}{hint})"
+    if info.st_uid == uid or info.st_mode & 0o022:
+        return "its launcher file can be rewritten by the kiosk user"
+    return None
 
 
 def main(args):
@@ -221,8 +254,9 @@ def main(args):
                 path = launcher_path(pid, argv)
             except (OSError, IndexError):
                 continue
-            if running_launcher_can_exec(pid, path):
-                print(f"kept {pid}")
+            refusal = kill_refusal(pid, path)
+            if refusal is not None:
+                print(f"kept {pid} {refusal}")
                 continue
         try:
             signal.pidfd_send_signal(fd, signum)

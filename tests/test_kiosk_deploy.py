@@ -849,7 +849,8 @@ def test_install_never_kills_a_pid_that_is_no_longer_the_watchdog(box):
     fake = _old_install(box,
                         "#!/bin/bash\n"
                         f'exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
-                        f'{real_sleep} 25 &\n'
+                        # Holds the lock until the test ends it, past every wait install.sh has.
+                        f'{real_sleep} 600 &\n'
                         f'echo $! > {box.log.parent / "child-pid"}\n'
                         f"trap 'exec 9>&-; exec -a imposter {real_sleep} 60' TERM\n"
                         f'while :; do {real_sleep} 0.2; done\n')
@@ -1066,50 +1067,155 @@ def test_install_without_a_pidfd_signals_nothing_and_keeps_the_watchdog(box, mis
         _end(old)
 
 
-def test_install_hands_over_when_the_watchdog_exits_just_before_its_sigkill(box):
-    """The watchdog passes the re-check, then exits before SIGKILL lands, so the send fails.
-    Under `set -e` that must not end install.sh: it still hands over and prints its message."""
+# Runs inside the hook: the launcher file the watchdog's fd 255 names reads as root's and
+# unwritable, as on a box where install.sh's `sudo install` put it (a test cannot make one).
+_LAUNCHER_ROOT_OWNED = """
+import os
+_fstat = os.fstat
+def _as_installed(fd):
+    st = _fstat(fd)
+    try:
+        target = os.readlink(f"/proc/self/fd/{fd}").removesuffix(" (deleted)")
+    except OSError:
+        return st
+    if target != os.path.realpath(sys.argv[4]):
+        return st
+    return os.stat_result((st.st_mode & ~0o222, st.st_ino, st.st_dev, st.st_nlink, 0, 0,
+                           st.st_size, st.st_atime, st.st_mtime, st.st_ctime))
+os.fstat = _as_installed
+"""
+
+
+def _reviewed_watchdog_ignoring_term(box):
+    """The checkout's own launcher (byte for byte the shipped one, a reviewed launcher), run as a
+    watchdog that ignores TERM (bash keeps a signal ignored at start ignored), so install.sh comes
+    to its SIGKILL step. Its sleeps last 30 s while the hold file exists."""
     box.alive.touch()
+    hold, pids = _sleep_stub(box, 30)
+    launcher = _checkout_launcher(box)
+    assert launcher.read_bytes() == LAUNCHER.read_bytes()
+    old = subprocess.Popen(["bash", str(launcher), "watch"], env=box.env(),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           preexec_fn=lambda: signal.signal(signal.SIGTERM, signal.SIG_IGN))
+    assert _wait_for(lambda: _pids(pids)), "the watchdog never reached its loop"
+    return old, hold, pids
+
+
+def test_install_kills_a_reviewed_launcher_from_a_file_its_user_cannot_rewrite(box):
+    """The one case for SIGKILL: the bytes behind fd 255 are a reviewed launcher's, and the file
+    is not the kiosk user's to rewrite. Then a watchdog that ignored TERM is killed and replaced."""
     _quiet_desktop(box)
     box.start_session()
     _installed_launcher(box)
-    _python_hook(box, "_inner = _signal.pidfd_send_signal\n"
-                      "def _late(fd, sig, *rest):\n"
-                      "    _inner(fd, sig, *rest)\n"
-                      "    if sig == _signal.SIGKILL:\n"
-                      "        raise ProcessLookupError(3, 'No such process')\n"
-                      "_signal.pidfd_send_signal = _late\n")
-    old = _stubborn_watchdog(box, usr1=":")  # its launcher never execs
+    _python_hook(box, _LAUNCHER_ROOT_OWNED)
+    old, hold, pids = _reviewed_watchdog_ignoring_term(box)
     try:
-        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        hold.unlink()  # sleeps from here on end the session, the new watchdog's included
+        result = box.run(_install(box), timeout=40)
+        assert _sent(box) == [signal.SIGTERM, signal.SIGKILL], result.stderr
+        old.wait(timeout=10)
+        _hands_over(box, result)
+    finally:
+        _end(old)
+        _kill_all(_pids(pids))
+
+
+def test_install_hands_over_when_the_watchdog_exits_just_before_its_sigkill(box):
+    """The watchdog passes the re-check, then exits before SIGKILL lands, so the send fails.
+    Under `set -e` that must not end install.sh: it still hands over and prints its message."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, _LAUNCHER_ROOT_OWNED +
+                 "_inner = _signal.pidfd_send_signal\n"
+                 "def _late(fd, sig, *rest):\n"
+                 "    _inner(fd, sig, *rest)\n"
+                 "    if sig == _signal.SIGKILL:\n"
+                 "        raise ProcessLookupError(3, 'No such process')\n"
+                 "_signal.pidfd_send_signal = _late\n")
+    old, hold, pids = _reviewed_watchdog_ignoring_term(box)
+    try:
+        hold.unlink()
         result = box.run(_install(box), timeout=40)
         assert _sent(box) == [signal.SIGTERM, signal.SIGKILL]
         old.wait(timeout=10)
         _hands_over(box, result)
     finally:
         _end(old)
+        _kill_all(_pids(pids))
 
 
-def test_install_never_kills_a_watchdog_whose_launcher_could_exec_another_program(box):
-    """SIGKILL could land on whatever program a watchdog exec'd after the last check, so it goes
-    only to one whose launcher never execs. This one's can (its USR1 trap does): it gets the TERM
-    it ignores, then a warning, never the SIGKILL."""
+def _term_only(box, result, old, reason):
+    assert result.returncode == 0, result.stderr
+    assert _sent(box) == [signal.SIGTERM], box.log.read_text()
+    assert old.poll() is None, "install.sh killed it"
+    assert box.calls("setsid") == []
+    [warn] = [ln for ln in result.stderr.splitlines() if "WARN" in ln]
+    assert "not killed" in warn and reason in warn, warn
+    return warn
+
+
+def test_install_never_kills_a_watchdog_on_an_unreviewed_launcher(box):
+    """Its launcher's digest is no reviewed launcher's, so TERM only, even from a file its user
+    cannot rewrite. The exec scan only adds a hint (this one's USR1 trap can exec)."""
     _quiet_desktop(box)
     box.start_session()
     _installed_launcher(box)
-    _python_hook(box, "")
+    _python_hook(box, _LAUNCHER_ROOT_OWNED)
     old = _stubborn_watchdog(box)
     try:
         assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
         result = box.run(_install(box), timeout=40)
-        assert result.returncode == 0, result.stderr
-        assert _sent(box) == [signal.SIGTERM], box.log.read_text()
-        assert old.poll() is None and not _is_imposter(old.pid)
-        assert box.calls("setsid") == []
-        [warn] = [ln for ln in result.stderr.splitlines() if "WARN" in ln]
-        assert "could exec" in warn and "not killed" in warn, warn
+        warn = _term_only(box, result, old, "unreviewed launcher")
+        assert "can exec another program" in warn, warn
+        assert not _is_imposter(old.pid)
     finally:
         _end(old)
+
+
+def test_install_never_kills_a_reviewed_launcher_from_a_file_its_user_can_rewrite(box):
+    """The digest matches, but the kiosk user owns the file and could have rewritten it in place
+    after bash loaded it: the bytes on disk would then not be the ones running. TERM only."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "")
+    old, hold, pids = _reviewed_watchdog_ignoring_term(box)
+    try:
+        result = box.run(_install(box), timeout=40)
+        _term_only(box, result, old, "can be rewritten by the kiosk user")
+    finally:
+        _end(old)
+        _kill_all(_pids(pids))
+
+
+def test_install_never_kills_a_watchdog_whose_launcher_was_rewritten_in_place(box):
+    """Bash loaded one launcher, then the same inode was rewritten to a reviewed launcher's exact
+    bytes. The digest now matches what bash is not running; the file being the user's to rewrite
+    is what keeps it TERM only."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "")
+    launcher = _old_install(box, LAUNCHER.read_text(encoding="utf-8") + "# the bytes bash ran\n")
+    inode = launcher.stat().st_ino
+    box.alive.touch()
+    hold, pids = _sleep_stub(box, 30)
+    old = subprocess.Popen(["bash", str(launcher), "watch"], env=box.env(),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           preexec_fn=lambda: signal.signal(signal.SIGTERM, signal.SIG_IGN))
+    try:
+        assert _wait_for(lambda: _pids(pids))
+        with open(launcher, "r+b") as f:  # the same inode, rewritten
+            f.write(LAUNCHER.read_bytes())
+            f.truncate()
+        assert launcher.stat().st_ino == inode
+        assert launcher.read_bytes() == LAUNCHER.read_bytes()
+        result = box.run(_install(box), timeout=40)
+        _term_only(box, result, old, "can be rewritten by the kiosk user")
+    finally:
+        _end(old)
+        _kill_all(_pids(pids))
 
 
 def test_install_never_signals_a_non_shell_with_the_watchdogs_exact_command_line(box):
@@ -1287,6 +1393,85 @@ def test_a_second_install_that_finds_the_new_watchdog_already_started_says_so_qu
     finally:
         _end(old)
         _kill_all(_pids(pids))
+
+
+def test_a_replacement_that_appears_right_after_discovery_is_no_reason_to_warn(box):
+    """The other install can start the new watchdog between this one finding the old watchdog
+    and looking at the lock's other holders. That holder is then a watchdog by every check, not
+    under the old one: the hand-over is done, so no WARN and no signal. Staged by having the
+    discovery scan itself make the old watchdog start a detached successor that keeps the lock."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    pids, once = box.log.parent / "watchdog-pids", box.log.parent / "successor-asked"
+    _python_hook(box,
+                 "import atexit, os, time\n"
+                 f"def _start_successor(pids={str(pids)!r}, once={str(once)!r}):\n"
+                 "    if os.path.exists(once):\n"
+                 "        return\n"
+                 "    open(once, 'w').close()\n"
+                 "    first = int(open(pids).read().split()[0])\n"
+                 "    os.kill(first, _signal.SIGUSR1)\n"
+                 "    end = time.time() + 5\n"
+                 "    while len(open(pids).read().split()) < 2 and time.time() < end:\n"
+                 "        time.sleep(0.05)\n"
+                 "if sys.argv[1] == 'FIND':\n"
+                 "    atexit.register(_start_successor)\n")
+    real_sleep = shutil.which("sleep")
+    _old_install(box,
+                 "#!/bin/bash\n"
+                 'if [ -z "${SUCCESSOR:-}" ]; then\n'
+                 f'  exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
+                 "fi\n"
+                 f"echo $$ >> {pids}\n"
+                 # Detached (its parent subshell exits at once), with the locked fd 9.
+                 f"trap '( SUCCESSOR=1 {shutil.which('bash')} \"$0\" watch & )' USR1\n"
+                 f"while :; do {real_sleep} 0.2; done\n")
+    old = _watchdog(box, _checkout_launcher(box))
+    try:
+        assert _wait_for(lambda: len(_pids(pids)) == 1)
+        result = box.run(_install(box), timeout=40)
+        assert result.returncode == 0, result.stderr
+        assert len(_pids(pids)) == 2, "the successor never started"
+        assert "WARN" not in result.stderr, result.stderr
+        assert any("already started the new course watchdog" in ln
+                   for ln in result.stdout.splitlines()), result.stdout
+        assert _sent(box) == [] and box.calls("setsid") == []
+        assert old.poll() is None
+    finally:
+        _end(old)
+        _kill_all(_pids(pids))
+
+
+def test_the_lock_wait_keeps_to_its_deadline_however_slow_the_scans(box):
+    """Each one-second lock attempt is followed by a scan for another install's watchdog; with
+    scans that take a second each, the 15 s wait used to take 30. One monotonic deadline covers
+    both, and each scan gets only the time left."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, "import time\nif sys.argv[1] == 'FIND':\n    time.sleep(1)\n")
+    old = _stubborn_watchdog(box)  # ignores TERM; unreviewed, so TERM only after the wait
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        start = time.time()
+        result = box.run(_install(box), timeout=60)
+        took = time.time() - start
+        _term_only(box, result, old, "unreviewed launcher")
+        # The first discovery and the holder check take their second or so each, plus 15 s.
+        assert took < 21, took
+    finally:
+        _end(old)
+
+
+def test_the_reviewed_launcher_list_names_exactly_the_reviewed_launchers():
+    """One frozen list, read by install.sh's helper at run time: the shipped launcher, the one
+    the reference Recon runs (3004a03), and the managed wrapper enrollment installs."""
+    import hashlib
+    helper = _helper_module()
+    listed = helper.reviewed_digests()
+    files = [LAUNCHER, DEPLOYED_LAUNCHER, MANAGED_LAUNCHER]
+    assert listed == {hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 
 
 def test_install_never_kills_a_reused_pid_whose_start_time_differs(box):

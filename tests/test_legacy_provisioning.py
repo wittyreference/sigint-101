@@ -322,6 +322,16 @@ class StatefulLegacyBox:
         return proc, launched
 
 
+def test_the_frozen_launcher_digest_is_on_install_shs_reviewed_launcher_list():
+    """install.sh's helper may SIGKILL a watchdog only on a launcher listed in
+    deploy/reviewed-launchers.sha256; the digest frozen here must be that list's entry for the
+    shipped launcher, so the two can never drift apart."""
+    [frozen] = [sha for src, _, _, sha in LEGACY_INSTALLED_FILES
+                if src == "deploy/kiosk/start-kiosk.sh"]
+    reviewed = (REPO / "deploy" / "reviewed-launchers.sha256").read_text(encoding="utf-8")
+    assert f"{frozen}  deploy/kiosk/start-kiosk.sh" in reviewed.splitlines()
+
+
 def test_interim_pr_legacy_provisioning_still_boots_checkout(tmp_path):
     assert BASH, "bash is required"
     box = StatefulLegacyBox(tmp_path)
