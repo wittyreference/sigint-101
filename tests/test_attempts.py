@@ -2530,3 +2530,124 @@ def test_r5_clock_exception_after_launch_stops_owned_run_and_preserves_exception
     finally:
         boom_clock[0] = False
         sweeper.stop()
+
+
+def test_r6_merged_supervised_decoder_borrowed_and_owned_compare_and_stop(tmp_path, monkeypatch):
+    """R6 (C76b merge): migrated SupervisedReceiver rtl_433 Decoder returns an OwnedRun only when
+    a claim spawns a new run, returns no handle when borrowed, and compare-and-stops only its own
+    Run under _life while sparing any genuine replacement."""
+    from sigint101.decode import Decoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.receiver_lifecycle import OwnedRun, SupervisedReceiver
+    from tests.test_app import _present
+
+    assert issubclass(Decoder, SupervisedReceiver)
+    LiveChild = _make_live_child_cls()
+    now = [9000.0]
+    _patch_log_clock(monkeypatch, now)
+    rtl_children: list = []
+
+    def spawn_rtl(cmd, **_kw):
+        ch = LiveChild(cmd)
+        rtl_children.append(ch)
+        return ch
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    rtl = Decoder(
+        spawn=spawn_rtl, which=lambda n: n, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        decoder_factory=lambda: rtl,
+        clock=lambda: now[0],
+    )
+
+    real_log = app_mod.log_event
+    monkeypatch.setattr(
+        app_mod,
+        "log_event",
+        lambda path, kind, payload, **kw: (
+            (_ for _ in ()).throw(OSError("append failed"))
+            if kind == "challenge_start"
+            else real_log(path, kind, payload, **kw)
+        ),
+    )
+
+    try:
+        with TestClient(app) as client:
+            # 1. Owned claim via app.state.claim_sdr("decoder") spawns child 1; an overlapping
+            # borrow via claim_sdr, GET /api/decode, and start_owned() returns no handle and
+            # does not invalidate the owner's handle.
+            def launch_decoder_with_borrows():
+                h_own = app.state.claim_sdr("decoder", rtl.start)
+                assert isinstance(h_own, OwnedRun)
+                assert h_own.name == "decoder"
+                assert h_own.run_id is rtl._run
+                assert app.state.claim_sdr("decoder", rtl.start) is None
+                resp_borrow = client.get("/api/decode")
+                assert resp_borrow.status_code == 200
+                assert "x-sigint-claim" not in resp_borrow.headers
+                assert app.state.owned_run_for_response(resp_borrow) is None
+                assert rtl.start_owned() is None
+                assert len(rtl_children) == 1
+                return h_own
+
+            _, err1 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 4, 900, launch=launch_decoder_with_borrows,
+            )
+            assert err1 is not None and "append failed" in err1
+            assert len(rtl_children) == 1
+            assert rtl_children[0].poll() is not None, "failed Start left owned rtl_433 running"
+            assert not rtl.running
+
+            # 2. Borrowed already-running decoder: GET /api/decode starts child 2 first; a Start
+            # hook borrowing it gets None and failing Start leaves child 2 running untouched.
+            resp_pre = client.get("/api/decode")
+            assert resp_pre.status_code == 200
+            assert "x-sigint-claim" in resp_pre.headers
+            assert len(rtl_children) == 2 and rtl_children[1].poll() is None
+
+            borrowed: list = []
+
+            def launch_borrow_existing():
+                h = app.state.claim_sdr("decoder", rtl.start)
+                borrowed.append(h)
+                return h
+
+            _, err2 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 4, 900, launch=launch_borrow_existing,
+            )
+            assert err2 is not None and "append failed" in err2
+            assert borrowed == [None]
+            assert rtl_children[1].poll() is None, "failed Start stopped borrowed rtl_433"
+            assert rtl.running
+            rtl.stop()
+            assert rtl_children[1].poll() is not None
+
+            # 3. Genuine replacement: Start owns child 3, then another caller stops child 3 and
+            # starts child 4 before journal append fails -> cleanup spares child 4.
+            def launch_owned_before_replacement():
+                h = app.state.claim_sdr("decoder", rtl.start)
+                assert isinstance(h, OwnedRun)
+                return h
+
+            def replace_on_log(path, kind, payload, **kw):
+                if kind == "challenge_start":
+                    rtl.stop()
+                    h_rep = app.state.claim_sdr("decoder", rtl.start)
+                    assert isinstance(h_rep, OwnedRun)
+                    raise OSError("append failed after rtl_433 replacement")
+                return real_log(path, kind, payload, **kw)
+
+            monkeypatch.setattr(app_mod, "log_event", replace_on_log)
+            _, err3 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 4, 900, launch=launch_owned_before_replacement,
+            )
+            assert err3 is not None and "append failed after rtl_433 replacement" in err3
+            assert len(rtl_children) == 4
+            assert rtl_children[2].poll() is not None
+            assert rtl_children[3].poll() is None, "cleanup stopped genuine rtl_433 replacement"
+            assert rtl.running
+    finally:
+        rtl.shutdown()
