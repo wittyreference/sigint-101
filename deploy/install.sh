@@ -82,6 +82,22 @@ is_kiosk() {
   return 1
 }
 
+# wait_for_lock SECONDS, once the watchdogs in restart_watchdog's `found` were stopped: 0 when
+# the lock is free, 2 when a watchdog not among them already holds it (another install, run at
+# the same time, finished the hand-over first), 1 when the time ran out.
+wait_for_lock() {
+  local i w
+  local -a now
+  for ((i = 0; i < $1; i++)); do
+    flock -w 1 "$WATCH_LOCK" true && return 0
+    mapfile -t now < <(watchdogs)
+    for w in "${now[@]}"; do
+      [[ " ${found[*]} " == *" $w "* ]] || return 2
+    done
+  done
+  return 1
+}
+
 # A running watchdog keeps the launcher it started with in memory, so without this a launcher
 # change (the window bounds, say) waits for the next login. Stop it through a pidfd and start the
 # installed launcher's watchdog in the same desktop session, with that session's environment
@@ -122,7 +138,13 @@ restart_watchdog() {
   fi
   # The lock frees when the watchdog has exited. An older launcher let its sleep or curl inherit
   # the lock, which then lasts up to that command's end, so allow it some seconds.
-  if ! flock -w 15 "$WATCH_LOCK" true; then
+  local waited=0
+  wait_for_lock 15 || waited=$?
+  if [ "$waited" = 2 ]; then
+    echo "install: another install has already started the new course watchdog"
+    return 0
+  fi
+  if [ "$waited" != 0 ]; then
     # Re-checked after a fresh pin: only what is still the same watchdog is killed, and only if
     # the launcher it runs can never exec another program (the helper prints "kept PID" if not).
     local killed
@@ -135,7 +157,13 @@ restart_watchdog() {
         "another program, so it was not killed; it restarts at the next login" >&2
       return 0
     fi
-    if ! flock -w 5 "$WATCH_LOCK" true; then
+    waited=0
+    wait_for_lock 5 || waited=$?
+    if [ "$waited" = 2 ]; then
+      echo "install: another install has already started the new course watchdog"
+      return 0
+    fi
+    if [ "$waited" != 0 ]; then
       echo "install: WARN the course watchdog's lock is still held; it restarts at the next login" >&2
       return 0
     fi

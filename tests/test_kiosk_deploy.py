@@ -1201,6 +1201,88 @@ def test_the_exec_scan_follows_the_watch_path_and_skips_here_documents():
     assert not helper.can_exec(heredoc)
 
 
+def _install_function(name):
+    """One function of install.sh, as text, to run on its own."""
+    text = INSTALL.read_text(encoding="utf-8")
+    start = text.index(f"\n{name}() {{\n") + 1
+    return text[start:text.index("\n}\n", start) + 3]
+
+
+@pytest.mark.parametrize("home", ["plain", "with a space"])
+@pytest.mark.parametrize("form", ["separate", "joined"])
+@pytest.mark.parametrize("profile, kiosk", [
+    (".config/chromium-kiosk", True),
+    (".config/chromium-kiosk-old", False),
+    (".config/chromium-kiosk2", False),
+    (".config/chromium-kiosk/../other", False),
+])
+def test_only_the_whole_kiosk_profile_flag_marks_the_kiosk_browser(tmp_path, home, form, profile,
+                                                                   kiosk):
+    """The kiosk is the browser on exactly ~/.config/chromium-kiosk, never one whose profile path
+    merely starts with it, whether Chromium shows its arguments one by one or as one title."""
+    home_dir = tmp_path / ("learner home" if home != "plain" else "home")
+    home_dir.mkdir()
+    flag = f"--user-data-dir={home_dir}/{profile}"
+    loop = f"while :; do {shutil.which('sleep')} 1; done"
+    bash = shutil.which("bash")
+    if form == "separate":
+        argv = [bash, "-c", loop, "chromium", "--kiosk", flag, "--app=http://127.0.0.1:8008"]
+    else:
+        argv = [f"/usr/lib/chromium/chromium --kiosk {flag} --app=http://127.0.0.1:8008",
+                "-c", loop]
+    proc = subprocess.Popen(argv, executable=bash)
+    try:
+        assert _wait_for(lambda: flag.encode() in Path(f"/proc/{proc.pid}/cmdline").read_bytes())
+        check = subprocess.run([bash, "-c", _install_function("is_kiosk") + 'is_kiosk "$1"',
+                                "is_kiosk", str(proc.pid)],
+                               env={"HOME": str(home_dir), "PATH": "/usr/bin:/bin"},
+                               capture_output=True, text=True, timeout=10)
+        assert (check.returncode == 0) is kiosk, (argv, check.stderr)
+    finally:
+        _end(proc)
+
+
+def test_a_second_install_that_finds_the_new_watchdog_already_started_says_so_quietly(box):
+    """Two installs at once: both stop the old watchdog, one starts the new one, and the other
+    then finds the lock held by it. That is the hand-over done, not a stuck lock: no WARN, no
+    second watchdog, and no 20 s wait. Staged here by an old watchdog that, on TERM, starts its
+    successor (a watchdog by every check) before it exits."""
+    box.alive.touch()
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    pids = box.log.parent / "watchdog-pids"
+    real_sleep = shutil.which("sleep")
+    # The successor inherits the locked fd 9, so the lock is never free in between, as when the
+    # other install's new watchdog took it first.
+    _old_install(box,
+                 "#!/bin/bash\n"
+                 'if [ -z "${SUCCESSOR:-}" ]; then\n'
+                 f'  exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
+                 "fi\n"
+                 f"echo $$ >> {pids}\n"
+                 f"trap 'SUCCESSOR=1 {shutil.which('bash')} \"$0\" watch & exit 0' TERM\n"
+                 f"while :; do {real_sleep} 0.2; done\n")
+    old = _watchdog(box, _checkout_launcher(box))
+    try:
+        assert _wait_for(lambda: len(_pids(pids)) == 1)
+        start = time.time()
+        result = box.run(_install(box), timeout=40)
+        took = time.time() - start
+        assert result.returncode == 0, result.stderr
+        assert "WARN" not in result.stderr, result.stderr
+        assert any("already started the new course watchdog" in ln
+                   for ln in result.stdout.splitlines()), result.stdout
+        assert box.calls("setsid") == []
+        old.wait(timeout=10)
+        [_, successor] = _pids(pids)
+        assert _alive(successor) and not _lock_is_free(box)
+        assert took < 10, took
+    finally:
+        _end(old)
+        _kill_all(_pids(pids))
+
+
 def test_install_never_kills_a_reused_pid_whose_start_time_differs(box):
     """A reused PID cannot be staged without privileges, so the start time stands in: at the
     SIGKILL re-check, /proc/PID/stat reports another start time for the pinned PID, as it would
