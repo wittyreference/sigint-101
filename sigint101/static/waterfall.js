@@ -994,6 +994,13 @@
     return Promise.resolve();
   }
 
+  function start() { autoTuneToBand().then(tick); }
+
   say("checking", "sample", "Checking receiver…");
-  autoTuneToBand().then(tick);
+  // The band tune follows the lesson's restore, as it did when the restore blocked the page.
+  // On a lesson page the first poll waits for the lesson's tuning (lesson-tuning.js), so it
+  // reads the lesson's frequency, not the one the rack left; past the timeout it polls anyway
+  // and the page says the radios are still being tuned. The rack starts at once.
+  if (window.LessonTuning) window.LessonTuning.ready.then(start);
+  else start();
 })();

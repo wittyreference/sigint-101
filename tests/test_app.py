@@ -1097,7 +1097,8 @@ def test_a_tuning_post_for_a_lesson_the_course_lacks_is_refused_and_changes_noth
 
 
 def test_the_lesson_page_restores_its_tuning_before_any_panel_starts_polling(tmp_path):
-    # lesson-tuning.js posts synchronously, so it must load ahead of every panel script.
+    # lesson-tuning.js sets up the gate the panels' first polls wait on, so it must load ahead of
+    # every panel script.
     with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
         html = client.get("/lesson/1").text
     tag = re.search(r'<script src="/static/lesson-tuning\.js"([^>]*)>', html)
@@ -1106,6 +1107,25 @@ def test_the_lesson_page_restores_its_tuning_before_any_panel_starts_polling(tmp
     first_panel = min(html.index(f'src="/static/{name}.js"')
                       for name in ("decoder-panel", "waterfall", "decode", "aprs"))
     assert tag.start() < first_panel
+
+
+def test_the_lesson_page_has_a_note_that_says_when_its_tuning_is_late_or_refused(tmp_path):
+    # lesson-tuning.js writes into it once the panels stop waiting for a slow restore, or when the
+    # restore is refused. Hidden until then: a restore that worked has nothing to say.
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        html = client.get("/lesson/1").text
+    note = re.search(r"<[a-z]+[^>]*\bdata-lesson-tuning\b[^>]*>", html)
+    assert note, "the lesson page has no tuning note for lesson-tuning.js to fill"
+    assert 'role="status"' in note.group(0)
+    assert re.search(r"\shidden\b", note.group(0))
+
+
+def test_the_rack_never_restores_a_lessons_tuning(tmp_path):
+    # The rack's polls never wait on, or apply, a lesson's tuning: it loads no lesson-tuning.js.
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        html = client.get("/operate/ism").text
+    assert 'src="/static/decode.js"' in html
+    assert "lesson-tuning" not in html
 
 
 # Every page the render checks load (tools/render/*.py), in the order make render-check runs them.

@@ -554,6 +554,22 @@ body {
   white-space: nowrap;
 }
 
+/* The lesson's tuning note (lesson-tuning.js): shown only while a slow restore is still running
+   or after one was refused. It takes what room the rail has left and ends in an ellipsis rather
+   than pushing the steps off the 800 px screen; the whole line rides in its title. */
+.rail__tuning {
+  flex: 0 1 auto;
+  min-width: 9ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.2;
+  text-transform: uppercase;
+  color: var(--warn);
+  white-space: nowrap;
+}
+
 /* ===== Stage view ========================================================= */
 .stage {
   flex: 1 1 auto;
