@@ -660,6 +660,13 @@ _FALSE_BEACON_HOLDING = re.compile(
     r"(?:wi-?fi\s+)?(?:beacons?|metadata|headers?)\b[^.?!;]*\b(?:lawful|legal)\b",
     re.I,
 )
+# F7: Wi-Fi payload IS carried by radio; Joffe's point is the statute's term "radio communication"
+# (18 USC 2510(16)). A bare "not radio" is false as physics; a quoted "radio" or the full term
+# is not.
+_BARE_NOT_RADIO = re.compile(
+    r"\b(?:not|isn['’]t|aren['’]t|never)\s+(?:an?\s+)?radio\b(?!\s*-|\s+communications?\b)",
+    re.I,
+)
 
 
 def _check_joffe_explain(explain: str) -> list[str]:
@@ -703,7 +710,28 @@ def _check_joffe_overstatements(all_text: str) -> list[str]:
         issues.append("presents one circuit's ruling as nationwide settled federal law")
     if _FALSE_BEACON_HOLDING.search(all_text):
         issues.append("claims Joffe held beacon metadata lawful")
+    if _BARE_NOT_RADIO.search(all_text):
+        issues.append("says payload is not radio (false as physics); name the statute's term")
     return issues
+
+
+def test_payload_radio_guard_rejects_bare_not_radio_and_accepts_the_statutory_term():
+    # F7: restatements of the defect must fail.
+    for defect in (
+        "Payload is not radio; scan metadata",
+        "Open Wi-Fi payload isn't radio, so a survey may read it.",
+        "Wi-Fi data is not a radio signal under Joffe.",
+        "Payload: not radio. This panel reads metadata.",
+    ):
+        assert _check_joffe_overstatements(defect), defect
+    # Fair wordings that mark or name the statute's term must pass.
+    for fair in (
+        'Not "radio communication"; metadata only',
+        'Payload is not "radio"; scan metadata',
+        "Payload is not a radio communication under 18 USC 2510(16); this panel stops at metadata.",
+        'Wi-Fi payload rides on radio waves, but it is not a "radio communication" (9th Cir.).',
+    ):
+        assert _check_joffe_overstatements(fair) == [], fair
 
 
 def test_joffe_claim_probe_rejects_round1_overstatements_and_accepts_accurate_rewordings():
