@@ -303,8 +303,19 @@ def test_locks_gate_writer_transfer_and_cloexec(tmp_path):
 
 
 def test_installed_unit_blocks_every_start_during_the_copy(tmp_path, sealed_host_runtime):
+    from urllib.request import urlopen
+
     assert BASH, "bash is required"
     rt_dir, host_py = sealed_host_runtime
+    step_timeout = 45
+
+    def run_start_attempt(step, argv, *, env=None):
+        try:
+            return subprocess.run(
+                argv, env=env, capture_output=True, text=True, timeout=step_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(f"{step} timed out after {step_timeout}s") from exc
 
     # Main-side comparison: deploy/kiosk/start-kiosk.sh open has no mutation gate and calls
     # `systemctl --user start sigint101.service` immediately even while an update lock is held.
@@ -326,12 +337,10 @@ def test_installed_unit_blocks_every_start_during_the_copy(tmp_path, sealed_host
         legacy_bin / "curl",
         f'if [ ! -e "{curl_flag}" ]; then touch "{curl_flag}"; exit 1; fi; exit 0',
     )
-    r_leg = subprocess.run(
+    r_leg = run_start_attempt(
+        "legacy desktop open",
         [BASH, str(REPO_ROOT / "deploy" / "kiosk" / "start-kiosk.sh"), "open"],
         env=legacy_env,
-        capture_output=True,
-        text=True,
-        timeout=10,
     )
     assert r_leg.returncode == 0
     assert "systemctl --user start sigint101.service" in legacy_log.read_text(encoding="utf-8")
@@ -379,33 +388,27 @@ def test_installed_unit_blocks_every_start_during_the_copy(tmp_path, sealed_host
     try:
         with acquire_mutation_gate(root):
             # (a) Unit/manual/restart launch via dispatcher is refused with EXIT_GATE_BUSY.
-            for _ in range(2):
-                d_res = subprocess.run(
+            for attempt in range(1, 3):
+                d_res = run_start_attempt(
+                    f"dispatcher start with mutation gate held (attempt {attempt})",
                     [sys.executable, "-B", str(fx["dispatcher"]), "--root", str(root), "serve"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
                 )
                 assert d_res.returncode == EXIT_GATE_BUSY, (d_res.returncode, d_res.stderr)
                 assert "busy" in d_res.stderr.lower() or "maintenance" in d_res.stderr.lower()
 
             # (b) Managed desktop icon opener stands down while mutation gate is held.
-            open_res = subprocess.run(
+            open_res = run_start_attempt(
+                "managed desktop open with mutation gate held",
                 [BASH, str(MANAGED_DIR / "sigint101-course-managed.sh"), "open"],
                 env=desk_env,
-                capture_output=True,
-                text=True,
-                timeout=10,
             )
             assert open_res.returncode == EXIT_GATE_BUSY, (open_res.returncode, open_res.stderr)
 
             # (c) Managed watchdog stands down while mutation gate is held.
-            watch_res = subprocess.run(
+            watch_res = run_start_attempt(
+                "managed desktop watch with mutation gate held",
                 [BASH, str(MANAGED_DIR / "sigint101-course-managed.sh"), "watch"],
                 env=desk_env,
-                capture_output=True,
-                text=True,
-                timeout=10,
             )
             assert watch_res.returncode == 0
             assert not managed_log.exists() or managed_log.read_text(encoding="utf-8") == ""
@@ -426,25 +429,30 @@ def test_installed_unit_blocks_every_start_during_the_copy(tmp_path, sealed_host
         stderr=subprocess.PIPE,
     )
     try:
-        import urllib.request
-
         url = f"http://{fx['host']}:{fx['port']}/api/hardware"
-        deadline = time.monotonic() + 12.0
+        deadline = time.monotonic() + step_timeout
         body = None
-        while time.monotonic() < deadline:
+        last_error = "no response"
+        while (remaining := deadline - time.monotonic()) > 0:
             if proc.poll() is not None:
                 raise AssertionError(
-                    f"managed launcher exited ({proc.returncode}): "
+                    f"managed launcher exited before becoming ready ({proc.returncode}): "
                     f"{proc.stderr.read().decode('utf-8', 'replace')}"
                 )
             try:
-                with urllib.request.urlopen(url, timeout=1.0) as resp:
+                # /api/hardware may itself wait up to 5s for the USB probe.
+                with urlopen(url, timeout=min(10.0, remaining)) as resp:
                     if resp.status == 200:
                         body = json.loads(resp.read().decode("utf-8"))
                         break
-            except OSError:
-                time.sleep(0.1)
-        assert body is not None, "managed console did not become reachable after gate release"
+                    last_error = f"HTTP {resp.status}"
+            except OSError as exc:
+                last_error = str(exc)
+            time.sleep(0.1)
+        assert body is not None, (
+            f"managed console readiness after gate release timed out after {step_timeout}s "
+            f"(served marker present: {served_marker.is_file()}, last error: {last_error})"
+        )
         assert served_marker.is_file(), "serving marker must be written before listening"
         marker_data = json.loads(served_marker.read_text(encoding="utf-8"))
         assert marker_data["operation_id"] == "op-gate-1"
@@ -456,8 +464,20 @@ def test_installed_unit_blocks_every_start_during_the_copy(tmp_path, sealed_host
         with acquire_mutation_gate(root, blocking=False):
             pass
     finally:
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=10)
+        proc.terminate()
+        try:
+            proc.wait(timeout=step_timeout)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            try:
+                proc.wait(timeout=step_timeout)
+            except subprocess.TimeoutExpired as kill_exc:
+                raise AssertionError(
+                    f"managed launcher SIGKILL reap timed out after {step_timeout}s"
+                ) from kill_exc
+            raise AssertionError(
+                f"managed launcher shutdown timed out after {step_timeout}s"
+            ) from exc
 
 
 # --- 3. Writer cgroup & listener must be gone before snapshot (§8) -----------------------------
