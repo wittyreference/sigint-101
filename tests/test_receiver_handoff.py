@@ -389,39 +389,124 @@ def test_shutdown_cancels_grace_and_releases_other_radios_while_reporting_is_blo
 
 
 def test_shutdown_interpreter_exits_at_deadline_with_a_stalled_worker(tmp_path):
+    """Two receivers and a store never return; shutdown still keeps its one deadline and exits.
+
+    The deadline is checked against the clock readings finish_console itself makes, which the
+    child records, not against wall time in this process: child start-up, interpreter teardown
+    and coverage writes on a loaded machine can take seconds and are not what this proves. The
+    guard below only catches a hang.
+    """
+    import json
+
     code = """
 import asyncio
-import threading
-from pathlib import Path
+import json
 import sys
-from sigint101 import app
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+from sigint101 import app, exam, radio_control
 from tests.test_app import _client
 
-app.SHUTDOWN_TOTAL_S = 0.4
-class Flock:
-    def stop(self):
-        print('worker parked', flush=True)
+app.SHUTDOWN_TOTAL_S = float(sys.argv[2])
+GUARD_S = float(sys.argv[3])
+parked = {name: threading.Event() for name in ("flock", "rayhunter", "exam")}
+phase, reads, unreached = [None], [], []
+
+
+def stall(name):
+    def park(*_):
+        parked[name].set()
         threading.Event().wait()
+    return park
+
+
+class Flock:
+    stop = stall("flock")
+
+
+class Rayhunter:
+    stop = stall("rayhunter")
+
+
+exam.ExamStore.close = stall("exam")
+
+
+def monotonic():
+    # Each later read waits until the workers of its phase are parked, so every wait is sure to
+    # be on a stalled worker however late a loaded machine runs it; the time is read after that.
+    if reads:
+        names = ("flock", "rayhunter") if phase[0] == "drain" else ("exam",)
+        unreached.extend(name for name in names if not parked[name].wait(GUARD_S))
+    now = time.monotonic()
+    reads.append((phase[0], now))
+    return now
+
+
+radio_control.time = SimpleNamespace(monotonic=monotonic)
+seal = radio_control.ReceptionSink.seal
+
+
+def sealed(sink):
+    seal(sink)
+    phase[0] = "close"
+
+
+radio_control.ReceptionSink.seal = sealed
+finish = app.finish_console
+
+
+async def finish_console(*args):
+    phase[0] = "drain"
+    return await finish(*args)
+
+
+app.finish_console = finish_console
+
 
 async def run():
-    console = _client(Path(sys.argv[1]), flock_factory=Flock).app
+    console = _client(Path(sys.argv[1]), flock_factory=Flock, rayhunter_factory=Rayhunter).app
     async with console.router.lifespan_context(console):
         pass
+    return console.state.shutdown_errors
 
-asyncio.run(run())
-print('lifespan exited', flush=True)
+
+errors = asyncio.run(run())
+print(json.dumps({"reads": reads, "unreached": unreached, "errors": errors}), flush=True)
 """
-    with subprocess.Popen([sys.executable, "-c", code, str(tmp_path)],
+
+    def gave_up_at(reads, phase, until):
+        # Every read before the last came before ``until``; the last, which ended the wait, after.
+        times = [now for name, now in reads if name == phase]
+        return bool(times) and times[-1] >= until and all(now < until for now in times[:-1])
+
+    total, guard = 0.4, 10
+    with subprocess.Popen([sys.executable, "-c", code, str(tmp_path), str(total), str(guard)],
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         try:
-            assert select.select([proc.stdout], [], [], 8)[0], "shutdown never reached the worker"
-            assert proc.stdout.readline() == b"worker parked\n"
-            out, err = proc.communicate(timeout=1.4)
-            assert proc.returncode == 0, err.decode()
-            assert b"lifespan exited" in out
+            assert select.select([proc.stdout], [], [], 6 * guard)[0], "shutdown hung"
+            try:
+                out, err = proc.communicate(timeout=6 * guard)
+            except subprocess.TimeoutExpired:
+                pytest.fail("the interpreter did not exit with stalled workers")
         finally:
             if proc.poll() is None:
                 proc.kill()
+    assert proc.returncode == 0, err.decode()
+    report = json.loads(out.decode().splitlines()[-1])
+    assert report["unreached"] == [], "a stalled worker never started"
+    (first_phase, start), *reads = report["reads"]
+    assert first_phase == "drain"
+    # One deadline from the first read, as finish_console sets it: the receivers get all but a
+    # quarter of it (one second at most), and the stores close by that same deadline.
+    deadline = start + total
+    drain_end = deadline - min(1.0, total / 4)
+    assert gave_up_at(reads, "drain", drain_end), reads
+    assert gave_up_at(reads, "close", deadline), reads
+    assert {"flock: shutdown still pending", "rayhunter: shutdown still pending",
+            "exam: close still pending"} <= set(report["errors"])
 
 
 def test_receiver_shutdown_times_out_waiting_for_a_reaped_run_to_report(monkeypatch):

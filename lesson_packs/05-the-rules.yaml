@@ -92,9 +92,9 @@ sort:
     why: "The scanner rule governs certification and sale, not owning an SDR."
     cite: "47 CFR 15.121"
   - key: ham-tx-unlicensed
-    text: "Key up and transmit on a local 2-meter amateur repeater with no amateur licence."
+    text: "From your own handheld, with no ham licence, call a licensed friend on 2-meter simplex."
     answer: illegal
-    why: "Using a ham repeater requires an FCC amateur licence grant."
+    why: "An amateur station may transmit only under a licensed ham's physical control."
     cite: "47 USC 301; 47 CFR 97.5(a)"
   - key: pocsag-words
     text: "Decode and read the text of a commercial carrier's unencrypted POCSAG pager messages."
@@ -143,8 +143,8 @@ sources:
     url: "https://cdn.ca9.uscourts.gov/datastore/general/2013/12/27/11-17483_opinion122713.pdf"
     read: "2026-11-27"
   - title: "47 U.S.C. 301 — License for radio communication or transmission of energy"
-    url: "https://www.govinfo.gov/app/details/USCODE-2023-title47/USCODE-2023-title47-chap5-subchapIII-partI-sec301"
-    read: "2026-11-27"
+    url: "https://www.govinfo.gov/content/pkg/USCODE-2023-title47/html/USCODE-2023-title47-chap5-subchapIII-partI-sec301.htm"
+    read: "2026-11-28"
   - title: "47 U.S.C. 605 — Unauthorized publication or use of communications"
     url: "https://www.govinfo.gov/app/details/USCODE-2023-title47/USCODE-2023-title47-chap5-subchapVI-sec605"
     read: "2026-11-27"
@@ -152,8 +152,8 @@ sources:
     url: "https://www.ecfr.gov/current/title-47/section-15.121"
     read: "2026-11-27"
   - title: "47 CFR 97.5 — Amateur Radio Service station license required"
-    url: "https://www.ecfr.gov/current/title-47/section-97.5"
-    read: "2026-11-27"
+    url: "https://www.ecfr.gov/current/title-47/chapter-I/subchapter-D/part-97/subpart-A/section-97.5"
+    read: "2026-11-28"
   - title: "47 CFR 95.305 — Personal Radio Services authorization (FRS licence-by-rule)"
     url: "https://www.ecfr.gov/current/title-47/section-95.305"
     read: "2026-11-27"

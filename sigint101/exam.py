@@ -221,12 +221,23 @@ class ExamStore:
     );
     """
 
-    def __init__(self, db_path=None):
+    def __init__(self, db_path=None, *, managed: bool = False, read_only: bool = False):
         self.db_path = str(db_path) if db_path is not None else self.DEFAULT_DB_PATH
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False + a lock, matching progress.py: the FastAPI threadpool
         # touches this from a different thread than the one that opened it.
         self._lock = threading.Lock()
+        if managed:
+            from .migrations import EXAM_SCHEMA_VERSION, reviewed_signatures
+            from .storage import open_managed_sqlite
+
+            self._conn = open_managed_sqlite(
+                self.db_path,
+                expected_version=EXAM_SCHEMA_VERSION,
+                expected_signature=reviewed_signatures("exam")["v1"],
+                read_only=read_only,
+            )
+            return
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:

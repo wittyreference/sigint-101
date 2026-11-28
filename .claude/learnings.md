@@ -10,6 +10,35 @@ When the request wakes, the calibration may have returned with its child still a
 **How to apply.** Store an unconfirmed calibration child before releasing the reservation.
 Check it before joining the queue and again after acquiring the reservation. Confirm the
 child's exit before starting the next receiver.
+## 2026-11-28: A blocked receive can outlive closing its UDP descriptor
+**Finding.** A reader blocked in recvmsg can still hold a kernel reference while another thread
+closes the descriptor. A sender may briefly see the receiver as open.
+**How to apply.** To test the companion's closed-peer send error, wake the reader and wait for it
+to return before telling the child to send. The child can stay alive until the send is observed.
+
+## 2026-11-28: Provision keeps its loaded recipes after pulling the course
+**Finding.** A running provision script pulls the checkout before building decoders, but its
+build functions still come from the script that started the run.
+**How to apply.** A decoder needed on that same run can be provisioned by the updated kiosk
+installer. Update the server unit so the old script sees a difference and invokes that installer.
+## 2026-11-28: setting the first Meshtastic region can enable transmit
+**Finding.** The firmware enables transmit when a LoRa write moves the region off UNSET.
+The region change schedules a reboot. The local CLI writes the whole LoRa config and can
+return before the change is visible.
+[Firmware region handling](https://github.com/meshtastic/firmware/blob/6d41e279f1f5/src/modules/AdminModule.cpp#L816-L839)
+[Firmware save and reboot](https://github.com/meshtastic/firmware/blob/6d41e279f1f5/src/modules/AdminModule.cpp#L1364-L1374)
+[CLI config write](https://github.com/meshtastic/python/blob/2.7.11/meshtastic/node.py#L192-L210)
+[CLI acknowledgment handling](https://github.com/meshtastic/python/blob/2.7.11/meshtastic/__main__.py#L1186-L1190)
+**How to apply.** Read the enabled state first. If it was off, wait for the new region before
+restoring it and confirm the restored state. Retry both the restore and its readback across a
+daemon restart. Keep the original state across an interrupted write.
+
+## 2026-11-27: Meshtastic's radio power value is narrower than its protobuf field
+**Finding.** The LoRa protobuf accepts a signed 32-bit `tx_power`. The firmware stores it in a
+signed byte before interpreting zero as automatic power. For example, a value of -226 can become
+30 after narrowing. [Meshtastic RadioInterface](https://github.com/meshtastic/firmware/blob/master/src/mesh/RadioInterface.cpp)
+**How to apply.** Validate the representable range and reject zero before comparing a requested
+power against a module ceiling. Keep the configured value's readback separate from RF measurement.
 
 ## 2026-11-27: xdist workers still share loopback ports
 **Finding.** Worker processes isolate module patches and pytest gives each worker a temporary
