@@ -1607,12 +1607,18 @@ def test_saved_state_validates_stamps_retrieval_challenges_and_challenge_passes(
     from sigint101.exam import load_pool
     from sigint101.lessons import load_lessons
     from sigint101.migrations import migrate_store_copy
-    from sigint101.validation import validate_saved_state
+    from sigint101.validation import (
+        CHECKED_EXAM_TABLES,
+        CHECKED_PROGRESS_TABLES,
+        validate_saved_state,
+    )
 
     lessons = load_lessons(REPO_ROOT / "lesson_packs")
     pool = load_pool()
-    # Pick a lesson with a check block and one without a check block.
-    with_check = next(lid for lid, les in sorted(lessons.items()) if les.check)
+    # Pick two lessons with a check block and one without a check block.
+    with_checks = [lid for lid, les in sorted(lessons.items()) if les.check]
+    with_check = with_checks[0]
+    with_check_2 = with_checks[1]
     without_check = next(lid for lid, les in sorted(lessons.items()) if not les.check)
     valid_choice = lessons[with_check].check["choices"][0]["key"]
 
@@ -1640,27 +1646,9 @@ def test_saved_state_validates_stamps_retrieval_challenges_and_challenge_passes(
         scratch_dir=scratch / "e",
     )
 
-    # Add retrieval, challenges, and challenge_passes tables directly to exercise PR 4's validator
-    # across both current and post-merge v1 schemas.
+    # Seed valid rows strictly using origin/main's REAL v1 schema (no hand-crafted tables!).
     conn = sqlite3.connect(gen / "progress.db")
     try:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS retrieval ("
-            "lesson_id INTEGER PRIMARY KEY, box INTEGER NOT NULL DEFAULT 1, "
-            "last_seen REAL NOT NULL, seen INTEGER NOT NULL DEFAULT 0, "
-            "correct INTEGER NOT NULL DEFAULT 0, last_choice TEXT)"
-        )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS challenges ("
-            "unit_id INTEGER PRIMARY KEY, started_at REAL NOT NULL, "
-            "window_s INTEGER NOT NULL, instrument TEXT)"
-        )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS challenge_passes ("
-            "unit_id INTEGER NOT NULL, passed_at REAL NOT NULL, "
-            "instrument TEXT NOT NULL, window_s INTEGER NOT NULL DEFAULT 600)"
-        )
-        # Seed valid rows first.
         conn.execute(
             "INSERT INTO stamps(instrument, first_ts, count, provenance, digest) "
             "VALUES('ism', 1700000000.0, 1, '{}', 'aa')"
@@ -1671,22 +1659,29 @@ def test_saved_state_validates_stamps_retrieval_challenges_and_challenge_passes(
             (with_check, valid_choice),
         )
         conn.execute(
-            "INSERT INTO challenges(unit_id, started_at, window_s, instrument) "
-            "VALUES(4, 1700000000.0, 600, 'ism')"
+            "INSERT INTO challenges(unit_id, started_at, window_s) "
+            "VALUES(4, 1700000000.0, 900)"
         )
         conn.execute(
-            "INSERT INTO challenge_passes(unit_id, passed_at, instrument, window_s) "
-            "VALUES(4, 1700000100.0, 'ism', 600)"
+            "INSERT INTO challenge_passes("
+            "unit_id, started_at, passed_at, instrument, provenance, digest"
+            ") VALUES(4, 1700000000.0, 1700000100.0, 'ism', '{}', 'dd')"
+        )
+        conn.execute(
+            "INSERT INTO replays_seen(instrument, first_ts, count, recording, digest) "
+            "VALUES('ism', 1700000000.0, 1, 'ism-sensor-demo', 'rr')"
         )
         conn.commit()
     finally:
         conn.close()
 
-    def fake_challenge_for(uid: int):
-        return object() if uid in (4, 5) else None
-
+    # Trace SQL queries to prove every table in CHECKED_PROGRESS/EXAM_TABLES is read!
+    prog_sql: list[str] = []
+    exam_sql: list[str] = []
     prog_ro = Progress(gen / "progress.db", managed=False)
     exam_ro = ExamStore(gen / "exam.db", managed=True, read_only=True)
+    prog_ro._conn.set_trace_callback(prog_sql.append)
+    exam_ro._conn.set_trace_callback(exam_sql.append)
     try:
         assert (
             validate_saved_state(
@@ -1694,15 +1689,24 @@ def test_saved_state_validates_stamps_retrieval_challenges_and_challenge_passes(
                 exam_pool=pool,
                 progress=prog_ro,
                 exam_store=exam_ro,
-                challenge_for_fn=fake_challenge_for,
             )
             == []
         )
     finally:
+        prog_ro._conn.set_trace_callback(None)
+        exam_ro._conn.set_trace_callback(None)
         prog_ro.close()
         exam_ro.close()
 
-    # Now inject bad rows into stamps, retrieval, challenges, and challenge_passes.
+    prog_trace = "\n".join(prog_sql)
+    exam_trace = "\n".join(exam_sql)
+    for tbl in CHECKED_PROGRESS_TABLES:
+        assert f"FROM {tbl}" in prog_trace, f"checked progress table {tbl!r} was never queried!"
+    for tbl in CHECKED_EXAM_TABLES:
+        assert f"FROM {tbl}" in exam_trace, f"checked exam table {tbl!r} was never queried!"
+
+    # Inject bad rows across stamps, retrieval (unknown choice on check lesson, empty last_choice,
+    # lesson without check, out-of-range box, unknown lesson), challenges, passes, replays_seen.
     conn = sqlite3.connect(gen / "progress.db")
     try:
         conn.execute(
@@ -1711,20 +1715,30 @@ def test_saved_state_validates_stamps_retrieval_challenges_and_challenge_passes(
         )
         conn.execute(
             "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
-            "VALUES(?, 99, 1700000000.0, 1, 0, 'bogus_choice')",
+            "VALUES(?, 1, 1700000000.0, 1, 0, 'bogus_choice_on_check_lesson')",
+            (with_check_2,),
+        )
+        conn.execute(
+            "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
+            "VALUES(?, 99, 1700000000.0, 1, 0, '')",
             (without_check,),
         )
         conn.execute(
             "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
-            "VALUES(9999, 1, 1700000000.0, 0, 0, '')"
+            "VALUES(9999, 1, 1700000000.0, 0, 0, NULL)"
         )
         conn.execute(
-            "INSERT INTO challenges(unit_id, started_at, window_s, instrument) "
-            "VALUES(1, 1700000000.0, 0, 'bogus_inst')"
+            "INSERT INTO challenges(unit_id, started_at, window_s) "
+            "VALUES(1, 1700000000.0, 0)"
         )
         conn.execute(
-            "INSERT INTO challenge_passes(unit_id, passed_at, instrument, window_s) "
-            "VALUES(2, 1700000100.0, 'bogus_inst', -5)"
+            "INSERT INTO challenge_passes("
+            "unit_id, started_at, passed_at, instrument, provenance, digest"
+            ") VALUES(2, 1700000000.0, 1700000100.0, 'bogus_pass_inst', '{}', 'ee')"
+        )
+        conn.execute(
+            "INSERT INTO replays_seen(instrument, first_ts, count, recording, digest) "
+            "VALUES('bogus_replay_inst', 1700000000.0, 0, '', '')"
         )
         conn.commit()
     finally:
@@ -1738,21 +1752,29 @@ def test_saved_state_validates_stamps_retrieval_challenges_and_challenge_passes(
             exam_pool=pool,
             progress=prog_ro2,
             exam_store=exam_ro2,
-            challenge_for_fn=fake_challenge_for,
         )
     finally:
         prog_ro2.close()
         exam_ro2.close()
 
     joined = "\n".join(errs)
-    assert "not_a_stamp_inst" in joined
-    assert f"lesson {without_check}" in joined
-    assert "9999" in joined
-    assert "box" in joined
-    assert "challenges" in joined
-    assert "window_s" in joined
-    assert "challenge_passes" in joined
-    assert "bogus_inst" in joined
+    assert "stamps references unknown instrument 'not_a_stamp_inst'" in joined
+    assert (
+        f"retrieval for lesson {with_check_2} has unknown last_choice "
+        "'bogus_choice_on_check_lesson'"
+    ) in joined
+    assert f"retrieval for lesson {without_check}, but lesson has no check" in joined
+    assert f"retrieval for lesson {without_check} has out-of-range box 99" in joined
+    assert (
+        f"retrieval for lesson {without_check} has blank last_choice" in joined
+        or "last_choice ''" in joined
+    )
+    assert "retrieval references unknown lesson_id 9999" in joined
+    assert "challenges references unit 1 with no challenge" in joined
+    assert "challenges for unit 1 has invalid window_s 0" in joined
+    assert "challenge_passes references unit 2 with no challenge" in joined
+    assert "challenge_passes for unit 2 references unknown instrument 'bogus_pass_inst'" in joined
+    assert "replays_seen references unknown instrument 'bogus_replay_inst'" in joined
 
 
 def test_trial_socket_peer_pid_check_rejects_mismatched_pid_and_accepts_match(tmp_path):

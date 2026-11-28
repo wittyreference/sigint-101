@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -77,6 +78,30 @@ def _render_managed_unit(
     return rendered
 
 
+def _probe_checkout_git_value(checkout: Path, *git_args: str) -> str | None:
+    if not (checkout / ".git").exists():
+        return None
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(checkout),
+        "LANG": "C.UTF-8",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    res = subprocess.run(
+        ["git", "-C", str(checkout), *git_args],
+        env=env,
+        capture_output=True,
+        text=True,
+        close_fds=True,
+        timeout=10,
+    )
+    if res.returncode != 0:
+        return None
+    val = res.stdout.strip()
+    return val or None
+
+
 def enroll_legacy_fixture(
     *,
     repo_root: str | Path,
@@ -90,6 +115,9 @@ def enroll_legacy_fixture(
     home: str | Path,
     runtime_dir: str | Path,
     host_python: str | Path = "/usr/bin/python3",
+    trusted_remote: str | None = None,
+    legacy_commit: str | None = None,
+    requirements_sha256: str | None = None,
     host: str = "127.0.0.1",
     port: int = 8008,
     operation_id: str = "enroll-0001",
@@ -99,6 +127,7 @@ def enroll_legacy_fixture(
     reload_systemd: Callable[[], None] | None = None,
     drain_old_service: Callable[[], None] | None = None,
     on_boundary: Callable[[str], None] | None = None,
+    inherited_gate_fd: int | None = None,
     bench_marker_checker: Callable[[Path], None] = require_bench_marker,
 ) -> dict:
     """Run the ordered enrollment prerequisites in a fixture without touching live host paths.
@@ -118,6 +147,15 @@ def enroll_legacy_fixture(
     wrapper_file = Path(desktop_wrapper_path)
     managed_dir = repo / "deploy" / "managed"
 
+    resolved_remote = trusted_remote or _probe_checkout_git_value(
+        checkout, "config", "--get", "remote.origin.url"
+    )
+    resolved_commit = legacy_commit or _probe_checkout_git_value(checkout, "rev-parse", "HEAD")
+    req_file = checkout / "requirements.txt"
+    resolved_req_sha = requirements_sha256
+    if resolved_req_sha is None and req_file.is_file() and not req_file.is_symlink():
+        resolved_req_sha = hashlib.sha256(req_file.read_bytes()).hexdigest()
+
     # 1) Require closed kiosk page and deliberate Exit flag before changing anything.
     lister_kw = {"process_lister": kiosk_process_lister} if kiosk_process_lister is not None else {}
     require_kiosk_page_closed(home=home, **lister_kw)
@@ -126,7 +164,9 @@ def enroll_legacy_fixture(
 
     # 2) Create permanent lock inodes and hold exclusive mutation gate.
     ensure_lock_files(root, home=home)
-    with acquire_mutation_gate(root, blocking=False, home=home):
+    with acquire_mutation_gate(
+        root, blocking=False, inherited_gate_fd=inherited_gate_fd, home=home
+    ):
         # 3) Stage sealed dependency snapshot probed against host_python ABI (F4, U3).
         runtime_dir_path = root / "runtimes" / runtime_id
         if not runtime_dir_path.exists():
@@ -210,6 +250,11 @@ def enroll_legacy_fixture(
             "runtime_id": runtime_id,
             "legacy_checkout": str(checkout),
             "legacy_data_dir": str(data_dir),
+            "host_python": str(host_python),
+            "legacy_python": str(legacy_python),
+            "trusted_remote": resolved_remote,
+            "legacy_commit": resolved_commit,
+            "requirements_sha256": resolved_req_sha,
             "shims": shim_records,
         }
         _atomic_write_bytes(

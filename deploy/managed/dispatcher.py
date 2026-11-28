@@ -21,6 +21,7 @@ DEFAULT_BENCH_MARKER_PATH = Path("/etc/sigint101/bench-updater-allow.json")
 SHARED_GATE_FD_ENV = "SIGINT101_SHARED_GATE_FD"
 MUTATION_GATE_FD_ENV = "SIGINT101_MUTATION_GATE_FD"
 DISPATCH_COMMANDS = ("serve", "provision", "apply", "enroll", "recover", "check", "status")
+_CLI_PASSTHROUGH_ENV = ("PATH", "HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG")
 
 
 def _default_root() -> Path:
@@ -28,6 +29,17 @@ def _default_root() -> Path:
     if env_root:
         return Path(env_root)
     return Path.home() / DEFAULT_ROOT_REL
+
+
+def _read_host_machine_id() -> str | None:
+    for candidate in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")):
+        try:
+            text = candidate.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        except OSError:
+            continue
+    return None
 
 
 def _open_trusted_dir(path: str | Path, *, dir_fd: int | None = None, label: str) -> int:
@@ -121,13 +133,23 @@ def _verify_bench_marker(root: Path) -> None:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise RuntimeError("non-bench host refused: malformed bench marker") from exc
+
+    host_mid = _read_host_machine_id()
+    if not host_mid:
+        raise RuntimeError("non-bench host refused: host machine-id is unavailable")
+    marker_mid = data.get("machine_id") if isinstance(data, dict) else None
+    marker_root = data.get("updater_root") if isinstance(data, dict) else None
     if (
         not isinstance(data, dict)
         or data.get("format_version") != 1
         or data.get("purpose") != "sigint101-pr4-disposable-bench"
         or data.get("hostname") != socket.gethostname()
-        or not isinstance(data.get("updater_root"), str)
-        or Path(data["updater_root"]).resolve() != resolved_root
+        or not isinstance(marker_mid, str)
+        or marker_mid != host_mid
+        or not isinstance(marker_root, str)
+        or not os.path.isabs(marker_root)
+        or os.path.realpath(marker_root) != marker_root
+        or Path(marker_root) != resolved_root
     ):
         raise RuntimeError("non-bench host refused: bench marker does not match this host/root")
 
@@ -176,7 +198,6 @@ def main(argv: list[str] | None = None) -> int:
                 exp = os.lstat(root / "locks" / "mutation.lock")
                 if (st.st_dev, st.st_ino) != (exp.st_dev, exp.st_ino):
                     raise RuntimeError("inherited mutation gate FD does not match mutation.lock")
-                # F8: idempotently re-assert LOCK_EX|LOCK_NB to confirm the lock is actually held.
                 fcntl.flock(gate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             else:
                 gate_fd = _acquire_gate_fd(root, exclusive=exclusive)
@@ -206,14 +227,13 @@ def main(argv: list[str] | None = None) -> int:
         if not control_dir.is_dir() or control_dir.is_symlink():
             raise RuntimeError(f"selected control generation missing: {control_id}")
 
-        env = os.environ.copy()
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env["PYTHONPATH"] = str(control_dir)
-        if gate_fd is not None:
-            os.set_inheritable(gate_fd, True)
-            env[MUTATION_GATE_FD_ENV if exclusive else SHARED_GATE_FD_ENV] = str(gate_fd)
-
         if args.command == "serve":
+            env = os.environ.copy()
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env["PYTHONPATH"] = str(control_dir)
+            if gate_fd is not None:
+                os.set_inheritable(gate_fd, True)
+                env[SHARED_GATE_FD_ENV] = str(gate_fd)
             launcher_path = control_dir / "deploy" / "managed" / "launcher.py"
             if not launcher_path.is_file() or launcher_path.is_symlink():
                 raise RuntimeError(f"control launcher missing: {launcher_path}")
@@ -228,6 +248,17 @@ def main(argv: list[str] | None = None) -> int:
                 *args.extra,
             ]
         else:
+            # F8: isolate CLI dispatch from CWD (e.g. ~/sigint-101) with chdir(root) + -P -s
+            # so a local checkout's sigint101/ tree can never shadow ROOT/control/<id>.
+            env = {k: os.environ[k] for k in _CLI_PASSTHROUGH_ENV if k in os.environ}
+            env.setdefault("PATH", "/usr/bin:/bin")
+            env.setdefault("LANG", "C.UTF-8")
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env["PYTHONPATH"] = str(control_dir)
+            if gate_fd is not None:
+                os.set_inheritable(gate_fd, True)
+                env[MUTATION_GATE_FD_ENV] = str(gate_fd)
+            os.chdir(root)
             cli_args = (
                 ["provision", *args.extra]
                 if args.command == "provision"
@@ -236,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
             exec_argv = [
                 sys.executable,
                 "-B",
+                "-P",
+                "-s",
                 "-m",
                 "sigint101.updater_cli",
                 "--root",

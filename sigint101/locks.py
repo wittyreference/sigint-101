@@ -20,6 +20,7 @@ MUTATION_LOCK_NAME = "mutation.lock"
 WRITER_LOCK_NAME = "writer.lock"
 WRITER_LOCK_FD_ENV = "SIGINT101_WRITER_LOCK_FD"
 SHARED_GATE_FD_ENV = "SIGINT101_SHARED_GATE_FD"
+MUTATION_GATE_FD_ENV = "SIGINT101_MUTATION_GATE_FD"
 LOCK_PROTOCOL_VERSION = 1
 
 
@@ -185,17 +186,44 @@ def _acquire_lock_file(
     )
 
 
+def adopt_inherited_mutation_gate(
+    root: str | Path,
+    fd: int,
+    *,
+    home: str | Path | None = None,
+) -> LockHandle:
+    """Adopt an exclusive mutation-gate FD from dispatcher/shim and re-assert LOCK_EX (F8)."""
+    resolved_root = validate_updater_root(root, home=home)
+    os.set_inheritable(fd, False)
+    st = _verify_lock_fd(fd, label="inherited mutation gate")
+    expected_path = resolved_root / LOCK_DIR_NAME / MUTATION_LOCK_NAME
+    exp_st = os.lstat(expected_path)
+    if (st.st_dev, st.st_ino) != (exp_st.st_dev, exp_st.st_ino):
+        raise LockError("inherited mutation gate FD does not match ROOT/locks/mutation.lock")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            raise LockBusyError("inherited mutation gate FD does not hold mutation.lock") from exc
+        raise LockError(f"flock failed on inherited mutation gate: {exc}") from exc
+    return LockHandle(fd=fd, path=expected_path, st_dev=st.st_dev, st_ino=st.st_ino)
+
+
 @contextmanager
 def acquire_mutation_gate(
     root: str | Path,
     *,
     blocking: bool = False,
+    inherited_gate_fd: int | None = None,
     home: str | Path | None = None,
 ) -> Iterator[LockHandle]:
     """Hold the exclusive mutation gate (LOCK_EX on mutation.lock) with O_CLOEXEC."""
-    handle = _acquire_lock_file(
-        root, MUTATION_LOCK_NAME, lock_op=fcntl.LOCK_EX, blocking=blocking, home=home
-    )
+    if inherited_gate_fd is not None:
+        handle = adopt_inherited_mutation_gate(root, inherited_gate_fd, home=home)
+    else:
+        handle = _acquire_lock_file(
+            root, MUTATION_LOCK_NAME, lock_op=fcntl.LOCK_EX, blocking=blocking, home=home
+        )
     try:
         yield handle
     finally:

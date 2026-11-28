@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -46,6 +45,121 @@ from sigint101.validation import UnitSettings
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANAGED_DIR = REPO_ROOT / "deploy" / "managed"
+
+_RUNTIME_TOP_ENTRIES = (
+    "_yaml",
+    "annotated_doc",
+    "annotated_types",
+    "anyio",
+    "click",
+    "fastapi",
+    "h11",
+    "idna",
+    "jinja2",
+    "markupsafe",
+    "opentelemetry",
+    "pydantic",
+    "pydantic_core",
+    "sniffio",
+    "starlette",
+    "typing_extensions.py",
+    "typing_inspection",
+    "uvicorn",
+    "watchfiles",
+    "yaml",
+)
+
+_CACHED_SITE_PACKAGES: Path | None = None
+_CACHED_SEALED_RUNTIME: tuple[Path, str] | None = None
+
+
+def _chmod_tree_writable(root: Path) -> None:
+    if not root.exists():
+        return
+    for cur, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        cp = Path(cur)
+        try:
+            os.chmod(cp, 0o700)
+        except OSError:
+            pass
+        for d in dirs:
+            try:
+                os.chmod(cp / d, 0o700)
+            except OSError:
+                pass
+        for f in files:
+            fp = cp / f
+            if not fp.is_symlink():
+                try:
+                    os.chmod(fp, 0o600)
+                except OSError:
+                    pass
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_readonly_tmp_path(tmp_path: Path):
+    yield
+    _chmod_tree_writable(tmp_path)
+
+
+def _get_real_site_packages_source() -> Path:
+    global _CACHED_SITE_PACKAGES
+    if _CACHED_SITE_PACKAGES is not None and _CACHED_SITE_PACKAGES.is_dir():
+        return _CACHED_SITE_PACKAGES
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="sigint101_sp_src_"))
+    venv_sp = (
+        Path(sys.prefix)
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    for entry in _RUNTIME_TOP_ENTRIES:
+        src = venv_sp / entry
+        if not src.exists():
+            continue
+        dst = base / entry
+        if src.is_dir():
+            shutil.copytree(
+                src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
+            )
+        else:
+            shutil.copy2(src, dst)
+    _CACHED_SITE_PACKAGES = base
+    return base
+
+
+def _get_cached_sealed_runtime() -> tuple[Path, str]:
+    global _CACHED_SEALED_RUNTIME
+    if _CACHED_SEALED_RUNTIME is not None and _CACHED_SEALED_RUNTIME[0].is_dir():
+        return _CACHED_SEALED_RUNTIME
+    import tempfile
+
+    from sigint101.runtime import probe_python_abi, stage_sealed_runtime
+
+    sp_src = _get_real_site_packages_source()
+    host_py = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+    base = Path(tempfile.mkdtemp(prefix="sigint101_rt_cached_"))
+    rt_dir = base / "rt-0001"
+    stage_sealed_runtime(sp_src, rt_dir, runtime_id="rt-0001", python_abi=probe_python_abi(host_py))
+    _CACHED_SEALED_RUNTIME = (rt_dir, host_py)
+    return _CACHED_SEALED_RUNTIME
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_cached_sp_src():
+    yield
+    global _CACHED_SITE_PACKAGES, _CACHED_SEALED_RUNTIME
+    if _CACHED_SEALED_RUNTIME is not None:
+        base = _CACHED_SEALED_RUNTIME[0].parent
+        _chmod_tree_writable(base)
+        shutil.rmtree(base, ignore_errors=True)
+        _CACHED_SEALED_RUNTIME = None
+    if _CACHED_SITE_PACKAGES is not None:
+        _chmod_tree_writable(_CACHED_SITE_PACKAGES)
+        shutil.rmtree(_CACHED_SITE_PACKAGES, ignore_errors=True)
+        _CACHED_SITE_PACKAGES = None
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -321,10 +435,14 @@ def _setup_enrolled_legacy_box(tmp_path: Path) -> dict:
     legacy_data = checkout / "data"
     _seed_legacy_generation(legacy_data)
 
-    # Create a tiny site-packages snapshot for runtime staging.
-    sp_src = tmp_path / "sp_src"
-    sp_src.mkdir()
-    (sp_src / "_sealed_ok.py").write_text("OK = True\n", encoding="utf-8")
+    # Pre-stage cached sealed runtime so F9's -B -I -S trial runs fast without 2000x fsync/test.
+    cached_rt, host_py = _get_cached_sealed_runtime()
+    sp_src = _get_real_site_packages_source()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    (root / "runtimes").mkdir(mode=0o700, exist_ok=True)
+    os.chmod(root / "runtimes", 0o700)
+    shutil.copytree(cached_rt, root / "runtimes" / "rt-0001")
 
     runtime_dir = tmp_path / "xdg_rt"
     runtime_dir.mkdir()
@@ -344,21 +462,14 @@ def _setup_enrolled_legacy_box(tmp_path: Path) -> dict:
         desktop_wrapper_path=desktop_bin,
         home=home,
         runtime_dir=runtime_dir,
-        host_python=sys.executable,
+        host_python=host_py,
+        trusted_remote=str(bare),
+        legacy_commit=c1,
         kiosk_process_lister=lambda: [],
         reload_systemd=lambda: None,
         drain_old_service=lambda: None,
         bench_marker_checker=bench_check,
     )
-    # Record baseline requirements hash + trusted remote in enrollment.json.
-    enr_path = root / "enrollment.json"
-    enr = json.loads(enr_path.read_text(encoding="utf-8"))
-    enr["trusted_remote"] = str(bare)
-    enr["legacy_commit"] = c1
-    enr["requirements_sha256"] = hashlib.sha256(
-        (checkout / "requirements.txt").read_bytes()
-    ).hexdigest()
-    enr_path.write_text(json.dumps(enr, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     return {
         "bare": bare,
@@ -881,11 +992,10 @@ def test_public_only_start_failure_aborts_to_exact_prior_pair_and_handles_crash_
         root, failed_op, sel_failed["release_id"], sel_failed["generation_id"]
     ) == "absent"
 
-    # Interrupt abort BEFORE selector replacement -> failed_op still selected.
+    # Interrupt abort BEFORE selector replacement -> failed_op stays selected and fails start.
     class _AbortCrash(RuntimeError):
         pass
 
-    svc.fail_public_startup = False
     with pytest.raises(_AbortCrash):
         abort_unserved(
             root=root,
@@ -902,6 +1012,7 @@ def test_public_only_start_failure_aborts_to_exact_prior_pair_and_handles_crash_
     assert cur_after_crash["operation_id"] == failed_op
 
     # Complete abort -> restores exact legacy pair with fresh abort op ID, keeping failed gen.
+    svc.fail_public_startup = False
     aborted = abort_unserved(
         root=root,
         operation_id=failed_op,

@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -24,8 +26,14 @@ from sigint101.runtime import (
     verify_runtime_compatibility,
 )
 from sigint101.storage import fsync_dir, fsync_file
+from sigint101.unit_settings import (
+    UnitSettingsError,
+    check_unit_settings_parity,
+    load_systemd_unit_settings,
+)
 
 SELECTOR_FORMAT_VERSION = 1
+SERVED_MARKER_FILENAME = "served.json"
 
 
 def _load_and_fence_selector(root: Path) -> dict:
@@ -59,11 +67,86 @@ def _validate_dir_id(value: object, label: str) -> str:
     return value
 
 
+def _inspect_and_sync_serving_marker(
+    root: Path,
+    *,
+    operation_id: str,
+    release_id: str,
+    generation_id: str,
+) -> str:
+    """Walk ROOT/operations/<op>/served.json via dir_fd (N1); re-fsync if valid, refuse if corrupt.
+
+    Returns 'absent' or 'served'; raises RuntimeError on any symlink, hardlink, bad mode, or drift.
+    """
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    root_fd = os.open(os.fspath(root), dir_flags)
+    try:
+        try:
+            ops_fd = os.open("operations", dir_flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            return "absent"
+        try:
+            try:
+                op_fd = os.open(operation_id, dir_flags, dir_fd=ops_fd)
+            except FileNotFoundError:
+                return "absent"
+            try:
+                st_dir = os.fstat(op_fd)
+                if st_dir.st_uid != os.geteuid() or (st_dir.st_mode & 0o022):
+                    raise RuntimeError("untrusted operations directory permissions or owner")
+
+                file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                try:
+                    fd = os.open(SERVED_MARKER_FILENAME, file_flags, dir_fd=op_fd)
+                except FileNotFoundError:
+                    return "absent"
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        raise RuntimeError("existing serving marker must not be a symlink") from exc
+                    raise RuntimeError(f"cannot open existing serving marker: {exc}") from exc
+
+                try:
+                    st = os.fstat(fd)
+                    if (
+                        not stat.S_ISREG(st.st_mode)
+                        or st.st_uid != os.geteuid()
+                        or (st.st_mode & 0o022)
+                        or st.st_nlink > 1
+                    ):
+                        raise RuntimeError(
+                            "existing serving marker is not a trusted regular single-link file"
+                        )
+                    raw = os.read(fd, 16384)
+                    existing = json.loads(raw.decode("utf-8"))
+                    if (
+                        not isinstance(existing, dict)
+                        or existing.get("format_version") != 1
+                        or existing.get("operation_id") != operation_id
+                        or existing.get("release_id") != release_id
+                        or existing.get("generation_id") != generation_id
+                    ):
+                        raise RuntimeError("existing serving marker does not match current.json")
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.fsync(op_fd)
+                return "served"
+            finally:
+                os.close(op_fd)
+        finally:
+            os.close(ops_fd)
+    finally:
+        os.close(root_fd)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Managed SIGINT 101 service launcher.")
     parser.add_argument("--root", required=True, help="Updater ROOT directory.")
     parser.add_argument(
         "--control-dir", required=True, help="Selected immutable control directory."
+    )
+    parser.add_argument(
+        "--unit-name", default="sigint101.service", help="Systemd user unit name for R2-1 parity."
     )
     args = parser.parse_args(argv)
 
@@ -142,24 +225,25 @@ def main(argv: list[str] | None = None) -> int:
             current_abi = probe_python_abi(python_exe)
             verify_runtime_compatibility(runtime_dir, current_abi=current_abi, verify_files=True)
 
-            # §5: if an existing serving marker is visible, verify it matches and re-fsync both
-            # the marker and its directory before authorizing listening or writers.
-            marker_path = ops_dir / "served.json"
-            if marker_path.exists() or marker_path.is_symlink():
-                if marker_path.is_symlink() or not marker_path.is_file():
-                    raise RuntimeError("existing serving marker is not a regular file")
-                existing = json.loads(marker_path.read_text(encoding="utf-8"))
-                if (
-                    not isinstance(existing, dict)
-                    or existing.get("operation_id") != op_id
-                    or existing.get("release_id") != release_id
-                    or existing.get("generation_id") != generation_id
-                ):
-                    raise RuntimeError("existing serving marker does not match current.json")
-                fsync_file(marker_path)
-                fsync_dir(ops_dir)
+            # §5 & N1: inspect serving marker via trusted dir_fd; re-fsync if already served.
+            marker_state = _inspect_and_sync_serving_marker(
+                root,
+                operation_id=op_id,
+                release_id=release_id,
+                generation_id=generation_id,
+            )
 
-            # F3: -I -S strips interpreter and user site-packages so only sealed runtime imports.
+            # F6 (R2-1): verify unit-only settings parity ONLY before serving marker exists.
+            recorded_fp = selector.get("settings_fingerprint")
+            if marker_state == "absent" and recorded_fp:
+                current_settings = load_systemd_unit_settings(args.unit_name)
+                check_unit_settings_parity(
+                    recorded_fingerprint=str(recorded_fp),
+                    current_settings=current_settings,
+                    serving_marker_exists=False,
+                )
+
+            # -I -S strips interpreter and user site-packages so only sealed runtime imports.
             exec_argv = [
                 python_exe,
                 "-B",
@@ -191,8 +275,6 @@ def main(argv: list[str] | None = None) -> int:
             ]
 
         # Drop shared gate BEFORE serving; transfer ONLY the writer lock FD across service exec.
-        # F5: strip PYTHONPATH and control-dispatch env vars; pass writer FD via CLI arg so zero
-        # internal env vars appear in /proc/<pid>/environ of the live service or its children.
         session.drop_shared_gate()
         writer_fd = session.prepare_writer_fd_for_exec()
         exec_argv.extend(["--writer-lock-fd", str(writer_fd)])
@@ -207,7 +289,14 @@ def main(argv: list[str] | None = None) -> int:
             env.pop(leak_key, None)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         os.execve(python_exe, exec_argv, env)
-    except (RuntimeError, RuntimeCompatibilityError, KeyError, ValueError, OSError) as exc:
+    except (
+        RuntimeError,
+        RuntimeCompatibilityError,
+        UnitSettingsError,
+        KeyError,
+        ValueError,
+        OSError,
+    ) as exc:
         session.close()
         print(f"sigint101-launcher: startup refused: {exc}", file=sys.stderr)
         return 1

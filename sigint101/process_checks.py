@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import http.client
+import os
 import re
 import socket
 import subprocess
@@ -15,6 +17,13 @@ from .kiosk import KIOSK_PROFILE, proc_cmdlines
 
 _INACTIVE_STATES = frozenset({"inactive", "failed"})
 _BUSY_SUBSTATES = frozenset({"deactivating", "stopping", "running", "start-pre", "auto-restart"})
+_MINIMAL_SYSTEMCTL_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "LANG",
+)
 
 
 class KioskPageOpenError(RuntimeError):
@@ -186,16 +195,39 @@ def start_unit_with_reset(
 
 
 class SystemdUserController:
-    """Bounded subprocess adapter for systemd --user control with close_fds=True."""
+    """Bounded subprocess adapter for systemd --user control satisfying ServiceAdapter."""
 
-    def __init__(self, unit: str = "sigint101.service", *, env: dict[str, str] | None = None):
+    def __init__(
+        self,
+        unit: str = "sigint101.service",
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8008,
+        http_timeout_s: float = 2.0,
+        env: dict[str, str] | None = None,
+    ):
         self.unit = unit
+        self.host = host
+        self.port = int(port)
+        self.http_timeout_s = http_timeout_s
         self._env = env
+
+    def _effective_env(self) -> dict[str, str]:
+        if self._env is not None:
+            return dict(self._env)
+        clean: dict[str, str] = {}
+        for key in _MINIMAL_SYSTEMCTL_ENV_KEYS:
+            val = os.environ.get(key)
+            if val is not None:
+                clean[key] = val
+        clean.setdefault("PATH", "/usr/bin:/bin")
+        clean.setdefault("LANG", "C.UTF-8")
+        return clean
 
     def _run(self, *args: str, timeout_s: float = 15.0) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["systemctl", "--user", *args],
-            env=self._env,
+            env=self._effective_env(),
             capture_output=True,
             text=True,
             close_fds=True,
@@ -231,6 +263,24 @@ class SystemdUserController:
         if not cg:
             return []
         return read_cgroup_pids(Path(cgroup_root) / cg)
+
+    def get_cgroup_pids(self, *, cgroup_root: str | Path = "/sys/fs/cgroup") -> list[int]:
+        return self.cgroup_pids(cgroup_root=cgroup_root)
+
+    def is_listener_active(self) -> bool:
+        return is_tcp_port_listening(self.host, self.port)
+
+    def is_http_ready(self) -> bool:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=self.http_timeout_s)
+        try:
+            conn.request("GET", "/api/hardware", headers={"Host": f"{self.host}:{self.port}"})
+            resp = conn.getresponse()
+            resp.read()
+            return resp.status == 200
+        except (OSError, http.client.HTTPException):
+            return False
+        finally:
+            conn.close()
 
     def stop(self, timeout_s: float = 15.0) -> None:
         res = self._run("stop", self.unit, timeout_s=timeout_s)

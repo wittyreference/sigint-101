@@ -13,16 +13,18 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from .bench_gate import require_bench_marker
 from .locks import (
     EXIT_GATE_BUSY,
     LockBusyError,
     acquire_mutation_gate,
+    acquire_shared_gate,
     acquire_writer_lock,
 )
 from .process_checks import (
+    SystemdUserController,
     require_kiosk_page_closed,
     start_unit_with_reset,
     wait_service_drained,
@@ -32,14 +34,18 @@ from .release_prep import (
     check_space_budget,
     estimate_apply_budget_bytes,
     fetch_and_export_release,
+    validate_remote_url,
     verify_candidate_contracts,
 )
 from .runtime import probe_python_abi, verify_runtime_compatibility
 from .snapshot import copy_generation_snapshot
 from .storage import fsync_dir, fsync_file, validate_updater_root
-
-if TYPE_CHECKING:
-    from .validation import UnitSettings
+from .trial import run_private_trial
+from .unit_settings import (
+    UnitSettings,
+    compute_settings_fingerprint,
+    load_systemd_unit_settings,
+)
 
 SELECTOR_FORMAT_VERSION = 1
 SERVED_MARKER_FILENAME = "served.json"
@@ -77,6 +83,19 @@ def _fire(on_boundary: Callable[[str], None] | None, name: str) -> None:
         on_boundary(name)
 
 
+def _ensure_synced_dir(path: Path, *, mode: int = 0o700) -> None:
+    """Create `path` if missing and fsync its parent directory so the new entry is durable (F11)."""
+    if path.exists():
+        return
+    if not path.parent.exists():
+        _ensure_synced_dir(path.parent, mode=mode)
+    try:
+        os.mkdir(path, mode)
+    except FileExistsError:
+        return
+    fsync_dir(path.parent)
+
+
 def _open_trusted_dir(path: Path, *, label: str) -> int:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     fd = os.open(os.fspath(path), flags)
@@ -100,7 +119,7 @@ def _write_json_durable(
     on_replace: Callable[[], None] | None = None,
 ) -> None:
     """Write canonical JSON with file fsync, atomic replacement (if not exclusive), and dir sync."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _ensure_synced_dir(path.parent, mode=0o700)
     raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if exclusive:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -183,7 +202,7 @@ def _read_enrollment_meta(root: Path) -> dict:
 
 
 def _new_unique_id(prefix: str, parent_dir: Path) -> str:
-    parent_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _ensure_synced_dir(parent_dir, mode=0o700)
     for seq in range(1, 10000):
         cand = f"{prefix}-{time.time_ns()}-{seq:04d}"
         if not (parent_dir / cand).exists():
@@ -291,7 +310,6 @@ def _wait_live_ready(
     gen_id = selector.get("generation_id")
 
     while True:
-        # Ensure no concurrent operation superseded selection.
         try:
             current = _read_selector(root)
         except UpdaterError:
@@ -326,6 +344,26 @@ def _list_incomplete_intents(root: Path, active_op_id: str) -> list[str]:
     return incomplete
 
 
+def _resolve_managed_host_python(enr: dict, old_selector: dict) -> str:
+    """Resolve enrolled host Python for managed trial & service, never legacy .venv (F2)."""
+    host_py = str(enr.get("host_python") or "")
+    if not host_py:
+        if old_selector["mode"] == "managed" and old_selector.get("python_executable"):
+            host_py = str(old_selector["python_executable"])
+        else:
+            raise PolicyRefusalError("enrollment metadata is missing host_python")
+    legacy_checkout = enr.get("legacy_checkout") or old_selector.get("checkout_dir")
+    if legacy_checkout:
+        try:
+            if Path(host_py).resolve().is_relative_to(Path(legacy_checkout).resolve()):
+                raise PolicyRefusalError(
+                    f"host_python {host_py!r} must not live inside legacy checkout"
+                )
+        except OSError:
+            pass
+    return host_py
+
+
 def apply_update(
     *,
     root: str | Path,
@@ -333,12 +371,15 @@ def apply_update(
     pinned_commit: str,
     service: ServiceAdapter,
     ref: str = "refs/heads/main",
+    unit_name: str = "sigint101.service",
     unit_settings: UnitSettings | None = None,
+    unit_settings_loader: Callable[[str], UnitSettings] | None = None,
     home: str | Path | None = None,
     kiosk_process_lister=None,
     statvfs_fn: Callable[[str | Path], object] = os.statvfs,
     ready_timeout_s: float = 15.0,
     on_boundary: Callable[[str], None] | None = None,
+    inherited_gate_fd: int | None = None,
     bench_marker_checker: Callable[[Path], None] = require_bench_marker,
 ) -> dict:
     """Execute a full manual course apply or first legacy->managed conversion (§5).
@@ -352,7 +393,13 @@ def apply_update(
     lister_kw = {"process_lister": kiosk_process_lister} if kiosk_process_lister is not None else {}
     require_kiosk_page_closed(home=home, **lister_kw)
 
-    with acquire_mutation_gate(resolved_root, blocking=False, home=home):
+    restart_old_after_unlock = False
+    precommit_exc: BaseException | None = None
+    old_selector_for_restart: dict | None = None
+
+    with acquire_mutation_gate(
+        resolved_root, blocking=False, inherited_gate_fd=inherited_gate_fd, home=home
+    ):
         # Recheck kiosk page closed under the exclusive mutation gate immediately before work.
         require_kiosk_page_closed(home=home, **lister_kw)
 
@@ -366,6 +413,9 @@ def apply_update(
         baseline_req_sha = str(enr.get("requirements_sha256") or "")
         if not baseline_req_sha:
             raise PolicyRefusalError("enrollment metadata is missing requirements_sha256")
+
+        # N4: validate remote policy BEFORE allocating operation IDs or writing intent.json!
+        validate_remote_url(remote_url, trusted_remote=trusted_remote)
 
         current_commit = (
             old_selector.get("commit")
@@ -390,28 +440,39 @@ def apply_update(
         )
         runtime_id = str(old_selector["runtime_id"])
         runtime_dir = resolved_root / "runtimes" / runtime_id
-        python_exe = str(old_selector.get("python_executable") or sys.executable)
+        # F2: managed trial and service ALWAYS run on enrolled host_python, never legacy .venv.
+        host_python = _resolve_managed_host_python(enr, old_selector)
+
+        # F1: load effective unit settings automatically on real systemd hosts or when loader given.
+        effective_unit_settings = unit_settings
+        if effective_unit_settings is None:
+            if unit_settings_loader is not None:
+                effective_unit_settings = unit_settings_loader(unit_name)
+            elif isinstance(service, SystemdUserController):
+                effective_unit_settings = load_systemd_unit_settings(service.unit)
 
         # Validate sealed runtime ABI before staging/stopping.
         verify_runtime_compatibility(
-            runtime_dir, current_abi=probe_python_abi(python_exe), verify_files=True
+            runtime_dir, current_abi=probe_python_abi(host_python), verify_files=True
         )
 
         # Conservative initial space budget check BEFORE staging or stopping service (§1, §5.1).
         initial_budget = estimate_apply_budget_bytes(source_data_dir=source_data_dir)
         check_space_budget(resolved_root, required_bytes=initial_budget, statvfs_fn=statvfs_fn)
 
-        # Allocate exclusive operation, release, generation, and staging IDs.
+        # Allocate exclusive operation, release, generation, and staging IDs (F11 synced dirs).
         action = "convert" if old_selector["mode"] == "legacy" else "apply"
         op_id = _new_unique_id("op", resolved_root / "operations")
         release_id = _new_unique_id("rel", resolved_root / "releases")
         generation_id = _new_unique_id("gen", resolved_root / "data")
+        _ensure_synced_dir(resolved_root / "staging", mode=0o700)
         staging_dir = resolved_root / "staging" / op_id
         ops_dir = resolved_root / "operations" / op_id
         dest_release_dir = resolved_root / "releases" / release_id
         dest_gen_dir = resolved_root / "data" / generation_id
 
-        # 1) Write durable operation intent BEFORE staging starts (§5.2).
+        # 1) Create & fsync operations/<op> entry in operations/, then write durable intent (§5.2).
+        _ensure_synced_dir(ops_dir, mode=0o700)
         _fire(on_boundary, "before_intent_sync")
         intent_payload = {
             "format_version": 1,
@@ -459,7 +520,6 @@ def apply_update(
         service_stopped_precommit = True
         try:
             with acquire_writer_lock(resolved_root, blocking=False, home=home):
-                # Re-check authoritative selector under both locks.
                 if _read_selector(resolved_root) != old_selector:
                     raise UpdaterError("selector changed before snapshot/publication")
 
@@ -479,15 +539,13 @@ def apply_update(
                 )
                 _fire(on_boundary, "after_snapshot_copy")
 
-                # 5) Run private read-only trial with effective unit settings and reap it.
-                from .trial import run_private_trial  # noqa: PLC0415
-                from .validation import compute_settings_fingerprint  # noqa: PLC0415
-
+                # 5) Run private read-only trial under enrolled sealed runtime (-B -I -S, F9).
                 trial_result = run_private_trial(
-                    python_executable=python_exe,
+                    python_executable=host_python,
                     release_root=dest_release_dir,
                     data_dir=dest_gen_dir,
-                    unit_settings=unit_settings,
+                    runtime_dir=runtime_dir,
+                    unit_settings=effective_unit_settings,
                     expected_release_id=release_id,
                     expected_commit=pinned_commit,
                     expected_generation_id=generation_id,
@@ -500,8 +558,8 @@ def apply_update(
                 _fire(on_boundary, "after_trial")
 
                 settings_fp = (
-                    compute_settings_fingerprint(unit_settings.unit_only())
-                    if unit_settings is not None
+                    compute_settings_fingerprint(effective_unit_settings.unit_only())
+                    if effective_unit_settings is not None
                     else None
                 )
                 predecessor = (
@@ -526,7 +584,7 @@ def apply_update(
                     "predecessor": predecessor,
                     "host": str(old_selector.get("host", "127.0.0.1")),
                     "port": int(old_selector.get("port", 8008)),
-                    "python_executable": python_exe,
+                    "python_executable": host_python,
                 }
 
                 # 6) Write & fsync immutable prepared.json BEFORE selector replacement (§5.2-5.3).
@@ -543,11 +601,15 @@ def apply_update(
                 _write_json_durable(ops_dir / PREPARED_FILENAME, prepared_payload, exclusive=True)
                 _fire(on_boundary, "after_prepared_sync")
 
-                # Re-verify selector still equals old_selector immediately before atomic replace.
                 if _read_selector(resolved_root) != old_selector:
                     raise UpdaterError("selector drifted immediately before commit")
 
                 # 7) Single atomic selector commit: write temp, fsync temp, replace, fsync ROOT.
+                def _on_apply_replace() -> None:
+                    nonlocal service_stopped_precommit
+                    service_stopped_precommit = False
+                    _fire(on_boundary, "after_selector_replace_before_parent_sync")
+
                 _write_json_durable(
                     resolved_root / "current.json",
                     new_selector,
@@ -555,25 +617,49 @@ def apply_update(
                     on_tmp_fsync=lambda: _fire(
                         on_boundary, "after_selector_tmp_fsync_before_replace"
                     ),
-                    on_replace=lambda: _fire(
-                        on_boundary, "after_selector_replace_before_parent_sync"
-                    ),
+                    on_replace=_on_apply_replace,
                 )
                 service_stopped_precommit = False
                 _fire(on_boundary, "after_selector_parent_sync")
-        except BaseException:
-            # Pre-commit refusal after stopping old service: restart original pair if untouched!
+        except BaseException as exc:
+            # F3: defer restarting the original pair until AFTER BOTH locks are released!
             if service_stopped_precommit:
                 try:
                     if _read_selector(resolved_root) == old_selector:
-                        start_unit_with_reset(
-                            reset_failed=service.reset_failed, start_unit=service.start
-                        )
+                        restart_old_after_unlock = True
+                        old_selector_for_restart = old_selector
+                        precommit_exc = exc
                 except Exception:  # noqa: BLE001
                     pass
-            raise
+            if not restart_old_after_unlock:
+                raise
 
-        _fire(on_boundary, "before_unlock_and_start")
+        if not restart_old_after_unlock:
+            _fire(on_boundary, "before_unlock_and_start")
+
+    # F3: both locks are now released! If pre-commit refused post-stop, restart original & verify.
+    if (
+        restart_old_after_unlock
+        and precommit_exc is not None
+        and old_selector_for_restart is not None
+    ):
+        restarted_ready = False
+        try:
+            start_unit_with_reset(reset_failed=service.reset_failed, start_unit=service.start)
+            restarted_ready = _wait_live_ready(
+                resolved_root, old_selector_for_restart, service, timeout_s=ready_timeout_s
+            )
+        except Exception as restart_exc:  # noqa: BLE001
+            raise UpdaterError(
+                f"{precommit_exc} (pre-commit restart of original pair failed: {restart_exc}; "
+                "run sigint101-updater --recover)"
+            ) from precommit_exc
+        if not restarted_ready:
+            raise UpdaterError(
+                f"{precommit_exc} (original pair restarted after refusal but is not ready; "
+                "run sigint101-updater --recover)"
+            ) from precommit_exc
+        raise precommit_exc
 
     # 8) Locks are now released! Reset failed state, start unit, and await live readiness (§5.4).
     start_unit_with_reset(reset_failed=service.reset_failed, start_unit=service.start)
@@ -637,6 +723,23 @@ def _validate_prior_selector_for_abort(root: Path, old_selector: dict) -> None:
     raise AbortError(f"unsupported prior selector mode: {mode!r}")
 
 
+def _is_selector_live_now(root: Path, selector: dict, service: ServiceAdapter) -> bool:
+    active_state, _sub_state, main_pid = service.unit_state()
+    if not (active_state == "active" and main_pid > 0 and service.is_http_ready()):
+        return False
+    if selector["mode"] == "legacy":
+        return True
+    return (
+        inspect_serving_marker(
+            root,
+            selector["operation_id"],
+            selector.get("release_id"),
+            selector.get("generation_id"),
+        )
+        == "served"
+    )
+
+
 def abort_unserved(
     *,
     root: str | Path,
@@ -646,6 +749,7 @@ def abort_unserved(
     kiosk_process_lister=None,
     ready_timeout_s: float = 15.0,
     on_boundary: Callable[[str], None] | None = None,
+    inherited_gate_fd: int | None = None,
     bench_marker_checker: Callable[[Path], None] = require_bench_marker,
 ) -> dict:
     """Abort a proven-unserved post-commit operation back to its exact prior pair (§5)."""
@@ -655,17 +759,50 @@ def abort_unserved(
     # 1) Read-only pre-check BEFORE stopping any running service (§5).
     current = _read_selector(resolved_root)
 
-    # Idempotent retry of an already-completed abort reports the same result with zero mutations!
+    # F5: idempotent retry of an already-committed abort returns immediately if live, or completes
+    # fencing + start if a prior abort crashed after selector replacement before start!
     if current.get("action") == "abort" and current.get("aborted_operation_id") == operation_id:
-        return {
+        if _is_selector_live_now(resolved_root, current, service):
+            if inherited_gate_fd is not None:
+                os.close(inherited_gate_fd)
+            return {
+                "action": "abort",
+                "status": "ready",
+                "mode": current["mode"],
+                "operation_id": current["operation_id"],
+                "aborted_operation_id": operation_id,
+                "release_id": current.get("release_id"),
+                "generation_id": current.get("generation_id"),
+            }
+        with acquire_mutation_gate(
+            resolved_root, blocking=False, inherited_gate_fd=inherited_gate_fd, home=home
+        ):
+            sel_path = resolved_root / "current.json"
+            cur_locked = _read_selector(resolved_root)
+            wait_service_drained(
+                stop_unit=service.stop,
+                get_unit_state=service.unit_state,
+                get_cgroup_pids=service.get_cgroup_pids,
+                is_listener_active=service.is_listener_active,
+                kill_cgroup=service.kill_cgroup,
+            )
+            with acquire_writer_lock(resolved_root, blocking=False, home=home):
+                fsync_file(sel_path)
+                fsync_dir(resolved_root)
+        start_unit_with_reset(reset_failed=service.reset_failed, start_unit=service.start)
+        ready = _wait_live_ready(resolved_root, cur_locked, service, timeout_s=ready_timeout_s)
+        out = {
             "action": "abort",
-            "status": "ready" if service.is_http_ready() else "committed, console not ready",
-            "mode": current["mode"],
-            "operation_id": current["operation_id"],
+            "status": "ready" if ready else "committed, console not ready",
+            "mode": cur_locked["mode"],
+            "operation_id": cur_locked["operation_id"],
             "aborted_operation_id": operation_id,
-            "release_id": current.get("release_id"),
-            "generation_id": current.get("generation_id"),
+            "release_id": cur_locked.get("release_id"),
+            "generation_id": cur_locked.get("generation_id"),
         }
+        if not ready:
+            out["recovery_command"] = "sigint101-updater --recover"
+        return out
 
     if current.get("operation_id") != operation_id:
         raise AbortError(
@@ -682,6 +819,10 @@ def abort_unserved(
         raise AbortError(f"prepared record unreadable for {operation_id!r}: {exc}") from exc
     if not isinstance(prepared, dict) or prepared.get("operation_id") != operation_id:
         raise AbortError(f"prepared record does not match operation {operation_id!r}")
+    if prepared.get("new_selector") != current:
+        raise AbortError(
+            f"prepared record new_selector does not match current.json for {operation_id!r}"
+        )
 
     marker_state = inspect_serving_marker(
         resolved_root,
@@ -707,9 +848,15 @@ def abort_unserved(
     lister_kw = {"process_lister": kiosk_process_lister} if kiosk_process_lister is not None else {}
     require_kiosk_page_closed(home=home, **lister_kw)
 
-    # 2) Take mutation gate, drain service, take writer lock, and RE-VERIFY absence of marker!
-    restart_current_on_refusal = False
-    with acquire_mutation_gate(resolved_root, blocking=False, home=home):
+    # 2) Take mutation gate, re-check kiosk page, drain service, take writer lock, RE-VERIFY marker!
+    restart_needed = False
+    saved_exc: BaseException | None = None
+    selector_for_restart: dict | None = None
+
+    with acquire_mutation_gate(
+        resolved_root, blocking=False, inherited_gate_fd=inherited_gate_fd, home=home
+    ):
+        require_kiosk_page_closed(home=home, **lister_kw)
         wait_service_drained(
             stop_unit=service.stop,
             get_unit_state=service.unit_state,
@@ -717,11 +864,11 @@ def abort_unserved(
             is_listener_active=service.is_listener_active,
             kill_cgroup=service.kill_cgroup,
         )
+        service_stopped_precommit = True
         try:
             with acquire_writer_lock(resolved_root, blocking=False, home=home):
                 cur_after = _read_selector(resolved_root)
                 if cur_after.get("operation_id") != operation_id:
-                    restart_current_on_refusal = True
                     raise AbortError("selected operation changed during drain; abort refused")
 
                 marker_after = inspect_serving_marker(
@@ -731,7 +878,6 @@ def abort_unserved(
                     cur_after.get("generation_id"),
                 )
                 if marker_after != "absent":
-                    restart_current_on_refusal = True
                     raise AbortError(
                         f"operation {operation_id!r} became {marker_after} before drain completed; "
                         "abort refused and selected pair preserved"
@@ -741,6 +887,8 @@ def abort_unserved(
 
                 abort_op_id = _new_unique_id("abort", resolved_root / "operations")
                 abort_ops_dir = resolved_root / "operations" / abort_op_id
+                _ensure_synced_dir(abort_ops_dir, mode=0o700)
+
                 restored_selector = dict(old_selector)
                 restored_selector["operation_id"] = abort_op_id
                 restored_selector["action"] = "abort"
@@ -758,37 +906,47 @@ def abort_unserved(
                     exclusive=True,
                 )
 
+                def _on_abort_replace() -> None:
+                    nonlocal service_stopped_precommit
+                    service_stopped_precommit = False
+                    _fire(on_boundary, "after_abort_selector_replace_before_parent_sync")
+
                 _write_json_durable(
                     resolved_root / "current.json",
                     restored_selector,
                     exclusive=False,
                     on_tmp_fsync=lambda: _fire(on_boundary, "after_abort_selector_tmp_fsync"),
-                    on_replace=lambda: _fire(
-                        on_boundary, "after_abort_selector_replace_before_parent_sync"
-                    ),
+                    on_replace=_on_abort_replace,
                 )
+                service_stopped_precommit = False
                 _fire(on_boundary, "after_abort_selector_parent_sync")
-        except AbortError:
-            if restart_current_on_refusal:
-                # Release locks before restarting the preserved selected pair (fall through below).
-                pass
+        except BaseException as exc:
+            # F4: ANY post-stop pre-commit refusal restarts the preserved pair AFTER unlocking!
+            if service_stopped_precommit:
+                restart_needed = True
+                saved_exc = exc
+                try:
+                    selector_for_restart = _read_selector(resolved_root)
+                except Exception:  # noqa: BLE001
+                    selector_for_restart = current
             else:
                 raise
-            # Exit mutation gate context, then restart preserved pair below.
-            restart_needed = True
-            saved_exc = sys.exc_info()[1]
-        else:
-            restart_needed = False
-            saved_exc = None
 
     if restart_needed and saved_exc is not None:
-        start_unit_with_reset(reset_failed=service.reset_failed, start_unit=service.start)
+        try:
+            start_unit_with_reset(reset_failed=service.reset_failed, start_unit=service.start)
+            if selector_for_restart is not None:
+                _wait_live_ready(
+                    resolved_root, selector_for_restart, service, timeout_s=ready_timeout_s
+                )
+        except Exception:  # noqa: BLE001
+            pass
         raise saved_exc
 
     # 3) Locks released! Reset failed state, start restored prior pair, and await readiness.
     start_unit_with_reset(reset_failed=service.reset_failed, start_unit=service.start)
     ready = _wait_live_ready(resolved_root, restored_selector, service, timeout_s=ready_timeout_s)
-    return {
+    out = {
         "action": "abort",
         "status": "ready" if ready else "committed, console not ready",
         "mode": restored_selector["mode"],
@@ -797,6 +955,9 @@ def abort_unserved(
         "release_id": restored_selector.get("release_id"),
         "generation_id": restored_selector.get("generation_id"),
     }
+    if not ready:
+        out["recovery_command"] = "sigint101-updater --recover"
+    return out
 
 
 def recover(
@@ -805,6 +966,7 @@ def recover(
     service: ServiceAdapter,
     home: str | Path | None = None,
     ready_timeout_s: float = 15.0,
+    inherited_gate_fd: int | None = None,
     bench_marker_checker: Callable[[Path], None] = require_bench_marker,
 ) -> dict:
     """Validate and fence the selected pair, report incomplete intents, and ensure live."""
@@ -812,7 +974,9 @@ def recover(
     bench_marker_checker(resolved_root)
 
     need_restart = False
-    with acquire_mutation_gate(resolved_root, blocking=False, home=home):
+    with acquire_mutation_gate(
+        resolved_root, blocking=False, inherited_gate_fd=inherited_gate_fd, home=home
+    ):
         sel_path = resolved_root / "current.json"
         selector = _read_selector(resolved_root)
         # Complete selector durability fence under the gate (§5).
@@ -838,7 +1002,6 @@ def recover(
                 resolved_root, op_id, selector.get("release_id"), selector.get("generation_id")
             )
             if marker_state == "served":
-                # Re-fsync serving marker + directory to finish any interrupted marker dir sync.
                 mpath = resolved_root / "operations" / op_id / SERVED_MARKER_FILENAME
                 fsync_file(mpath)
                 fsync_dir(mpath.parent)
@@ -940,11 +1103,12 @@ def check_status(
             "status": "not enrolled; run verified enrollment first",
         }
 
-    # Probe busy mutation gate read-only without creating any lock file.
+    # N2: probe with LOCK_SH|LOCK_NB so shared console startup does not trigger false busy (75),
+    # while any exclusive maintenance op (LOCK_EX) does!
     lock_file = resolved_root / "locks" / "mutation.lock"
     if lock_file.is_file() and not lock_file.is_symlink():
         try:
-            with acquire_mutation_gate(resolved_root, blocking=False, home=home):
+            with acquire_shared_gate(resolved_root, blocking=False, home=home):
                 pass
         except LockBusyError:
             return {

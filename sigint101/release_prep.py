@@ -7,6 +7,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import resource
+import signal
 import stat
 import subprocess
 from collections.abc import Callable
@@ -17,7 +19,7 @@ from .storage import fsync_dir
 RELEASE_MANIFEST_FILENAME = "release.json"
 DEFAULT_MAX_PACK_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_EXPORT_BYTES = 64 * 1024 * 1024
-DEFAULT_RELEASE_ESTIMATE_BYTES = 16 * 1024 * 1024
+DEFAULT_RELEASE_ESTIMATE_BYTES = 64 * 1024 * 1024
 DEFAULT_FREE_RESERVE_BYTES = 64 * 1024 * 1024
 
 
@@ -52,15 +54,20 @@ def _dir_size_bytes(path: Path) -> int:
 def estimate_apply_budget_bytes(
     *,
     source_data_dir: str | Path,
-    release_estimate_bytes: int = DEFAULT_RELEASE_ESTIMATE_BYTES,
+    release_estimate_bytes: int | None = None,
+    max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
+    max_export_bytes: int = DEFAULT_MAX_EXPORT_BYTES,
     reserve_bytes: int = DEFAULT_FREE_RESERVE_BYTES,
 ) -> int:
     """Compute conservative required bytes: Git pack, release, 2nd generation, scratch, reserve."""
     gen_bytes = _dir_size_bytes(Path(source_data_dir))
     # Full second generation + scratch SQLite recovery copies + growth margin.
     data_budget = gen_bytes * 2 + 16 * 1024 * 1024
-    # Private bare Git pack + unpacked release tree.
-    release_budget = release_estimate_bytes * 2
+    # Private bare Git pack + unpacked release tree: align conservatively with pack + export caps.
+    if release_estimate_bytes is not None:
+        release_budget = max(release_estimate_bytes * 2, max_pack_bytes + max_export_bytes)
+    else:
+        release_budget = max_pack_bytes + max_export_bytes
     return data_budget + release_budget + reserve_bytes
 
 
@@ -102,6 +109,7 @@ def _run_git(
     *,
     cwd: Path,
     timeout_s: float = 60.0,
+    max_file_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -110,6 +118,11 @@ def _run_git(
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_NOSYSTEM": "1",
     }
+
+    def _apply_limits() -> None:
+        if max_file_bytes is not None:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (max_file_bytes, max_file_bytes))
+
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -117,6 +130,7 @@ def _run_git(
         capture_output=True,
         close_fds=True,
         timeout=timeout_s,
+        preexec_fn=_apply_limits if max_file_bytes is not None else None,
     )
 
 
@@ -178,11 +192,29 @@ def fetch_and_export_release(
     fetch_res = _run_git(
         ["fetch", "--no-tags", remote_url, f"{ref}:refs/remotes/origin/target"],
         cwd=scratch,
+        max_file_bytes=max_pack_bytes,
     )
     if fetch_res.returncode != 0:
-        raise ReleasePrepError(
-            f"git fetch failed: {fetch_res.stderr.decode(errors='replace').strip()}"
-        )
+        err_text = fetch_res.stderr.decode(errors="replace").strip()
+        xfsz_codes = (-signal.SIGXFSZ, 128 + signal.SIGXFSZ)
+        if fetch_res.returncode in xfsz_codes or any(
+            marker in err_text.lower()
+            for marker in (
+                "file too large",
+                "file size limit",
+                "unable to write",
+                "write error",
+                "short write",
+                "pack-objects died",
+                "index-pack died",
+                "invalid index-pack output",
+                "index-pack failed",
+            )
+        ):
+            raise PolicyRefusalError(
+                f"fetched Git pack exceeded cap ({max_pack_bytes} bytes) during fetch: {err_text}"
+            )
+        raise ReleasePrepError(f"git fetch failed: {err_text}")
 
     pack_bytes = _dir_size_bytes(scratch / "objects")
     if pack_bytes > max_pack_bytes:
@@ -297,7 +329,10 @@ def fetch_and_export_release(
     m_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     m_fd = os.open(os.fspath(manifest_path), m_flags, 0o600)
     try:
-        os.write(m_fd, m_bytes)
+        m_view = memoryview(m_bytes)
+        m_written = 0
+        while m_written < len(m_view):
+            m_written += os.write(m_fd, m_view[m_written:])
         os.fsync(m_fd)
     finally:
         os.close(m_fd)
@@ -347,6 +382,13 @@ def verify_release_manifest_integrity(release_dir: str | Path) -> dict:
             exp = expected_files[rel]
             if actual_sha != exp["sha256"] or len(data) != exp["size"]:
                 raise ReleasePrepError(f"payload hash/size mismatch in sealed release: {rel}")
+            st_mode = stat.S_IMODE(fp.lstat().st_mode)
+            expected_perm = 0o500 if exp.get("mode") == "100755" else 0o400
+            if st_mode & 0o222 or st_mode != expected_perm:
+                raise ReleasePrepError(
+                    f"sealed release file mode mismatch at {rel}: "
+                    f"got {oct(st_mode)}, expected {oct(expected_perm)}"
+                )
 
     missing = sorted(set(expected_files.keys()) - observed)
     if missing:

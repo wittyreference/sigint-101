@@ -53,6 +53,35 @@ MANAGED_DIR = REPO_ROOT / "deploy" / "managed"
 BASH = shutil.which("bash")
 
 
+def _chmod_tree_writable(root: Path) -> None:
+    if not root.exists():
+        return
+    for cur, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        cp = Path(cur)
+        try:
+            os.chmod(cp, 0o700)
+        except OSError:
+            pass
+        for d in dirs:
+            try:
+                os.chmod(cp / d, 0o700)
+            except OSError:
+                pass
+        for f in files:
+            fp = cp / f
+            if not fp.is_symlink():
+                try:
+                    os.chmod(fp, 0o600)
+                except OSError:
+                    pass
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_readonly_tmp_path(tmp_path: Path):
+    yield
+    _chmod_tree_writable(tmp_path)
+
+
 def _free_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -1689,7 +1718,7 @@ def test_dispatcher_accepts_provision_shim_handoff_not_only_serve(tmp_path):
         timeout=15,
     )
     assert "invalid choice" not in res.stderr.lower(), res.stderr
-    assert res.returncode in (0, 10, 11, 1), (res.returncode, res.stdout, res.stderr)
+    assert res.returncode in (0, 10), (res.returncode, res.stdout, res.stderr)
 
     # On a non-bench host, provision-shim.sh --apply through REAL dispatcher.py MUST be refused
     # by the PR 4 bench gate (not argparse invalid choice!).

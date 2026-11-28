@@ -125,15 +125,22 @@ def require_bench_marker(
         )
 
     expected_mid = _machine_id if _machine_id is not None else _read_host_machine_id()
+    if not expected_mid:
+        raise BenchGateError("non-bench host refused: host machine-id is unavailable")
     marker_mid = data.get("machine_id")
-    if expected_mid is not None and marker_mid != expected_mid:
+    if not isinstance(marker_mid, str) or not marker_mid or marker_mid != expected_mid:
         raise BenchGateError("non-bench host refused: bench marker machine_id does not match host")
 
     marker_root = data.get("updater_root")
-    if not isinstance(marker_root, str) or Path(marker_root).resolve() != resolved_root:
+    if (
+        not isinstance(marker_root, str)
+        or not os.path.isabs(marker_root)
+        or os.path.realpath(marker_root) != marker_root
+        or Path(marker_root) != resolved_root
+    ):
         raise BenchGateError(
             f"non-bench host refused: bench marker updater_root {marker_root!r} "
-            f"does not match canonical root {str(resolved_root)!r}"
+            f"must be the canonical absolute path {str(resolved_root)!r}"
         )
 
     return data

@@ -36,6 +36,8 @@ CONTROL_ALLOWLIST: tuple[str, ...] = (
     "sigint101/schema_fixtures.json",
     "sigint101/snapshot.py",
     "sigint101/storage.py",
+    "sigint101/trial.py",
+    "sigint101/unit_settings.py",
     "sigint101/updater.py",
     "sigint101/updater_cli.py",
 )
