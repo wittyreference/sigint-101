@@ -748,3 +748,62 @@ def test_migrating_legacy_progress_preserves_replays_already_seen(tmp_path):
         assert managed.replays_seen() == before
     finally:
         managed.close()
+
+
+def test_replay_wait_error_escalates_before_returning(replay, recording, monkeypatch):
+    class WaitError(Child):
+        def wait(self, timeout=None):
+            if self.sent == ["TERM"]:
+                raise OSError("injected wait error")
+            return super().wait(timeout)
+
+    child = WaitError(ARGV, stubborn=True)
+    monkeypatch.setattr("sigint101.receiver_lifecycle.REAP_RETRY_MIN_S", 30)
+    decoder = _decoder(replay, lambda *args, **kwargs: child)
+    try:
+        decoder.start_replay(recording)
+        decoder.stop()
+        assert child.sent == ["TERM", "KILL"]
+        assert not decoder.release_failure(pending=True)
+    finally:
+        child.code = -9
+        decoder.shutdown()
+
+
+@pytest.mark.parametrize("control", ["stop", "release", "retune"])
+def test_later_replay_control_retries_unconfirmed_reap_now(
+        replay, recording, monkeypatch, control):
+    child = Child(ARGV, unkillable=True)
+    monkeypatch.setattr("sigint101.receiver_lifecycle.REAP_RETRY_MIN_S", 30)
+    decoder = _decoder(replay, lambda *args, **kwargs: child)
+    try:
+        decoder.start_replay(recording)
+        decoder.stop()
+        assert decoder.release_failure(pending=True)
+        child.unkillable = False
+        getattr(decoder, control)(*([433_000_000] if control == "retune" else []))
+        assert child.sent == ["TERM", "KILL", "KILL"]
+        assert not decoder.release_failure(pending=True)
+    finally:
+        child.code = -9
+        decoder.shutdown()
+
+
+def test_replay_reports_a_refused_kill_as_unconfirmed(replay, recording, monkeypatch):
+    class RefusedKill(Child):
+        def kill(self):
+            if refused:
+                raise PermissionError("injected signal refusal")
+            super().kill()
+
+    refused = True
+    child = RefusedKill(ARGV, stubborn=True)
+    monkeypatch.setattr("sigint101.receiver_lifecycle.REAP_RETRY_MIN_S", 30)
+    decoder = _decoder(replay, lambda *args, **kwargs: child)
+    try:
+        decoder.start_replay(recording)
+        decoder.stop()
+        assert "could not be confirmed stopped" in decoder.release_failure(pending=True)
+    finally:
+        refused = False
+        decoder.shutdown()

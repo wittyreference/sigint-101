@@ -638,7 +638,7 @@ class SupervisedReceiver:
     def _retry(self, run):
         while not self._closing:
             run.wake.clear()
-            if self._closing:
+            if self._closing or run.reaped:
                 return
             if not run.wake.wait(REAP_RETRY_MIN_S) and self._retry_reap(run, REAP_RETRY_WAIT_S):
                 return
