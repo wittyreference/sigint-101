@@ -27,17 +27,35 @@ if [ "${SIGINT101_TESTING:-}" = 1 ] && [[ "${SIGINT101_TEST_INSTALL_WAIT_S:-}" =
 then
   INSTALL_WAIT_S="$SIGINT101_TEST_INSTALL_WAIT_S"
 fi
-# The lock's directory is this user's own, 0700, and neither it nor the lock is a symlink, so the
-# lock can never be opened through a link to some other file.
-# Two installs may get here at once, so "already there" is no error; the checks below decide.
-mkdir -p "${INSTALL_LOCK_DIR%/*}"
-mkdir -m 0700 "$INSTALL_LOCK_DIR" 2>/dev/null || true
-if [ -L "$INSTALL_LOCK_DIR" ] || [ ! -d "$INSTALL_LOCK_DIR" ] || [ ! -O "$INSTALL_LOCK_DIR" ] ||
-  [ -L "$INSTALL_LOCK" ] || { [ -e "$INSTALL_LOCK" ] && { [ ! -f "$INSTALL_LOCK" ] ||
-  [ ! -O "$INSTALL_LOCK" ]; }; }; then
-  echo "install: stopped: $INSTALL_LOCK must be a plain file of yours, in a directory of yours," \
-    "with no symlink on the way; nothing was changed" >&2
+# The lock's directory is this user's own, 0700, and neither ~/.cache, the directory nor the lock
+# is a symlink, so nothing is made or opened through a link to somewhere else.
+INSTALL_CACHE_DIR="${INSTALL_LOCK_DIR%/*}"
+lock_path_refused() {
+  echo "install: stopped: $INSTALL_LOCK must be a plain file of yours, in a directory of yours" \
+    "(0700), with no symlink on the way ($1); nothing was changed" >&2
   exit 1
+}
+# ~/.cache itself first, before anything is made under it: a symlink there would put the lock
+# directory, and the lock, wherever it points.
+if [ -L "$INSTALL_CACHE_DIR" ] || { [ -e "$INSTALL_CACHE_DIR" ] && [ ! -d "$INSTALL_CACHE_DIR" ]; }
+then
+  lock_path_refused "$INSTALL_CACHE_DIR is a symlink or not a directory"
+fi
+# Two installs may get here at once, so "already there" is no error; the checks below decide.
+mkdir -p "$INSTALL_CACHE_DIR"
+mkdir -m 0700 "$INSTALL_LOCK_DIR" 2>/dev/null || true
+if [ -L "$INSTALL_CACHE_DIR" ] || [ -L "$INSTALL_LOCK_DIR" ] || [ ! -d "$INSTALL_LOCK_DIR" ] ||
+  [ ! -O "$INSTALL_LOCK_DIR" ]; then
+  lock_path_refused "$INSTALL_LOCK_DIR is a symlink, not a directory, or not yours"
+fi
+# A directory of the user's that is already there may be open to others (made under another
+# umask, say). Once its ownership and path are checked it is set to 0700 (the leading zeros clear
+# a directory's setgid bit too), before the lock is opened or looked at: nobody else can add
+# anything to it from here on, and whatever is in it already must still pass the lock's checks.
+chmod 00700 "$INSTALL_LOCK_DIR" 2>/dev/null || lock_path_refused "cannot set it to 0700"
+if [ -L "$INSTALL_LOCK" ] || { [ -e "$INSTALL_LOCK" ] && { [ ! -f "$INSTALL_LOCK" ] ||
+  [ ! -O "$INSTALL_LOCK" ]; }; }; then
+  lock_path_refused "the lock is a symlink, not a plain file, or not yours"
 fi
 if ! command -v flock >/dev/null 2>&1; then
   echo "install: stopped: flock (from util-linux) is missing, and it keeps two installs from" \

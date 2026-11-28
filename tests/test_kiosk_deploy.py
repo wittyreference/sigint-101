@@ -1687,6 +1687,70 @@ def test_install_refuses_a_lock_reached_through_a_symlink(box):
     assert box.calls("systemctl") == []
 
 
+def _snapshot(root):
+    """Every entry under ROOT, links not followed: its type, mode, and contents or link target."""
+    import hashlib
+    entries = {}
+    for top, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            p = Path(top) / name
+            st = p.lstat()
+            if p.is_symlink():
+                entries[str(p.relative_to(root))] = ("link", os.readlink(p))
+            elif p.is_dir():
+                entries[str(p.relative_to(root))] = ("dir", st.st_mode)
+            else:
+                digest = hashlib.sha256(p.read_bytes()).hexdigest()
+                entries[str(p.relative_to(root))] = ("file", st.st_mode, digest)
+    return entries
+
+
+@pytest.mark.parametrize("ready", [False, True], ids=["empty-target", "lock-dir-in-target"])
+def test_install_refuses_a_symlinked_cache_and_writes_nothing_through_it(box, ready):
+    """C86 r4 (F1a): ~/.cache itself a symlink to a writable directory elsewhere. The install
+    stops before it makes anything under it or opens the lock: the link's target, the install's
+    destinations in the home, and the log of system and service calls all stay as they were."""
+    target = box.log.parent / "elsewhere-cache"
+    target.mkdir(mode=0o700)
+    (target / "keep.txt").write_text("keep me\n")
+    if ready:
+        (target / "sigint101").mkdir(mode=0o700)
+    (box.home / ".cache").symlink_to(target)
+    before_target, before_home = _snapshot(target), _snapshot(box.home)
+    before_log = box.log.read_text()
+    result = box.run(INSTALL)
+    assert result.returncode == 1, result.stderr
+    assert "stopped:" in result.stderr and "nothing was changed" in result.stderr, result.stderr
+    assert "symlink" in result.stderr, result.stderr
+    assert _snapshot(target) == before_target
+    assert _snapshot(box.home) == before_home
+    assert box.log.read_text() == before_log
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o755, 0o777, 0o2770],
+                         ids=["0775", "0755", "0777", "setgid-0770"])
+def test_install_makes_an_existing_lock_directory_private_before_it_opens_the_lock(box, mode):
+    """C86 r4 (F1b): a lock directory that is already there, the user's own and no symlink, but
+    open to others. Its ownership and path are checked, then it is set to 0700 before the lock is
+    opened, so nobody else can put anything in it from then on. The install then runs as usual."""
+    lock_dir = box.home / ".cache" / "sigint101"
+    lock_dir.mkdir(parents=True)
+    lock_dir.chmod(mode)
+    assert lock_dir.stat().st_mode & 0o7777 == mode
+    result = box.run(INSTALL)
+    assert result.returncode == 0, result.stderr
+    assert lock_dir.stat().st_mode & 0o7777 == 0o700
+    lock = lock_dir / "install.lock"
+    assert lock.is_file() and not lock.is_symlink()
+
+
+def test_a_fresh_lock_directory_is_made_private(box):
+    """No lock directory yet: the install makes it 0700, whatever the umask."""
+    result = box.run(INSTALL)
+    assert result.returncode == 0, result.stderr
+    assert (box.home / ".cache" / "sigint101").stat().st_mode & 0o7777 == 0o700
+
+
 @pytest.mark.parametrize("offset, replacement", [(-1, False), (0, False), (1, True)],
                          ids=["older", "same-tick", "later"])
 def test_only_a_strictly_later_start_counts_as_a_replacement(offset, replacement):
