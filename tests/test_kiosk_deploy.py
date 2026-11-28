@@ -1744,6 +1744,50 @@ def test_install_makes_an_existing_lock_directory_private_before_it_opens_the_lo
     assert lock.is_file() and not lock.is_symlink()
 
 
+@pytest.mark.parametrize("when", ["after-chmod", "before-chmod"])
+def test_a_lock_directory_replaced_around_its_chmod_gets_no_lock_and_stops_the_install(box, when):
+    """C86 r5 (F1b): the lock directory is swapped for a 0775 one at the moment install.sh sets
+    it to 0700 (a chmod stand-in does the swap, just after or just before the real chmod). The
+    lock may open only in the directory that was checked and set to 0700, and since the path no
+    longer names that directory the install stops: nothing is opened in the replacement, its
+    mode is left alone, and no system or service call is made."""
+    real_chmod = shutil.which("chmod")
+    lock_dir = box.home / ".cache" / "sigint101"
+    aside = box.home / ".cache" / "pinned-aside"
+    staged = box.log.parent / "swapped"
+    swap = (f'mv {lock_dir} {aside} && mkdir {lock_dir} && {real_chmod} 0775 {lock_dir} && '
+            f'touch {staged}')
+    first = "first" if when == "before-chmod" else "then"
+    real = f'{real_chmod} "$@" || exit'
+    _stub(box.bin, "chmod",
+          f'if [ "$1" = 00700 ] && [ ! -e {staged} ]; then\n'
+          + (f'  {swap}\n  {real}\n' if first == "first" else f'  {real}\n  {swap}\n')
+          + '  exit 0\n'
+          'fi\n'
+          f'exec {real_chmod} "$@"')
+    result = box.run(INSTALL)
+    assert staged.exists(), "the swap never ran: " + result.stderr
+    assert result.returncode == 1, result.stderr
+    assert "stopped:" in result.stderr and "replaced" in result.stderr, result.stderr
+    assert not (lock_dir / "install.lock").exists(), "the lock opened in the replacement"
+    assert lock_dir.stat().st_mode & 0o7777 == 0o775
+    assert aside.stat().st_mode & 0o7777 == 0o700
+    assert box.calls("sudo") == [] and box.calls("systemctl") == []
+
+
+def test_install_runs_in_the_directory_it_was_started_from_after_taking_the_lock(box):
+    """The lock is opened from inside its directory; the install then goes back to where it was
+    started, so nothing after it runs from the lock's directory."""
+    start = box.log.parent / "started-here"
+    start.mkdir()
+    probe = box.log.parent / "sudo-cwd"
+    _stub(box.bin, "sudo", f'echo "sudo $*" >> {box.log}; pwd -P > {probe}')
+    result = subprocess.run(["bash", str(INSTALL)], env=box.env(), cwd=start,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert probe.read_text().strip() == str(start.resolve())
+
+
 def test_a_fresh_lock_directory_is_made_private(box):
     """No lock directory yet: the install makes it 0700, whatever the umask."""
     result = box.run(INSTALL)

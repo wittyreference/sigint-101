@@ -245,7 +245,8 @@ def ais_install(box):
           '[[ "$*" != *install* ]] || exit 1\n'
           f'printf "%s\\n" "#!{BASH}" "echo ${{CAPABILITY:-sigint101-ais-udp-v1}}" > rtl_ais\n'
           'chmod +x rtl_ais')
-    for tool in ("bash", "chmod", "cp", "touch"):
+    # ls: install.sh reads its lock directory's mode with `ls -ld .` (C86).
+    for tool in ("bash", "chmod", "cp", "touch", "ls"):
         (box.bin / tool).symlink_to(shutil.which(tool))
     _stub(box.bin / "sudo",
           f'echo "sudo $*" >> "{box.log}"\n'

@@ -48,21 +48,43 @@ if [ -L "$INSTALL_CACHE_DIR" ] || [ -L "$INSTALL_LOCK_DIR" ] || [ ! -d "$INSTALL
   [ ! -O "$INSTALL_LOCK_DIR" ]; then
   lock_path_refused "$INSTALL_LOCK_DIR is a symlink, not a directory, or not yours"
 fi
-# A directory of the user's that is already there may be open to others (made under another
-# umask, say). Once its ownership and path are checked it is set to 0700 (the leading zeros clear
-# a directory's setgid bit too), before the lock is opened or looked at: nobody else can add
-# anything to it from here on, and whatever is in it already must still pass the lock's checks.
-chmod 00700 "$INSTALL_LOCK_DIR" 2>/dev/null || lock_path_refused "cannot set it to 0700"
-if [ -L "$INSTALL_LOCK" ] || { [ -e "$INSTALL_LOCK" ] && { [ ! -f "$INSTALL_LOCK" ] ||
-  [ ! -O "$INSTALL_LOCK" ]; }; }; then
-  lock_path_refused "the lock is a symlink, not a plain file, or not yours"
-fi
 if ! command -v flock >/dev/null 2>&1; then
   echo "install: stopped: flock (from util-linux) is missing, and it keeps two installs from" \
     "running at once; nothing was changed" >&2
   exit 1
 fi
-exec 7>>"$INSTALL_LOCK"
+# From here the work is done inside the lock's directory: the shell's working directory pins the
+# directory just checked, so the chmod, the mode check and the lock's open all act on that one
+# directory, whatever later happens to the path. A directory of the user's that is already there
+# may be open to others (made under another umask, say); it is set to 0700 (the leading zeros
+# clear a directory's setgid bit too) before the lock is looked at or opened. From then on no
+# other account can add or replace anything in it, and whatever is in it already must still pass
+# the lock's checks. After the open, the path must still name the pinned directory and its lock,
+# or another install would take a different lock: the install stops.
+INSTALL_LOCK_DIR_P="$(cd -P -- "$HOME" 2>/dev/null && pwd -P)/.cache/sigint101" ||
+  lock_path_refused "cannot read where your home directory is"
+INSTALL_START_DIR="$PWD"
+cd -P -- "$INSTALL_LOCK_DIR" 2>/dev/null || lock_path_refused "cannot enter $INSTALL_LOCK_DIR"
+if [ "$(pwd -P)" != "$INSTALL_LOCK_DIR_P" ] || [ ! -O . ]; then
+  lock_path_refused "$INSTALL_LOCK_DIR changed while it was being checked"
+fi
+chmod 00700 . 2>/dev/null || lock_path_refused "cannot set it to 0700"
+lock_dir_mode="$(ls -ld . 2>/dev/null)" || lock_path_refused "cannot read its mode"
+case "${lock_dir_mode%% *}" in
+  drwx------ | drwx------.) ;;  # 0700; a trailing "." is only an SELinux label, "+" an ACL
+  *) lock_path_refused "it is not 0700 (${lock_dir_mode%% *})" ;;
+esac
+if [ -L ./install.lock ] || { [ -e ./install.lock ] && { [ ! -f ./install.lock ] ||
+  [ ! -O ./install.lock ]; }; }; then
+  lock_path_refused "the lock is a symlink, not a plain file, or not yours"
+fi
+exec 7>>./install.lock
+if [ "$(pwd -P)" != "$INSTALL_LOCK_DIR_P" ] || [ ! /dev/fd/7 -ef "$INSTALL_LOCK" ]; then
+  exec 7>&-
+  lock_path_refused "$INSTALL_LOCK_DIR was replaced while the lock was being opened"
+fi
+# Nothing below depends on the working directory (HERE is absolute), but it goes back anyway.
+cd -- "$INSTALL_START_DIR" 2>/dev/null || cd /
 if ! flock -n 7; then
   echo "install: another install.sh is running; waiting for it (up to ${INSTALL_WAIT_S} s)" >&2
   if ! flock -w "$INSTALL_WAIT_S" 7; then
