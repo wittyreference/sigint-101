@@ -136,6 +136,38 @@ CREATE TABLE IF NOT EXISTS replays_seen (
 );
 """
 
+# Tier C per-unit solos and capstone attempts, per-leg reception passes, and legal calls:
+# additive tables so existing databases gain them on open without touching any existing table.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS solo_attempts (
+    solo_id    TEXT PRIMARY KEY,
+    started_at REAL NOT NULL,
+    window_s   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS solo_passes (
+    solo_id    TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    band_slot  INTEGER NOT NULL,
+    passed_at  REAL NOT NULL,
+    instrument TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    digest     TEXT NOT NULL,
+    PRIMARY KEY (solo_id, started_at, band_slot)
+);
+CREATE TABLE IF NOT EXISTS solo_calls (
+    solo_id       TEXT NOT NULL,
+    started_at    REAL NOT NULL,
+    band_slot     INTEGER NOT NULL,
+    call          TEXT NOT NULL,
+    why_key       TEXT NOT NULL,
+    call_correct  INTEGER NOT NULL,
+    why_correct   INTEGER NOT NULL,
+    answered_at   REAL NOT NULL,
+    item_revision TEXT NOT NULL,
+    PRIMARY KEY (solo_id, started_at, band_slot)
+);
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
@@ -802,6 +834,90 @@ class Progress:
     def credit_challenges(self, stamps, qualifies) -> list[dict]:
         """Credit open live-find attempts in one transaction using the first qualifying stamp."""
         return self.credit_attempts(CHALLENGE_KIND, stamps, qualifies)
+
+    def solo_calls(self, solo_id: str, started_at: float) -> list[dict]:
+        """Return all legal calls recorded for one solo attempt, ordered by band_slot."""
+        with self._lock:
+            if self._closed:
+                return []
+            rows = self._conn.execute(
+                "SELECT solo_id, started_at, band_slot, call, why_key, call_correct, "
+                "why_correct, answered_at, item_revision "
+                "FROM solo_calls WHERE solo_id=? AND started_at=? ORDER BY band_slot",
+                (solo_id, started_at),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_solo_complete_pass_ts(self, solo_id: str, leg_count: int) -> float | None:
+        """Newest answered_at where all `leg_count` legs passed both reception and legal call."""
+        if leg_count <= 0:
+            return None
+        with self._lock:
+            if self._closed:
+                return None
+            row = self._conn.execute(
+                "SELECT MAX(c.answered_at) AS done_at "
+                "FROM solo_calls c "
+                "JOIN solo_passes p "
+                "  ON p.solo_id = c.solo_id "
+                " AND p.started_at = c.started_at "
+                " AND p.band_slot = c.band_slot "
+                "WHERE c.solo_id=? AND c.call_correct=1 AND c.why_correct=1 "
+                "GROUP BY c.started_at "
+                "HAVING COUNT(DISTINCT c.band_slot) >= ? "
+                "ORDER BY done_at DESC LIMIT 1",
+                (solo_id, int(leg_count)),
+            ).fetchone()
+        return float(row["done_at"]) if row and row["done_at"] is not None else None
+
+    def record_solo_call(
+        self,
+        solo_id: str,
+        started_at: float,
+        band_slot: int,
+        *,
+        call: str,
+        why_key: str,
+        call_correct: bool,
+        why_correct: bool,
+        answered_at: float,
+        item_revision: str,
+    ) -> bool:
+        """Insert one solo legal call (insert-once via ON CONFLICT DO NOTHING)."""
+        with self._lock:
+            if self._closed:
+                return False
+            with self._conn:
+                cur = self._conn.execute(
+                    "INSERT INTO solo_calls("
+                    "solo_id, started_at, band_slot, call, why_key, call_correct, "
+                    "why_correct, answered_at, item_revision"
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    (
+                        solo_id,
+                        started_at,
+                        band_slot,
+                        call,
+                        why_key,
+                        1 if call_correct else 0,
+                        1 if why_correct else 0,
+                        answered_at,
+                        item_revision,
+                    ),
+                )
+            return bool(cur.rowcount)
+
+    def delete_solo_call(self, solo_id: str, started_at: float, band_slot: int) -> bool:
+        """Remove a newly inserted solo call when its event log write fails so resubmit works."""
+        with self._lock:
+            if self._closed:
+                return False
+            with self._conn:
+                cur = self._conn.execute(
+                    "DELETE FROM solo_calls WHERE solo_id=? AND started_at=? AND band_slot=?",
+                    (solo_id, started_at, band_slot),
+                )
+            return bool(cur.rowcount)
 
     def enroll_recall(self, lesson_ids, *, now: float) -> None:
         """Enrol newly eligible completed lessons into box 1 without overwriting existing rows."""

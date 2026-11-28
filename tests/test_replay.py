@@ -742,7 +742,7 @@ def test_migrating_legacy_progress_preserves_replays_already_seen(tmp_path):
     dest = tmp_path / "next" / "progress.db"
     report = migrate_store_copy(source, dest, store="progress", scratch_dir=tmp_path / "scratch")
     assert report["from_version"] == 0 and report["to_version"] == 1
-    assert report["matched_v0"] == "v0_challenges_retrieval_replays_seen"
+    assert report["matched_v0"] == "v0_solos"
     managed = Progress(dest, managed=True)
     try:
         assert managed.replays_seen() == before

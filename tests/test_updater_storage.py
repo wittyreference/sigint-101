@@ -62,8 +62,13 @@ _REPLAY_PROGRESS_BASES = {
 
 def _build_progress_v0(path: Path, variant: str) -> dict:
     """Create a real historical version-0 progress.db fixture and return seeded expected rows."""
-    with_replay = variant in _REPLAY_PROGRESS_BASES
-    variant = _REPLAY_PROGRESS_BASES.get(variant, variant)
+    with_solos = variant == "v0_solos"
+    with_replay = with_solos or variant in _REPLAY_PROGRESS_BASES
+    variant = (
+        "v0_challenges_retrieval"
+        if with_solos
+        else _REPLAY_PROGRESS_BASES.get(variant, variant)
+    )
     conn = sqlite3.connect(path)
     expected: dict = {}
     if variant == "empty":
@@ -243,6 +248,61 @@ def _build_progress_v0(path: Path, variant: str) -> dict:
         replay_row = ("ism", 106.0, 2, "clip", "ab" * 32)
         conn.execute("INSERT INTO replays_seen VALUES(?, ?, ?, ?, ?)", replay_row)
         expected["replays_seen"] = [replay_row]
+    if with_solos:
+        conn.executescript("""
+            CREATE TABLE solo_attempts (
+                solo_id    TEXT PRIMARY KEY,
+                started_at REAL NOT NULL,
+                window_s   INTEGER NOT NULL
+            );
+            CREATE TABLE solo_passes (
+                solo_id    TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                band_slot  INTEGER NOT NULL,
+                passed_at  REAL NOT NULL,
+                instrument TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                digest     TEXT NOT NULL,
+                PRIMARY KEY (solo_id, started_at, band_slot)
+            );
+            CREATE TABLE solo_calls (
+                solo_id       TEXT NOT NULL,
+                started_at    REAL NOT NULL,
+                band_slot     INTEGER NOT NULL,
+                call          TEXT NOT NULL,
+                why_key       TEXT NOT NULL,
+                call_correct  INTEGER NOT NULL,
+                why_correct   INTEGER NOT NULL,
+                answered_at   REAL NOT NULL,
+                item_revision TEXT NOT NULL,
+                PRIMARY KEY (solo_id, started_at, band_slot)
+            );
+        """)
+        solo_prov = json.dumps({"instrument": "ism", "tool": "rtl_433"})
+        solo_digest = "ef" * 32
+        conn.execute(
+            "INSERT INTO solo_attempts(solo_id, started_at, window_s) "
+            "VALUES('u4-solo', 2000.0, 900)"
+        )
+        conn.execute(
+            "INSERT INTO solo_passes("
+            "solo_id, started_at, band_slot, passed_at, instrument, provenance, digest"
+            ") VALUES('u4-solo', 2000.0, 0, 2050.0, 'ism', ?, ?)",
+            (solo_prov, solo_digest),
+        )
+        conn.execute(
+            "INSERT INTO solo_calls("
+            "solo_id, started_at, band_slot, call, why_key, call_correct, why_correct, "
+            "answered_at, item_revision"
+            ") VALUES('u4-solo', 2000.0, 0, 'legal', 'readily-accessible', 1, 1, 2060.0, 'rev-1')"
+        )
+        expected["solo_attempts"] = [("u4-solo", 2000.0, 900)]
+        expected["solo_passes"] = [
+            ("u4-solo", 2000.0, 0, 2050.0, "ism", solo_prov, solo_digest)
+        ]
+        expected["solo_calls"] = [
+            ("u4-solo", 2000.0, 0, "legal", "readily-accessible", 1, 1, 2060.0, "rev-1")
+        ]
     conn.commit()
     conn.close()
     return expected
@@ -360,7 +420,7 @@ def _counting_write_authorizer(counter: list[str]):
     [
         "empty", "v0_72ddf9c", "v0_02c2095", "v0_e72c706", "v0_1a35a1a",
         "v0_retrieval", "v0_challenges", "v0_challenges_retrieval",
-        *_REPLAY_PROGRESS_BASES,
+        *_REPLAY_PROGRESS_BASES, "v0_solos",
     ],
 )
 @pytest.mark.parametrize(
@@ -421,7 +481,7 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     assert prog.get(1) is not None or p_variant == "empty"
     if p_variant in (
         "v0_e72c706", "v0_1a35a1a", "v0_retrieval", "v0_challenges", "v0_challenges_retrieval",
-        *_REPLAY_PROGRESS_BASES,
+        *_REPLAY_PROGRESS_BASES, "v0_solos",
     ):
         assert len(prog.stamps()) == 1
         assert prog.stamps()[0]["count"] == 3

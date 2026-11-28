@@ -114,6 +114,39 @@ _PROGRESS_TABLE_DDL: tuple[tuple[str, str], ...] = (
         "recording TEXT NOT NULL, "
         "digest TEXT NOT NULL)",
     ),
+    (
+        "solo_attempts",
+        "CREATE TABLE solo_attempts ("
+        "solo_id TEXT PRIMARY KEY, "
+        "started_at REAL NOT NULL, "
+        "window_s INTEGER NOT NULL)",
+    ),
+    (
+        "solo_passes",
+        "CREATE TABLE solo_passes ("
+        "solo_id TEXT NOT NULL, "
+        "started_at REAL NOT NULL, "
+        "band_slot INTEGER NOT NULL, "
+        "passed_at REAL NOT NULL, "
+        "instrument TEXT NOT NULL, "
+        "provenance TEXT NOT NULL, "
+        "digest TEXT NOT NULL, "
+        "PRIMARY KEY (solo_id, started_at, band_slot))",
+    ),
+    (
+        "solo_calls",
+        "CREATE TABLE solo_calls ("
+        "solo_id TEXT NOT NULL, "
+        "started_at REAL NOT NULL, "
+        "band_slot INTEGER NOT NULL, "
+        "call TEXT NOT NULL, "
+        "why_key TEXT NOT NULL, "
+        "call_correct INTEGER NOT NULL, "
+        "why_correct INTEGER NOT NULL, "
+        "answered_at REAL NOT NULL, "
+        "item_revision TEXT NOT NULL, "
+        "PRIMARY KEY (solo_id, started_at, band_slot))",
+    ),
 )
 
 _EXAM_TABLE_DDL: tuple[tuple[str, str], ...] = (
