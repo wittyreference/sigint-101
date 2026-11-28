@@ -70,9 +70,9 @@ class Box:
         env.update(extra)
         return env
 
-    def run(self, script, *args, **extra):
+    def run(self, script, *args, timeout=20, **extra):
         return subprocess.run(["bash", str(script), *args], env=self.env(**extra),
-                              capture_output=True, text=True, timeout=20)
+                              capture_output=True, text=True, timeout=timeout)
 
     def calls(self, prefix):
         return [ln for ln in self.log.read_text().splitlines() if ln.startswith(prefix)]
@@ -388,6 +388,18 @@ def test_an_unreadable_output_size_falls_back_to_the_panel(box, body):
     assert _arg(box.launches()[0], "--window-size") == "800,480"
 
 
+def test_a_wlr_randr_that_ignores_term_cannot_hold_up_the_launch(box):
+    """The output size is read in a subshell that holds the watchdog's lock while it runs, so a
+    hung wlr-randr must be killed, not only asked to stop."""
+    real_sleep = shutil.which("sleep")
+    _wlr_randr(box, f"trap '' TERM; exec {real_sleep} 60")
+    start = time.time()
+    result = box.run(LAUNCHER, "open")
+    assert result.returncode == 0, result.stderr
+    assert _arg(box.launches()[0], "--window-size") == "800,480"
+    assert time.time() - start < 12
+
+
 def _mode(mode, transform="normal", scale="1.000000"):
     return (f'HDMI-A-1 "P"\n  Enabled: yes\n  Modes:\n    {mode} px, 60.000000 Hz (current)\n'
             f"  Transform: {transform}\n  Scale: {scale}\n")
@@ -568,18 +580,22 @@ def _fake_kiosk(box):
     return proc, signals
 
 
+def _quiet_desktop(box):
+    """Only the watchdog's kiosk check finds anything: no labwc or bar for the theme to reload."""
+    _stub(box.bin, "pgrep", f'echo "pgrep $*" >> {box.log}\n'
+                            'case "$*" in\n'
+                            f'  *"[u]ser-data-dir="*) [ -e {box.alive} ] ;;\n'
+                            '  *) exit 1 ;;\n'
+                            'esac')
+
+
 class _Deploy:
     """A running watchdog (the old launcher, mid-sleep), an open kiosk, then install.sh."""
 
     def __init__(self, box):
         self.box = box
         box.alive.touch()  # the course is open
-        # Only the watchdog's kiosk check finds anything: no labwc or bar for the theme to reload.
-        _stub(box.bin, "pgrep", f'echo "pgrep $*" >> {box.log}\n'
-                                'case "$*" in\n'
-                                f'  *"[u]ser-data-dir="*) [ -e {box.alive} ] ;;\n'
-                                '  *) exit 1 ;;\n'
-                                'esac')
+        _quiet_desktop(box)
         box.start_session()
         self.sleeper = _LongSleep(box)
         _installed_launcher(box)
@@ -636,7 +652,9 @@ def test_install_leaves_the_open_kiosk_alone_and_says_when_changes_apply(deploy,
     assert not deploy.signals.exists(), deploy.signals.read_text()
     assert box.launches(wait=0.3) == []
     [line] = [ln for ln in result.stdout.splitlines() if "next launch" in ln]
+    # `open` does nothing while a kiosk is alive, so the learner must Exit first.
     assert "sigint101-course open" in line, line
+    assert "Exit" in line and line.index("Exit") < line.index("sigint101-course open"), line
 
 
 def test_install_with_no_watchdog_running_starts_none(box):
@@ -645,6 +663,177 @@ def test_install_with_no_watchdog_running_starts_none(box):
     assert result.returncode == 0, result.stderr
     assert box.calls("setsid") == []
     assert len([ln for ln in result.stdout.splitlines() if "next launch" in ln]) == 1
+
+
+# The launcher the reference Recon runs today (main at 3004a03, byte for byte). Its watch loop's
+# children inherit the lock, so its `sleep 10` holds it for a while after the watchdog is stopped.
+DEPLOYED_LAUNCHER = REPO / "tests" / "fixtures" / "kiosk" / "start-kiosk-3004a03.sh"
+
+
+def _sleep_stub(box, seconds):
+    """While the hold file exists, each `sleep` is real and lasts `seconds`; its PID goes in
+    sleep-pids. Without the hold file a sleep is logged and ends the session."""
+    hold, pids = box.log.parent / "hold", box.log.parent / "sleep-pids"
+    real = shutil.which("sleep")
+    _stub(box.bin, "sleep",
+          f'if [ -e {hold} ]; then echo $$ >> {pids}; exec {real} {seconds}; fi\n'
+          f'echo "sleep $*" >> {box.log}; rm -f {box.runtime}/wayland-9')
+    hold.touch()
+    return hold, pids
+
+
+def _pids(path):
+    return [int(p) for p in path.read_text().split()] if path.exists() else []
+
+
+def _kill_all(pids):
+    for pid in pids:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def _watchdog(box, launcher):
+    return subprocess.Popen(["bash", str(launcher), "watch"], env=box.env(),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _old_install(box, text):
+    """An older launcher at its installed name, as the Recon runs it."""
+    path = box.log.parent / "old" / "sigint101-course"
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_install_hands_over_from_the_deployed_launcher_whose_sleep_holds_the_lock(box):
+    """The first deploy of this change finds a watchdog on the Recon's launcher: once it is
+    stopped, its sleep still holds the lock for up to 10 s (4 s here). install.sh must wait for
+    it, or the new watchdog stands down and the box is left with none."""
+    box.alive.touch()
+    _quiet_desktop(box)
+    box.start_session()
+    hold, pids = _sleep_stub(box, 4)
+    _installed_launcher(box)
+    old = _watchdog(box, _old_install(box, DEPLOYED_LAUNCHER.read_text(encoding="utf-8")))
+    try:
+        assert _wait_for(lambda: _pids(pids))
+        assert not _lock_is_free(box)
+        hold.unlink()
+        result = box.run(INSTALL)
+        assert result.returncode == 0, result.stderr
+        assert "WARN" not in result.stderr, result.stderr
+        old.wait(timeout=10)
+        assert len(box.calls("setsid")) == 1
+        # Exactly one new watchdog, on the installed launcher, took the lock and ran its pass.
+        assert _wait_for(lambda: box.calls("sleep") == ["sleep 10"]), box.log.read_text()
+        assert box.calls("launcher installed") == ["launcher installed watch"]
+    finally:
+        if old.poll() is None:
+            old.kill()
+        old.wait(timeout=10)
+        _kill_all(_pids(pids))
+
+
+def test_install_leaves_the_watchdog_running_when_the_kiosk_holds_its_lock(box):
+    """A kiosk Chromium started by a launcher without `9>&-` holds the lock for as long as it
+    runs. Stopping the watchdog then would leave none, since no new one could take the lock, so
+    install.sh leaves the working one alone, says so, and does not touch the browser."""
+    _quiet_desktop(box)
+    box.start_session()
+    hold, pids = _sleep_stub(box, 30)
+    text = DEPLOYED_LAUNCHER.read_text(encoding="utf-8")
+    assert text.count("--password-store=basic 9>&- &") == 1
+    legacy = _old_install(box, text.replace("--password-store=basic 9>&- &",
+                                            "--password-store=basic &"))
+    signals, kiosk_pid = box.log.parent / "kiosk-signals", box.log.parent / "kiosk-pid"
+    real_sleep = shutil.which("sleep")
+    _stub(box.bin, "chromium",
+          f'echo $$ > {kiosk_pid}; touch {box.alive}\n'
+          'for s in TERM INT HUP QUIT USR1 USR2 ALRM PIPE CONT; do\n'
+          f'  trap "echo $s >> {signals}" "$s"\n'
+          'done\n'
+          f'while :; do {real_sleep} 0.1; done')
+    _installed_launcher(box)
+    old = _watchdog(box, legacy)
+    try:
+        assert _wait_for(lambda: kiosk_pid.exists() and _pids(pids))
+        browser = int(kiosk_pid.read_text())
+        result = box.run(INSTALL)
+        assert result.returncode == 0, result.stderr
+        assert old.poll() is None, "install.sh stopped the only watchdog that can run"
+        assert box.calls("setsid") == []
+        assert _alive(browser) and not signals.exists()
+        [warn] = [ln for ln in result.stderr.splitlines() if "WARN" in ln]
+        assert f"{browser} " in warn and "left running" in warn, warn
+    finally:
+        if old.poll() is None:
+            old.kill()
+        old.wait(timeout=10)
+        _kill_all(_pids(pids) + ([int(kiosk_pid.read_text())] if kiosk_pid.exists() else []))
+
+
+def test_install_never_kills_a_pid_that_is_no_longer_the_watchdog(box):
+    """The stand-in for a reused PID: on TERM the watchdog becomes another program under the
+    same PID, while a child of it holds the lock past install.sh's wait. When install.sh falls
+    back to SIGKILL it must kill only what is still the watchdog, so that PID lives."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    real_sleep = shutil.which("sleep")
+    fake = _old_install(box,
+                        "#!/bin/bash\n"
+                        f'exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
+                        f'{real_sleep} 25 &\n'
+                        f'echo $! > {box.log.parent / "child-pid"}\n'
+                        f"trap 'exec 9>&-; exec -a imposter {real_sleep} 60' TERM\n"
+                        f'while :; do {real_sleep} 0.2; done\n')
+    old = _watchdog(box, fake)
+    child = box.log.parent / "child-pid"
+    try:
+        assert _wait_for(lambda: child.exists() and child.read_text().strip())
+        result = box.run(INSTALL, timeout=40)
+        assert result.returncode == 0, result.stderr
+        assert old.poll() is None, "install.sh killed a PID that was no longer the watchdog"
+        cmdline = Path(f"/proc/{old.pid}/cmdline").read_bytes().split(b"\0")
+        assert cmdline[0] == b"imposter", cmdline
+        assert box.calls("setsid") == []
+        assert any("still held" in ln for ln in result.stderr.splitlines()), result.stderr
+    finally:
+        if old.poll() is None:
+            old.kill()
+        old.wait(timeout=10)
+        _kill_all(_pids(child))
+
+
+def test_install_leaves_a_lock_holder_alone_unless_bash_runs_the_launcher(box):
+    """A program that is not the shell running the launcher is never the watchdog, even with the
+    launcher's path and `watch` as its arguments and the lock held."""
+    box.start_session()
+    _installed_launcher(box)
+    signals = box.log.parent / "signals"
+    script = box.log.parent / "py" / "sigint101-course"
+    script.parent.mkdir()
+    script.write_text(
+        "import fcntl, signal, sys, time\n"
+        f"lock = open({str(_lock(box))!r}, 'w')\n"
+        "fcntl.flock(lock, fcntl.LOCK_EX)\n"
+        f"signal.signal(signal.SIGTERM, lambda *a: open({str(signals)!r}, 'a').write('TERM'))\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(30)\n", encoding="utf-8")
+    proc = subprocess.Popen([shutil.which("python3"), str(script), "watch"],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "locked"
+        result = box.run(INSTALL)
+        assert result.returncode == 0, result.stderr
+        assert proc.poll() is None and not signals.exists()
+        assert box.calls("setsid") == []
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
 
 
 # --- the desktop entries ------------------------------------------------------------

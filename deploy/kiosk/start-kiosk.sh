@@ -39,7 +39,9 @@ kiosk_alive() {
 output_size() {
   local size=""
   if command -v wlr-randr >/dev/null 2>&1; then
-    size="$(timeout 5 wlr-randr 2>/dev/null | awk '
+    # -k: a wlr-randr that ignores TERM is killed, so it can never hold up a launch (or, under
+    # the watchdog, keep its lock in this subshell).
+    size="$(timeout -k 2 5 wlr-randr 2>/dev/null | awk '
       function emit() {
         if (on && w > 0 && h > 0) {
           if (tr ~ /^(flipped-)?(90|270)$/) { t = w; w = h; h = t }

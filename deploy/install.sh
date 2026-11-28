@@ -11,25 +11,83 @@ COURSE_BIN="/usr/local/bin/sigint101-course"
 # The running course watchdog holds a flock on this (deploy/kiosk/start-kiosk.sh).
 WATCH_LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sigint101-kiosk-watch.lock"
 
-# This user's running watchdogs: the processes that have the lock file open and whose command
-# line is exactly "<shell> <launcher> watch". Never a pattern match on names: the watchdog's own
-# children and the kiosk browser may have the file open too, and they are left alone.
-watchdog_pids() {
+# The processes holding the watchdog's flock, one PID a line: those with an fd on the lock file
+# whose fdinfo lists the lock. A process that has merely opened the file holds nothing.
+lock_holders() {
   [ -e "$WATCH_LOCK" ] || return 0
   local fd pid seen=" "
-  local -a argv
   while IFS= read -r fd; do
     pid="${fd#/proc/}"
     pid="${pid%%/*}"
     case "$seen" in *" $pid "*) continue ;; esac
+    grep -q '^lock:.*FLOCK' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null || continue
     seen+="$pid "
-    [ -O "/proc/$pid" ] || continue
-    mapfile -d '' argv 2>/dev/null < "/proc/$pid/cmdline" || continue
-    [ "${#argv[@]}" -eq 3 ] && [ "${argv[2]}" = watch ] || continue
-    case "${argv[1]##*/}" in
-      sigint101-course | start-kiosk.sh) printf '%s\n' "$pid" ;;
-    esac
+    printf '%s\n' "$pid"
   done < <(find /proc/[0-9]*/fd -maxdepth 1 -lname "$WATCH_LOCK" 2>/dev/null)
+}
+
+# A process's start time (field 22 of /proc/PID/stat), which a reused PID does not share.
+start_time() {
+  local stat
+  stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+  local -a f
+  read -r -a f <<< "${stat##*) }"
+  [ -n "${f[19]:-}" ] || return 1
+  printf '%s\n' "${f[19]}"
+}
+
+# Is PID this user's watchdog? Its command line is exactly "bash|sh <launcher> watch". Never a
+# pattern match on names.
+is_watchdog() {
+  local -a argv
+  [ -O "/proc/$1" ] || return 1
+  mapfile -d '' argv 2>/dev/null < "/proc/$1/cmdline" || return 1
+  [ "${#argv[@]}" -eq 3 ] && [ "${argv[2]}" = watch ] || return 1
+  case "${argv[0]##*/}" in bash | sh) ;; *) return 1 ;; esac
+  case "${argv[1]##*/}" in sigint101-course | start-kiosk.sh) return 0 ;; esac
+  return 1
+}
+
+# The running watchdogs, as "PID:START", from the lock's holders.
+watchdogs() {
+  local pid start
+  while IFS= read -r pid; do
+    is_watchdog "$pid" || continue
+    start="$(start_time "$pid")" || continue
+    printf '%s:%s\n' "$pid" "$start"
+  done < <(lock_holders)
+}
+
+# Does PID descend from one of the watchdogs given (as "PID:START"), or has it already exited?
+# An older launcher's sleep, curl or systemctl holds the lock that way, and ends within seconds
+# of the watchdog.
+passing_holder() {
+  local pid="$1" ppid stat w hops
+  shift
+  [ -e "/proc/$pid" ] || return 0
+  for hops in 1 2 3 4 5 6 7 8; do
+    if ! stat="$(cat "/proc/$pid/stat" 2>/dev/null)"; then
+      [ "$hops" = 1 ] && return 0
+      return 1
+    fi
+    stat="${stat##*) }"
+    read -r _ ppid _ <<< "$stat"
+    for w in "$@"; do [ "$ppid" = "${w%%:*}" ] && return 0; done
+    [ "$ppid" -gt 1 ] 2>/dev/null || return 1
+    pid="$ppid"
+  done
+  return 1
+}
+
+# Is PID the kiosk browser? Its command line names the kiosk's profile.
+is_kiosk() {
+  local a
+  local -a argv
+  mapfile -d '' argv 2>/dev/null < "/proc/$1/cmdline" || return 1
+  for a in "${argv[@]}"; do
+    [ "$a" = "--user-data-dir=$HOME/.config/chromium-kiosk" ] && return 0
+  done
+  return 1
 }
 
 # A running watchdog keeps the launcher it started with in memory, so without this a launcher
@@ -38,19 +96,36 @@ watchdog_pids() {
 # (install.sh is often run over SSH, which has no WAYLAND_DISPLAY). The kiosk browser is never
 # touched: a learner may be mid-lesson, so new browser flags apply at its next launch.
 restart_watchdog() {
-  local pid
-  local -a pids session_env run
-  mapfile -t pids < <(watchdog_pids)
-  [ "${#pids[@]}" -gt 0 ] || return 0
-  if ! mapfile -d '' session_env 2>/dev/null < "/proc/${pids[0]}/environ"; then
+  local pid w
+  local -a found holders session_env run
+  mapfile -t found < <(watchdogs)
+  [ "${#found[@]}" -gt 0 ] || return 0
+  # Anything else holding the lock for good (a kiosk browser an older launcher started without
+  # closing fd 9) would keep any new watchdog out, so the working one is left as it is.
+  mapfile -t holders < <(lock_holders)
+  for pid in "${holders[@]}"; do
+    for w in "${found[@]}"; do [ "$pid" = "${w%%:*}" ] && continue 2; done
+    if is_kiosk "$pid" || ! passing_holder "$pid" "${found[@]}"; then
+      echo "install: WARN the course watchdog was left running: $pid" \
+        "($(cat "/proc/$pid/comm" 2>/dev/null)) holds its lock; it restarts at the next login" >&2
+      return 0
+    fi
+  done
+  if ! mapfile -d '' session_env 2>/dev/null < "/proc/${found[0]%%:*}/environ"; then
     echo "install: WARN could not read the course watchdog's session; it restarts at the next login" >&2
     return 0
   fi
-  kill -TERM "${pids[@]}" 2>/dev/null || true
+  for w in "${found[@]}"; do kill -TERM "${w%%:*}" 2>/dev/null || true; done
   # The lock frees when the watchdog has exited. An older launcher let its sleep or curl inherit
   # the lock, which then lasts up to that command's end, so allow it some seconds.
   if ! flock -w 15 "$WATCH_LOCK" true; then
-    kill -KILL "${pids[@]}" 2>/dev/null || true
+    # Only what is still the same watchdog: same PID and start time, the lock, the command line.
+    mapfile -t holders < <(watchdogs)
+    for w in "${found[@]}"; do
+      for pid in "${holders[@]}"; do
+        [ "$pid" = "$w" ] && kill -KILL "${w%%:*}" 2>/dev/null
+      done
+    done
     if ! flock -w 5 "$WATCH_LOCK" true; then
       echo "install: WARN the course watchdog's lock is still held; it restarts at the next login" >&2
       return 0

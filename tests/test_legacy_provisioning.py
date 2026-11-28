@@ -35,8 +35,9 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "sysroot",
         "usr/local/bin/sigint101-course",
         # Refrozen for C78-C80 (reviewed legacy deploy change): the watch loop runs with the
-        # lock's fd 9 closed so no child inherits it, and a watchdog that stands down says why.
-        "b2257b402a5e15ba1fbac6d7812db6393d3df4e91baa5831050bbc25d5e95785",
+        # lock's fd 9 closed so no child inherits it, a watchdog that stands down says why, and
+        # a wlr-randr that ignores TERM is killed (timeout -k).
+        "7d005f37c50d5ef252ac9a3ecfb24bd85b14161ab47ce4262339e79eccee75ee",
     ),
     (
         "deploy/kiosk/sigint101.svg",
