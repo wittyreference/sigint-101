@@ -61,13 +61,20 @@ def test_m11_try_keeps_the_second_nodes_antenna_on():
         "'antenna ... before ... power' or 'never power ... without ... antenna'")
 
 
+# The preset as Meshtastic writes it, or its alt name, or its config name.
+LONGFAST = re.compile(r"\blong[\s_-]?fast\b", re.I)
+LONG_TURBO = re.compile(r"\blong[\s_-]?turbo\b", re.I)
+
+
 def test_m11_try_names_the_region_and_preset_the_second_node_shares_with_the_box():
     # A Meshtastic node sends nothing until its region is set, and nodes need the same region and
-    # modem preset to communicate. Left unsaid, a mismatch is an empty list with no reason given.
+    # modem preset to communicate. Provisioning sets the kit to US / LONG_TURBO, so the second node
+    # must match Long Turbo — never LongFast.
     lesson = load_lesson_file(PACK)
-    ask = lesson.stages["try"].lower()
-    assert "region" in ask, "the try must name the region"
-    assert "longfast" in ask, "the try must name the LongFast preset"
+    ask = lesson.stages["try"]
+    assert "region" in ask.lower(), "the try must name the region"
+    assert LONG_TURBO.search(ask), "the try must name the Long Turbo preset"
+    assert not LONGFAST.search(ask), "the try must not tell the second node to use LongFast"
 
 
 def test_m11_try_keeps_its_distance_and_the_path_with_no_second_node():
@@ -87,16 +94,12 @@ def test_m11_try_measures_the_50_cm_from_the_nomad():
         "the try must measure the distance from the Nomad: '50 cm from the Nomad'")
 
 
-# The preset as Meshtastic writes it, or its alt name, or its config name: "LongFast", "Long Fast",
-# "LONG_FAST".
-LONGFAST = re.compile(r"\blong[\s_-]?fast\b", re.I)
-
-# LongFast's limit, about -17 dB: Semtech gives -17.5 dB as the typical LoRa demodulator SNR at
-# SF11, LongFast's spreading factor (SX1261/2 datasheet, Table 6-1; TN1300.05, Table 1). Digits
+# SF11's limit, about -17 dB: Semtech gives -17.5 dB as the typical LoRa demodulator SNR at
+# SF11, Long Turbo's spreading factor (SX1261/2 datasheet, Table 6-1; TN1300.05, Table 1). Digits
 # after a minus sign or a hyphen, "minus seventeen", or "seventeen dB under the noise".
 SEVENTEEN = r"(?:17(?:\.5)?(?!\d)|seventeen\b)"
-LONGFAST_LIMIT = re.compile(rf"(?:[\N{{MINUS SIGN}}-]\s?|\bminus\s+){SEVENTEEN}"
-                            rf"|\b{SEVENTEEN}\s*dB\s+(?:below|under)\b", re.I)
+SF11_LIMIT = re.compile(rf"(?:[\N{{MINUS SIGN}}-]\s?|\bminus\s+){SEVENTEEN}"
+                        rf"|\b{SEVENTEEN}\s*dB\s+(?:below|under)\b", re.I)
 
 
 # Fails first, gives up, drops or loses the packet, or needs a stronger signal.
@@ -106,7 +109,7 @@ FAILS = re.compile(r"\b(?:fail\w*|give\w* up|drop\w*|los(?:e|es|t|ing)\b"
 
 def _a_clause_has_short_or_medium_presets_failing(text):
     # One clause names the Short or Medium presets and has them fail. Not "faster" presets: Long
-    # Turbo is faster than LongFast but keeps SF11, so its limit is LongFast's.
+    # Turbo is faster than LongFast but keeps SF11, so its SNR limit is -17.5 dB too.
     for clause in re.split(r"[.;:!?]", text.lower()):
         if (re.search(r"\bpresets?\b", clause)
                 and re.search(r"\b(?:short|medium)\b", clause)
@@ -115,23 +118,53 @@ def _a_clause_has_short_or_medium_presets_failing(text):
     return False
 
 
-def test_m11_predict_names_the_longfast_preset_but_not_its_limit():
-    # Twelve dB under the noise decodes on LongFast (SF11, typical limit -17.5 dB) and fails on the
-    # Short presets (SF7 stops near -7.5 dB, SF8 near -10), so the predict names the preset it asks
-    # about. It gives no limit: "about -17 dB" there would hand the learner the answer before the
-    # commit.
+def test_m11_predict_names_the_long_turbo_preset_but_not_its_limit():
+    # Twelve dB under the noise decodes on Long Turbo (SF11, typical limit -17.5 dB) and fails on
+    # the Short presets (SF7 stops near -7.5 dB, SF8 near -10), so the predict names Long Turbo
+    # without giving its limit away before the commit.
     predict = load_lesson_file(PACK).stages["predict"]
-    assert LONGFAST.search(predict), "the predict must name the LongFast preset"
+    assert LONG_TURBO.search(predict), "the predict must name the Long Turbo preset"
+    assert not LONGFAST.search(predict), "the predict must not call this radio's preset LongFast"
     assert not re.search(rf"\b{SEVENTEEN}|\blimit", predict, re.I), (
-        "the predict must not give LongFast's limit away")
+        "the predict must not give Long Turbo's limit away")
 
 
-def test_m11_verdict_gives_the_longfast_limit_and_short_and_medium_presets_failing_sooner():
-    # The verdict says why the answer holds on this radio: it decodes cleanly on LongFast, to about
-    # -17 dB, and the Short and Medium presets fail sooner.
+def test_m11_verdict_gives_the_long_turbo_limit_and_short_and_medium_presets_failing_sooner():
+    # The verdict says why the answer holds on this radio: it decodes cleanly on Long Turbo (SF11),
+    # to about -17 dB, and the Short and Medium presets fail sooner.
     verdict = load_lesson_file(PACK).verdict
     assert re.search(r"\bdecodes\b", verdict, re.I), "the verdict must keep the answer: it decodes"
-    assert LONGFAST.search(verdict), "the verdict must name the LongFast preset"
-    assert LONGFAST_LIMIT.search(verdict), "the verdict must give LongFast's limit, about -17 dB"
+    assert LONG_TURBO.search(verdict), "the verdict must name the Long Turbo preset"
+    assert not LONGFAST.search(verdict), "the verdict must not label this radio's preset LongFast"
+    assert SF11_LIMIT.search(verdict), "the verdict must give SF11's limit, about -17 dB"
     assert _a_clause_has_short_or_medium_presets_failing(verdict), (
         "the verdict must say the Short and Medium presets fail sooner")
+
+
+CALLS_8DBM_THE_GRANT = re.compile(
+    r"\b8\s*dBm\s+(?:fcc\s+)?grant\b"
+    r"|\b(?:fcc\s+)?grant\s+(?:of|is|at|:)\s+8\s*dBm\b"
+    r"|\b8\s*dBm\s+is\s+(?:the|its)\s+(?:module['’]?s\s+)?(?:fcc\s+)?grant\b",
+    re.I,
+)
+EIGHT_DBM_UNDER_GRANT = re.compile(
+    r"\b8\s*dBm\b[^.?!]*\b(?:under|below|within|inside)\b[^.?!]*\b(?:fcc\s+)?grant\b"
+    r"|\b(?:under|below|within|inside)\b[^.?!]*\b(?:fcc\s+)?grant\b[^.?!]*\b8\s*dBm\b",
+    re.I,
+)
+
+
+def test_m11_explain_names_long_turbo_500khz_lesson_05_and_8dbm():
+    lesson = load_lesson_file(PACK)
+    explain = lesson.stages["explain"]
+    assert LONG_TURBO.search(explain), "explain must name Long Turbo"
+    assert not LONGFAST.search(explain), "explain must not label this radio's preset LongFast"
+    assert re.search(r"\b500\s*kHz\b", explain, re.I), "explain must note 500 kHz"
+    assert SF11_LIMIT.search(explain), "explain must state the SF11 SNR limit"
+    assert re.search(r"\blesson\s+0?5\b", explain, re.I), "explain must point to Lesson 05"
+    assert EIGHT_DBM_UNDER_GRANT.search(explain), (
+        "explain must place 8 dBm under/below the module's FCC grant")
+    all_prose = " ".join([lesson.concept, *lesson.stages.values(), lesson.verdict])
+    assert not CALLS_8DBM_THE_GRANT.search(all_prose), (
+        "M11 must not call 8 dBm the module's FCC grant "
+        "(the E22-900M22S grant is ~9 dBm at 500 kHz)")

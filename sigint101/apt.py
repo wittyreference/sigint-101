@@ -20,6 +20,7 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import SupervisedReceiver
+from .storage import sync_media_asset
 
 # satdump's binary. It opens the RTL-SDR directly, runs the NOAA APT pipeline on a live pass, and
 # writes the decoded image products as files — so this decoder orchestrates a process and then reads
@@ -87,7 +88,8 @@ class AptDecoder(SupervisedReceiver):
     """
 
     def __init__(self, *, output_dir, data_dir=None, freq_hz=DEFAULT_APT_HZ, device=0, spawn=_popen,
-                 radio_present=None, which=shutil.which, serial=None, list_devices=None):
+                 radio_present=None, which=shutil.which, serial=None, list_devices=None,
+                 sync_assets: bool = False):
         self.output_dir = Path(output_dir)
         # Returned paths are relative to the data dir the console serves from; output_dir sits under
         # it (data/apt under data/), so its parent is the right default.
@@ -99,6 +101,7 @@ class AptDecoder(SupervisedReceiver):
         self._spawn = spawn
         self._which = which
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
+        self._sync_assets = bool(sync_assets)
         self._runs = RunGuard()
         self._init_lifecycle()
         self.error = None
@@ -145,15 +148,32 @@ class AptDecoder(SupervisedReceiver):
 
         return launch, (freq_hz, before, radio)
 
+    def _sync_published_image(self, png: Path) -> bool:
+        """Fsync a completed APT PNG and its directory before announcing it when managed.
+
+        satdump writes directly into output_dir rather than a private staging file, so APT
+        fences the reception announcement here rather than pre-link visibility.
+        """
+        if not self._sync_assets:
+            return True
+        try:
+            sync_media_asset(png)
+        except OSError as exc:
+            self.error = str(exc)
+            return False
+        return True
+
     def _report(self, run):
         """Fix all rows before the next APT pass can scan or write this directory."""
         freq_hz, before, radio = run.args
         written = [png for png in self._pngs() if png not in before]
         written.sort(key=lambda png: png.stat().st_mtime)
-        rows = [self._row(png, freq_hz) for png in written]
+        rows = [(png, self._row(png, freq_hz)) for png in written]
         command = command_line(run.proc)
         run.ready.set()
-        for row in rows:
+        for png, row in rows:
+            if not self._sync_published_image(png):
+                continue
             self._emit(self._admit(), row, command=command, freq_hz=freq_hz, radio=radio)
 
     def drain(self, timeout: float = APT_PASS_TIMEOUT_S) -> None:

@@ -74,12 +74,27 @@ def test_m28_try_keeps_the_second_nodes_antenna_on():
 
 def test_m28_try_names_the_region_and_preset_the_second_node_shares_with_the_box():
     # A Meshtastic node sends nothing until its region is set, and nodes need the same region and
-    # modem preset to communicate. Left unsaid, a mismatch is an empty list with no reason given.
-    # The stage names LongFast earlier as our channel, so the preset is looked for in the sentence
-    # about the second node. That sentence named LongFast before this check was written: the
-    # LongFast line is a guard against a later trim, not a test that failed first.
+    # modem preset to communicate. Provisioning sets the kit to US / LONG_TURBO, so the second node
+    # must match Long Turbo — never LongFast.
     lesson = load_lesson_file(PACK)
     ask = lesson.stages["try"].lower()
     assert "region" in ask, "the try must name the region"
-    assert re.search(r"\bsecond\b[^.?!]*\bnode\b[^.?!]*\blongfast", ask), (
-        "the sentence about the second node must name LongFast: 'second ... node ... LongFast'")
+    assert re.search(r"\bsecond\b[^.?!]*\bnode\b[^.?!]*\blong\s*turbo\b", ask), (
+        "the sentence about the second node must name Long Turbo: 'second ... node ... Long Turbo'")
+    assert not re.search(r"\blong[\s_-]?fast\b", ask), (
+        "M28 try must not tell the learner to use LongFast")
+    assert not re.search(r"\blong[\s_-]?fast\b", lesson.stages["explain"], re.I), (
+        "M28 explain must name Long Turbo's default channel, not LongFast's")
+    assert re.search(r"\blong\s*turbo\b", lesson.stages["explain"], re.I)
+
+
+def test_no_lesson_tells_a_second_node_to_use_longfast():
+    # Guard every shipped pack so no try stage sends a second node to LongFast while provisioning
+    # puts the kit on US / LONG_TURBO.
+    pack_dir = PACK.parent
+    for path in sorted(pack_dir.glob("*.yaml")):
+        lesson = load_lesson_file(path)
+        ask = lesson.stages.get("try", "")
+        assert not re.search(r"\blong[\s_-]?fast\b", ask, re.I), (
+            f"{path.name} try still points a second node to LongFast: {ask!r}"
+        )
