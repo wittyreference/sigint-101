@@ -514,6 +514,7 @@ class Sweeper:
         # on its own is not relaunched on every poll, and each quick death doubles the wait.
         self._clock = clock
         self._started_at = None
+        self._first_row_deadline = None
         self._deaths = 0
         self._retry_at = None
 
@@ -643,10 +644,13 @@ class Sweeper:
             raise SpectrumUnavailable(f"cannot run {RTL_POWER}: {exc}") from exc
 
         self.error = None
-        self._started_at = self._clock()
+        started_at = self._clock()
+        first_row_deadline = started_at + (self.stale_after() + self.START_ALLOWANCE_S)
         # In one step under the row lock, so a reader left from an earlier start never sees
         # this one half made (_current).
         with self._lock:
+            self._started_at = started_at
+            self._first_row_deadline = first_row_deadline
             self._interrupted = False
             self._run += 1
         # A daemon thread, so a wedged rtl_power cannot keep the whole console alive
@@ -820,8 +824,12 @@ class Sweeper:
                 return
             now = self._clock()
             last = self._rows[-1] if self._rows else None
-            waits = ((now - last[1], last[2][0]) if last is not None and last[0] == run
-                     else (None, None))
+            if last is not None and last[0] == run:
+                waits = (now - last[1], last[2][0])
+            else:
+                # The reader uses the run's deadline without taking the lifecycle lock.
+                wait = now - self._started_at if now > self._first_row_deadline else None
+                waits = (wait, None)
             self._rows.append((run, now, waits, row))
             # A run's first row after a restart ends "restarting": newest() judges it from here.
             self._restarting = False
@@ -863,34 +871,31 @@ class Sweeper:
     def newest(self) -> tuple:
         """The running sweep's newest row, whether it is stale, and its age in seconds.
 
-        (row, stale, age), or (None, None, None) until the sweep running now has published a row
-        of its own. `stale` is None while the row is a reading. It is "stalled" once the row is
-        older than stale_after(). It is "resuming" for the first two rows published after a wait
+        (row, stale, age). `stale` is None while the row is a reading. It is "stalled" once the row
+        is older than stale_after(). It is "resuming" for the first two rows published after a wait
         that long: a pass is published when the next one begins, so the first is the pass held
         back when rtl_power stalled, and the second the one rtl_power was sweeping then, finished
         after. Both carry levels from before the stall. The reading, the Capture refusal and the
         waterfall all judge by this one rule.
 
-        After a restart (restart()), until a run publishes a row of its own, it is "restarting",
-        with no row and no age: the rows kept are from before the press. That holds while the
-        stalled rtl_power is stopped and the next has not started, and while a run started after
-        the press has no row yet, for stale_after() plus START_ALLOWANCE_S. A run that brings no
-        row in that time is "stalled" again, aged from its start, and can be restarted again.
+        Before its first row, a run has stale_after() plus START_ALLOWANCE_S to start producing
+        rows. It returns no row or age during that allowance, with "restarting" after a restart
+        press and no stale state otherwise. "restarting" also holds between the press and the
+        start. Past the allowance, any running sweep with no row is "stalled", aged from its
+        start. Its first two rows then read "resuming", as after a stall between rows.
         """
         with self._life:
             with self._lock:
                 run, published, waits, row = (self._rows[-1] if self._rows
                                               else (None, None, (None, None), None))
                 restarting = self._restarting
-            if restarting and (not self.running or run != self._run):
-                if not self.running:
-                    return None, "restarting", None
-                since = self._clock() - self._started_at
-                if since > self.stale_after() + self.START_ALLOWANCE_S:
-                    return None, "stalled", since
-                return None, "restarting", None
-            if run != self._run or not self.running:
-                return None, None, None
+            if not self.running:
+                return None, "restarting" if restarting else None, None
+            if run != self._run:
+                now = self._clock()
+                if now > self._first_row_deadline:
+                    return None, "stalled", now - self._started_at
+                return None, "restarting" if restarting else None, None
             limit = self.stale_after()
             age = self._clock() - published
             if age > limit:
@@ -964,11 +969,10 @@ class Sweeper:
     #: rtl_power to exit (_exit_status).
     STOP_WAIT_S = 3.0
 
-    #: How long, beyond stale_after(), a run started after a restart may go without its first row
-    #: before it reads "stalled" again (newest()). stale_after() already covers the passes before a
-    #: first row (one is published when the next begins); this covers rtl_power opening the dongle,
-    #: a second or two. Not yet timed on the kiosk, so generous: too long only brings the key back
-    #: later.
+    #: Extra time beyond stale_after() for rtl_power to open the dongle and publish its first row.
+    #: The allowance is untimed on the kiosk. Too short means a slow healthy start reads "resuming"
+    #: for two rows. Too long can pass off levels from a stalled first pass as a reading up to
+    #: the full startup limit old.
     START_ALLOWANCE_S = 10.0
 
     def restart(self) -> tuple:

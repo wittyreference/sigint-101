@@ -43,6 +43,9 @@ COMMIT_STAGE = "predict"
 # the teaching landed.
 CHECK_STAGE = "check"
 
+# The allowed bucket keys on an optional `sort:` card deck (M5's 12-card law sort).
+SORT_ANSWERS = ("legal", "illegal", "depends")
+
 # What a predict asks about, which sets how the explain names its answer. An instrument predict
 # asks what the radio will show or do, so the reveal reads "What the radio does"; a knowledge
 # predict asks what is true (the law, what a detection proves, what you need), so it reads "In
@@ -136,11 +139,25 @@ class Lesson:
     verdict: str = ""
     check: dict | None = None
     predict_kind: str = "instrument"
+    sort: list | None = None
 
     @property
     def reveal_label(self) -> str:
         """How the explain header names the answer: what the radio does, or a plain fact."""
         return REVEAL_LABELS[self.predict_kind]
+
+    def sort_feedback(self, card_key: str, choice: str) -> dict:
+        """Score one card-sort tap and return its key, answer, correctness, why, and citation."""
+        by_key = {card["key"]: card for card in (self.sort or ())}
+        card = by_key[card_key]
+        return {
+            "card": card["key"],
+            "choice": choice,
+            "answer": card["answer"],
+            "correct": choice == card["answer"],
+            "why": card["why"],
+            "cite": card["cite"],
+        }
 
     def check_feedback(self, key: str) -> dict:
         """Whether a check answer was the key, with the chosen chip's and the key's label and why.
@@ -526,6 +543,50 @@ def _parse_check(data: dict, ctx: str) -> dict | None:
     return {"prompt": prompt, "choices": choices, "answer": answer}
 
 
+def _parse_sort(data: dict, ctx: str) -> list | None:
+    """Validate an optional `sort:` card deck (key, text, answer, why, cite).
+
+    Mirrors `_parse_check`: a malformed card fails at load rather than mid-lesson. Each card's
+    answer must be legal, illegal, or depends, and its why and cite stay single-line so feedback
+    fits on the 800x480 screen. Returns None when a pack declares no sort deck.
+    """
+    raw = data.get("sort")
+    if raw in (None, []):
+        return None
+    if not isinstance(raw, list):
+        raise LessonError(f"{ctx}: 'sort' must be a list of cards")
+    cards = []
+    seen_keys: set[str] = set()
+    for card in raw:
+        card = card if isinstance(card, dict) else {}
+        fields = {}
+        for field in ("key", "text", "answer", "why", "cite"):
+            value = card.get(field)
+            if isinstance(value, bool):
+                raise LessonError(
+                    f"{ctx}: sort card {field} {value!r} is a YAML boolean — quote it in the pack"
+                )
+            fields[field] = str(value).strip() if value is not None else ""
+            if not fields[field]:
+                raise LessonError(f"{ctx}: each sort card needs a non-empty '{field}'")
+        if fields["key"] in seen_keys:
+            raise LessonError(f"{ctx}: duplicate sort card key '{fields['key']}'")
+        seen_keys.add(fields["key"])
+        if fields["answer"] not in SORT_ANSWERS:
+            allowed = ", ".join(SORT_ANSWERS)
+            raise LessonError(
+                f"{ctx}: sort card '{fields['key']}' answer '{fields['answer']}' must be one of "
+                f"{allowed}"
+            )
+        for line_field in ("why", "cite"):
+            if "\n" in fields[line_field]:
+                raise LessonError(
+                    f"{ctx}: sort card '{fields['key']}' '{line_field}' must be one line"
+                )
+        cards.append(fields)
+    return cards
+
+
 def parse_lesson(data: dict) -> Lesson:
     """Turn parsed YAML into a Lesson, refusing anything half-defined.
 
@@ -631,6 +692,7 @@ def parse_lesson(data: dict) -> Lesson:
         verdict=verdict,
         check=_parse_check(data, ctx),
         predict_kind=predict_kind,
+        sort=_parse_sort(data, ctx),
     )
 
 

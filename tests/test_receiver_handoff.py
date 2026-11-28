@@ -2,13 +2,17 @@
 # ABOUTME: Uses process and logging gates instead of requiring a radio.
 
 import asyncio
+import io
 import select
 import signal
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 
-from sigint101 import app, aprs, childproc, receiver_lifecycle
+import pytest
+
+from sigint101 import app, aprs, childproc, radio_control, receiver_lifecycle
 from sigint101.events import read_events
 from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _StubSweeper
@@ -74,6 +78,8 @@ def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_pat
         try:
             assert retried.wait(3), "no background retry ran during refused claims"
             assert ticket.physical.is_set() and not ticket.reaped
+            with decoder._runs:
+                assert not decoder._runs.is_current(ticket.number)
             assert proc.poll() is None and launches == []
         finally:
             stop_polls.set()
@@ -294,6 +300,257 @@ print('lifespan exited', flush=True)
         finally:
             if proc.poll() is None:
                 proc.kill()
+
+
+def test_receiver_shutdown_times_out_waiting_for_a_reaped_run_to_report(monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "SHUTDOWN_REPORT_WAIT_S", 0.05, raising=False)
+    proc = Child(["aprs"])
+    decoder = _aprs(proc)
+    entered, resume, stopped = (threading.Event() for _ in range(3))
+    errors = []
+
+    def hold_report(_run):
+        entered.set()
+        resume.wait(5)
+
+    def shutdown():
+        try:
+            decoder.shutdown()
+        except aprs.AprsUnavailable as exc:
+            errors.append(str(exc))
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(decoder, "_report", hold_report)
+    decoder.start()
+    ticket = decoder._run
+    worker = threading.Thread(target=shutdown, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        assert ticket.reaped and proc.poll() is not None
+        assert stopped.wait(1), "shutdown still waited for a stalled report"
+        assert errors == ["rtl_fm shutdown reports still pending"]
+        assert not ticket.complete.is_set()
+    finally:
+        resume.set()
+        worker.join(2)
+        assert ticket.complete.wait(2)
+
+
+def test_retirement_bounds_diagnostic_wait_and_closes_stderr_when_safe(monkeypatch):
+    monkeypatch.setattr(receiver_lifecycle, "DIAGNOSTIC_WAIT_S", 0.05, raising=False)
+    entered, resume, closed = (threading.Event() for _ in range(3))
+
+    class StalledStderr(io.StringIO):
+        def read(self, *args):
+            entered.set()
+            resume.wait(5)
+            return super().read(*args)
+
+        def close(self):
+            super().close()
+            closed.set()
+
+    proc = Child(["aprs"], code=1)
+    proc.stderr.close()
+    proc.stderr = StalledStderr("exit detail")
+    decoder = _aprs(proc)
+    decoder.start()
+    ticket = decoder._run
+    try:
+        assert entered.wait(2)
+        assert ticket.complete.wait(1), "retirement still waited for stalled stderr"
+        assert ticket.reaped and not proc.stderr.closed
+    finally:
+        resume.set()
+        assert closed.wait(2)
+    assert ticket.diagnosed.is_set()
+    assert "exit detail" in decoder.watch.reason
+
+
+@pytest.mark.parametrize("transport", [False, True], ids=["pipe", "feed"])
+@pytest.mark.parametrize("failure", ["stop", "join"])
+def test_cleanup_fault_still_fences_the_run_and_closes_its_transport(
+        monkeypatch, transport, failure):
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.02)
+    events = []
+    fault = threading.Event()
+    thread_errors = []
+
+    def record(action):
+        with decoder._runs:
+            events.append((action, decoder._runs.is_current(ticket.number)))
+
+    class Proc(Child):
+        def terminate(self):
+            record("terminate")
+            super().terminate()
+
+        def wait(self, timeout=None):
+            if failure == "stop":
+                raise OSError("child wait failed")
+            return super().wait(timeout)
+
+    class Feed(Proc):
+        def stop_child(self):
+            return childproc.stop_process(self)
+
+        def close_transport(self):
+            record("close")
+
+    class Reader:
+        def join(self, timeout=None):
+            record("join")
+            raise RuntimeError("reader join failed")
+
+    def capture_thread_error(args):
+        thread_errors.append(args.exc_value)
+        fault.set()
+
+    monkeypatch.setattr(threading, "excepthook", capture_thread_error)
+    proc = (Feed if transport else Proc)(["aprs"])
+    decoder = _aprs(proc)
+    decoder.start()
+    ticket = decoder._run
+    decoder._thread = Reader()
+    proc.code = 1
+    ticket.wake.set()
+    assert ticket.complete.wait(2)
+    with decoder._runs:
+        assert not decoder._runs.is_current(ticket.number)
+    assert proc.poll() == 1 and ticket.reaped
+    assert events[0] == ("terminate", True)
+    assert proc.sent == ["TERM"]
+    if failure == "stop":
+        assert ticket.reap_failed and "child wait failed" in ticket.failure
+        assert all(action != "join" for action, _ in events)
+    else:
+        assert not ticket.reap_failed
+        assert fault.wait(2)
+        assert [str(exc) for exc in thread_errors] == ["reader join failed"]
+        assert events[1] == ("join", True)
+    close_states = [current for action, current in events if action == "close"]
+    assert bool(close_states) == transport
+    assert not any(close_states)
+
+
+@pytest.mark.parametrize("switched_at, ordinary_wait", [(0.5, [1.5]), (5, [])])
+def test_queued_claim_uses_the_current_holder_bound_after_ppm(
+        monkeypatch, switched_at, ordinary_wait):
+    arbiter = radio_control.RadioArbiter()
+    now = 0
+    waits = []
+    monkeypatch.setattr(radio_control, "time", SimpleNamespace(monotonic=lambda: now))
+
+    def wait(left):
+        nonlocal now
+        waits.append(left)
+        if len(waits) == 1:
+            now = switched_at
+            arbiter._claim = ("aprs", now)
+        else:
+            now += left
+
+    monkeypatch.setattr(arbiter._lock, "wait", wait)
+    with arbiter.reserve("ppm", AssertionError, float("inf")):
+        with pytest.raises(RuntimeError, match="radio is busy"):
+            with arbiter.reserve("spectrum", RuntimeError, radio_control.CLAIM_QUEUE_WAIT_S):
+                pytest.fail("a second caller acquired the radio")
+    assert waits == [radio_control.PPM_HOLD_S, *ordinary_wait]
+
+
+def _queue_behind(monkeypatch, holder, started, takeover, arrival=0):
+    """Queue a spectrum claim at `arrival` behind `holder`; `takeover(now, left)` drives waits."""
+    arbiter = radio_control.RadioArbiter()
+    clock = SimpleNamespace(now=started, waits=[], granted=None, refused_at=None)
+    monkeypatch.setattr(radio_control, "time", SimpleNamespace(monotonic=lambda: clock.now))
+
+    def wait(left):
+        assert left > 0, "the queued claim waited for no time (busy-wait)"
+        assert len(clock.waits) < 50, "the queued claim kept waiting without a ceiling"
+        clock.waits.append(left)
+        claim = takeover(clock.now, left)
+        if claim is False:
+            clock.now += left
+        else:
+            clock.now, arbiter._claim = claim
+
+    monkeypatch.setattr(arbiter._lock, "wait", wait)
+    with arbiter.reserve(holder, AssertionError, float("inf")):
+        clock.now = arrival
+        try:
+            with arbiter.reserve("spectrum", RuntimeError,
+                                 arrival + radio_control.CLAIM_QUEUE_WAIT_S):
+                clock.granted = arbiter._claim
+        except RuntimeError as exc:
+            assert str(exc) == "the radio is busy finishing another request"
+            clock.refused_at = clock.now
+    return clock
+
+
+def test_queued_claim_gives_up_at_its_own_ppm_ceiling_when_a_second_ppm_takes_over(monkeypatch):
+    def takeover(now, left):
+        # ppm claim B wins the wake-up at t=12; after that every wait runs out.
+        return (12, ("ppm", 12)) if now == 0 else False
+
+    clock = _queue_behind(monkeypatch, "ppm", 0, takeover)
+    assert clock.granted is None
+    assert clock.refused_at == pytest.approx(radio_control.PPM_HOLD_S)
+    assert clock.waits == [radio_control.PPM_HOLD_S, radio_control.PPM_HOLD_S - 12]
+
+
+@pytest.mark.parametrize("period", [1, 5, 12, 19.5])
+def test_a_stream_of_ppm_claims_cannot_hold_a_queued_claim_past_a_fixed_ceiling(
+        monkeypatch, period):
+    def takeover(now, left):
+        # A fresh ppm claim takes the radio every `period` seconds for as long as anyone waits.
+        if left <= period:
+            return False
+        return (now + period, ("ppm", now + period))
+
+    clock = _queue_behind(monkeypatch, "ppm", 0, takeover)
+    assert clock.granted is None
+    assert clock.refused_at == pytest.approx(radio_control.PPM_HOLD_S)
+
+
+def test_a_single_ppm_holder_keeps_its_own_bound_and_hands_over_on_release(monkeypatch):
+    # ppm started 5 s before the claim queued: its own bound ends first, at t=15.
+    clock = _queue_behind(monkeypatch, "ppm", -5, lambda now, left: False)
+    assert clock.waits == [radio_control.PPM_HOLD_S - 5]
+    assert clock.refused_at == pytest.approx(radio_control.PPM_HOLD_S - 5)
+
+    # A second ppm claim that releases inside the ceiling hands the radio to the queued claim.
+    def takeover(now, left):
+        return {0: (12, ("ppm", 12)), 12: (18, None)}[now]
+
+    clock = _queue_behind(monkeypatch, "ppm", 0, takeover)
+    assert clock.refused_at is None
+    assert clock.granted == ("spectrum", 18)
+
+
+def test_the_ppm_ceiling_counts_from_the_claims_arrival_not_the_first_ppm_start(monkeypatch):
+    # ppm A started at t=0, the claim queued at t=5, ppm B took over at t=12.
+    def takeover(now, left):
+        return (12, ("ppm", 12)) if now == 5 else False
+
+    clock = _queue_behind(monkeypatch, "ppm", 0, takeover, arrival=5)
+    assert clock.granted is None
+    assert clock.refused_at == pytest.approx(5 + radio_control.PPM_HOLD_S)
+
+
+def test_a_nearly_finished_ppm_holder_still_leaves_the_ordinary_deadline(monkeypatch):
+    # ppm's own bound ends 1 s after the claim queued; the claim still waits its 2 s.
+    clock = _queue_behind(monkeypatch, "ppm", 1 - radio_control.PPM_HOLD_S,
+                          lambda now, left: False)
+    assert clock.waits == [radio_control.CLAIM_QUEUE_WAIT_S]
+    assert clock.refused_at == pytest.approx(radio_control.CLAIM_QUEUE_WAIT_S)
+
+
+def test_a_queued_claim_behind_an_ordinary_holder_keeps_the_ordinary_deadline(monkeypatch):
+    clock = _queue_behind(monkeypatch, "aprs", 0, lambda now, left: False)
+    assert clock.waits == [radio_control.CLAIM_QUEUE_WAIT_S]
+    assert clock.refused_at == pytest.approx(radio_control.CLAIM_QUEUE_WAIT_S)
 
 
 def test_ppm_retains_its_long_capture_window_without_losing_typed_queue_refusals(

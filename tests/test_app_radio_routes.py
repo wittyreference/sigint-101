@@ -21,7 +21,7 @@ from sigint101.decode import Decoder
 from sigint101.dmr import DmrDecoder
 from sigint101.events import log_event, read_events
 from sigint101.flock import FlockDetector
-from sigint101.hardware import RtlSdrDevice
+from sigint101.hardware import RtlSdrDevice, probe_rtlsdr
 from sigint101.lora import LoRaListener
 from sigint101.pocsag import PocsagDecoder
 from sigint101.ppm import PpmUnavailable
@@ -42,6 +42,10 @@ from tests.test_app import (
     _StubDecoder,
     _StubSweeper,
 )
+from tests.test_hardware import _lsusb, sysfs_tree
+
+# What a tool says when the kernel has deauthorized the radio it tries to claim.
+CLAIM_FAILS = "usb_claim_interface error -5\nFailed to open rtlsdr device #0.\n"
 
 
 def _live():
@@ -590,6 +594,32 @@ def test_decoder_empty_bus_refusal_names_no_waterfall_and_fits_64_chars(
     assert body["cause"] == "no_radio"
     assert shown["badge"] == "NO RADIO"
     assert shown["reason"] == reason
+
+
+# --- C50: a radio the kernel deauthorized reads "No radio", not a tool's death -----------------
+
+@pytest.mark.parametrize("path,factory,build,key,kind", SDR_DECODER_ROUTES, ids=SDR_DECODER_IDS)
+def test_a_deauthorized_radio_lsusb_still_lists_gives_no_radio(
+        tmp_path, path, factory, build, key, kind):
+    # R19 on the reference Recon: lsusb lists the built-in RTL2832U, sysfs has it authorized=0,
+    # and the tool that tries to open it dies with usb_claim_interface error -5.
+    root = sysfs_tree(tmp_path / "usb", ("1-1.2", "0bda:2838", "0"))
+
+    def probe():
+        return probe_rtlsdr(which=lambda name: "/usr/bin/" + name, run=_lsusb(),
+                            sysfs_root=root)
+
+    def build_on_a_deauthorized_radio():
+        dec = build(lambda *_: Child(["tool"], code=2, said=CLAIM_FAILS), tmp_path)
+        dec._radio_present = lambda: probe().present  # as create_app wires every receiver
+        return dec
+
+    with _client(tmp_path, probe=probe, **{factory: build_on_a_deauthorized_radio}) as client:
+        body = client.get(path).json()
+    assert body["available"] is False
+    assert body["reason"].startswith("no RTL-SDR on the USB bus")
+    assert body["cause"] == "no_radio"
+    assert _panel_shows(kind, [body])[0]["badge"] == "NO RADIO"
 
 
 @pytest.mark.parametrize(("reason", "cause", "next_step"), [

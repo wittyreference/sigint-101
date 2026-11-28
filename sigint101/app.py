@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
+from secrets import token_hex, token_urlsafe
 from time import monotonic
 
 # Form bodies are decoded with parse_qs rather than Starlette's request.form(). Starlette pulls
@@ -32,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .acars import AcarsDecoder, AcarsUnavailable
-from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
+from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbPortOccupied, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
@@ -61,8 +62,9 @@ from .hardware import (
     select_rtlsdr_index,
 )
 from .kiosk import request_exit
-from .lessons import CHECK_STAGE, COMMIT_STAGE, load_lessons
-from .lora import LoRaListener, LoRaUnavailable
+from .law import LAW_CAUTION, LAW_SECTIONS
+from .lessons import CHECK_STAGE, COMMIT_STAGE, SORT_ANSWERS, load_lessons
+from .lora import LoRaListener, LoRaSendLost, LoRaTxDisabled, LoRaUnavailable
 from .operate import (
     DEFAULT_INSTRUMENT,
     INSTRUMENTS,
@@ -85,7 +87,7 @@ from .provenance import (
 from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, finish_console
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
-from .safety import notice_for
+from .safety import notice_for, rack_lora_send
 from .spectrum import (
     DEFAULT_BIN,
     DEFAULT_HIGH,
@@ -311,16 +313,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     reports "no radio" — which is how the suite honours the no-mock-hardware invariant with no
     dongle attached. The module-level `app` below uses the real ones.
     """
-    # The status bar's battery, on every page: the UPS's INA219 as its daemon reports it, or
-    # unknown. A box with no gauge shows a dash, never a number. Tests hand in their own gauge.
+    # The status bar reads the UPS's INA219. A box without a measurement shows a dash.
+    # Tests can supply a gauge at the app boundary.
     battery = BatteryGauge() if battery_gauge is None else battery_gauge
 
     def status_bar(request: Request) -> dict:
         reading = battery.read()
+        ppm = request.app.state.last_ppm
         if reading is None:
-            return {"battery_pct": None, "battery_charging": False}
+            return {"battery_pct": None, "battery_charging": False, "ppm_value": ppm}
         return {"battery_pct": reading.percent, "battery_charging": reading.charging,
-                "battery_low": reading.low, "battery_volts": reading.voltage}
+                "battery_low": reading.low, "battery_volts": reading.voltage, "ppm_value": ppm}
 
     def flock_tool(request: Request) -> dict:
         """The Flock source's tool, read off the detector the site configured: tcpdump or Marauder.
@@ -377,6 +380,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         build_lora = LoRaListener
     else:
         build_lora = lora_factory
+    lora_send_permit = token_urlsafe(24)
+
+    def record_transmission(kind, payload):
+        try:
+            log_event(app.state.events_path, kind, payload)
+        except OSError as exc:
+            logging.getLogger(__name__).warning("could not log LoRa %s: %s", kind, exc)
 
     # The RDS decoder runs rtl_fm|redsea, so it holds the one dongle the sweeper and rtl_433 decoder
     # also want — it joins their release/resume turn-taking. Wired to the same probe and enumerator.
@@ -540,6 +550,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.sweeper = build_sweeper()
         app.state.decoder = build_decoder()
         app.state.lora = build_lora()
+        app.state.lora.on_transmission = record_transmission
         app.state.rds = build_rds()
         app.state.adsb = build_adsb()
         app.state.aprs = build_aprs()
@@ -763,6 +774,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             context["check_answer"] = answered["choice"] if answered else None
             context["check_feedback"] = (lesson.check_feedback(answered["choice"])
                                          if answered else None)
+        if lesson.sort:
+            context["sort_answers"] = app.state.progress.get_sort_answers(lesson_id)
         # A lesson that names its own band starts the instrument there instead of the default FM
         # sweep: the dial reads its centre and step, and the live waterfall carries the band edges
         # the console retunes the sweep to. A lesson with no band leaves these unset, so the
@@ -836,6 +849,61 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.progress.record_stage(lesson_id, CHECK_STAGE,
                                         lesson.stage_order.index(CHECK_STAGE))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    @app.post("/api/sort")
+    async def sort_answer(lesson_id: int, request: Request):
+        """Record one card-sort answer (M5's 12-card law sort) and return its why and citation.
+
+        Law is taught as knowledge, never a lockout (D16): any card may be sorted or re-sorted
+        freely, and the score never gates moving on or completing the lesson.
+        """
+        _require_lesson(lesson_id)
+        lesson = app.state.lessons[lesson_id]
+        if not lesson.sort:
+            return JSONResponse(status_code=404, content={
+                "recorded": False, "reason": f"lesson {lesson_id} has no card sort"})
+        card = (await _field(request, "card")).strip()
+        choice = (await _field(request, "choice")).strip()
+        known_cards = {c["key"] for c in lesson.sort}
+        if card not in known_cards:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"'{card}' is not one of the sort cards"})
+        if choice not in SORT_ANSWERS:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"'{choice}' is not a valid sort answer"})
+        fb = lesson.sort_feedback(card, choice)
+        app.state.progress.record_sort_answer(lesson_id, card, choice, correct=fb["correct"])
+        log_event(app.state.events_path, "sort_answer",
+                  {"lesson": lesson_id, "card": card, "choice": choice, "correct": fb["correct"]})
+        saved = app.state.progress.get_sort_answers(lesson_id)
+        answered = sum(1 for c in lesson.sort if c["key"] in saved)
+        score = sum(1 for c in lesson.sort if saved.get(c["key"], {}).get("correct"))
+        if "application/json" in request.headers.get("accept", "") or (
+            "application/json" in request.headers.get("content-type", "")
+        ):
+            return {"recorded": True, **fb, "answered": answered, "score": score,
+                    "total": len(lesson.sort)}
+        return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    def _safe_back(back: str | None) -> tuple[str, str]:
+        """Resolve an optional internal back path for /law, refusing any external URL."""
+        if back and back.startswith("/") and not back.startswith("//"):
+            if re.fullmatch(r"/lesson/\d+", back):
+                return back, f"Lesson {back.rsplit('/', 1)[-1]}"
+            if re.fullmatch(r"/unit/\d+", back):
+                return back, f"Unit {back.rsplit('/', 1)[-1]}"
+        return "/", "Home"
+
+    @app.get("/law", response_class=HTMLResponse)
+    def law_reference(request: Request, back: str | None = None):
+        """Show me the law: a scrolling quick-reference citing each authority behind the rules."""
+        back_href, back_label = _safe_back(back)
+        return templates.TemplateResponse(
+            request=request,
+            name="law.html",
+            context={"title": "The Law", "back_href": back_href, "back_label": back_label,
+                     "caution": LAW_CAUTION, "sections": LAW_SECTIONS},
+        )
 
     @app.post("/api/stage")
     async def stage(lesson_id: int, request: Request):
@@ -1281,6 +1349,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reason.startswith("no RTL-SDR on the USB bus"):
             return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
                     "next_step": "Plug in the RTL-SDR."}
+        if isinstance(exc, AdsbPortOccupied):
+            return {"cause": "unavailable", "next_step": "Free the port, then retry ADS-B."}
+        if reason == "no Flipper on USB":
+            return {"cause": "no_radio", "message": "No Flipper on USB.",
+                    "next_step": "Connect the Flipper over USB."}
         if reason == "no Flipper attached":
             return {"cause": "no_radio", "next_step": "Connect the Flipper over USB."}
         if reason.startswith("no monitor radio:"):
@@ -1445,7 +1518,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             try:
                 listener.start()
             except LoRaUnavailable as exc:
-                return _refused("lora", exc, {"packets": []})
+                return _refused("lora", exc, {"packets": [], **listener.send_state()})
             _started("lora", {"host": listener.hostname, "port": listener.port})
         return {
             "available": True,
@@ -1454,7 +1527,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "host": listener.hostname,
             "port": listener.port,
             "packets": [p.as_dict() for p in listener.recent(limit)],
+            **listener.send_state(),
         }
+
+    @app.post("/api/lora/send")
+    def lora_send(request: Request):
+        """One explicit rack tap hands one fixed test text to the local radio."""
+        try:
+            with rack_lora_send(request, lora_send_permit):
+                send = app.state.lora.send(f"SIGINT 101 test {token_hex(2)}")
+        except PermissionError as exc:
+            return JSONResponse(status_code=403, content={"reason": str(exc)})
+        except LoRaTxDisabled as exc:
+            return JSONResponse(status_code=409, content={"reason": str(exc)})
+        except LoRaSendLost as exc:
+            return JSONResponse(status_code=503, content={"reason": str(exc), "send": exc.send})
+        except LoRaUnavailable as exc:
+            return JSONResponse(status_code=503, content={"reason": str(exc)})
+        return {"send": send}
 
     @app.get("/api/flock")
     def flock(limit: int | None = None):
@@ -1772,18 +1862,29 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     @app.get("/api/hardware")
     def hardware():
-        """What the radio probe sees right now — present, how it looked, and the detail.
-
-        Re-probed on every call, so a dongle unplugged after boot shows up here instead of a stale
-        "present". Absence is reported as data, never masked.
-        """
+        """Report the current USB probe and whether the console is using the RTL-SDR."""
         radio = probe()
-        return {"present": radio.present, "method": radio.method, "detail": radio.detail}
+        if not radio.known:
+            state = "unknown"
+        elif not radio.present:
+            state = "absent"
+        else:
+            busy = app.state.radio_arbiter.busy
+            for name in sdr_consumers:
+                if busy:
+                    break
+                receiver = getattr(app.state, name)
+                release_failure = getattr(receiver, "release_failure", None)
+                if receiver.running or (release_failure and release_failure(pending=True)):
+                    busy = True
+            state = "busy" if busy else "present"
+        return {"present": radio.present, "method": radio.method, "detail": radio.detail,
+                "state": state, "ppm": app.state.last_ppm}
 
     @app.get("/api/battery")
     def battery_reading():
         """The pack as the status bar shows it, for the bar's own refresh: a reading, or absent
-        with the reason (no daemon, an I2C error, a stale poll)."""
+        with the reason (missing adapter, I2C error, or incomplete conversion)."""
         reading = battery.read()
         if reading is None:
             return {"present": False, "reason": battery.reason}
@@ -2045,6 +2146,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
                      # The pager shows framing only wherever it is tuned; its dial says so.
                      "text_withheld": inst.key == "pager",
+                     "lora_send_permit": lora_send_permit if inst.key == "lora" else None,
                      "safety_notice": notice_for(instrument=inst)},
         )
 

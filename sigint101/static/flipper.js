@@ -68,15 +68,34 @@
     if (radio) radio.textContent = info ? radioLine(info) : "";
   }
 
+  function clearCard(panel) {
+    var card = panel.querySelector("[data-flipper-card]");
+    fillCard(panel, null);
+    if (card) card.hidden = true;
+  }
+
   // No read: the card hides and the empty line carries the reason (no Flipper on USB, two on the
   // bus, an app open on it, or a port error). The API supplies the cause to the shared badge.
   function showEmpty(panel, body) {
-    var card = panel.querySelector("[data-flipper-card]");
     var empty = panel.querySelector("[data-flipper-empty]");
     var badge = panel.querySelector("[data-flipper-badge]");
-    fillCard(panel, null);
-    if (card) card.hidden = true;
+    clearCard(panel);
     DecoderPanel.showDown(panel, badge, empty, body);
+  }
+
+  // The shared renderer may be the part that failed.
+  function showDrawError(panel) {
+    clearCard(panel);
+    var badge = panel.querySelector("[data-flipper-badge]");
+    var empty = panel.querySelector("[data-flipper-empty]");
+    if (badge) {
+      badge.textContent = "UNAVAILABLE";
+      badge.className = "decoder__status decoder__status--empty";
+    }
+    if (empty) {
+      empty.textContent = "Could not display the Flipper reading.";
+      empty.hidden = false;
+    }
   }
 
   function render(panel, body) {
@@ -98,8 +117,16 @@
       }, function () { return pollAnswer(null, null); })
       .then(function (body) {
         var waiting = body.available === false;
-        panels.forEach(function (p) { if (waiting) showEmpty(p, body); else render(p, body); });
-        if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
+        var retry = waiting;
+        panels.forEach(function (p) {
+          try {
+            if (waiting) showEmpty(p, body); else render(p, body);
+          } catch (_) {
+            retry = true;
+            showDrawError(p);
+          }
+        });
+        if (!stopped) setTimeout(tick, retry ? RETRY_MS : POLL_MS);
       })
       .catch(function () { if (!stopped) setTimeout(tick, RETRY_MS); });
   }

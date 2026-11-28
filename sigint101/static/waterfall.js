@@ -25,7 +25,7 @@
       makeGainStepper: makeGainStepper, meterReading: meterReading,
       meterLabelTops: meterLabelTops, sweepBadge: sweepBadge, meterState: meterState,
       restartKey: restartKey, makeRestarter: makeRestarter, restartNote: restartNote,
-      meterNoteText: meterNoteText,
+      meterNoteText: meterNoteText, liveSnr: liveSnr,
     };
     return;
   }
@@ -196,6 +196,14 @@
       reading = meterReading(reading, row);
     });
     return reading ? { reading: reading, note: null } : { reading: null, note: "waiting" };
+  }
+
+  function liveSnr(poll, visible) {
+    if (!visible || !poll || poll.code !== 200 || !poll.body.command || poll.body.stale ||
+        poll.body.available === false) return null;
+    var rows = poll.body.rows || [];
+    var row = rows[rows.length - 1];
+    return row && Number.isFinite(row.snr_db) ? row.snr_db : null;
   }
 
   // The waterfall's badge, short, with the whole account in its title. A stale newest row reads
@@ -866,7 +874,22 @@
     if (seen.length > 400) seen = seen.slice(-200);
   }
 
+  function updateStatusSnr() {
+    if (!window.StatusBar) return;
+    var visible = panels.some(function (panel) { return !panel.canvas.closest("[hidden]"); });
+    window.StatusBar.setSnr(liveSnr(lastPoll, visible));
+  }
+
+  if (window.StatusBar && window.MutationObserver) {
+    var stageObserver = new MutationObserver(updateStatusSnr);
+    panels.forEach(function (panel) {
+      var stage = panel.canvas.closest("[data-stage]");
+      if (stage) stageObserver.observe(stage, { attributes: true, attributeFilter: ["hidden"] });
+    });
+  }
+
   function showUnavailable(body) {
+    updateStatusSnr();
     var down = window.DecoderPanel.downState(body);
     var reason = window.DecoderPanel.refusalText(down);
     if (!waiting) {
@@ -939,6 +962,7 @@
           if (p.meter) showMeter(p, meterState(p.reading, fresh, result.body.stale));
         });
 
+        updateStatusSnr();
         var badge = sweepBadge(result.body, total);
         say(badge.text, badge.kind, badge.title);
       })

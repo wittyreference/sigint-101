@@ -106,20 +106,22 @@ def _listener(**kw):
 
 
 def test_listener_buffers_received_packets():
-    lis = _listener()
+    iface = FakeInterface()
+    lis = _listener(connect=lambda *_: iface)
     lis.start()
-    lis._on_receive(TEXT_PKT)
-    lis._on_receive(TELEM_PKT)
+    lis._on_receive(TEXT_PKT, iface)
+    lis._on_receive(TELEM_PKT, iface)
     reads = lis.recent()
     assert [r.portnum for r in reads] == ["TEXT_MESSAGE_APP", "TELEMETRY_APP"]
 
 
 def test_listener_buffer_is_bounded_to_newest():
-    lis = _listener(history=3)
+    iface = FakeInterface()
+    lis = _listener(history=3, connect=lambda *_: iface)
     lis.start()
     for n in range(8):
         pkt = dict(TEXT_PKT, id=n, rxSnr=-float(n))
-        lis._on_receive(pkt)
+        lis._on_receive(pkt, iface)
     reads = lis.recent()
     assert len(reads) == 3
     assert reads[-1].snr_db == pytest.approx(-7.0)

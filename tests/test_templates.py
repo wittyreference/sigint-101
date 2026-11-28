@@ -94,7 +94,6 @@ def _status(**overrides):
         "title": "Gain and SNR",
         "back_href": "/unit/1",
         "back_label": "Unit 1",
-        "ppm_corrected": False,
         "ppm_value": 164,
         "snr_db": 14,
         "battery_pct": 82,
@@ -104,17 +103,16 @@ def _status(**overrides):
     return data
 
 
-def test_status_bar_shows_a_dash_not_a_number_when_nothing_is_measured():
-    # No battery gauge and no live SNR reach the status bar: it must say "unknown", never invent
-    # a reading (the no-mock rule). A default of 100% read as a full battery on every screen.
+def test_status_bar_shows_unknown_battery_and_omits_unmeasured_snr():
+    # A default of 100% read as a full battery on every screen. The unused SNR readout
+    # looked like a second, empty battery, so give that space back when there is no reading.
     ctx = _status()
     del ctx["battery_pct"], ctx["snr_db"]
     html = _render("base.html", **ctx)
     batt = re.search(r'readout--batt.*?readout__value">(.*?)</span>', html, re.S).group(1)
-    snr = re.search(r'readout--snr.*?readout__value">(.*?)</span>', html, re.S).group(1)
     assert "100%" not in html
     assert batt == "&mdash;"
-    assert snr == "&mdash;"
+    assert "readout--snr" not in html
 
 
 def test_status_bar_shows_a_real_battery_reading_when_one_is_given():
@@ -301,18 +299,24 @@ def test_base_renders_the_persistent_status_bar():
     assert "statusbar" in html
     # Back is always visible in the shell.
     assert "btn-back" in html
-    # The four status-bar slots the shell promises.
-    assert "chip--ppm" in html
+    assert "readout--ppm" in html
+    assert "data-status-radio" in html
+    assert "/static/status-bar.js" in html
     assert "readout--snr" in html and "SNR" in html
     assert "readout--batt" in html
     assert "btn-theme" in html
 
 
-def test_base_ppm_chip_reads_raw_or_corrected_from_context():
-    raw = _render("base.html", **_status(ppm_corrected=False))
-    assert "RAW" in raw
-    corrected = _render("base.html", **_status(ppm_corrected=True))
-    assert "CORRECTED" in corrected
+def test_base_ppm_is_a_quiet_label_with_the_measured_sign():
+    for value, label in ((None, "PPM —"), (0, "PPM +0"), (12, "PPM +12"), (-12.5, "PPM -12.5")):
+        html = _render("base.html", **_status(ppm_value=value))
+        span = re.search(r'<span class="readout readout--ppm"[^>]*>(.*?)</span>', html)
+        assert span and span.group(1) == label
+        assert "chip--ppm" not in html and "PPM RAW" not in html
+    css = (TEMPLATES_DIR.parent / "static" / "app.css").read_text()
+    style = re.search(r"\.readout--ppm\s*\{([^}]+)\}", css).group(1)
+    assert "color: var(--fg-mute)" in style
+    assert "border" not in style and "background" not in style and "cursor" not in style
 
 
 def test_base_carries_the_selected_theme_onto_the_app_root():
@@ -1762,6 +1766,12 @@ def test_lesson_gates_recover_the_header_height_without_shrinking_touch_targets(
         66 + 40 + 2 * 6
     )
     assert _px(_css_decl(".app", "--touch")) >= 72
+
+
+def test_rack_picker_selection_uses_the_filled_home_tile_palette():
+    for prop in ("background", "border-color", "color"):
+        assert _css_decl(".rack__pick--on", prop) == _css_decl(".tile--active", prop)
+    assert _css_decl(".rack__pick--on .rack__pick-tool", "color") == "inherit"
 
 
 def test_scroll_cue_frames_wrap_home_lesson_text_and_operator_picker():

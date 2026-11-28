@@ -410,6 +410,17 @@ def test_a_release_that_fails_after_a_good_read_keeps_the_reading():
     assert channel.closed is True
 
 
+def test_close_surfaces_a_bad_descriptor_after_a_good_read():
+    exc = OSError(errno.EBADF, os.strerror(errno.EBADF))
+    channel = FailingChannel("read", 0, None, close_exc=exc)
+    cli = FlipperCli(port=LONG_PORT, opener=lambda port: channel)
+    with pytest.raises(OSError) as raised:
+        with cli:
+            assert "Ex4mple" in cli.command("device_info")
+    assert raised.value is exc
+    cli.close()  # The session no longer owns a handle, even after the close failed.
+
+
 class _Bug(TypeError):
     """A fault in the code, not the port: what a broad catch would hide as "lost the Flipper"."""
 
@@ -537,6 +548,20 @@ def _panel_shows(status, text):
                             timeout=60)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def test_a_missing_flipper_reply_shows_how_to_connect_it(tmp_path):
+    with _serve(tmp_path, FlipperConsole(glob=lambda _: [])) as client:
+        resp = client.get("/api/flipper")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["reason"] == "no Flipper on USB"
+    assert body["available"] is False and body["device"] is None and body["command"] is None
+    shown = _panel_shows(resp.status_code, resp.text)
+    assert shown["empty"] == "No Flipper on USB. · Connect the Flipper over USB.", shown
+    assert shown["badge"] == "NO RADIO", shown
+    assert shown["emptyHidden"] is False and shown["cardHidden"] is True, shown
+    assert shown["nextPollMs"] == [RETRY_MS], shown
 
 
 ROUTE_CASES = {

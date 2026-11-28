@@ -2,6 +2,7 @@
 # ABOUTME: A fake DevTools endpoint stands in for Chrome; the scripts run as real processes.
 
 import base64
+import errno
 import json
 import os
 import shutil
@@ -20,6 +21,8 @@ SCROLL = REPO / "tools" / "render" / "render_scroll.py"
 FIGURE = REPO / "tools" / "render" / "render_figure.py"
 FIT = REPO / "tools" / "render" / "render_fit.py"
 LOGBOOK = REPO / "tools" / "render" / "render_logbook.py"
+LORA = REPO / "tools" / "render" / "render_lora.py"
+CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
 SURVEY = REPO / "tools" / "render" / "render_survey.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
@@ -205,10 +208,19 @@ def devtools():
         fake.close()
 
 
-def _closed_port():
-    """A port on 127.0.0.1 nothing listens on: no browser there."""
-    with socket.create_server(("127.0.0.1", 0)) as s:
-        return s.getsockname()[1]
+@pytest.fixture
+def closed_port():
+    """Hold a loopback port without listening so connects fail even during parallel tests."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        yield sock.getsockname()[1]
+
+
+def test_unreachable_render_port_stays_reserved(closed_port):
+    with socket.socket() as contender:
+        with pytest.raises(OSError) as unavailable:
+            contender.bind(("127.0.0.1", closed_port))
+        assert unavailable.value.errno == errno.EADDRINUSE
 
 
 def run(script, *args, port, fast=True, timeout=60):
@@ -277,9 +289,9 @@ def test_render_fit_cannot_pass_without_a_measurement(devtools, tmp_path, predic
     assert _verdicts(proc)[0].startswith("VERDICT: FAIL - predict:")
 
 
-def test_render_fit_cannot_pass_without_devtools(tmp_path):
+def test_render_fit_cannot_pass_without_devtools(tmp_path, closed_port):
     proc = run(FIT, "http://127.0.0.1:1/lesson/29", str(tmp_path / "predict.png"),
-               port=_closed_port(), timeout=3)
+               port=closed_port, timeout=3)
     assert_no_pass(proc)
 
 
@@ -316,8 +328,8 @@ def test_render_scroll_run_plainly_exits_1_on_fail(devtools):
     assert_ends(proc, 1, "VERDICT: FAIL")
 
 
-def test_render_scroll_with_no_browser_exits_non_zero():
-    proc = run(SCROLL, "http://127.0.0.1:1/lesson/2", "explain", port=_closed_port())
+def test_render_scroll_with_no_browser_exits_non_zero(closed_port):
+    proc = run(SCROLL, "http://127.0.0.1:1/lesson/2", "explain", port=closed_port)
     assert_no_pass(proc)
 
 
@@ -360,19 +372,19 @@ def test_render_figure_run_plainly_exits_1_on_fail(devtools, tmp_path):
     assert_ends(proc, 1, "VERDICT: FAIL")
 
 
-def test_render_figure_errors_exit_non_zero(devtools, tmp_path):
+def test_render_figure_errors_exit_non_zero(devtools, tmp_path, closed_port):
     out = str(tmp_path / "fig")
     # The card's expression threw: a page with no app on it (an error page, a wrong address).
     assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark", out,
                        port=devtools({CARD: THROWS, OVERLAY: OVERLAY_OK})))
     # No browser listening.
-    assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark", out, port=_closed_port()))
+    assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark", out, port=closed_port))
     # The screenshots cannot be saved: their folder does not exist.
     assert_no_pass(run(FIGURE, "http://127.0.0.1:1/exam", "dark",
                        str(tmp_path / "missing" / "fig"),
                        port=devtools({CARD: CARD_OK, OVERLAY: OVERLAY_OK})))
     # No page address given.
-    assert_no_pass(run(FIGURE, port=_closed_port()))
+    assert_no_pass(run(FIGURE, port=closed_port))
 
 
 @pytest.fixture
@@ -421,7 +433,7 @@ def render_make(tmp_path, console_url, devtools):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, SURVEY):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -460,10 +472,14 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
 
 
-@pytest.mark.parametrize("failing", ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name,
-                                     SURVEY.name],
-                         ids=["all-pass", "fit-fails", "scroll-fails", "figure-fails",
-                              "logbook-fails", "survey-fails"])
+@pytest.mark.parametrize(
+    "failing",
+    ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name, SURVEY.name],
+    ids=[
+        "all-pass", "fit-fails", "scroll-fails", "figure-fails",
+        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
+    ],
+)
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
     proc = render_make(FAILING_CHECK=failing)
     assert proc.stdout.splitlines() == [
@@ -471,6 +487,8 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {SCROLL.name} {console_url}/",
         f"ran {FIGURE.name} {console_url}/exam/review/T6C02",
         f"ran {LOGBOOK.name} {console_url}",
+        f"ran {LORA.name} {console_url}",
+        f"ran {CARD_SORT.name} {console_url}",
         f"ran {SURVEY.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
@@ -494,8 +512,8 @@ def test_make_render_check_fails_clearly_when_chromium_is_unreachable(
     assert "ran " not in proc.stdout
 
 
-def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make):
-    proc = render_make(RENDER_URL=f"http://127.0.0.1:{_closed_port()}")
+def test_make_render_check_fails_clearly_when_console_is_unreachable(render_make, closed_port):
+    proc = render_make(RENDER_URL=f"http://127.0.0.1:{closed_port}")
     assert proc.returncode != 0
     assert "Cannot reach the console" in proc.stderr, proc.stderr
     assert "ran " not in proc.stdout
@@ -505,6 +523,24 @@ LOGBOOK_FITS = {"back": True, "doc": [800, 480], "scrolls": True, "lastVisible":
                 "contrast": [8, 9], "differentMarks": True}
 RACK_FITS = {"doc": [800, 480], "visible": True, "stripVisible": True, "target": [76, 72]}
 THEMES = ("dark", "sunlight", "red-night")
+
+
+@pytest.mark.parametrize("defect", [None, "notice", "refusal"])
+def test_lora_render_checks_send_and_notice_in_all_themes(devtools, defect):
+    answers = {
+        f"measureLoRa({json.dumps(theme)}": {
+            "theme": theme, "doc": [800, 480], "send": [76, 72],
+            "visible": not (defect == "notice" and theme == "red-night"), "shapes": True,
+            "refusalVisible": not (defect == "refusal" and theme == "red-night"),
+        }
+        for theme in THEMES
+    }
+    proc = run(LORA, "http://127.0.0.1:9", port=devtools(answers))
+    assert proc.returncode == int(defect is not None), (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        f"VERDICT: {'FAIL' if defect and theme == 'red-night' else 'PASS'} - LoRa send {theme}"
+        for theme in THEMES
+    ]
 
 
 def _logbook_pages(*, rack_defect=None, logbook_defect=None):
@@ -558,6 +594,174 @@ def test_rack_render_fails_if_the_later_theme_overflows_or_blocks_the_strip(devt
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-2:] == ["VERDICT: FAIL - rack red-night",
                                    "VERDICT: PASS - logbook red-night"]
+
+
+CARD_SORT_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "choicesFit": True,
+    "choiceHeights": [80, 80, 80],
+    "footerFit": True,
+    "feedbackFits": True,
+    "cardScrolls": False,
+    "worstDelta": 0,
+    "introFontPx": 18,
+}
+LAW_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "scrolls": True,
+    "lastVisible": True,
+    "sections": 8,
+}
+
+
+def _card_sort_pages(*, sort_defect=None, law_defect=None):
+    pages = {}
+    for theme in THEMES:
+        sort = {**CARD_SORT_FITS, "theme": theme}
+        law = {**LAW_FITS, "theme": theme}
+        if theme == "red-night":
+            sort.update(sort_defect or {})
+            law.update(law_defect or {})
+        pages[f"measureCardSort({json.dumps(theme)})"] = sort
+        pages[f"measureLaw({json.dumps(theme)})"] = law
+    return pages
+
+
+def test_card_sort_render_checks_card_screen_and_law_in_all_three_themes(devtools):
+    port = devtools(_card_sort_pages())
+    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - card-sort dark",
+        "VERDICT: PASS - law dark",
+        "VERDICT: PASS - card-sort sunlight",
+        "VERDICT: PASS - law sunlight",
+        "VERDICT: PASS - card-sort red-night",
+        "VERDICT: PASS - law red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"back": False},
+    {"doc": [801, 480]},
+    {"doc": [800, 481]},
+    {"choicesFit": False},
+    {"choiceHeights": [80, 71, 80]},
+    {"footerFit": False},
+    {"feedbackFits": False},
+    {"cardScrolls": True},
+    {"worstDelta": 1},
+    {"introFontPx": 14},
+    {"theme": "dark"},
+])
+def test_card_sort_render_fails_when_card_screen_overflows_or_shrinks_buttons(devtools, defect):
+    port = devtools(_card_sort_pages(sort_defect=defect))
+    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-2:] == [
+        "VERDICT: FAIL - card-sort red-night",
+        "VERDICT: PASS - law red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"back": False},
+    {"doc": [800, 481]},
+    {"scrolls": False},
+    {"lastVisible": False},
+    {"sections": 0},
+    {"theme": "dark"},
+])
+def test_card_sort_render_fails_when_law_page_does_not_scroll_or_drops_back(devtools, defect):
+    port = devtools(_card_sort_pages(law_defect=defect))
+    proc = run(CARD_SORT, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - law red-night"
+
+
+def test_card_sort_render_stubs_fetch_before_clicking_so_no_answers_post():
+    # F4: executing measureCardSort against a live console must never POST /api/sort writes into
+    # the learner's progress.db. Run the actual CARD_SORT JS under node with a click handler that
+    # calls window.fetch and assert zero fetches reach the server.
+    node = shutil.which("node")
+    assert node, "node is required to test the CARD_SORT browser snippet"
+    import ast
+    tree = ast.parse(CARD_SORT.read_text(encoding="utf-8"))
+    snippet = next(
+        node_.value.value
+        for node_ in tree.body
+        if isinstance(node_, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "CARD_SORT" for t in node_.targets)
+    )
+    harness = f"""
+const assert = require("node:assert/strict");
+let fetchCalls = 0;
+const origFetch = () => {{ fetchCalls += 1; return Promise.resolve({{ ok: true }}); }};
+const rect = (h = 80) => ({{
+  width: 100, height: h, left: 10, top: 10, right: 110, bottom: 10 + h,
+}});
+const makeEl = (h = 80) => ({{
+  hidden: false, disabled: false, scrollWidth: 100, clientWidth: 100,
+  scrollHeight: h, clientHeight: h,
+  getBoundingClientRect: () => rect(h),
+  click() {{}},
+}});
+const fb = makeEl(40);
+const card = makeEl(140);
+const prevBtn = Object.assign(makeEl(76), {{ disabled: true }});
+const nextBtn = Object.assign(makeEl(76), {{ disabled: true }});
+const choices = [0, 1, 2].map(() => {{
+  const el = makeEl(80);
+  el.click = () => {{ globalThis.window.fetch("/api/sort?lesson_id=5", {{ method: "POST" }}); }};
+  return el;
+}});
+const footBtns = [prevBtn, nextBtn];
+const panel = {{
+  hidden: false,
+  querySelectorAll(sel) {{
+    if (sel === "[data-sort-choice]") return choices;
+    if (sel.includes(".stage-foot")) return footBtns;
+    return [];
+  }},
+  querySelector(sel) {{
+    if (sel === ".sort-card") return card;
+    if (sel === "[data-sort-feedback]") return fb;
+    if (sel === "[data-sort-prev]") return prevBtn;
+    if (sel === "[data-sort-next]") return nextBtn;
+    if (sel === "[data-sort-intro]") return makeEl(22);
+    return null;
+  }},
+}};
+globalThis.window = {{ fetch: origFetch }};
+globalThis.fetch = origFetch;
+globalThis.innerWidth = 800;
+globalThis.innerHeight = 480;
+globalThis.getComputedStyle = () => ({{
+  overflowX: "visible", overflowY: "visible", fontSize: "18px",
+}});
+globalThis.document = {{
+  documentElement: {{ scrollWidth: 800, scrollHeight: 480 }},
+  querySelector(sel) {{
+    if (sel === ".app") return {{ dataset: {{ theme: "dark" }} }};
+    if (sel === ".btn-back") return makeEl(76);
+    if (sel.includes("data-sort-panel")) return panel;
+    return null;
+  }},
+  querySelectorAll(sel) {{
+    if (sel === ".stage-panel") return [panel];
+    return [];
+  }},
+}};
+{snippet}
+const result = measureCardSort("dark");
+assert.equal(result.cardsChecked, 1);
+assert.equal(fetchCalls, 0, "measureCardSort posted to fetch instead of stubbing it first");
+assert.equal(globalThis.window.fetch, origFetch, "window.fetch should be restored afterwards");
+"""
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 SURVEY_FITS = {

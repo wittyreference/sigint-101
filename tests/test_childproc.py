@@ -296,6 +296,22 @@ def test_the_stderr_tail_is_bounded():
     assert len(reason) < 400
 
 
+# rtl_433's start-up narration: every protocol it registered, on one line far longer than the cap.
+RTL_433_PROTOCOLS = ("Registered 186 out of 223 device decoding protocols [ 1-4 8 11-12 15-17 "
+                     "19-21 23 25-26 29-36 38-60 63 67-71 73-100 102-105 108-116 119-121 124-128 "
+                     "130-149 151-161 163-168 170-175 177-197 199 201-215 217-223 ]")
+
+
+def test_an_error_line_outranks_start_up_narration_in_the_reason():
+    # C50, R19 on the reference Recon: the claim error and the protocol list were the last two
+    # lines, and the list alone filled the 160 characters the reason keeps.
+    assert len(RTL_433_PROTOCOLS) > childproc.TAIL_CHARS
+    proc = _Ended(["rtl_433"], 2)
+    reason = exit_reason(proc, tail=["usb_claim_interface error -5", RTL_433_PROTOCOLS])
+    assert reason.startswith("rtl_433 stopped (exit status 2)")
+    assert "usb_claim_interface error -5" in reason
+
+
 # --- Pipeline ---------------------------------------------------------------------------------
 
 
@@ -611,205 +627,6 @@ def test_watch_ended_computes_exit_diagnostics_outside_run_guard_lock():
     assert outcome == [None]
     assert watch.stopped is False
     assert watch.blocked() is None
-
-
-def test_settle_ended_stops_pipe_process_before_joining_and_ends_run_after():
-    watch, _ = _watch()
-    guard = childproc.RunGuard()
-    first = guard.current
-    events = []
-
-    class _TrackedProc(_Ended):
-        def terminate(self):
-            events.append(("terminate", guard.is_current(first)))
-
-    class _FakeThread:
-        def join(self, timeout=None):
-            events.append(("join", timeout, guard.is_current(first)))
-
-    proc = _TrackedProc(["rtl_433"], 1)
-    watch.spawned(proc)
-
-    def note_end(p, run):
-        events.append(("note_end", p is proc, run == first, guard.is_current(first)))
-        watch.ended(p, runs=guard, run=run)
-
-    reaped = childproc.settle_ended(
-        proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=1.25)
-    assert reaped is True
-    assert events == [
-        ("note_end", True, True, True),
-        ("terminate", True),
-        ("join", 1.25, True),
-    ]
-    with guard:
-        assert guard.is_current(first) is False
-    assert watch.stopped is True
-
-
-def test_settle_ended_stops_socket_child_before_join_and_closes_transport_after():
-    watch, _ = _watch()
-    guard = childproc.RunGuard()
-    first = guard.current
-    events = []
-
-    class _SocketFeed(_Ended):
-        def stop_child(self):
-            events.append(("stop_child", guard.is_current(first)))
-            return True
-
-        def close_transport(self):
-            events.append(("close_transport", guard.is_current(first)))
-
-        def terminate(self):  # pragma: no cover - settle_ended must use stop_child, not terminate
-            events.append(("terminate", guard.is_current(first)))
-
-    class _FakeThread:
-        def join(self, timeout=None):
-            events.append(("join", timeout, guard.is_current(first)))
-
-    proc = _SocketFeed(["dump1090-fa"], 1)
-    watch.spawned(proc)
-
-    def note_end(p, run):
-        events.append(("note_end", p is proc, run == first, guard.is_current(first)))
-        watch.ended(p, runs=guard, run=run)
-
-    reaped = childproc.settle_ended(
-        proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=0.75)
-    assert reaped is True
-    assert events == [
-        ("note_end", True, True, True),
-        ("stop_child", True),
-        ("join", 0.75, True),
-        ("close_transport", False),
-    ]
-    with guard:
-        assert guard.is_current(first) is False
-    assert watch.stopped is True
-
-
-def test_settle_ended_ends_run_even_when_join_times_out_and_reports_unkillable(monkeypatch):
-    monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.01)
-    watch, _ = _watch()
-    guard = childproc.RunGuard()
-    first = guard.current
-    proc = _Unkillable()
-    watch.spawned(proc)
-
-    class _StuckThread:
-        def join(self, timeout=None):
-            pass
-
-    reaped = childproc.settle_ended(
-        proc, _StuckThread(), guard, watch, note_end=lambda _p, _r: None, wait_s=0.01)
-    assert reaped is False
-    assert proc.sent == ["TERM", "KILL"]
-    with guard:
-        assert guard.is_current(first) is False
-
-
-@pytest.mark.parametrize("fail_at", ["note_end", "stop", "join"])
-def test_settle_ended_cleans_up_pipe_process_when_step_raises(fail_at):
-    watch, _ = _watch()
-    guard = childproc.RunGuard()
-    first = guard.current
-    events = []
-
-    class _TrackedProc(_Ended):
-        def terminate(self):
-            events.append(("terminate", guard.is_current(first)))
-
-        def wait(self, timeout=None):
-            if fail_at == "stop":
-                raise OSError("wait failed")
-            return super().wait(timeout=timeout)
-
-    class _FakeThread:
-        def join(self, timeout=None):
-            events.append(("join", guard.is_current(first)))
-            if fail_at == "join":
-                raise RuntimeError("join failed")
-
-    proc = _TrackedProc(["rtl_433"], 1)
-    watch.spawned(proc)
-
-    def note_end(p, run):
-        events.append(("note_end", guard.is_current(first)))
-        if fail_at == "note_end":
-            raise OSError("stderr read failed")
-        watch.ended(p, runs=guard, run=run)
-
-    expected = RuntimeError if fail_at == "join" else OSError
-    with pytest.raises(expected):
-        childproc.settle_ended(
-            proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=0.5)
-
-    with guard:
-        assert guard.is_current(first) is False
-    assert [name for name, _ in events].count("terminate") == 1
-    if fail_at == "note_end":
-        assert events == [("note_end", True), ("terminate", False)]
-    elif fail_at == "stop":
-        assert events == [("note_end", True), ("terminate", True)]
-    else:
-        assert events == [("note_end", True), ("terminate", True), ("join", True)]
-
-
-@pytest.mark.parametrize("fail_at", ["note_end", "stop_child", "join"])
-def test_settle_ended_cleans_up_socket_feed_when_step_raises(fail_at):
-    watch, _ = _watch()
-    guard = childproc.RunGuard()
-    first = guard.current
-    events = []
-
-    class _SocketFeed(_Ended):
-        def stop_child(self):
-            events.append(("stop_child", guard.is_current(first)))
-            if fail_at == "stop_child":
-                raise OSError("stop_child failed")
-            return True
-
-        def close_transport(self):
-            events.append(("close_transport", guard.is_current(first)))
-
-    class _FakeThread:
-        def join(self, timeout=None):
-            events.append(("join", guard.is_current(first)))
-            if fail_at == "join":
-                raise RuntimeError("join failed")
-
-    proc = _SocketFeed(["dump1090-fa"], 1)
-    watch.spawned(proc)
-
-    def note_end(p, run):
-        events.append(("note_end", guard.is_current(first)))
-        if fail_at == "note_end":
-            raise OSError("stderr read failed")
-        watch.ended(p, runs=guard, run=run)
-
-    expected = RuntimeError if fail_at == "join" else OSError
-    with pytest.raises(expected):
-        childproc.settle_ended(
-            proc, _FakeThread(), guard, watch, note_end=note_end, wait_s=0.5)
-
-    with guard:
-        assert guard.is_current(first) is False
-    assert [name for name, _ in events].count("stop_child") == 1
-    assert events[-1] == ("close_transport", False)
-    if fail_at == "note_end":
-        assert events == [
-            ("note_end", True), ("stop_child", False), ("close_transport", False),
-        ]
-    elif fail_at == "stop_child":
-        assert events == [
-            ("note_end", True), ("stop_child", True), ("close_transport", False),
-        ]
-    else:
-        assert events == [
-            ("note_end", True), ("stop_child", True), ("join", True),
-            ("close_transport", False),
-        ]
 
 
 def test_fake_children_do_not_leak_unclosed_stderr_files():

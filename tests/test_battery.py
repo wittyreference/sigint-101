@@ -1,34 +1,20 @@
 # ABOUTME: Tests the battery gauge: the vendor's 3S voltage-to-percent curve, charging from the
 # ABOUTME: current's sign, the honest None when nothing measures, and the status bar it feeds.
 
-import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from sigint101 import battery
 from sigint101.app import create_app
-from sigint101.battery import (
-    LOW_PERCENT,
-    BatteryGauge,
-    BatteryReading,
-    fetch_daemon,
-    parse_daemon,
-    percent_from_voltage,
-)
+from sigint101.battery import BatteryGauge, BatteryReading, percent_from_voltage
 from sigint101.hardware import RadioProbe
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FIXTURE_PACKS = FIXTURES / "lesson_packs"
-
-# A real reading, captured from the reference Recon's battery daemon (GET 127.0.0.1:9099/battery) on
-# 2026-11-03 while the Recon sat on charge in the truck.
-REAL = json.loads((FIXTURES / "battery" / "daemon-reference-recon.json").read_text())
-# The wall-clock moment the real reading was taken, so the fixture reads as fresh.
-REAL_AT = 1793671271.0  # 2026-11-03T02:01:11Z
-
 
 # --- the vendor curve -----------------------------------------------------------
 
@@ -52,147 +38,8 @@ def test_percent_is_a_whole_number():
     assert percent_from_voltage(12.328) == 92
 
 
-# --- parsing the daemon's reading -----------------------------------------------
-
-
-def test_a_real_daemon_reading_parses_to_volts_percent_and_charging():
-    reading = parse_daemon(REAL, now=REAL_AT)
-    assert reading == BatteryReading(voltage=12.328, current_a=0.114, percent=92, charging=True)
-    assert reading.low is False
-
-
-def test_negative_current_is_the_pack_discharging():
-    # Waveshare's UPS wiki: a negative current is the batteries feeding the Pi, positive is
-    # the batteries charging.
-    reading = parse_daemon(dict(REAL, current_a=-0.62), now=REAL_AT)
-    assert reading.charging is False
-
-
-def test_a_reading_under_the_low_mark_is_low():
-    volts = 9.0 + 3.6 * (LOW_PERCENT - 1) / 100
-    assert parse_daemon(dict(REAL, voltage=volts), now=REAL_AT).low is True
-    assert parse_daemon(dict(REAL, voltage=12.0), now=REAL_AT).low is False
-
-
-def test_a_daemon_reporting_an_i2c_error_is_no_reading():
-    # The daemon keeps its last numbers when a poll fails and sets "error"; those numbers are no
-    # longer a measurement of now.
-    assert parse_daemon(dict(REAL, error="OSError(121, 'Remote I/O error')"), now=REAL_AT) is None
-
-
-def test_a_daemon_that_has_not_polled_yet_is_no_reading():
-    # battery_daemon.py's state before its first poll.
-    blank = {"voltage": None, "current_a": None, "power_w": None, "percent": None,
-             "timestamp": None, "error": None}
-    assert parse_daemon(blank, now=REAL_AT) is None
-
-
-def test_a_stale_reading_is_no_reading():
-    # The daemon polls every 5 s; a reading a minute old means its poller has stopped.
-    assert parse_daemon(REAL, now=REAL_AT + 60) is None
-    assert parse_daemon(REAL, now=REAL_AT + 20) is not None
-
-
-@pytest.mark.parametrize("payload", [
-    {},
-    {"voltage": "12.3", "current_a": 0.1, "timestamp": "2026-11-03T02:01:11Z", "error": None},
-    dict(REAL, timestamp="yesterday"),
-    dict(REAL, current_a=None),
-    [],
-])
-def test_anything_else_is_no_reading(payload):
-    assert parse_daemon(payload, now=REAL_AT) is None
-
-
-# --- the gauge: one fetch per ten seconds, honest when absent ------------------
-
-
 class _Clocks:
-    def __init__(self):
-        self.mono = 100.0
-        self.wall = REAL_AT
-
-
-def _gauge(fetch, clocks):
-    return BatteryGauge(fetch=fetch, clock=lambda: clocks.mono, wall_clock=lambda: clocks.wall)
-
-
-def test_the_gauge_reads_once_per_cache_window():
-    calls = []
-    clocks = _Clocks()
-
-    def fetch():
-        calls.append(1)
-        return REAL
-
-    gauge = _gauge(fetch, clocks)
-    assert gauge.read().percent == 92
-    clocks.mono += 9.9
-    gauge.read()
-    assert len(calls) == 1
-    clocks.mono += 0.2
-    gauge.read()
-    assert len(calls) == 2
-
-
-def test_an_unreachable_daemon_is_no_reading_and_is_not_hammered():
-    calls = []
-    clocks = _Clocks()
-
-    def fetch():
-        calls.append(1)
-        raise ConnectionRefusedError(111, "Connection refused")
-
-    gauge = _gauge(fetch, clocks)
-    assert gauge.read() is None
-    assert gauge.read() is None
-    assert len(calls) == 1
-    assert "Connection refused" in gauge.reason
-
-
-def test_a_daemon_error_gives_its_reason():
-    clocks = _Clocks()
-    gauge = _gauge(lambda: dict(REAL, error="OSError(121, 'Remote I/O error')"), clocks)
-    assert gauge.read() is None
-    assert "Remote I/O error" in gauge.reason
-
-
-# --- the real fetch, against a real local HTTP server ---------------------------
-
-
-class _DaemonHandler(BaseHTTPRequestHandler):
-    def log_message(self, *args, **kwargs):
-        pass
-
-    def do_GET(self):
-        body = json.dumps(REAL).encode()
-        self.send_response(200 if self.path == "/battery" else 404)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-
-@pytest.fixture
-def daemon_url():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _DaemonHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}"
-    server.shutdown()
-    server.server_close()
-
-
-def test_fetch_daemon_reads_the_daemons_json(daemon_url):
-    assert fetch_daemon(f"{daemon_url}/battery") == REAL
-
-
-def test_fetch_daemon_raises_when_nothing_listens():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _DaemonHandler)
-    port = server.server_address[1]
-    server.server_close()
-    with pytest.raises(OSError):
-        fetch_daemon(f"http://127.0.0.1:{port}/battery")
+    mono = 100.0
 
 
 # --- the status bar on every page, and /api/battery -----------------------------
@@ -239,7 +86,7 @@ def test_the_error_page_shows_the_measured_battery_too(tmp_path):
 
 
 def test_no_reading_shows_a_dash_on_every_page(tmp_path):
-    with _client(tmp_path, _FixedGauge(None, "battery daemon unreachable")) as client:
+    with _client(tmp_path, _FixedGauge(None, "INA219 unavailable")) as client:
         html = client.get("/").text
     assert _batt_value(html) == "&mdash;"
     assert "batt--low" not in html
@@ -272,6 +119,153 @@ def test_api_battery_returns_the_reading(tmp_path):
 
 
 def test_api_battery_says_absent_with_the_reason(tmp_path):
-    with _client(tmp_path, _FixedGauge(None, "battery daemon unreachable")) as client:
+    with _client(tmp_path, _FixedGauge(None, "INA219 unavailable")) as client:
         body = client.get("/api/battery").json()
-    assert body == {"present": False, "reason": "battery daemon unreachable"}
+    assert body == {"present": False, "reason": "INA219 unavailable"}
+
+
+# Datasheet-based bytes (TI SBOS448G, sections 8.5.1 and 8.6.3), not bench captures.
+# Bus 3082 x 4 mV with CNVR set. R2 is 0.1 ohm on the Waveshare 3S schematic.
+INA219_CHARGING = {
+    0x01: b"\x04\x74",  # 1140 x 10 µV
+    0x02: b"\x60\x52",  # 12.328 V
+    0x03: b"\x02\xbe",  # 702 x 2 mW
+    0x04: b"\x04\x74",  # 1140 x 100 µA
+    0x05: b"\x10\x00",  # Existing calibration 4096, 100 µA per current count
+}
+
+
+class _ReadOnlyBus:
+    """An SMBus double which exposes only register reads and close."""
+
+    def __init__(self, number, registers):
+        assert number == 1
+        self.registers = registers
+        self.reads = []
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.closed = True
+
+    def read_i2c_block_data(self, address, register, length):
+        assert (address, length) == (0x41, 2)
+        self.reads.append(register)
+        value = self.registers[register]
+        if isinstance(value, OSError):
+            raise value
+        return list(value)
+
+
+def _fake_ina219(monkeypatch, registers):
+    buses = []
+
+    def connect(number):
+        bus = _ReadOnlyBus(number, registers)
+        buses.append(bus)
+        return bus
+
+    monkeypatch.setitem(sys.modules, "smbus2", SimpleNamespace(SMBus=connect))
+    return buses
+
+
+def test_ina219_decodes_datasheet_byte_order_and_calibrated_scaling():
+    bus = _ReadOnlyBus(1, INA219_CHARGING)
+    sample = battery.read_ina219(bus)
+
+    assert sample.voltage == pytest.approx(12.328)
+    assert sample.shunt_voltage == pytest.approx(0.0114)
+    assert sample.current_a == pytest.approx(0.114)
+    assert sample.power_w == pytest.approx(1.404)
+    assert set(bus.reads) == set(INA219_CHARGING)
+
+
+def test_ina219_current_is_signed_and_power_is_unsigned():
+    # A second existing calibration doubles the calibration word, halving both LSBs.
+    # Negative one shunt count produces negative two current counts.
+    registers = INA219_CHARGING | {
+        0x01: b"\xff\xff",
+        0x03: b"\x00\x00",
+        0x04: b"\xff\xfe",
+        0x05: b"\x20\x00",
+    }
+    sample = battery.read_ina219(_ReadOnlyBus(1, registers))
+    assert sample.shunt_voltage == pytest.approx(-0.00001)
+    assert sample.current_a == pytest.approx(-0.0001)
+    # At 25.6 V and 1.2801 A, the unsigned power word has its high bit set.
+    high_bus_voltage = registers | {
+        0x01: b"\x32\x01",  # 12801 shunt counts
+        0x02: b"\xc8\x02",
+        0x03: b"\x80\x02",
+        0x04: b"\x64\x02",  # 25602 current counts
+    }
+    sample = battery.read_ina219(_ReadOnlyBus(1, high_bus_voltage))
+    assert sample.power_w == pytest.approx(32.770)
+
+
+def test_uncalibrated_ina219_reads_pack_current_from_shunt(monkeypatch):
+    registers = INA219_CHARGING | {
+        0x01: b"\xe7\xc8",  # -6200 x 10 µV / 0.1 ohm = -0.62 A
+        0x02: b"\x59\x12",  # 2850 x 4 mV with CNVR set
+        0x03: b"\x00\x00",
+        0x04: b"\x00\x00",
+        0x05: b"\x00\x00",
+    }
+    buses = _fake_ina219(monkeypatch, registers)
+    gauge = BatteryGauge()
+    reading = gauge.read()
+    assert reading is not None
+    assert reading.voltage == pytest.approx(11.4)
+    assert reading.current_a == pytest.approx(-0.62)
+    assert reading.percent == 67
+    assert reading.charging is False
+    assert len(buses) == 1 and buses[0].closed
+    assert battery.read_ina219(_ReadOnlyBus(1, registers)).power_w is None
+
+
+@pytest.mark.parametrize("bad_register,replacement,reason", [
+    (0x02, b"\x60\x50", "conversion"),
+    (0x02, b"\x60\x53", "overflow"),
+    (0x04, b"\x04", "short"),
+    (0x01, OSError("Remote I/O error"), "Remote I/O error"),
+])
+def test_ina219_measurement_failure_clears_the_cached_reading(
+        monkeypatch, bad_register, replacement, reason):
+    registers = INA219_CHARGING.copy()
+    buses = _fake_ina219(monkeypatch, registers)
+    clocks = _Clocks()
+    gauge = BatteryGauge(clock=lambda: clocks.mono)
+    assert gauge.read().percent == 92
+    assert gauge.read().percent == 92
+    assert len(buses) == 1 and buses[0].closed
+    registers[bad_register] = replacement
+    clocks.mono += 10
+    assert gauge.read() is None
+    assert reason in gauge.reason
+    assert gauge.read() is None
+    assert len(buses) == 2 and buses[1].closed
+
+
+def test_console_uses_the_ina219_for_page_and_api(tmp_path, monkeypatch):
+    buses = _fake_ina219(monkeypatch, INA219_CHARGING)
+    app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path)
+    with TestClient(app) as client:
+        response = client.get("/api/battery")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["present"] and body["charging"] and body["percent"] == 92
+        assert body["current_a"] == pytest.approx(0.114)
+        assert _batt_value(client.get("/operate/waterfall").text) == "92%"
+    assert len(buses) == 1 and buses[0].closed
+
+
+
+def test_unavailable_ina219_reports_unknown_on_page_and_api(tmp_path):
+    app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path)
+    with TestClient(app) as client:
+        body = client.get("/api/battery").json()
+        assert body["present"] is False
+        assert "I2C bus is unavailable" in body["reason"]
+        assert _batt_value(client.get("/").text) == "&mdash;"

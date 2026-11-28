@@ -509,13 +509,15 @@ def test_lora_reports_each_packet_received_over_the_air():
         def close(self):
             pass
 
-    lis = lora.LoRaListener(connect=lambda host, port: Interface())
+    iface = Interface()
+    lis = lora.LoRaListener(connect=lambda host, port: iface)
     hook = _hook(lis)
     lis.start()
     try:
-        lis._on_receive(packet=LORA_TEXT)
-        lis._on_receive(packet={"from": 123, "fromId": "!0000007b"})     # the node itself: no
-        lis._on_receive(packet=LORA_ENCRYPTED)
+        lis._on_receive(packet=LORA_TEXT, interface=iface)
+        # The node's own traffic is not an over-the-air reception.
+        lis._on_receive(packet={"from": 123, "fromId": "!0000007b"}, interface=iface)
+        lis._on_receive(packet=LORA_ENCRYPTED, interface=iface)
     finally:
         lis.stop()
     assert hook.calls == [p.as_dict() for p in lis.recent()]

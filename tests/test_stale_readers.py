@@ -1549,11 +1549,14 @@ def test_pipeline_natural_exit_reaps_live_downstream_and_drains_buffered_pipe(mo
         assert stages[1].poll() is None
 
         real_thread = dec._thread
+        ticket = dec._run
         down_poll_at_join = []
 
         class _CheckAtJoin:
             def join(self, timeout=None):
-                down_poll_at_join.append(stages[1].poll())
+                with dec._runs:
+                    current = dec._runs.is_current(ticket.number)
+                down_poll_at_join.append((stages[1].poll(), timeout, current))
                 go_on.set()
                 return real_thread.join(timeout)
 
@@ -1561,7 +1564,11 @@ def test_pipeline_natural_exit_reaps_live_downstream_and_drains_buffered_pipe(mo
         with pytest.raises(aprs.AprsUnavailable, match="status 1"):
             dec.start()
 
-        assert down_poll_at_join and down_poll_at_join[0] is not None
+        [(downstream_code, timeout, current)] = down_poll_at_join
+        assert downstream_code is not None and timeout == dec.STOP_WAIT_S and current
+        assert ticket.complete.wait(2) and dec.watch.stopped
+        with dec._runs:
+            assert not dec._runs.is_current(ticket.number)
         assert not real_thread.is_alive()
         assert {s["source"] for s in dec.stations()} == {"KD2ABC-9", "N0CALL"}
         assert heard.log == [
@@ -1583,6 +1590,18 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
     # budget shorter than FEED_POLL_S. Only non-blocking draining finishes before the join budget.
     pairs = []
     procs = []
+    lifecycle = []
+
+    class _TrackedFeed(adsb._Feed):
+        def stop_child(self):
+            with dec._runs:
+                lifecycle.append(("stop", dec._runs.is_current(dec._run.number)))
+            return super().stop_child()
+
+        def close_transport(self):
+            with dec._runs:
+                lifecycle.append(("close", dec._runs.is_current(dec._run.number)))
+            return super().close_transport()
 
     def spawn(device):
         client_sock, server_sock = socket.socketpair()
@@ -1591,7 +1610,7 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
         proc = _AliveProc(
             ["dump1090-fa", "--device-index", str(device), "--run", str(len(procs) + 1)])
         procs.append(proc)
-        return adsb._Feed(proc, client_sock)
+        return _TrackedFeed(proc, client_sock)
 
     dec = adsb.AdsbDecoder(spawn=spawn, **_common())
     dec.STOP_WAIT_S = 0.15
@@ -1624,6 +1643,8 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
 
         class _ReleaseOnJoin:
             def join(self, timeout=None):
+                with dec._runs:
+                    lifecycle.append(("join", dec._runs.is_current(dec._run.number)))
                 joined.set()
                 go_on.set()
                 real_thread.join(timeout)
@@ -1638,6 +1659,9 @@ def test_adsb_natural_exit_drains_complete_sbs_line_queued_in_socket():
         assert joined.is_set()
         assert alive_after_join == [False]
         assert not real_thread.is_alive()
+        assert dec._run.complete.wait(2) and dec.watch.stopped
+        assert lifecycle == [("stop", True), ("join", True), ("close", False)]
+        assert pairs[0][0].fileno() == -1
         assert len(procs) == 1
         assert {a["hex_ident"] for a in dec.aircraft()} == {"A1B2C3", "DDEEFF"}
         assert heard.log == [
@@ -1994,7 +2018,7 @@ def test_after_natural_exit_drain_times_out_old_reader_death_record_reaches_noth
 def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_drops_queued_item(
         monkeypatch):
     # A failed diagnostic leaves a usable exit reason. Reap and fence the old reader so a queued
-    # item cannot publish after the drain deadline or change the replacement run's watch.
+    # item cannot publish after the drain deadline or leave an error on the replacement run.
     procs = []
 
     class _TrackedLateProc(LateProc):
@@ -2044,16 +2068,17 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
         with pytest.raises(aprs.AprsUnavailable, match="exit status 1.*stderr read failed"):
             dec.start()
         assert procs[0].terminated is True
-
-        # Resuming the detached reader must publish nothing to the roster or reception hook.
-        go_on.set()
-        procs[0].close_pipe()
-        real_thread.join(5)
-        assert not real_thread.is_alive()
         assert "exit status 1" in dec.watch.reason and "stderr read failed" in dec.watch.reason
         clock.now += 60
         dec.start()
-        assert dec.watch.stopped is False
+        assert len(procs) == 2 and dec.running
+
+        # The detached reader cannot touch the replacement's error or reception data.
+        go_on.set()
+        procs[0].break_pipe(OSError("stale stdout failed"))
+        procs[0].close_pipe()
+        real_thread.join(5)
+        assert not real_thread.is_alive()
         assert dec.error is None
         assert [s["source"] for s in dec.stations()] == ["KD2ABC-9"]
         assert heard.log == [("KD2ABC-9", aprs.DEFAULT_APRS_HZ, _line(procs[0]))]

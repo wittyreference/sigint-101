@@ -16,7 +16,6 @@
   'ais': ('162.0', 'MHz', 'Marine AIS · 161.975 + 162.025 · rtl_ais'),
   'apt': (none, 'MHz', 'NOAA APT · satdump'),
   'sstv': (none, 'MHz', 'SSTV · rtl_fm|sox|sstv decoding a picture'),
-  'lora': ('915', 'MHz', 'US LoRa band · meshtastic listening'),
   'flock': ('2.4', 'GHz', 'WiFi · monitor mode, receive-only'),
   'rayhunter': ('ORBIC', '·4G', 'Rayhunter · control plane, read-only'),
   'flipper': ('USB', '·CLI', 'Flipper Zero · serial'),
@@ -38,12 +37,28 @@
      the screen. Picking one is a page of its own, so Back and a reload both land where you are.
      Flock names the tool of the source the site configured (tcpdump, or Marauder). #}
   <div class="scroll-frame rack__chooser">
+    {% set picker_groups = {
+      'Spectrum': {'waterfall': 'Band sweep', 'rds': 'FM metadata', 'apt': 'Sat weather'},
+      'Aircraft and ships': {'adsb': 'Air traffic', 'acars': 'Air reports', 'ais': 'Ship tracks'},
+      'Pagers and packets': {'ism': 'Sensor data', 'aprs': 'Ham packets', 'pager': 'Page frames',
+                            'dmr': 'Radio voice', 'sstv': 'Radio image', 'lora': 'Mesh radio'},
+      'Counter-surveillance': {'flock': 'Camera cues', 'rayhunter': 'Tower clues'},
+      'Devices': {'flipper': 'Device info', 'clock': 'PPM check', 'health': 'Sweep setup'},
+    } %}
     <nav class="rack__picker" aria-label="Instruments">
-      {% for i in instruments %}
-      <a class="rack__pick{% if i.key == inst.key %} rack__pick--on{% endif %}" href="/operate/{{ i.key }}"{% if i.key == inst.key %} aria-current="page"{% endif %}>
-        <span class="rack__pick-label">{{ i.label }}</span>
-        <span class="rack__pick-tool">{{ flock_tool if i.key == 'flock' else i.tool }}</span>
-      </a>
+      {% for heading, entries in picker_groups.items() %}
+      {% set heading_id = 'rack-group-' ~ loop.index %}
+      <section class="rack__group" aria-labelledby="{{ heading_id }}">
+        <h2 class="rack__group-title" id="{{ heading_id }}">{{ heading }}</h2>
+        {% for key, detail in entries.items() %}
+        {% set i = instruments|selectattr('key', 'equalto', key)|first %}
+        <a class="rack__pick{% if i.key == inst.key %} rack__pick--on{% endif %}" href="/operate/{{ i.key }}"{% if i.key == inst.key %} aria-current="page"{% endif %}>
+          <span class="rack__pick-label">{{ 'POCSAG' if i.key == 'pager' else i.label }}</span>
+          <span class="rack__pick-tool">{{ flock_tool if i.key == 'flock' else i.tool }}</span>
+          <span class="rack__pick-detail">{{ detail }}</span>
+        </a>
+        {% endfor %}
+      </section>
       {% endfor %}
     </nav>
   </div>
@@ -90,7 +105,7 @@
       {% elif inst.key == 'dmr' %}{{ panels.dmr(freq_hz / 1000000, head_command=false) }}
       {% elif inst.key == 'apt' %}{{ panels.apt(head_command=false) }}
       {% elif inst.key == 'sstv' %}{{ panels.sstv(freq_hz / 1000000, head_command=false) }}
-      {% elif inst.key == 'lora' %}{{ panels.lora(safety_notice) }}
+      {% elif inst.key == 'lora' %}{{ panels.lora() }}
       {% elif inst.key == 'flock' %}{{ panels.flock(flock_tool, head_command=false) }}
       {% elif inst.key == 'rayhunter' %}{{ panels.rayhunter() }}
       {% elif inst.key == 'flipper' %}{{ panels.flipper() }}
@@ -110,6 +125,18 @@
       </div>
       <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+<span class="rack__adjust-label">Freq</span></button>
       {{ step_key(inst.steps) }}
+    </div>
+    {% elif inst.key == 'lora' %}
+    <div class="rack-lora" data-lora-send-permit="{{ lora_send_permit }}">
+      <div class="rack-lora__action">
+        <button class="tune-btn btn--primary" type="button" data-lora-send>Send</button>
+        <div class="rack-lora__readout">
+          <div data-lora-radio>Radio settings not reported</div>
+          <div class="rack-lora__outcome" data-lora-outcome role="status" hidden></div>
+          <div data-lora-no-repeat hidden>A node that does not forward looks the same.</div>
+        </div>
+      </div>
+      {{ panels.safety_notice(safety_notice) }}
     </div>
     {% else %}
     {% set fixed = FIXED[inst.key] %}

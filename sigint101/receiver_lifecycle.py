@@ -15,6 +15,8 @@ SAME_TARGET_WAIT_S = 2.0
 REAP_RETRY_MIN_S = 2.0
 REAP_RETRY_WAIT_S = 0.1
 DIRECT_CAPTURE_WAIT_S = 10.0
+SHUTDOWN_REPORT_WAIT_S = 6.0
+DIAGNOSTIC_WAIT_S = 3.0
 
 
 class PartialLaunch(RuntimeError):
@@ -54,6 +56,8 @@ class Run:
     ready: threading.Event = field(default_factory=threading.Event)
     complete: threading.Event = field(default_factory=threading.Event)
     diagnosed: threading.Event = field(default_factory=threading.Event)
+    diagnostic_lock: threading.Lock = field(default_factory=threading.Lock)
+    deferred_stderr: tuple = ()
     reader: threading.Thread | None = None
     reaped: bool = False
     reap_failed: bool = False
@@ -171,10 +175,14 @@ class SupervisedReceiver:
         self._wait_physical(run, intent)
         with self._reports_lock:
             reports = tuple(self._reports)
-        for ticket in reports:
-            ticket.complete.wait()
+        # Older runs can still be reporting. Give the whole set one budget.
+        deadline = time.monotonic() + SHUTDOWN_REPORT_WAIT_S
+        reported = all(ticket.complete.wait(max(0, deadline - time.monotonic()))
+                       for ticket in reports)
         if reason := self.release_failure(pending=True):
             raise self._unavailable(reason)
+        if not reported:
+            raise self._unavailable(f"{self.watch.tool} shutdown reports still pending")
 
     def _cancel(self):
         self._control += 1
@@ -428,7 +436,10 @@ class SupervisedReceiver:
                     if self._runs.is_current(run.number) and self.error == status:
                         self.error = detail
         finally:
-            run.diagnosed.set()
+            with run.diagnostic_lock:
+                run.diagnosed.set()
+                streams, run.deferred_stderr = run.deferred_stderr, ()
+            self._close_stderr(streams)
 
     def _stop_child(self, proc):
         stop = getattr(proc, "stop_child", None)
@@ -519,8 +530,7 @@ class SupervisedReceiver:
                 with self._reports_lock:
                     self._reports.discard(run)
 
-    @staticmethod
-    def _close_diagnostics(run):
+    def _close_diagnostics(self, run):
         # DMR exposes its stderr as the reader's stdout. That reader still owns its stream.
         reader_stream = getattr(run.proc, "stdout", None)
         streams = []
@@ -530,7 +540,16 @@ class SupervisedReceiver:
                 streams.append(stderr)
         if not streams:
             return
-        run.diagnosed.wait()
+        if not run.diagnosed.wait(DIAGNOSTIC_WAIT_S):
+            # The diagnostic worker still owns stderr. Give it the close when it finishes.
+            with run.diagnostic_lock:
+                if not run.diagnosed.is_set():
+                    run.deferred_stderr = tuple(streams)
+                    return
+        self._close_stderr(streams)
+
+    @staticmethod
+    def _close_stderr(streams):
         for stream in streams:
             try:
                 stream.close()

@@ -19,6 +19,11 @@ class RadioArbiter:
         self._claim = None
         self._closing = False
 
+    @property
+    def busy(self):
+        with self._lock:
+            return self._claim is not None
+
     def close(self):
         with self._lock:
             self._closing = True
@@ -27,12 +32,15 @@ class RadioArbiter:
     @contextmanager
     def reserve(self, receiver, unavailable, deadline):
         with self._lock:
-            ppm_deadline = None
+            # A ppm holder may stretch this claim's wait, but never past one PPM_HOLD_S from its
+            # arrival, however many ppm claims take the radio in turn.
+            ppm_cap = time.monotonic() + PPM_HOLD_S
             while self._claim is not None and not self._closing:
                 owner, started = self._claim
-                if owner == "ppm" and ppm_deadline is None:
-                    ppm_deadline = started + PPM_HOLD_S
-                left = max(deadline, ppm_deadline or 0) - time.monotonic()
+                holder_deadline = deadline
+                if owner == "ppm":
+                    holder_deadline = max(deadline, min(started + PPM_HOLD_S, ppm_cap))
+                left = holder_deadline - time.monotonic()
                 if left <= 0:
                     raise unavailable("the radio is busy finishing another request")
                 self._lock.wait(left)

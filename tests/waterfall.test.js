@@ -522,6 +522,13 @@ test("a pressed key stays shown but cannot be pressed again until the console an
   assert.deepEqual(panel.restartKey(POLL("stalled"), true), { shown: true, disabled: true });
 });
 
+test("after a gain step the restart key appears if waiting for the first row becomes stalled", () => {
+  const poll = (stale) => ({ code: 200, body: { ...FM_BODY, gain: 29.7, stale } });
+  assert.equal(panel.restartKey(poll("waiting"), false).shown, false);
+  assert.equal(panel.restartKey(poll("stalled"), false).shown, true);
+  assert.equal(panel.restartKey(poll("resuming"), false).shown, false);
+});
+
 test("a restarting sweep's meter drops its floor and peak", () => {
   // A guard: meterState already gives any stale state its note.
   assert.deepEqual(panel.meterState({ floor: -9.5, peak: 20.2 }, [], "restarting"),
@@ -572,3 +579,17 @@ test("every meter note fits the meter: restarting reads '— starting —', none
       assert.ok(panel.meterNoteText(note, "").length <= 12, note);
     }
   });
+
+test("the status SNR comes from the newest live sweep, including a measured zero", () => {
+  const body = { available: true, command: "rtl_power", stale: null,
+                 rows: [{ snr_db: 32.5 }, { snr_db: 0 }] };
+  assert.equal(panel.liveSnr({ code: 200, body }, true), 0);
+  assert.equal(panel.liveSnr({ code: 200, body }, false), null);
+  for (const stale of ["waiting", "stalled", "resuming", "restarting"]) {
+    assert.equal(panel.liveSnr({ code: 200, body: { ...body, stale } }, true), null);
+  }
+  assert.equal(panel.liveSnr({ code: 503, body }, true), null);
+  assert.equal(panel.liveSnr({ code: 200, body: { ...body, command: null } }, true), null);
+  assert.equal(panel.liveSnr({ code: 200, body: { ...body, rows: [] } }, true), null);
+  assert.equal(panel.liveSnr(null, true), null);
+});

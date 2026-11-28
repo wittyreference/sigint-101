@@ -1,6 +1,7 @@
 # ABOUTME: Integration tests for the FastAPI console — its routes and the server-side
 # ABOUTME: commit-before-reveal gate, driven through the TestClient against a fixture pack.
 
+import asyncio
 import inspect
 import io
 import json
@@ -8,6 +9,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from html import unescape
 from pathlib import Path
 
@@ -27,7 +29,7 @@ from sigint101.dmr import DmrDecoder
 from sigint101.events import log_event, read_events
 from sigint101.flock import FlockDetector
 from sigint101.hardware import RadioProbe, RtlSdrDevice
-from sigint101.lora import LoRaListener, parse_lora_packet
+from sigint101.lora import LoRaListener, parse_lora_packet, radio_settings
 from sigint101.pocsag import PocsagDecoder
 from sigint101.provenance import BIAS_STATE, REFERENCE_HZ, read_baseline
 from sigint101.rayhunter import RayhunterMonitor
@@ -47,6 +49,8 @@ from tests.test_spectrum import (
     FailingPipeProc,
     FedProc,
     HeldProc,
+    _feed_row,
+    _flush_event,
     _fm_pass,
     wait_for_rows,
 )
@@ -208,6 +212,9 @@ class _StubLora:
 
     def recent(self, limit=None):
         return self._packets if limit is None else self._packets[-limit:]
+
+    def send_state(self):
+        return {"radio": radio_settings(None), "sends": []}
 
     def stop(self):
         self._started = False
@@ -2216,6 +2223,42 @@ def test_hardware_reports_an_absent_radio(tmp_path):
     assert resp.json()["present"] is False
 
 
+def test_hardware_bar_follows_the_probe_and_real_sdr_ownership(tmp_path):
+    probe_reply = _present()
+
+    def probe():
+        return probe_reply
+
+    with _client(tmp_path, probe=probe, sweeper_factory=lambda: _StubSweeper([])) as client:
+        def radio():
+            return client.get("/api/hardware").json()["state"]
+
+        assert radio() == "present"
+        with client.app.state.radio_arbiter.reserve("ppm", AssertionError, float("inf")):
+            assert radio() == "busy"
+        assert radio() == "present"
+        assert client.get("/api/spectrum").status_code == 200
+        assert radio() == "busy"
+        probe_reply = _absent()
+        assert radio() == "absent"
+        probe_reply = RadioProbe(False, "lsusb", "probe failed", known=False)
+        assert radio() == "unknown"
+        probe_reply = _present()
+        client.app.state.sweeper.release()
+        assert radio() == "present"
+
+
+def test_status_bar_uses_last_measured_ppm(tmp_path):
+    def measure(**_kwargs):
+        return {"ppm": -12.5, "reason": ""}
+
+    with _client(tmp_path, probe=_present, ppm_measure=measure) as client:
+        assert client.get("/api/hardware").json()["ppm"] is None
+        assert client.post("/api/ppm/measure").json()["ppm"] == -12.5
+        assert client.get("/api/hardware").json()["ppm"] == -12.5
+        assert "PPM -12.5</span>" in client.get("/").text
+
+
 # --- per-lesson tune band (the instrument starts on the lesson's band) --------
 
 
@@ -3290,7 +3333,9 @@ def test_the_spectrum_route_marks_a_stall_by_the_rule_the_reading_follows(tmp_pa
     pytest.param("/api/ppm/measure", None, False, id="ppm"),
     pytest.param("/api/gain", {"gain": 29.7}, True, id="restart-then-gain"),
 ])
-def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload, restart_first):
+def test_spectrum_waits_then_stalls_when_the_current_sweeps_first_row_is_late(
+    tmp_path, path, payload, restart_first
+):
     procs, bus, now = [], ["AAAA"], [1000.0]
 
     def measure(**kw):
@@ -3299,6 +3344,7 @@ def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload
     with _client(tmp_path, probe=_present, ppm_measure=measure,
                  sweeper_factory=lambda: _fed_sweeper(procs, bus, now)) as client:
         sweeper = client.app.state.sweeper
+        published = _flush_event(sweeper)
 
         def poll():
             response = client.get("/api/spectrum")
@@ -3308,8 +3354,8 @@ def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload
             return body
 
         starting = poll()
-        procs[-1].feed(FM_LINES)
-        wait_for_rows(sweeper, 2)
+        _feed_row(procs[-1], FM_LINES[:9], published)
+        _feed_row(procs[-1], FM_LINES[9:], published)
         before = poll()
         assert before["stale"] is None
         if restart_first:
@@ -3325,17 +3371,31 @@ def test_spectrum_waits_for_the_current_sweeps_first_row(tmp_path, path, payload
             assert client.post(path, json=payload).status_code == 200
 
         waiting = poll()
-        now[0] += sweeper.stale_after() + sweeper.START_ALLOWANCE_S + 0.01
-        still_waiting = poll()
+        bound = sweeper.stale_after() + sweeper.START_ALLOWANCE_S
+        now[0] += bound - 0.01
+        within_allowance = poll()
+        now[0] += 0.02
+        stalled = poll()
+        stalled_capture = client.post("/api/provenance/baseline")
         kept = [] if path in ("/api/tune", "/api/ppm/measure") else before["rows"]
-        procs[-1].feed(_fm_pass(2) + _fm_pass(0))
-        wait_for_rows(sweeper, len(kept) + 1)
-        live = poll()
+        after_stall, captures = [], []
+        for lines in (FM_LINES[:9], FM_LINES[9:17], FM_LINES[17:] + FM_LINES[:1]):
+            _feed_row(procs[-1], lines, published)
+            after_stall.append(poll())
+            captures.append(client.post("/api/provenance/baseline"))
 
-    assert (waiting["stale"], still_waiting["stale"], live["stale"]) == ("waiting", "waiting", None)
     assert (starting["stale"], starting["rows"]) == ("waiting", [])
-    assert waiting["rows"] == still_waiting["rows"] == kept
-    assert live["rows"][:-1] == kept
+    assert (waiting["stale"], within_allowance["stale"], stalled["stale"]) == (
+        "waiting", "waiting", "stalled")
+    assert waiting["rows"] == within_allowance["rows"] == stalled["rows"] == kept
+    assert stalled_capture.status_code == 400
+    assert "has not finished a pass for" in stalled_capture.json()["reason"]
+    assert [body["stale"] for body in after_stall] == ["resuming", "resuming", None]
+    assert [len(body["rows"]) for body in after_stall] == [len(kept) + n for n in (1, 2, 3)]
+    assert after_stall[-1]["rows"][:len(kept)] == kept
+    assert [response.status_code for response in captures] == [400, 400, 200]
+    assert all("after a stall" in response.json()["reason"] for response in captures[:2])
+    assert len(read_baseline(tmp_path / "events.jsonl")) == 1
 
 
 # --- ppm panel (M4): measure the crystal error against a broadcast stereo pilot ---------------
@@ -3449,46 +3509,75 @@ def test_the_restart_route_restarts_a_stalled_sweep_end_to_end(tmp_path):
     assert _kinds(tmp_path, "spectrum_restart") == [{"stalled_for_s": 60.0, "error": None}]
 
 
+@contextmanager
 def _not_stalled_console(tmp_path, case):
     """A console whose sweep is in a state a press must leave alone, and the state to name."""
     procs, bus, now = [], ([] if case == "no radio" else ["AAAA"]), [1000.0]
-    client = _client(tmp_path, probe=_present,
-                     sweeper_factory=lambda: _fed_sweeper(procs, bus, now),
-                     decoder_factory=lambda: _StubDecoder(_reads()))
-    client.__enter__()
-    sweeper = client.app.state.sweeper
-    if case == "no radio":
-        assert client.get("/api/spectrum").status_code == 503
-        return client, procs, "stopped"
-    client.get("/api/spectrum")
-    procs[-1].feed(FM_LINES)
-    wait_for_rows(sweeper, 2)
-    if case == "live":
-        return client, procs, "live"
-    if case == "rtl_433":
-        client.get("/api/decode")                   # rtl_433 takes the dongle
-        return client, procs, "released"
-    now[0] += 60
-    if case == "resuming":
-        procs[-1].feed(_fm_pass(0))
-        wait_for_rows(sweeper, 3)
-        return client, procs, "resuming"
-    assert client.post("/api/spectrum/restart").status_code == 200   # the first press
-    return client, procs, "restarting"
+    with _client(tmp_path, probe=_present,
+                 sweeper_factory=lambda: _fed_sweeper(procs, bus, now),
+                 decoder_factory=lambda: _StubDecoder(_reads())) as client:
+        response = client.get("/api/spectrum")
+        if case == "no radio":
+            assert response.status_code == 503
+            yield client, procs, "stopped"
+            return
+        sweeper = client.app.state.sweeper
+        procs[-1].feed(FM_LINES)
+        wait_for_rows(sweeper, 2)
+        if case == "rtl_433":
+            client.get("/api/decode")               # rtl_433 takes the dongle
+            state = "released"
+        elif case == "resuming":
+            now[0] += 60
+            procs[-1].feed(_fm_pass(0))
+            wait_for_rows(sweeper, 3)
+            state = "resuming"
+        elif case == "second press":
+            now[0] += 60
+            assert client.post("/api/spectrum/restart").status_code == 200  # the first press
+            state = "restarting"
+        else:
+            state = "live"
+        yield client, procs, state
+
+
+def test_restart_case_closes_its_client_if_setup_fails(tmp_path, monkeypatch):
+    clients, loops = [], []
+    make_client = _client
+
+    def capture_client(*args, **kwargs):
+        client = make_client(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    def fail_wait(*args):
+        [client] = clients
+        loops.append(client.portal.call(asyncio.get_running_loop))
+        raise RuntimeError("sweep setup failed")
+
+    monkeypatch.setattr("tests.test_app._client", capture_client)
+    monkeypatch.setattr("tests.test_app.wait_for_rows", fail_wait)
+    try:
+        with pytest.raises(RuntimeError, match="sweep setup failed"):
+            with _not_stalled_console(tmp_path, "live"):
+                pass
+        [loop] = loops
+        assert loop.is_closed()
+    finally:
+        for client in clients:
+            if client.portal is not None:
+                client.__exit__(None, None, None)
 
 
 @pytest.mark.parametrize("case", ["live", "resuming", "second press", "rtl_433", "no radio"])
 def test_the_restart_route_changes_nothing_when_the_sweep_is_not_stalled(tmp_path, case):
-    client, procs, state = _not_stalled_console(tmp_path, case)
-    try:
+    with _not_stalled_console(tmp_path, case) as (client, procs, state):
         sweeper, decoder = client.app.state.sweeper, client.app.state.decoder
         before = (len(procs), [p.terminated for p in procs], len(sweeper.rows()),
                   sweeper.released, decoder.running, decoder._released)
         pressed = client.post("/api/spectrum/restart")
         after = (len(procs), [p.terminated for p in procs], len(sweeper.rows()),
                  sweeper.released, decoder.running, decoder._released)
-    finally:
-        client.__exit__(None, None, None)
     assert pressed.status_code == 409
     assert pressed.json()["restarted"] is False and pressed.json()["state"] == state
     assert after == before
