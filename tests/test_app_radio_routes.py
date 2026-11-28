@@ -700,6 +700,30 @@ def test_capture_routes_have_one_explicit_start_and_keep_result(tmp_path):
     assert _kinds(tmp_path).count("capture_refused") == 2
 
 
+def test_capture_logs_each_refusal_reason_once_until_it_changes_or_starts(tmp_path, monkeypatch):
+    from tests.test_capture import TUNE, Recorder, capture, client
+
+    proc = Recorder(tmp_path)
+    cap = capture(tmp_path, proc)
+    path = "/api/capture/start"
+    with client(tmp_path, cap) as c:
+        invalid = [c.post(path, json={}) for _ in range(2)]
+        with monkeypatch.context() as patch:
+            patch.setattr(cap, "_which", lambda _: None)
+            absent = [c.post(path, json=TUNE) for _ in range(2)]
+        assert c.post(path, json=TUNE).status_code == 200
+        assert c.post("/api/capture/stop").status_code == 200
+        with monkeypatch.context() as patch:
+            patch.setattr(cap, "_which", lambda _: None)
+            after_start = [c.post(path, json=TUNE) for _ in range(2)]
+    assert [reply.status_code for reply in invalid + absent + after_start] == [
+        400, 400, 503, 503, 503, 503,
+    ]
+    reasons = [event["payload"]["reason"] for event in read_events(tmp_path / "events.jsonl")
+               if event["kind"] == "capture_refused"]
+    assert reasons == [batch[0].json()["reason"] for batch in (invalid, absent, after_start)]
+
+
 def test_cancelled_capture_spawn_has_no_start_event_or_managed_sync(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 

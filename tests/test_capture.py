@@ -753,3 +753,75 @@ def test_capture_reports_full_when_publication_and_rollback_fail(
     assert f"[Errno {publish}] fixture publication sync failed" in str(error)
     assert f"[Errno {rollback}] fixture rollback sync failed" in str(error)
     assert renames == 2 and store.catalog() == [first]
+
+
+def test_catalog_waits_for_capture_publication_sync(tmp_path, monkeypatch):
+    from sigint101 import capture_store
+
+    store = _store(tmp_path)
+    first = store.save(b"first", b"{}")
+    root_stat = (tmp_path / "captures").stat()
+    fsync = capture_store.fsync_fd
+    renamed, finish = threading.Event(), threading.Event()
+    rename = capture_store._rename_new
+
+    def published(*args):
+        rename(*args)
+        renamed.set()
+
+    def sync(fd):
+        if renamed.is_set() and os.path.samestat(os.fstat(fd), root_stat):
+            assert finish.wait(4)
+        fsync(fd)
+
+    with monkeypatch.context() as patch, ThreadPoolExecutor(1) as pool:
+        patch.setattr(capture_store, "_rename_new", published)
+        patch.setattr(capture_store, "fsync_fd", sync)
+        save = pool.submit(store.save, b"second", b"{}")
+        try:
+            assert renamed.wait(3)
+            assert _store(tmp_path).catalog() == [first]
+        finally:
+            finish.set()
+        second = save.result(4)
+    assert {row["id"] for row in _store(tmp_path).catalog()} == {first["id"], second["id"]}
+
+
+@pytest.mark.parametrize("parent", ["owner", "root"])
+def test_failed_capture_publication_stays_hidden_after_reopen(tmp_path, monkeypatch, parent):
+    from sigint101 import capture_store
+
+    store = _store(tmp_path)
+    first = store.save(b"previous", b"{}")
+    mount_parent = None
+    failed_stem = None
+    fsync = capture_store.fsync_fd
+    rename = capture_store._rename_new
+
+    def break_rollback(src, old, dst, new):
+        nonlocal mount_parent, failed_stem
+        if failed_stem is not None:
+            raise OSError(errno.EIO, "fixture rollback rename failed")
+        rename(src, old, dst, new)
+        failed_stem = new
+        mount_parent = os.fstat(src if parent == "owner" else dst)
+
+    def break_sync(fd):
+        if mount_parent is not None and os.path.samestat(os.fstat(fd), mount_parent):
+            raise OSError(errno.ENOSPC, "fixture publication sync failed")
+        fsync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(capture_store, "_rename_new", break_rollback)
+        patch.setattr(capture_store, "fsync_fd", break_sync)
+        with pytest.raises(
+            capture_store.CaptureStorageError, match="could not sync saved pair",
+        ) as e:
+            store.save(b"failed", b"{}")
+        assert e.value.full and "rollback rename failed" in str(e.value)
+    assert (tmp_path / "captures" / failed_stem).is_dir()
+    assert store.catalog() == [first]
+    reopened = _store(tmp_path)
+    assert reopened.catalog() == [first]
+    following = reopened.save(b"third", b"{}")
+    assert {row["id"] for row in reopened.catalog()} == {first["id"], following["id"]}

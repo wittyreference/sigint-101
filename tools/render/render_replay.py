@@ -28,10 +28,11 @@ from sigint101.stamps import mint  # noqa: E402
 
 STEM = "fixture"
 DIGEST = "a" * 64
+START_REFUSAL = "the recording changed since it was listed"
 FIXTURE = REPO / "tests" / "fixtures" / "rtl_433" / "acurite-tower-repeats.txt"
 
 STUB = r"""
-(rows => {
+((rows, refusal) => {
   const original = window.fetch;
   let started = false, polls = 0;
   const replay = () => ({mode: 'replay', replay: true, state: started ? 'replaying' : 'idle',
@@ -47,7 +48,13 @@ STUB = r"""
     if (path === '/api/replay/recordings') return reply({recordings:
       sessionStorage.getItem('replay-fixture-empty') ? [] : [{instrument: 'ism', stem: 'fixture'}],
       refused: []});
-    if (path === '/api/replay/ism/start') { started = true; return reply(replay()); }
+    if (path === '/api/replay/ism/start') {
+      if (sessionStorage.getItem('replay-fixture-refused')) {
+        return reply({...replay(), reason: refusal}, 409);
+      }
+      started = true;
+      return reply(replay());
+    }
     if (path === '/api/replay/ism/stop') { started = false; return reply(replay()); }
     if (path === '/api/replay/ism') return reply(replay());
     if (path === '/api/decode') {
@@ -61,7 +68,7 @@ STUB = r"""
     }
     return original(address, options);
   };
-})(%s)
+})(%s, %s)
 """
 
 MEASURE_PANEL = r"""
@@ -76,6 +83,7 @@ function measureReplay(theme, badgeText, lesson) {
   const badge = panel?.querySelector('[data-decode-badge]');
   const key = screen?.querySelector('[data-replay-toggle]');
   if (!panel || !badge || !key || badge.textContent !== badgeText || key.disabled) return null;
+  const note = panel.querySelector('[data-decode-empty]');
   const strip = key.closest('.tune');
   const liveCaption = strip.querySelector('[data-tune-caption]');
   const captionFits = lesson || badgeText === 'REPLAY' ||
@@ -105,6 +113,10 @@ function measureReplay(theme, badgeText, lesson) {
     rowsFit: rows.every(row => row.scrollWidth <= row.clientWidth + 1),
     hidden, caption: strip.querySelector('[data-replay-caption]').textContent,
     captionFits,
+    note: note.hidden ? '' : note.textContent,
+    noteFits: within(note) && note.scrollWidth <= note.clientWidth &&
+      note.scrollHeight <= note.clientHeight &&
+      note.getBoundingClientRect().bottom <= panel.getBoundingClientRect().bottom,
     contrast: (levels[1] + 0.05) / (levels[0] + 0.05),
   };
 }
@@ -217,17 +229,18 @@ def panel_measure(browser, theme, badge, lesson):
     return answer.get("result", {}).get("value") or {}
 
 
-def _panel_fits(refused, replayed, live, theme, lesson):
+def _panel_fits(no_radio, replayed, live, refused, theme, lesson):
     return (
         all(m.get("theme") == theme and m.get("doc") == [800, 480] and m.get("controls")
             and m.get("captionFits")
             and m.get("key", [0, 0])[0] in range(72, 81) and m["key"][1] >= 18
-            for m in (refused, replayed, live))
-        and refused["border"] == "dashed" and live["border"] == "solid"
+            for m in (no_radio, replayed, live, refused))
+        and no_radio["border"] == "dashed" and live["border"] == refused["border"] == "solid"
         and replayed["border"] == "double" and replayed["contrast"] >= 4.5
-        and len({m["pill"] for m in (refused, replayed, live)}) == 3
+        and len({m["pill"] for m in (no_radio, replayed, live)}) == 3
         and replayed["rows"] == 2 and replayed["marked"] and replayed["rowsFit"]
         and replayed["caption"] == f"REPLAY · {STEM}" and (lesson or replayed["hidden"])
+        and START_REFUSAL in refused["note"] and refused["noteFits"]
     )
 
 
@@ -241,7 +254,7 @@ def main(console):
         browser.call("Emulation.setDeviceMetricsOverride",
                      {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False})
         browser.call("Page.addScriptToEvaluateOnNewDocument",
-                     {"source": STUB % json.dumps(rows)})
+                     {"source": STUB % (json.dumps(rows), json.dumps(START_REFUSAL))})
         load_page(browser, f"{console}/operate/ism")
         failed = False
         panels = (("M10", "/lesson/10", True), ("rack", "/operate/ism", False))
@@ -261,13 +274,17 @@ def main(console):
                     scope = 'document.querySelector(\'.stage-panel[data-stage="demo"]\')'
                     browser.ev("""document.querySelectorAll('.stage-panel').forEach(
                         panel => panel.hidden = panel.dataset.stage !== 'demo')""")
-                refused = panel_measure(browser, theme, "NO RADIO", lesson)
+                no_radio = panel_measure(browser, theme, "NO RADIO", lesson)
                 browser.ev(f'{scope}?.querySelector("[data-replay-toggle]")?.click()')
                 replayed = panel_measure(browser, theme, "REPLAY", lesson)
                 browser.ev(f'{scope}?.querySelector("[data-replay-toggle]")?.click()')
                 live = panel_measure(browser, theme, "LIVE", lesson)
-                failed |= verdict(_panel_fits(refused, replayed, live, theme, lesson),
-                                  f"replay {label} {theme}", [refused, replayed, live])
+                browser.ev("sessionStorage.setItem('replay-fixture-refused', '1')")
+                browser.ev(f'{scope}?.querySelector("[data-replay-toggle]")?.click()')
+                refused = panel_measure(browser, theme, "LIVE", lesson)
+                browser.ev("sessionStorage.removeItem('replay-fixture-refused')")
+                failed |= verdict(_panel_fits(no_radio, replayed, live, refused, theme, lesson),
+                                  f"replay {label} {theme}", [no_radio, replayed, live, refused])
             measured = []
             for html in books:
                 load_page(browser, f"{console}/logbook")

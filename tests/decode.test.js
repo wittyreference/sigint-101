@@ -48,6 +48,7 @@ function page() {
   const node = () => ({
     children: [], hidden: false, textContent: "",
     appendChild(child) { this.children.push(child); },
+    prepend(text) { this.textContent = text + this.textContent; },
     replaceChildren() { this.children = []; },
     addEventListener(type, fn) { this[type] = fn; },
     setAttribute() {},
@@ -107,7 +108,7 @@ function page() {
     await answer("/api/replay/recordings", LIST);
     await answer("/api/replay/ism/start", REPLAYING, "POST");
   }
-  return { ready, start, answer, take, key, badge, list, classes, timers, requests };
+  return { ready, start, answer, take, key, badge, list, empty, classes, timers, requests };
 }
 
 test("a live answer released after Replay cannot paint", async () => {
@@ -175,5 +176,47 @@ for (const stateFirst of [false, true]) {
       await p.answer("/api/decode", LIVE);
       assert.equal(p.key.textContent, "Replay");
       assert.equal(p.key.disabled, false);
+    });
+}
+
+
+for (const competing of [false, true]) {
+  test("a refused replay start resumes live polling" + (competing ? " during another replay" : ""),
+    async () => {
+      const p = page();
+      await p.ready();
+      const old = p.take("/api/decode");
+      p.key.click();
+      await p.answer("/api/replay/recordings", LIST);
+      const reason = competing ? "a replay is running" : "the recording changed since it was listed";
+      const row = { model: "Sensor", mod: "ASK", freq_hz: 433920000, readings: {} };
+      await p.answer("/api/replay/ism/start", {
+        ...REPLAYING, state: competing ? "replaying" : "error", reason, decodes: [row],
+      }, "POST", false);
+      assert.ok(!p.classes.has("tune--replay"));
+      assert.equal(p.key.textContent, "Replay");
+      assert.equal(p.list.children.length, 0);
+      assert.ok(p.empty.textContent.includes(reason));
+
+      if (competing) {
+        await p.answer("/api/decode", { cause: "replaying", available: false,
+          reason: "The radio is busy" }, "GET", false);
+        assert.ok(!p.classes.has("tune--replay"));
+        assert.equal(p.badge.textContent, "UNAVAILABLE");
+        assert.ok(p.empty.textContent.includes(reason));
+        assert.ok(p.empty.textContent.includes("The radio is busy"));
+        p.timers.shift()();
+      }
+      assert.ok(!p.requests.some(q => q.url.startsWith("/api/replay/ism")));
+      await p.answer("/api/decode", { ...LIVE, decodes: [row] });
+      old.resolve({ ok: false, json: async () => ({ cause: "replaying" }) });
+      await turn();
+      assert.equal(p.badge.textContent, "LIVE");
+      assert.equal(p.list.children.length, 1);
+      assert.ok(!p.list.children[0].className.includes("decoder__item--replay"));
+      assert.ok(!p.empty.hidden && p.empty.textContent.includes(reason));
+      await p.start();
+      assert.equal(p.badge.textContent, "REPLAY");
+      assert.ok(!p.empty.textContent.includes(reason));
     });
 }

@@ -166,6 +166,8 @@ def start_replay(state, recording: Recording) -> None:
         if reason := replay.release_failure(pending=True):
             raise ReplayUnavailable(reason)
         deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
+        # The reservation covers stand-down and spawn only. Afterwards replay.running
+        # keeps live ISM polls from starting the decoder.
         with state.radio_arbiter.reserve("replay", ReplayUnavailable, deadline):
             state.decoder.release()
             if reason := state.decoder.release_failure(pending=True):
@@ -1960,6 +1962,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # every identical refusal is how events.jsonl grew by 42 lines a minute behind a dead Flock. A
     # refusal is logged when it changes, and again after the next successful start.
     last_refusal = {}
+    capture_refusal_lock = threading.Lock()
 
     def _receiver_cause(kind, exc, reason):
         """Classify the refusal that actually fired, without polling hardware again."""
@@ -2558,17 +2561,23 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def capture_start(payload=Body(default={})):
         state = app.state
         try:
-            return state.capture.request_start(
+            result = state.capture.request_start(
                 payload, settings=state.sweeper.capture_settings,
                 ppm=lambda: state.last_ppm,
                 claim=lambda: _claim_sdr("capture", explicit=True),
             )
         except CaptureUnavailable as exc:
             reason = str(exc)
-            state.capture.on_event("capture_refused", {"reason": reason})
+            with capture_refusal_lock:
+                if last_refusal.get("capture") != reason:
+                    last_refusal["capture"] = reason
+                    state.capture.on_event("capture_refused", {"reason": reason})
             return JSONResponse(status_code=exc.status, content={
                 **capture_status(), "reason": reason,
             })
+        with capture_refusal_lock:
+            last_refusal.pop("capture", None)
+        return result
 
     @app.post("/api/capture/stop")
     def capture_stop():

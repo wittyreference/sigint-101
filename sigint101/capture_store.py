@@ -37,6 +37,7 @@ ROOT = "captures"
 STAGING = ".staging"
 LOCK = ".store.lock"
 PAYLOAD = "payload"
+PUBLISHING = ".publishing"
 SUFFIXES = (".sigmf-data", ".sigmf-meta")
 _LOG = logging.getLogger(__name__)
 
@@ -135,10 +136,11 @@ def _empty_stage(staging, name, owner, owner_info):
     if PAYLOAD in entries:
         with _directory(owner, PAYLOAD, mount) as payload:
             names = os.listdir(payload)
-            stems = {entry.removesuffix(suffix) for entry in names for suffix in SUFFIXES
+            pair_names = set(names) - {PUBLISHING}
+            stems = {entry.removesuffix(suffix) for entry in pair_names for suffix in SUFFIXES
                      if entry.endswith(suffix)}
-            if names and (len(stems) != 1 or not STEM.fullmatch(stem := next(iter(stems)))
-                          or not set(names) <= set(_names(stem))):
+            if pair_names and (len(stems) != 1 or not STEM.fullmatch(stem := next(iter(stems)))
+                               or not pair_names <= set(_names(stem))):
                 raise _invalid("capture staging payload names")
             with _entries(payload, names, mount) as files:
                 if (not _still_named(staging, name, owner)
@@ -232,7 +234,6 @@ def _storage_error(exc):
 class CaptureStore:
     def __init__(self, data_dir):
         self.data_dir = Path(data_dir)
-        self._hidden = set()
 
     @contextmanager
     def _root(self, *, create):
@@ -282,7 +283,7 @@ class CaptureStore:
         try:
             with self._root(create=False) as (parent, root, mount):
                 for stem in sorted(os.listdir(root)):
-                    if not STEM.fullmatch(stem) or stem in self._hidden:
+                    if not STEM.fullmatch(stem):
                         continue
                     try:
                         with _directory(root, stem, mount) as clip:
@@ -316,19 +317,21 @@ class CaptureStore:
                 _private_file(lock)
                 with _directory(owner, PAYLOAD, mount, create=True) as payload:
                     names = _names(stem)
+                    _write(payload, PUBLISHING, b"", mount)
                     for entry, contents in zip(names, (data, meta), strict=True):
                         _write(payload, entry, contents, mount)
                     fsync_fd(payload)
                     if not admit():
                         return None
-                    with _entries(payload, names, mount) as files:
+                    entries = [PUBLISHING, *names]
+                    with _entries(payload, entries, mount) as files:
                         data_parent = os.stat(self.data_dir, follow_symlinks=False)
                         if (not os.path.samestat(data_parent, os.fstat(parent))
                                 or not _still_named(parent, ROOT, root)
                                 or not _still_named(root, STAGING, staging)
                                 or not _still_named(staging, name, owner)
                                 or not _still_named(owner, PAYLOAD, payload)
-                                or set(os.listdir(payload)) != set(names)
+                                or set(os.listdir(payload)) != set(entries)
                                 or not all(_still_named(payload, n, fd)
                                            for n, (fd, _) in files.items())):
                             raise _invalid("capture publish identity")
@@ -337,7 +340,6 @@ class CaptureStore:
                             fsync_fd(owner)
                             fsync_fd(root)
                         except OSError as publication_error:
-                            self._hidden.add(stem)
                             try:
                                 if not _still_named(root, stem, payload):
                                     raise _invalid("capture rollback identity")
@@ -353,6 +355,13 @@ class CaptureStore:
                                     f"or roll it back ({rollback_error})", full=full,
                                 ) from rollback_error
                             raise
+                        # The catalog requires exactly the two pair files. Keep the synced
+                        # marker until both parents are durable, even if rollback fails.
+                        if (not _still_named(root, stem, payload)
+                                or not _still_named(payload, PUBLISHING, files[PUBLISHING][0])):
+                            raise _invalid("capture publication marker identity")
+                        os.unlink(PUBLISHING, dir_fd=payload)
+                        fsync_fd(payload)
                 return {"id": stem, "bytes": len(data) + len(meta)}
             finally:
                 try:

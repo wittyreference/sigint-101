@@ -78,6 +78,7 @@
   var generation = 0;
   var busy = false;
   var recording = null;
+  var startRefusal = "";
 
   function updateKeys(body) {
     keys.forEach(function (key) {
@@ -139,6 +140,7 @@
       list.replaceChildren();
       if (!replaying && !ok) {
         DecoderPanel.showDown(panel, badge, empty, body);
+        if (startRefusal) empty.prepend(startRefusal + " · ");
         return;
       }
       var mark = replaying ? panel.querySelector("[data-replay-mark]") : null;
@@ -147,14 +149,15 @@
       DecoderPanel.showLive(badge, replaying ? { mode: "replay" } : body);
       DecoderPanel.showCommand(panel, replaying && body.command && body.input
         ? body.command + " < " + body.input : body.command);
-      empty.hidden = rows.length > 0 && !(replaying && body.reason);
+      empty.hidden = rows.length > 0 && !(replaying ? body.reason : startRefusal);
       if (!empty.hidden) empty.textContent = replaying
-        ? replayNote(body) : DecoderPanel.quietText(body, "nothing decoded yet");
+        ? replayNote(body) : startRefusal || DecoderPanel.quietText(body, "nothing decoded yet");
     });
   }
 
-  function switchMode(next) {
+  function switchMode(next, refusal = "") {
     mode = next;
+    startRefusal = refusal;
     var gen = ++generation;
     updateKeys();
     paint(next === "replay" ? {} : { state: "starting" }, true);
@@ -172,7 +175,8 @@
     try {
       var result = await read(gen, replaying ? "/api/replay/ism" : "/api/decode?limit=12");
       if (!result) return;
-      if (!replaying && result.body.cause === "replaying") {
+      // A refused start leaves this panel live even if another replay is blocking reception.
+      if (!replaying && !startRefusal && result.body.cause === "replaying") {
         poll(switchMode("replay"));
         return;
       }
@@ -204,6 +208,12 @@
       if (!result) return;
       if (back && result.ok) {
         poll(switchMode("live"));
+        return;
+      }
+      if (!back && !result.ok) {
+        var reason = result.body.reason;
+        poll(switchMode("live", reason ? "Replay could not start · " + reason
+          : "Replay could not start."));
         return;
       }
       paint(result.body, result.ok);
