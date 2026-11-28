@@ -1158,10 +1158,16 @@ def _helper_module():
     return module
 
 
-@pytest.mark.parametrize("launcher", [LAUNCHER, DEPLOYED_LAUNCHER], ids=["shipped", "3004a03"])
+MANAGED_LAUNCHER = REPO / "deploy" / "managed" / "sigint101-course-managed.sh"
+
+
+@pytest.mark.parametrize("launcher", [LAUNCHER, DEPLOYED_LAUNCHER, MANAGED_LAUNCHER],
+                         ids=["shipped", "3004a03", "managed"])
 def test_the_launchers_watch_path_never_execs_another_program(launcher):
     """What lets install.sh escalate to SIGKILL: once `watch` runs, the launcher stays in bash
-    until it exits. Its `exec 9>...` only moves file descriptors."""
+    until it exits. Its `exec 9>...` only moves file descriptors. The managed wrapper, which
+    enrollment installs at /usr/local/bin/sigint101-course, holds the same lock and must pass
+    too: its `exec 8<"$MUTATION_LOCK"` and `exec 8>&-` only move file descriptors as well."""
     helper = _helper_module()
     text = launcher.read_text(encoding="utf-8")
     path = helper.watch_path(text)
