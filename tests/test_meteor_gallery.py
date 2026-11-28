@@ -10,7 +10,7 @@ import os
 import struct
 import threading
 import zlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -1089,3 +1089,141 @@ def test_png_validator_rejects_corrupt_streams_and_accepts_interlaced_and_indexe
         + chunk(b"IEND", b"")
     )
     assert meteor._is_valid_png(valid_adam7)
+
+
+def test_r5_manifest_size_boundary_keeps_restartable_bounded_subset_and_refuses_zero_fit(
+    rig, tmp_path, monkeypatch
+):
+    """Round 5 (F1b regression): a pass with 250 valid long-named PNGs whose full manifest
+    would exceed _MAX_MANIFEST_BYTES (64 KiB) commits only a deterministic bounded subset that
+    fits within the reader's limit, logs/stamps only those kept products, writes no orphan PNGs,
+    and reopens identically after a full console restart; if even 1 product cannot fit, nothing
+    is committed, logged, or stamped."""
+    decoder, made, settings = rig
+    settings["utc"] = 1_732_880_000.0
+    png_bytes = _valid_png(2, 2, (30, 140, 210))
+
+    # 250 distinct valid long names matching _PRODUCT (96-char suffix -> ~81 KiB full manifest).
+    all_names = [f"MSU-MR-prod-{i:03d}-{'x' * 80}.png" for i in range(250)]
+
+    with meteor_client(tmp_path, decoder) as client:
+        assert client.post(LISTEN).status_code == 200
+        proc = made[-1][0]
+        proc.feed(progress_line())
+        proc.feed(MARKER)
+        assert decoder._run.physical.wait(2)
+        out = Path(proc.args[3])
+        out.mkdir(parents=True, exist_ok=True)
+        for name in all_names:
+            (out / name).write_bytes(png_bytes)
+        proc.die(0)
+        proc.close_pipe()
+        assert decoder._run.complete.wait(30)
+
+        st = client.get(STATUS).json()
+        assert st["state"] == "done"
+        assert len(st["passes"]) == 1
+        pass_row = st["passes"][0]
+        pass_id = pass_row["id"]
+        kept_images = pass_row["images"]
+        kept_count = len(kept_images)
+        assert 1 <= kept_count < len(all_names), (
+            f"expected bounded subset strictly smaller than {len(all_names)}, got {kept_count}"
+        )
+
+        # Manifest on disk must fit within the startup reader's _MAX_MANIFEST_BYTES limit,
+        # and adding one more product would cross that boundary.
+        pass_dir = tmp_path / "meteor" / pass_id
+        manifest_bytes = (pass_dir / "manifest.json").read_bytes()
+        assert len(manifest_bytes) <= meteor._MAX_MANIFEST_BYTES
+        manifest_obj = json.loads(manifest_bytes.decode("utf-8"))
+        one_more = {**manifest_obj, "images": [*manifest_obj["images"], manifest_obj["images"][0]]}
+        one_more_bytes = json.dumps(one_more, sort_keys=True).encode("utf-8")
+        assert len(one_more_bytes) > meteor._MAX_MANIFEST_BYTES
+
+        # Directory must contain only manifest.json and the exact kept PNGs (no orphan files).
+        kept_fnames = {PurePosixPath(img["path"]).parts[2] for img in kept_images}
+        disk_entries = {p.name for p in pass_dir.iterdir()}
+        assert disk_entries == (kept_fnames | {"manifest.json"})
+
+        # Logged receptions and stamps must match the exact kept subset (not 250).
+        receptions = [
+            e for e in read_events(tmp_path / "events.jsonl")
+            if e["kind"] == "reception" and e["payload"].get("instrument") == "meteor"
+        ]
+        assert len(receptions) == kept_count
+        assert [r["payload"]["item"]["path"] for r in receptions] == [
+            img["path"] for img in kept_images
+        ]
+        stamps = client.get("/api/stamps").json()["stamps"]
+        assert next(s for s in stamps if s["instrument"] == "meteor")["count"] == kept_count
+
+        # Every kept image serves 200; dropped product serves 404.
+        dropped_name = next(n for n in all_names if n not in kept_fnames)
+        assert client.get(f"/media/{kept_images[0]['path']}").content == png_bytes
+        assert client.get(f"/media/{kept_images[-1]['path']}").content == png_bytes
+        assert client.get(f"/media/meteor/{pass_id}/{dropped_name}").status_code == 404
+
+    # Restart console over the same data_dir without altering any file: pass and media survive!
+    reopened = meteor.MeteorDecoder(
+        data_dir=tmp_path,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+    )
+    with meteor_client(tmp_path, reopened) as client2:
+        st2 = client2.get(STATUS).json()
+        assert len(st2["passes"]) == 1, "published pass vanished after console restart"
+        assert st2["passes"][0]["id"] == pass_id
+        assert st2["passes"][0]["images"] == kept_images
+        for img in (kept_images[0], kept_images[-1]):
+            resp = client2.get(f"/media/{img['path']}")
+            assert resp.status_code == 200 and resp.content == png_bytes
+        assert client2.get(f"/media/meteor/{pass_id}/{dropped_name}").status_code == 404
+        stamps2 = client2.get("/api/stamps").json()["stamps"]
+        assert next(s for s in stamps2 if s["instrument"] == "meteor")["count"] == kept_count
+
+    # Edge case: when even a single product cannot fit within _MAX_MANIFEST_BYTES, commit is
+    # refused cleanly with zero receptions, zero stamps, and no directory left behind.
+    tiny_dir = tmp_path / "zero_fit"
+    tiny_dir.mkdir()
+    monkeypatch.setattr(meteor, "_MAX_MANIFEST_BYTES", 64)
+    made2: list = []
+
+    def _spawn2(argv, **_kw):
+        from tests.test_meteor import MeteorChild
+        proc = MeteorChild(argv)
+        made2.append(proc)
+        return proc
+
+    dec_tiny = meteor.MeteorDecoder(
+        data_dir=tiny_dir,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+        spawn=_spawn2,
+        clock=lambda: 1_732_890_000.0,
+    )
+    with meteor_client(tiny_dir, dec_tiny) as client_tiny:
+        assert client_tiny.post(LISTEN).status_code == 200
+        p_tiny = made2[-1]
+        p_tiny.feed(progress_line())
+        p_tiny.feed(MARKER)
+        assert dec_tiny._run.physical.wait(2)
+        out_tiny = Path(p_tiny.args[3])
+        out_tiny.mkdir(parents=True, exist_ok=True)
+        (out_tiny / "MSU-MR-one.png").write_bytes(png_bytes)
+        p_tiny.die(0)
+        p_tiny.close_pipe()
+        assert dec_tiny._run.complete.wait(3)
+
+        st_tiny = client_tiny.get(STATUS).json()
+        assert st_tiny["state"] == "no_picture"
+        assert st_tiny["passes"] == []
+        tiny_events = tiny_dir / "events.jsonl"
+        assert not tiny_events.exists() or not [
+            e for e in read_events(tiny_events)
+            if e["kind"] == "reception" and e["payload"].get("instrument") == "meteor"
+        ]
+        tiny_stamps = client_tiny.get("/api/stamps").json()["stamps"]
+        assert next(s for s in tiny_stamps if s["instrument"] == "meteor")["count"] == 0

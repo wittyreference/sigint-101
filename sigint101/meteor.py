@@ -669,6 +669,49 @@ def _public_pass_row(row: dict) -> dict:
     return public
 
 
+def _fit_manifest_within_limit(
+    base_row: dict,
+    verified_files: list[tuple[str, str, bytes, int, str]],
+    *,
+    max_bytes: int | None = None,
+) -> tuple[list[tuple[str, str, bytes, int, str]], dict, bytes] | None:
+    """Select the largest prefix of verified_files whose serialized manifest fits max_bytes."""
+    limit = _MAX_MANIFEST_BYTES if max_bytes is None else max_bytes
+    pass_id = base_row["id"]
+    all_meta = [
+        {
+            "path": f"meteor/{pass_id}/{fname}",
+            "product": product,
+            "size": size,
+            "sha256": digest,
+        }
+        for fname, product, _, size, digest in verified_files
+    ]
+
+    def _encode(count: int) -> tuple[dict, bytes]:
+        row = {**base_row, "images": all_meta[:count]}
+        return row, json.dumps(row, sort_keys=True).encode("utf-8")
+
+    full_row, full_raw = _encode(len(all_meta))
+    if len(full_raw) <= limit:
+        return verified_files, full_row, full_raw
+
+    lo, hi = 1, len(all_meta) - 1
+    best: tuple[int, dict, bytes] | None = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        row, raw = _encode(mid)
+        if len(raw) <= limit:
+            best = (mid, row, raw)
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best is None:
+        return None
+    keep, best_row, best_raw = best
+    return verified_files[:keep], best_row, best_raw
+
+
 def _validate_manifest(pass_id: str, data: object) -> dict | None:
     """Validate a saved pass manifest.json and its digest-bound image entries."""
     if not isinstance(data, dict) or data.get("id") != pass_id:
@@ -1125,7 +1168,7 @@ class MeteorDecoder(SupervisedReceiver):
         satellite = _read_satellite_name(stage_fd)
         verified_files: list[tuple[str, str, bytes, int, str]] = []
         used_names: set[str] = set()
-        for pic in capture.pictures:
+        for pic in sorted(capture.pictures, key=lambda p: (p["path"], p["product"])):
             rel_parts = tuple(PurePosixPath(pic["path"]).parts)
             data = _read_regular_bytes(stage_fd, rel_parts, max_bytes=_MAX_IMAGE_BYTES)
             if (not data or len(data) != pic["size"]
@@ -1142,6 +1185,34 @@ class MeteorDecoder(SupervisedReceiver):
             verified_files.append((fname, pic["product"], data, pic["size"], pic["sha256"]))
         if not verified_files:
             return None
+
+        base_row = {
+            "id": capture.id,
+            "started_at": float(capture.started_at),
+            "ended_at": float(capture.ended_at),
+            "freq_hz": capture.hz,
+            "mode": capture.mode,
+            "command": shlex.join(capture.argv),
+            "radio": capture.radio.copy(),
+            "satellite": satellite,
+            "result": "done",
+            "lock_ever": capture.lock_ever,
+            "ended_by": capture.ended_by,
+            "images": [],
+        }
+        fitted = _fit_manifest_within_limit(base_row, verified_files)
+        if fitted is None:
+            capture.publish_error = "Meteor pass manifest exceeded the size limit."
+            return None
+        selected_files, pass_row, manifest_bytes = fitted
+        if len(selected_files) < len(verified_files):
+            _log.warning(
+                "Meteor pass %s kept %d of %d products to fit the %d-byte manifest limit",
+                capture.id,
+                len(selected_files),
+                len(verified_files),
+                _MAX_MANIFEST_BYTES,
+            )
 
         candidate_name = f".publish-{capture.id}"
         index_tmp_name = f".gallery-{capture.id}.tmp"
@@ -1164,41 +1235,20 @@ class MeteorDecoder(SupervisedReceiver):
                         os.mkdir(candidate_name, 0o700, dir_fd=root_fd)
                         try:
                             with _directory(candidate_name, root_fd, private=True) as cand_fd:
-                                images_meta = []
                                 png_paths = []
-                                for fname, product, data, size, digest in verified_files:
+                                for fname, _product, data, _size, _digest in selected_files:
                                     flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                              | os.O_NOFOLLOW | os.O_CLOEXEC)
                                     fd = os.open(fname, flags, 0o644, dir_fd=cand_fd)
                                     with os.fdopen(fd, "wb") as handle:
                                         handle.write(data)
-                                    images_meta.append({
-                                        "path": f"meteor/{capture.id}/{fname}",
-                                        "product": product,
-                                        "size": size,
-                                        "sha256": digest,
-                                    })
                                     png_paths.append(candidate_path / fname)
 
-                                pass_row = {
-                                    "id": capture.id,
-                                    "started_at": float(capture.started_at),
-                                    "ended_at": float(capture.ended_at),
-                                    "freq_hz": capture.hz,
-                                    "mode": capture.mode,
-                                    "command": shlex.join(capture.argv),
-                                    "radio": capture.radio.copy(),
-                                    "satellite": satellite,
-                                    "result": "done",
-                                    "lock_ever": capture.lock_ever,
-                                    "ended_by": capture.ended_by,
-                                    "images": images_meta,
-                                }
                                 mflags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                           | os.O_NOFOLLOW | os.O_CLOEXEC)
                                 mfd = os.open("manifest.json", mflags, 0o644, dir_fd=cand_fd)
-                                with os.fdopen(mfd, "w", encoding="utf-8") as handle:
-                                    json.dump(pass_row, handle, sort_keys=True)
+                                with os.fdopen(mfd, "wb") as handle:
+                                    handle.write(manifest_bytes)
                                 manifest_path = candidate_path / "manifest.json"
 
                             if self._sync_assets:
