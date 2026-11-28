@@ -1813,12 +1813,13 @@ def test_pocsag_never_serves_the_words_of_a_commercial_page(tmp_path):
 
     class _Pipeline:
         stdout = iter([line])
+        code = None
 
         def poll(self):
-            return None
+            return self.code
 
         def terminate(self):
-            pass
+            self.code = 0
 
         def wait(self, timeout=None):
             return 0
@@ -2607,12 +2608,13 @@ class _IdleProc:
 
     def __init__(self):
         self.stdout = iter(())
+        self.code = None
 
     def poll(self):
-        return None
+        return self.code
 
     def terminate(self):
-        pass
+        self.code = 0
 
     def wait(self, timeout=None):
         return 0
@@ -3291,6 +3293,7 @@ class _FmSweep(_IdleProc):
     """A launched rtl_power at the process boundary, printing a real capture of the FM band."""
 
     def __init__(self):
+        super().__init__()
         self.stdout = iter(FM_LINES)
 
 

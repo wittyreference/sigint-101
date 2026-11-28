@@ -215,7 +215,6 @@ class _Capture:
     control: threading.Lock = field(default_factory=threading.Lock)
     eof: threading.Event = field(default_factory=threading.Event)
     handoff_done: threading.Event = field(default_factory=threading.Event)
-    retry_now: threading.Event = field(default_factory=threading.Event)
     handoff_deadline: float | None = None
     kill_deadline: float | None = None
     term_sent: bool = False
@@ -382,9 +381,11 @@ class MeteorDecoder(SupervisedReceiver):
                 capture.reports = match.groups()
                 capture.lock_ever |= capture.lock == "locked"
 
-    def release(self):
+    def release(self, *, for_claim=False):
         deadline = self._monotonic() + RELEASE_GRACE_S + KILL_GRACE_S
         with self._life:
+            if for_claim and self.release_failure():
+                return
             self._released = True
             intent = self._cancel_intent()
             run = self._run
@@ -396,14 +397,13 @@ class MeteorDecoder(SupervisedReceiver):
                         capture.handoff_deadline = deadline - KILL_GRACE_S
                     if capture.handoff_deadline is not None:
                         deadline = min(deadline, capture.handoff_deadline + KILL_GRACE_S)
-                if run.reap_failed:
-                    capture.retry_now.set()
                 run.wake.set()
+            retry = None if for_claim else self._request_retry(run)
         if intent:
             intent.done.wait(max(0, deadline - self._monotonic()))
             run = intent.run or run
         if run and not run.ready.is_set():
-            run.args[0].handoff_done.wait(max(0, deadline - self._monotonic()))
+            (retry or run.args[0].handoff_done).wait(max(0, deadline - self._monotonic()))
 
     def release_failure(self, *, pending=False):
         intent, run = self._intent, self._run
@@ -426,10 +426,8 @@ class MeteorDecoder(SupervisedReceiver):
                     self._interrupt(run, capture, "shutdown", "Console shut down.")
                 else:
                     self._interrupt(run, capture, "stopped", "SatDump was stopped.")
-            if run.reap_failed:
-                capture.retry_now.set()
             run.wake.set()
-        return run, intent
+        return run, intent, self._request_retry(run)
 
     def _interrupt(self, run, capture, cause, reason):
         if capture.interrupted is None:
@@ -483,52 +481,26 @@ class MeteorDecoder(SupervisedReceiver):
             run.wake.wait(min(receiver_lifecycle.SUPERVISOR_POLL_S,
                               max(0, deadline - self._monotonic())))
 
-    def _statuses(self, run):
-        try:
-            return super()._statuses(run)
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            run.failure = f"{self._unreaped_reason(run)}: {str(exc)[:160]}"
-            return [(run.proc, None)]
-
-    def _stop_run(self, run):
+    def _stop_run(self, run, *, kill_only=False, wait_s=None):
         capture, = run.args
-        deadline = capture.kill_deadline
-        if deadline is None:
-            deadline = self._monotonic() + KILL_GRACE_S
-        self._kill_and_reap(run, deadline)
 
-    def _wait_for_kill(self, run, deadline):
-        try:
-            run.proc.wait(timeout=max(0, deadline - self._monotonic()))
-        except subprocess.TimeoutExpired:
-            run.failure = self._unreaped_reason(run, timed_out=True)
-            return False
-        if run.proc.poll() is not None:
-            return True
-        run.failure = self._unreaped_reason(run)
-        return False
-
-    def _kill_and_reap(self, run, deadline):
-        proc = run.proc
-        try:
-            if proc.poll() is not None:
-                return True
-            capture, = run.args
+        def interrupt():
             with capture.control:
                 if capture.interrupted is None:
                     self._interrupt(run, capture, "handoff", "SatDump cleanup was interrupted.")
-            proc.kill()
-            try:
-                return self._wait_for_kill(run, deadline)
-            except (OSError, ValueError, subprocess.SubprocessError):
-                # The first wait failed. Recheck ownership before signalling the exact child.
-                if proc.poll() is not None:
-                    return True
-                proc.kill()
-                return self._wait_for_kill(run, deadline)
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            run.failure = f"{self._unreaped_reason(run)}: {str(exc)[:160]}"
-            return False
+
+        proc = run.proc.proc if isinstance(run.proc, _SatDumpProcess) else run.proc
+        return childproc.stop_and_confirm(
+            proc, kill_only=True, wait_s=KILL_GRACE_S if wait_s is None else wait_s,
+            deadline=None if kill_only else capture.kill_deadline,
+            retry_kill_wait=True, before_kill=interrupt, clock=self._monotonic,
+        )
+
+    def _stop_reason(self, run, result):
+        reason = self._unreaped_reason(run, timed_out=result.timed_out)
+        if result.error is not None:
+            return f"{reason}: {str(result.error)[:160]}"
+        return reason
 
     def _unreaped_reason(self, run, *, timed_out=False):
         result = "survived kill" if timed_out else "could not be confirmed stopped"
@@ -536,30 +508,17 @@ class MeteorDecoder(SupervisedReceiver):
             return f"SatDump finisher {result}"
         return f"SatDump {result}; the dongle may still be held"
 
+    def _physical_wait_event(self, run):
+        # The attempt can finish with a failed reap while the dongle is still held.
+        capture, = run.args
+        return capture.handoff_done
+
     def _notify_physical(self, run):
         capture, = run.args
         if run.reaped:
             run.physical.set()
         if run.reaped or run.reap_failed:
             capture.handoff_done.set()
-
-    def _retry_reap(self, run, timeout):
-        if not self._kill_and_reap(run, self._monotonic() + timeout):
-            return False
-        run.reaped = True
-        self._notify_physical(run)
-        return True
-
-    def _retry(self, run):
-        # Only controls expedite a reap. Reader wakes and status polls leave the cadence alone.
-        pending = run.args[0].retry_now
-        while not self._closing:
-            pending.wait(receiver_lifecycle.REAP_RETRY_MIN_S)
-            pending.clear()
-            if not self._closing and self._retry_reap(run, receiver_lifecycle.REAP_RETRY_WAIT_S):
-                return
-        if not run.reaped:
-            self._retry_reap(run, KILL_GRACE_S)
 
     def _drain_reader(self, _run):
         """Wait for explicit EOF during retirement, including cancelled and retried exits."""
