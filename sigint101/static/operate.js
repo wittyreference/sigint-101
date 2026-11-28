@@ -1,5 +1,5 @@
-// ABOUTME: The rack's own wiring: the step key, a decoder's frequency override through
-// ABOUTME: /api/<decoder>/tune, and the one-line reception log read from /api/receptions.
+// ABOUTME: The rack's own wiring: the picked instrument posted as the rack's place, the step key,
+// ABOUTME: a decoder's override through /api/<decoder>/tune, and the log line from /api/receptions.
 
 (function () {
   "use strict";
@@ -101,12 +101,26 @@
     return newest ? receptionLine(newest) : "no receptions logged yet";
   }
 
+  // The post that remembers a picked instrument as the rack's place. keepalive lets it finish
+  // after the tap has navigated away to the instrument's page.
+  function placeRequest(key) {
+    return {
+      url: "/api/rack/place",
+      init: {
+        method: "POST", cache: "no-store", keepalive: true,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ instrument: key }),
+      },
+    };
+  }
+
   // Under node's test runner the file is loaded for its pure helpers and there is no document.
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       formatStep: formatStep, parseSteps: parseSteps, nextStep: nextStep,
       formatDecoderMHz: formatDecoderMHz, tuneCaption: tuneCaption, makeStepper: makeStepper,
       freqLabel: freqLabel, receptionLine: receptionLine, logQuery: logQuery, logText: logText,
+      placeRequest: placeRequest,
     };
     return;
   }
@@ -121,6 +135,17 @@
   var picker = document.querySelector(".rack__picker");
   var current = picker && picker.querySelector(".rack__pick--on");
   if (current) current.scrollIntoView({ block: "center", inline: "nearest" });
+
+  // ---- The rack's place: a pick, not a page view, is what /operate reopens on ----------------
+  if (picker) {
+    picker.addEventListener("click", function (event) {
+      var pick = event.target && event.target.closest && event.target.closest("[data-rack-pick]");
+      if (!pick) return;
+      var request = placeRequest(pick.getAttribute("data-rack-pick"));
+      // A lost post leaves the place where it was; the tap still opens the instrument.
+      fetch(request.url, request.init).catch(function () {});
+    });
+  }
 
   // ---- The step key: rewrites the strip's data-step-hz, which the +/- keys read at each tap ----
   var stepKey = bench.querySelector("[data-step-cycle]");

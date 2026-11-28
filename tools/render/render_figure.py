@@ -7,7 +7,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_scroll import connect  # noqa: E402
+from render_scroll import connect, fence  # noqa: E402
 
 URL = sys.argv[1]
 THEME = sys.argv[2] if len(sys.argv) > 2 else "dark"
@@ -45,10 +45,11 @@ def main():
         "Emulation.setDeviceMetricsOverride",
         {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False},
     )
-    c.call("Page.navigate", {"url": URL})
+    page = fence(URL)   # through the render proxy, never the console itself
+    c.call("Page.navigate", {"url": page})
     time.sleep(2)
     c.ev("localStorage.setItem('sigint101.theme','%s')" % THEME)
-    c.call("Page.navigate", {"url": URL})
+    c.call("Page.navigate", {"url": page})
     time.sleep(2)
     card = c.ev(CARD)
     print("card", json.dumps(card))

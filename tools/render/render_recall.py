@@ -17,7 +17,7 @@ REPO = Path(__file__).resolve().parent.parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from render_scroll import connect  # noqa: E402
+from render_scroll import connect, fence, leave_page  # noqa: E402
 
 from sigint101.app import PACK_DIR, create_app  # noqa: E402
 from sigint101.hardware import RadioProbe  # noqa: E402
@@ -92,7 +92,8 @@ def _free_port() -> int:
 
 
 def load_page(browser, url):
-    nav = browser.call("Page.navigate", {"url": url})
+    # Through the render proxy, never the console itself (render_scroll.fence).
+    nav = browser.call("Page.navigate", {"url": fence(url)})
     if nav.get("errorText"):
         raise RuntimeError(nav["errorText"])
     for _ in range(25):
@@ -264,7 +265,7 @@ def main(_console=None):
                     _stop_server(server, thread)
         return int(failed)
     finally:
-        browser.s.close()
+        leave_page(browser)
 
 
 if __name__ == "__main__":
