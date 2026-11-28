@@ -1382,3 +1382,68 @@ def test_r4_f6_refused_user_reload_warns_on_both_enabled_and_disabled_updates(bo
         assert "Meshtastic LoRa defaults" in res.stdout
         assert "Stock Recon pieces" in res.stdout
         assert "Hand-over hygiene" in res.stdout
+
+
+def test_r5_f5_interrupted_enable_preserves_first_start_intent_and_respects_later_disable(
+    box, tmp_path
+):
+    """F5: if provision.sh is interrupted after installing the user unit and during first-time
+    `systemctl --user enable --now`, the durable pending marker is already on disk so the next
+    run retries enable --now instead of treating the service as owner-disabled."""
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        user_exists=True,
+    )
+    user_unit = box.home / ".config/systemd/user/sigint101-power-notice.service"
+    pending = box.home / ".config/systemd/user/.sigint101-power-notice.enable-pending"
+
+    # --check on a fresh box must never write the pending marker.
+    chk = box.run("--check")
+    assert chk.returncode == 0, chk.stdout + chk.stderr
+    assert not pending.exists(), "--check must not create the pending marker"
+
+    # Run 1: stub systemctl kills provision.sh mid-enable (before any post-failure fallback runs).
+    _stub(
+        box.bin / "systemctl",
+        f'echo "systemctl $*" >> "{box.log}"\n'
+        'case "$*" in\n'
+        '  "get-default") echo graphical.target; exit 0 ;;\n'
+        '  "is-enabled sigint101-power.service") echo "enabled"; exit 0 ;;\n'
+        '  "--user is-enabled sigint101-power-notice.service") echo "disabled"; exit 1 ;;\n'
+        '  "--user enable --now sigint101-power-notice.service")\n'
+        '    kill -TERM "$PPID"\n'
+        '    exit 143 ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n',
+    )
+    r1 = box.run()
+    assert r1.returncode != 0, "expected interrupted provision.sh to exit non-zero"
+    assert user_unit.is_file(), "unit file should be installed before enable --now"
+    assert pending.is_file(), "first-start pending marker must exist before enable --now runs"
+
+    # Run 2: service is still disabled; provision.sh must retry enable --now and clear marker.
+    box.log.write_text("", encoding="utf-8")
+    _setup_power_box(
+        box,
+        tmp_path,
+        notice_unit_state="disabled",
+        user_exists=True,
+    )
+    r2 = box.run()
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    sec2 = _power_section(r2.stdout)
+    assert "--user enable --now sigint101-power-notice.service" in box.calls(), (
+        f"interrupted first-start was misread as owner-disabled:\n{sec2}\n{box.calls()}"
+    )
+    assert "turned off by the owner" not in sec2, sec2
+    assert not pending.exists(), "pending marker should clear once enable --now succeeds"
+
+    # Run 3: after a completed install, owner disables unit -> respected.
+    box.log.write_text("", encoding="utf-8")
+    r3 = box.run()
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    sec3 = _power_section(r3.stdout)
+    assert "turned off by the owner" in sec3, sec3
+    assert "--user enable --now sigint101-power-notice.service" not in box.calls()

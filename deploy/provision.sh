@@ -855,6 +855,11 @@ step_power() {
   local notice_existed=0 notice_unit_changed=0
   if [ -f "$notice_unit_dst" ]; then
     notice_existed=1
+  elif [ "$CHECK" = 0 ]; then
+    # Record first-start intent before installing the unit so an interruption mid-install
+    # or mid-enable cannot later look like an owner-disabled unit (F5).
+    mkdir -p "$(dirname "$notice_pending")"
+    touch "$notice_pending"
   fi
   if cmp -s "$d/sigint101-power-notice.service" "$notice_unit_dst" 2>/dev/null; then
     ok "$notice_unit_dst"

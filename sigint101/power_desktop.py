@@ -24,17 +24,33 @@ NOTIFY_EXPIRE_MS = 6000  # Refreshed every 2 s; auto-expires cleanly if notifier
 
 _UINT32_RE = re.compile(r"\buint32\s+(\d+)\b")
 _BUSCTL_U_RE = re.compile(r"^\s*u\s+(\d+)\s*$")
+_DAEMON_REFUSAL_OR_TRANSPORT_HINTS = (
+    "accessdenied",
+    "access denied",
+    "permission denied",
+    "not authorized",
+    "authfailed",
+    "noreply",
+    "timeout",
+    "timed out",
+    "serviceunknown",
+    "namehasnoowner",
+    "disconnected",
+)
 _DAEMON_GONE_HINTS = (
     "unknownnotification",
     "unknown notification",
     "no such notification",
     "notification not found",
-    "invalid notification",
+    "invalid notification id",
+    "notification id not found",
 )
 
 
 def _daemon_confirms_gone(text: str) -> bool:
     lower = (text or "").lower()
+    if any(hint in lower for hint in _DAEMON_REFUSAL_OR_TRANSPORT_HINTS):
+        return False
     return any(hint in lower for hint in _DAEMON_GONE_HINTS)
 
 

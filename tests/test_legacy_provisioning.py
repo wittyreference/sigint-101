@@ -88,21 +88,22 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "usr/local/lib/sigint101-power/sigint101/battery.py",
         "33e91635e86833a459f812bcadb51a90337734779c7d5e7d221fec0b08562451",
     ),
-    # Safe shutdown slice 2b (round 4 LOCK/F1a/F1b/F3): hard-disarm lock restored in
-    # parse_threshold (lifted in 2c), canonical /etc/sigint101/power.conf only, strict grammar,
-    # and full notice span/deadline validation.
+    # Safe shutdown slice 2b (round 5 LOCK/F1b/F3): hard-disarm lock in parse_threshold (lifted
+    # in 2c), canonical /etc/sigint101/power.conf only, strict newline + control-char refusal,
+    # and full notice span/retry-interval validation.
     (
         "sigint101/power.py",
         "sysroot",
         "usr/local/lib/sigint101-power/sigint101/power.py",
-        "b4b558fa7aabe7804f9711213b65cb9dffdccb153af342a8be2611c29376fc25",
+        "7355cedc711ffce4f934cce8aff2f40779437626ef60cad8011b6ef2daacfa53",
     ),
-    # Safe shutdown slice 2b (round 4 F4): close-capable gdbus/busctl D-Bus with close retry.
+    # Safe shutdown slice 2b (round 5 F4): close-capable gdbus/busctl D-Bus with close retry and
+    # strict AccessDenied/refusal retention.
     (
         "sigint101/power_desktop.py",
         "sysroot",
         "usr/local/lib/sigint101-power/sigint101/power_desktop.py",
-        "8040e89cbba581949ea164e6602d0b866de3238f18c588e1e5fb0b9cb3b16eac",
+        "2f5cba89a6a3fb22f67330cb3144b7f67cf1b139dcbc89e20ea81c6d735feb88",
     ),
     # Safe shutdown slice 2b (round 3 F1): hardened non-root unit under /usr/local/lib/systemd/
     # system without EnvironmentFile (watcher reads power.conf itself).

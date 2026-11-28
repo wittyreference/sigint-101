@@ -312,3 +312,125 @@ test("F2 (r4): seeded banner survives first-poll timeout as unreadable and ignor
   const sClear = ctrl.startPoll();
   assert.equal(ctrl.applyReply(sClear, { active: false }, 4000).visible, false);
 });
+
+test("F2 (r5): contradictory inactive reply and stale reply after error cannot hide warning", async () => {
+  const vm = require("node:vm");
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const src = fs.readFileSync(
+    path.join(__dirname, "..", "sigint101", "static", "power-notice.js"),
+    "utf8",
+  );
+  const settle = () => new Promise((r) => setImmediate(r));
+
+  function makeDom(initialObj, fetchImpl) {
+    const banner = {
+      hidden: !(initialObj && initialObj.active),
+      _classes: new Set(initialObj && initialObj.failed ? ["power-notice--failed"] : []),
+      classList: {
+        toggle(name, on) { if (on) banner._classes.add(name); else banner._classes.delete(name); },
+      },
+      getAttribute(attr) {
+        return attr === "data-power-initial" ? JSON.stringify(initialObj) : null;
+      },
+      querySelector(sel) {
+        if (sel === "[data-power-headline]") return headline;
+        if (sel === "[data-power-detail]") return detail;
+        return null;
+      },
+    };
+    const headline = { textContent: initialObj && initialObj.active ? "INITIAL" : "" };
+    const detail = { textContent: initialObj && initialObj.active ? "INITIAL" : "" };
+    const listeners = {};
+    let now = 1000;
+    const sandbox = {
+      document: {
+        querySelector: (s) => (s === "[data-power-notice]" ? banner : null),
+        addEventListener: (ev, fn) => { listeners[ev] = fn; },
+      },
+      performance: { now: () => now },
+      Date: { now: () => now },
+      setTimeout: () => 1,
+      clearTimeout: () => {},
+      setInterval: () => 1,
+      clearInterval: () => {},
+      AbortController: class { constructor() { this.signal = {}; } abort() {} },
+      fetch: fetchImpl,
+    };
+    vm.runInNewContext(src, sandbox, { filename: "power-notice.js" });
+    return {
+      banner,
+      headline,
+      detail,
+      advanceClock: (ms) => { now += ms; },
+      triggerPoll: () => listeners["sigint101:power-poll"](),
+    };
+  }
+
+  // Probe 1: contradictory inactive payload { active: false, failed: true, retry_in_s: 30 }
+  // must be classified malformed and keep a seeded warning visible and marked unreadable.
+  for (const bogus of [
+    { active: false, failed: true, retry_in_s: 30 },
+    { active: false, remaining_s: 12 },
+    { active: false, extra: 1 },
+  ]) {
+    assert.equal(p.classifyPowerReply(bogus).kind, "malformed", JSON.stringify(bogus));
+  }
+  let replyBody = { active: false, failed: true, retry_in_s: 30 };
+  const dom1 = makeDom(
+    { active: true, failed: false, remaining_s: 42, voltage: 9.21, threshold_v: 9.5 },
+    () => Promise.resolve({ ok: true, status: 200, json: async () => replyBody }),
+  );
+  dom1.triggerPoll();
+  await settle();
+  await settle();
+  assert.equal(dom1.banner.hidden, false, "contradictory inactive payload hid warning");
+  assert.match(dom1.headline.textContent, /UNREADABLE/i);
+
+  // Probe 2: poll A (seq 1) pending while poll B (seq 2) returns malformed JSON -> warning
+  // marked unreadable; when poll A then resolves with valid { active: false }, it is stale
+  // and must NOT hide the warning. Only a newer poll C (seq 3) with { active: false } clears it.
+  const resolvers = [];
+  const dom2 = makeDom(
+    { active: true, failed: false, remaining_s: 42, voltage: 9.21, threshold_v: 9.5 },
+    () => new Promise((resolve) => { resolvers.push(resolve); }),
+  );
+  dom2.triggerPoll(); // poll A (seq 1)
+  dom2.triggerPoll(); // poll B (seq 2)
+  assert.equal(resolvers.length, 2);
+
+  // Poll B settles first with malformed JSON.
+  resolvers[1]({ ok: true, status: 200, json: async () => ({ active: true }) });
+  await settle();
+  await settle();
+  assert.equal(dom2.banner.hidden, false);
+  assert.match(dom2.headline.textContent, /UNREADABLE/i);
+
+  // Stale poll A then resolves with valid inactive -> MUST be ignored!
+  resolvers[0]({ ok: true, status: 200, json: async () => ({ active: false }) });
+  await settle();
+  await settle();
+  assert.equal(dom2.banner.hidden, false, "stale inactive reply after newer error hid warning");
+  assert.match(dom2.headline.textContent, /UNREADABLE/i);
+
+  // Fresh poll C with explicit valid { active: false } clears the warning.
+  dom2.triggerPoll(); // poll C (seq 3)
+  resolvers[2]({ ok: true, status: 200, json: async () => ({ active: false }) });
+  await settle();
+  await settle();
+  assert.equal(dom2.banner.hidden, true);
+  assert.equal(dom2.headline.textContent, "");
+
+  // Probe 3: controller-level check for read error advancing appliedSeq on an active live notice.
+  const ctrl = p.createPowerNoticeController({ lifetimeMs: 15000 });
+  const s1 = ctrl.startPoll();
+  ctrl.applyReply(s1, { active: true, failed: false, remaining_s: 40, voltage: 9.21, threshold_v: 9.5 }, 1000);
+  const sA = ctrl.startPoll();
+  const sB = ctrl.startPoll();
+  assert.notEqual(ctrl.applyError(sB, 3000), null);
+  assert.equal(ctrl.applyReply(sA, { active: false }, 3500), null, "stale inactive must be ignored after newer applyError");
+  assert.equal(ctrl.hasActive(), true);
+  const sC = ctrl.startPoll();
+  assert.equal(ctrl.applyReply(sC, { active: false }, 4000).visible, false);
+  assert.equal(ctrl.hasActive(), false);
+});

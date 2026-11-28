@@ -14,6 +14,7 @@ import signal
 import stat
 import subprocess
 import time
+import unicodedata
 from pathlib import Path
 
 from . import battery
@@ -99,6 +100,11 @@ def _validate_threshold_v(value: float) -> float:
 _THRESHOLD_LINE_RE = re.compile(r"^SIGINT101_POWER_THRESHOLD_V=([0-9]+(?:\.[0-9]+)?)$")
 _RECOVER_LINE_RE = re.compile(r"^SIGINT101_POWER_RECOVER_V=([0-9]+(?:\.[0-9]+)?)$")
 _SLICE_2B_LOCK_REASON = "locked disarmed in slice 2b (arming unlocks in slice 2c)"
+
+
+def _has_disallowed_control(line: str) -> bool:
+    """Return True if line holds any control char or Unicode line/paragraph separator."""
+    return any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") for ch in line)
 
 
 def parse_threshold(raw: str | None) -> tuple[float | None, str]:
@@ -194,10 +200,15 @@ def load_power_config(
     threshold_values: list[str] = []
     recover_values: list[str] = []
 
-    for lineno, raw_line in enumerate(text.splitlines(), start=1):
-        if raw_line.strip() == "":
+    for lineno, raw_line in enumerate(text.split("\n"), start=1):
+        if raw_line.endswith("\r"):
+            raw_line = raw_line[:-1]
+        if _has_disallowed_control(raw_line):
+            msg = f"{path}:{lineno}: control character in power.conf; refusing file"
+            return None, msg, 0.0, [msg]
+        if raw_line.strip(" ") == "":
             continue
-        if raw_line.lstrip(" \t").startswith("#"):
+        if raw_line.lstrip(" ").startswith("#"):
             continue
         m_thresh = _THRESHOLD_LINE_RE.match(raw_line)
         if m_thresh:
@@ -354,7 +365,7 @@ def read_power_notice(
         retry_deadline = _to_finite_float(data.get("retry_deadline_mono"))
         if retry_deadline is None:
             return inactive
-        if retry_deadline <= started_mono or retry_deadline < deadline_mono:
+        if retry_deadline < deadline_mono + POWEROFF_RETRY_S:
             return inactive
         if retry_deadline > updated_mono + POWEROFF_RETRY_S + NOTICE_FUTURE_TOLERANCE_S:
             return inactive

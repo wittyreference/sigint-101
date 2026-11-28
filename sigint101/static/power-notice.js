@@ -70,7 +70,11 @@
       return { kind: "malformed" };
     }
     if (data.active === false) {
-      return { kind: "inactive" };
+      var keys = Object.keys(data);
+      if (keys.length === 1 && keys[0] === "active") {
+        return { kind: "inactive" };
+      }
+      return { kind: "malformed" };
     }
     if (data.active === true && powerNoticeView(data).visible) {
       return { kind: "active", data: data };
@@ -135,6 +139,7 @@
 
     function applyError(seq, nowMs) {
       if (seq < appliedSeq) return null;
+      appliedSeq = seq;
       if (snapshot && snapshot.seeded) {
         snapshot.unreadable = true;
       }

@@ -1547,6 +1547,193 @@ def test_f4_desktop_notice_closes_via_close_capable_transport_on_recovery_and_ex
 # --- Round 4 (LOCK, F1a, F1b, F2 server seed, F3 span/update, F4 close retry) ---
 
 
+_LAUNCHER_TEST_INIT = r'''
+import atexit
+import importlib.abc
+import importlib.machinery
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+
+_CONF_ENV = os.environ.get("TEST_LAUNCHER_CONF")
+if _CONF_ENV:
+    _RESULT_PATH = pathlib.Path(os.environ["TEST_LAUNCHER_RESULT"])
+    _NOTICE_PATH = pathlib.Path(os.environ["TEST_LAUNCHER_NOTICE"])
+    _MAX_TICKS = int(os.environ.get("TEST_LAUNCHER_MAX_TICKS", "90"))
+    _STATE = {
+        "ticks": 0,
+        "gauge_calls": 0,
+        "auth_calls": 0,
+        "shutdown_calls": 0,
+        "unexpected_subprocesses": [],
+        "final_state": None,
+        "injected_verified": False,
+    }
+    _WATCHER_REF = [None]
+
+    def _dump_result():
+        w = _WATCHER_REF[0]
+        payload = {
+            **_STATE,
+            "final_state": w.state if w is not None else _STATE["final_state"],
+            "notice_exists": _NOTICE_PATH.exists(),
+        }
+        _RESULT_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+    atexit.register(_dump_result)
+
+    def _forbid_subprocess(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        _STATE["unexpected_subprocesses"].append(repr(cmd))
+        _dump_result()
+        raise RuntimeError(f"unexpected subprocess in power launcher fixture: {cmd!r}")
+
+    subprocess.run = _forbid_subprocess
+    subprocess.Popen = _forbid_subprocess
+
+    class _PowerPatchLoader(importlib.abc.Loader):
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def create_module(self, spec):
+            return self._wrapped.create_module(spec)
+
+        def exec_module(self, mod):
+            self._wrapped.exec_module(mod)
+            from sigint101.battery import BatteryReading, INA219Config
+
+            mod.DEFAULT_CONFIG_PATH = pathlib.Path(_CONF_ENV)
+            clk = [1000.0]
+
+            def fake_reader():
+                _STATE["gauge_calls"] += 1
+                return INA219Config.from_word(0x399F), BatteryReading(
+                    voltage=9.10, current_a=-0.6, percent=5, charging=False
+                )
+
+            def fake_auth():
+                _STATE["auth_calls"] += 1
+                return True, 's "yes"'
+
+            def fake_poweroff():
+                _STATE["shutdown_calls"] += 1
+
+            def fake_clock():
+                return clk[0]
+
+            def fake_sleep(dt):
+                clk[0] += dt
+
+            def bounded_sleep(dt):
+                _STATE["ticks"] += 1
+                fake_sleep(dt)
+                if _STATE["ticks"] >= _MAX_TICKS:
+                    os.kill(os.getpid(), signal.SIGTERM)
+
+            real_watcher = mod.PowerWatcher
+
+            class _InjectedPowerWatcher(real_watcher):
+                def __init__(self, *args, **kwargs):
+                    kwargs["reader"] = fake_reader
+                    kwargs["clock"] = fake_clock
+                    kwargs["sleep"] = fake_sleep
+                    kwargs["poweroff"] = fake_poweroff
+                    kwargs["can_power_off"] = fake_auth
+                    super().__init__(*args, **kwargs)
+                    assert self._reader is fake_reader
+                    assert self._clock is fake_clock
+                    assert self._sleep is fake_sleep
+                    assert self._poweroff is fake_poweroff
+                    assert self._can_power_off is fake_auth
+                    _STATE["injected_verified"] = True
+                    _WATCHER_REF[0] = self
+
+            mod.PowerWatcher = _InjectedPowerWatcher
+            mod.time.monotonic = fake_clock
+            mod.time.sleep = bounded_sleep
+
+    class _PowerPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != "sigint101.power":
+                return None
+            spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+            if spec is not None and spec.loader is not None:
+                spec.loader = _PowerPatchLoader(spec.loader)
+            return spec
+
+    sys.meta_path.insert(0, _PowerPatchFinder())
+'''
+
+
+def _stage_installed_power_sysroot(
+    sysroot: Path, *, revert_lock: bool = False
+) -> tuple[Path, Path]:
+    """Stage the actual deploy/system/sigint101-power launcher and library files in a temp sysroot.
+
+    When revert_lock=True, lifts ONLY the single slice-2b lock line in the disposable copy of
+    power.py to prove that the fixture reaches only the injected fake shutdown and never a real
+    subprocess when armed.
+    """
+    lib_root = sysroot / "usr" / "local" / "lib" / "sigint101-power"
+    lib_pkg = lib_root / "sigint101"
+    lib_pkg.mkdir(parents=True, exist_ok=True)
+    (lib_pkg / "__init__.py").write_text(_LAUNCHER_TEST_INIT, encoding="utf-8")
+    (lib_pkg / "battery.py").write_bytes((REPO / "sigint101" / "battery.py").read_bytes())
+
+    power_src = (REPO / "sigint101" / "power.py").read_text(encoding="utf-8")
+    if revert_lock:
+        lock_line = "return None, _SLICE_2B_LOCK_REASON"
+        assert power_src.count(lock_line) == 1, "expected exact single slice 2b lock return"
+        power_src = power_src.replace(lock_line, 'return value, ""', 1)
+    (lib_pkg / "power.py").write_text(power_src, encoding="utf-8")
+
+    bin_dir = sysroot / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    launcher = bin_dir / "sigint101-power"
+    launcher.write_bytes((REPO / "deploy" / "system" / "sigint101-power").read_bytes())
+    launcher.chmod(0o755)
+    return launcher, lib_root
+
+
+def _run_installed_power_launcher(
+    launcher: Path,
+    *,
+    conf_path: Path,
+    notice_path: Path,
+    result_path: Path,
+    extra_env: dict[str, str] | None = None,
+    max_ticks: int = 90,
+) -> tuple[int, dict, str]:
+    """Run the actual installed launcher with explicit fake callbacks and subprocess guard."""
+    if result_path.exists():
+        result_path.unlink()
+    if notice_path.exists():
+        notice_path.unlink()
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "TEST_LAUNCHER_CONF": str(conf_path),
+        "TEST_LAUNCHER_NOTICE": str(notice_path),
+        "TEST_LAUNCHER_RESULT": str(result_path),
+        "TEST_LAUNCHER_MAX_TICKS": str(max_ticks),
+        **(extra_env or {}),
+    }
+    proc = subprocess.run(
+        [str(launcher), "--notice-path", str(notice_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    combined = proc.stdout + proc.stderr
+    assert result_path.is_file(), f"launcher exited {proc.returncode} without result:\n{combined}"
+    data = json.loads(result_path.read_text(encoding="utf-8"))
+    return proc.returncode, data, combined
+
+
 def test_r4_lock_f1a_f1b_hard_disarm_canonical_path_and_strict_grammar(tmp_path):
     """LOCK + F1a + F1b: 2b restores 2a's hard-disarm in parse_threshold; production launcher
     binds strictly to /etc/sigint101/power.conf (refusing --config-path); power.conf enforces a
@@ -1559,18 +1746,9 @@ def test_r4_lock_f1a_f1b_hard_disarm_canonical_path_and_strict_grammar(tmp_path)
         assert reason, f"expected disarmed reason for {raw!r}"
 
     # Stage the real installed layout in a temporary sysroot.
-    sysroot = tmp_path / "sysroot"
-    lib_root = sysroot / "usr" / "local" / "lib" / "sigint101-power"
-    lib_pkg = lib_root / "sigint101"
-    lib_pkg.mkdir(parents=True)
-    for py_name in ("__init__.py", "battery.py", "power.py"):
-        (lib_pkg / py_name).write_bytes((REPO / "sigint101" / py_name).read_bytes())
-    bin_dir = sysroot / "usr" / "local" / "bin"
-    bin_dir.mkdir(parents=True)
-    launcher = bin_dir / "sigint101-power"
-    launcher.write_bytes((REPO / "deploy" / "system" / "sigint101-power").read_bytes())
-    launcher.chmod(0o755)
+    launcher, _ = _stage_installed_power_sysroot(tmp_path / "sysroot", revert_lock=False)
     notice_path = tmp_path / "notice.json"
+    result_path = tmp_path / "result.json"
     base_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
     # F1a: installed launcher refuses --config-path with a valid alternate file (canonical absent).
@@ -1588,91 +1766,19 @@ def test_r4_lock_f1a_f1b_hard_disarm_canonical_path_and_strict_grammar(tmp_path)
         f"{proc_alt.stdout}{proc_alt.stderr}"
     )
 
-    # Full-loop probe through the installed lib/sigint101-power package (90 ticks at low 9.1 V,
-    # fake shutdown spy, fake gauge spy) with canonical DEFAULT_CONFIG_PATH substituted in test.
-    loop_snippet = r"""
-import json, pathlib, sys
-sys.path.insert(0, sys.argv[1])
-import sigint101.power as p
-from sigint101.battery import BatteryReading, INA219Config
-
-p.DEFAULT_CONFIG_PATH = pathlib.Path(sys.argv[2])
-notice_path = pathlib.Path(sys.argv[3])
-
-gauge_calls = 0
-auth_calls = 0
-shutdown_calls = 0
-t = [1000.0]
-
-def fake_reader():
-    global gauge_calls
-    gauge_calls += 1
-    return INA219Config(0x399F), BatteryReading(
-        voltage=9.10, current_a=-0.6, power_w=5.46, percent=5, charging=False
-    )
-
-def fake_auth():
-    global auth_calls
-    auth_calls += 1
-    return True, 's "yes"'
-
-def fake_poweroff():
-    global shutdown_calls
-    shutdown_calls += 1
-
-def fake_clock():
-    return t[0]
-
-def fake_sleep(dt):
-    t[0] += dt
-
-# Stub main's watcher loop to run 90 ticks deterministically without touching host hardware.
-p.battery.read_battery_once = fake_reader
-p.check_can_power_off = fake_auth
-p.run_poweroff = fake_poweroff
-p.time.monotonic = fake_clock
-ticks = [0]
-orig_sleep = fake_sleep
-def bounded_sleep(dt):
-    ticks[0] += 1
-    orig_sleep(dt)
-    if ticks[0] >= 90:
-        import os, signal
-        os.kill(os.getpid(), signal.SIGTERM)
-p.time.sleep = bounded_sleep
-
-rc = p.main(["--notice-path", str(notice_path)])
-print("RESULT:" + json.dumps({
-    "rc": rc,
-    "ticks": ticks[0],
-    "gauge_calls": gauge_calls,
-    "auth_calls": auth_calls,
-    "shutdown_calls": shutdown_calls,
-    "notice_exists": notice_path.exists(),
-}))
-"""
-
     def _run_loop(conf_path: Path, *, extra_env: dict[str, str] | None = None) -> tuple[dict, str]:
-        env = {**base_env, **(extra_env or {})}
-        proc = subprocess.run(
-            [
-                "/usr/bin/python3",
-                "-I",
-                "-c",
-                loop_snippet,
-                str(lib_root),
-                str(conf_path),
-                str(notice_path),
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=15,
+        rc, data, combined = _run_installed_power_launcher(
+            launcher,
+            conf_path=conf_path,
+            notice_path=notice_path,
+            result_path=result_path,
+            extra_env=extra_env,
+            max_ticks=90,
         )
-        assert proc.returncode == 0, (proc.stdout, proc.stderr)
-        combined = proc.stdout + proc.stderr
-        line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT:"))
-        return json.loads(line[len("RESULT:"):]), combined
+        assert rc == 0, combined
+        assert data["injected_verified"] is True, (data, combined)
+        assert data["unexpected_subprocesses"] == [], (data, combined)
+        return {"rc": rc, **data}, combined
 
     cases: list[tuple[str, bytes | None, dict[str, str] | None, str]] = [
         ("absent_file", None, None, "disarmed"),
@@ -1736,6 +1842,7 @@ print("RESULT:" + json.dumps({
         assert res["gauge_calls"] == 0, f"{label}: disarmed watcher read I2C"
         assert res["auth_calls"] == 0, f"{label}: disarmed watcher checked auth"
         assert res["shutdown_calls"] == 0, f"{label}: disarmed watcher invoked shutdown"
+        assert res["unexpected_subprocesses"] == [], f"{label}: unexpected subprocess"
         assert res["notice_exists"] is False, f"{label}: disarmed watcher wrote notice.json"
         assert "armed at" not in output, (label, output)
         assert "disarmed" in output.lower(), (label, output)
@@ -1943,3 +2050,358 @@ def test_r4_f4_retains_notification_id_and_retries_pending_close_for_each_transp
             # 4) Further inactive ticks stop retrying once closed.
             assert mon.tick() == "INACTIVE"
             assert close_attempts == [30, 30]
+
+
+# --- Round 5 (LOCK fixture + revert proof, F1b control chars, F3 retry interval, F4 refusal) ---
+
+
+def test_r5_lock_installed_launcher_explicit_fakes_and_revert_proof(tmp_path):
+    """LOCK TEST: running the actual installed launcher with explicit fake callbacks and a hard
+    subprocess guard stays disarmed under slice 2b's lock, and when the lock is reverted in a
+    disposable temporary copy reaches ONLY the injected fake shutdown (zero real subprocesses)."""
+    conf = tmp_path / "power.conf"
+    conf.write_text(
+        "# bench calibrated\n"
+        "SIGINT101_POWER_THRESHOLD_V=9.50\n"
+        "SIGINT101_POWER_RECOVER_V=0.20\n",
+        encoding="utf-8",
+    )
+
+    # 1) Production power.py (lock engaged): runs actual launcher, stays disarmed for all 90 ticks.
+    locked_launcher, _ = _stage_installed_power_sysroot(tmp_path / "locked", revert_lock=False)
+    rc_locked, data_locked, out_locked = _run_installed_power_launcher(
+        locked_launcher,
+        conf_path=conf,
+        notice_path=tmp_path / "locked-notice.json",
+        result_path=tmp_path / "locked-result.json",
+        max_ticks=90,
+    )
+    assert rc_locked == 0, out_locked
+    assert data_locked["injected_verified"] is True
+    assert data_locked["unexpected_subprocesses"] == [], (data_locked, out_locked)
+    assert data_locked["ticks"] == 90
+    assert data_locked["gauge_calls"] == 0
+    assert data_locked["auth_calls"] == 0
+    assert data_locked["shutdown_calls"] == 0
+    assert data_locked["notice_exists"] is False
+    assert data_locked["final_state"] == "DISARMED"
+    assert "armed at" not in out_locked
+
+    # 2) Lock-revert proof (disposable copy with ONLY the slice-2b lock line reverted): the exact
+    # same actual-launcher fixture arms, checks fake auth once, counts down, calls ONLY the fake
+    # shutdown once, and NEVER invokes any real subprocess!
+    armed_launcher, _ = _stage_installed_power_sysroot(tmp_path / "armed", revert_lock=True)
+    rc_armed, data_armed, out_armed = _run_installed_power_launcher(
+        armed_launcher,
+        conf_path=conf,
+        notice_path=tmp_path / "armed-notice.json",
+        result_path=tmp_path / "armed-result.json",
+        max_ticks=90,
+    )
+    assert rc_armed == 0, out_armed
+    assert data_armed["injected_verified"] is True
+    assert data_armed["unexpected_subprocesses"] == [], (data_armed, out_armed)
+    assert data_armed["gauge_calls"] > 0, (data_armed, out_armed)
+    assert data_armed["auth_calls"] == 1, (data_armed, out_armed)
+    assert data_armed["shutdown_calls"] == 1, (data_armed, out_armed)
+    assert data_armed["final_state"] == "POWERING_OFF", (data_armed, out_armed)
+    assert data_armed["notice_exists"] is True, (data_armed, out_armed)
+    assert "armed at 9.50 V" in out_armed, out_armed
+    assert "invoking systemctl poweroff" in out_armed, out_armed
+
+    # 3) Negative self-check: prove the subprocess guard immediately fails any unexpected call.
+    _, lib_root = _stage_installed_power_sysroot(tmp_path / "guard-check", revert_lock=False)
+    guard_result = tmp_path / "guard-result.json"
+    guard_proc = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import sigint101; import subprocess; "
+                "subprocess.run(['/usr/bin/true'])"
+            ),
+            str(lib_root),
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "TEST_LAUNCHER_CONF": str(conf),
+            "TEST_LAUNCHER_NOTICE": str(tmp_path / "guard-notice.json"),
+            "TEST_LAUNCHER_RESULT": str(guard_result),
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert guard_proc.returncode != 0, "subprocess guard must fail unexpected subprocess at once"
+    assert "unexpected subprocess" in guard_proc.stderr
+    guard_data = json.loads(guard_result.read_text(encoding="utf-8"))
+    assert len(guard_data["unexpected_subprocesses"]) == 1
+
+
+def test_r5_f1b_rejects_control_chars_and_unicode_separators_in_comments(tmp_path):
+    """F1b: control characters and non-LF line separators cannot split a comment into an
+    assignment; any line with a control char other than the LF/CRLF line ending refuses the file."""
+    from sigint101.power import _SLICE_2B_LOCK_REASON, load_power_config
+
+    separators: list[tuple[str, bytes]] = [
+        ("vt_x0b", b"\x0b"),
+        ("ff_x0c", b"\x0c"),
+        ("bare_cr", b"\r"),
+        ("fs_x1c", b"\x1c"),
+        ("gs_x1d", b"\x1d"),
+        ("rs_x1e", b"\x1e"),
+        ("nel_u0085", "\x85".encode("utf-8")),
+        ("ls_u2028", "\u2028".encode("utf-8")),
+        ("ps_u2029", "\u2029".encode("utf-8")),
+        ("nul_x00", b"\x00"),
+        ("bel_x07", b"\x07"),
+        ("tab_x09", b"\t"),
+        ("del_x7f", b"\x7f"),
+    ]
+    for label, sep in separators:
+        conf = tmp_path / f"ctrl-{label}.conf"
+        conf.write_bytes(b"# comment" + sep + b"SIGINT101_POWER_THRESHOLD_V=9.50\n")
+        tv, reason, recover_v, diags = load_power_config(conf)
+        assert tv is None, label
+        assert recover_v == 0.0, label
+        assert reason != _SLICE_2B_LOCK_REASON, (
+            f"{label}: separator smuggled assignment past comment into parse_threshold: {reason}"
+        )
+        assert diags and ("control" in reason.lower() or "invalid" in reason.lower()), (
+            label,
+            reason,
+            diags,
+        )
+
+    # Leading tab on a comment line and trailing NUL on an assignment must also be refused.
+    for label, raw in (
+        ("tab_indented_comment", b"\t# comment\nSIGINT101_POWER_THRESHOLD_V=9.50\n"),
+        ("nul_in_value", b"SIGINT101_POWER_THRESHOLD_V=9.50\x00\n"),
+    ):
+        conf = tmp_path / f"{label}.conf"
+        conf.write_bytes(raw)
+        tv, reason, _, diags = load_power_config(conf)
+        assert tv is None and reason != _SLICE_2B_LOCK_REASON and diags, (label, reason, diags)
+
+    # Positive control: standard CRLF line endings stay valid grammar (and hit the 2b lock).
+    crlf_conf = tmp_path / "valid-crlf.conf"
+    crlf_conf.write_bytes(
+        b"# bench calibrated\r\n"
+        b"SIGINT101_POWER_THRESHOLD_V=9.50\r\n"
+        b"SIGINT101_POWER_RECOVER_V=0.20\r\n"
+    )
+    tv, reason, recover_v, diags = load_power_config(crlf_conf)
+    assert tv is None
+    assert reason == _SLICE_2B_LOCK_REASON
+    assert recover_v == pytest.approx(0.20)
+    assert diags == [_SLICE_2B_LOCK_REASON]
+
+
+def test_r5_f3_rejects_unattainable_retry_deadline_and_allows_hysteresis_update(tmp_path):
+    """F3: read_power_notice rejects failed notices whose retry_deadline_mono precedes
+    deadline_mono + POWEROFF_RETRY_S (impossible for the watcher to write), while still accepting
+    valid retries and later hysteresis updates after the retry deadline has passed."""
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+    from sigint101.power_desktop import DesktopNoticeMonitor
+
+    clk = _Clock(960.0)
+    notice_path = tmp_path / "notice.json"
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=tmp_path / "data",
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+
+    shown: list[tuple[str, str, bool]] = []
+
+    class _RecordingNotifier:
+        def show(self, summary: str, body: str, *, failed: bool) -> bool:
+            shown.append((summary, body, failed))
+            return True
+
+        def clear(self) -> bool:
+            return True
+
+    mon = DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=_RecordingNotifier())
+
+    invalid_cases = [
+        (
+            "retry_250ms_after_deadline",
+            {
+                "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+                "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 960.0,
+                "retry_deadline_mono": 960.25,
+            },
+        ),
+        (
+            "retry_under_interval_after_deadline",
+            {
+                "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+                "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 960.0,
+                "retry_deadline_mono": 1018.5,
+            },
+        ),
+        (
+            "retry_above_upper_bound",
+            {
+                "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+                "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 960.0,
+                "retry_deadline_mono": 1022.0,
+            },
+        ),
+    ]
+
+    with TestClient(app) as client:
+        for label, payload in invalid_cases:
+            notice_path.write_text(json.dumps(payload), encoding="utf-8")
+            assert read_power_notice(notice_path, clock=clk) == {"active": False}, label
+            resp = client.get("/api/power")
+            assert resp.status_code == 200 and resp.json() == {"active": False}, label
+            assert mon.tick() == "INACTIVE", label
+            assert shown == [], f"{label} unexpectedly showed desktop alert: {shown}"
+
+        # Valid control 1: fresh retry deadline at deadline_mono + POWEROFF_RETRY_S.
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+            "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 960.0,
+            "retry_deadline_mono": 1020.0,
+        }), encoding="utf-8")
+        expected_fresh = {
+            "active": True, "failed": True, "retry_in_s": 60,
+            "voltage": 9.18, "threshold_v": 9.5,
+        }
+        assert read_power_notice(notice_path, clock=clk) == expected_fresh
+        assert client.get("/api/power").json() == expected_fresh
+        assert mon.tick() == "FAILED"
+        assert "RETRYING IN 60 s" in shown[-1][0]
+
+        # Valid control 2: later update in hysteresis after retry_deadline_mono has passed.
+        clk.advance(65.0)
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": True, "voltage": 9.55, "threshold_v": 9.5,
+            "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 1025.0,
+            "retry_deadline_mono": 1020.0,
+        }), encoding="utf-8")
+        expected_hyst = {
+            "active": True, "failed": True, "retry_in_s": 0,
+            "voltage": 9.55, "threshold_v": 9.5,
+        }
+        assert read_power_notice(notice_path, clock=clk) == expected_hyst
+        assert client.get("/api/power").json() == expected_hyst
+        assert mon.tick() == "FAILED"
+        assert "RETRYING NOW" in shown[-1][0]
+
+
+def test_r5_f4_access_denied_close_refusal_keeps_id_and_retries_for_both_transports(tmp_path):
+    """F4: an AccessDenied refusal containing 'invalid notification credentials' is a refusal,
+    not proof the notification is gone; keep the ID and retry until closed or confirmed unknown."""
+    import sigint101.power_desktop as pd
+
+    for kind in ("gdbus", "busctl"):
+        clk = _Clock(500.0)
+        notice_path = tmp_path / f"f4-refusal-{kind}.json"
+        live_notifs: dict[int, str] = {}
+        close_attempts: list[int] = []
+        close_mode = {"step": "refuse"}
+        next_id = 40
+
+        def _fake_daemon(cmd, **kw):
+            nonlocal next_id
+            assert kw["timeout"] > 0
+            is_close = (
+                "org.freedesktop.Notifications.CloseNotification" in cmd
+                if kind == "gdbus"
+                else "CloseNotification" in cmd
+            )
+            if is_close:
+                nid = int(cmd[-1])
+                close_attempts.append(nid)
+                if close_mode["step"] == "refuse":
+                    close_mode["step"] = "ok"
+                    return SimpleNamespace(
+                        returncode=1,
+                        stdout="",
+                        stderr=(
+                            "Error: org.freedesktop.DBus.Error.AccessDenied: "
+                            "invalid notification credentials"
+                        ),
+                    )
+                if close_mode["step"] == "unknown_id":
+                    live_notifs.pop(nid, None)
+                    return SimpleNamespace(
+                        returncode=1,
+                        stdout="",
+                        stderr=(
+                            "Error: org.freedesktop.DBus.Error.InvalidArgs: "
+                            "Invalid notification id"
+                        ),
+                    )
+                live_notifs.pop(nid, None)
+                return SimpleNamespace(
+                    returncode=0, stdout="()\n" if kind == "gdbus" else "", stderr=""
+                )
+            if kind == "gdbus":
+                replaces = int(cmd[cmd.index(pd.APP_NAME) + 1])
+                nid = replaces if replaces > 0 else next_id
+                if replaces == 0:
+                    next_id += 1
+                live_notifs[nid] = cmd[cmd.index(pd.APP_NAME) + 3]
+                return SimpleNamespace(returncode=0, stdout=f"(uint32 {nid},)\n", stderr="")
+            idx = cmd.index("susssasa{sv}i")
+            replaces = int(cmd[idx + 2])
+            nid = replaces if replaces > 0 else next_id
+            if replaces == 0:
+                next_id += 1
+            live_notifs[nid] = cmd[idx + 4]
+            return SimpleNamespace(returncode=0, stdout=f"u {nid}\n", stderr="")
+
+        notifier = (
+            pd.GdbusNotifier(gdbus_bin="/usr/bin/gdbus", runner=_fake_daemon)
+            if kind == "gdbus"
+            else pd.BusctlNotifier(busctl_bin="/usr/bin/busctl", runner=_fake_daemon)
+        )
+        mon = pd.DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=notifier)
+
+        # 1) Show active countdown -> ID 40 live.
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+            "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.0,
+        }), encoding="utf-8")
+        assert mon.tick() == "ACTIVE"
+        assert list(live_notifs.keys()) == [40]
+
+        # 2) Notice clears; first close gets AccessDenied ("invalid notification credentials") ->
+        # MUST retain ID 40 and keep notification live for retry.
+        notice_path.unlink()
+        assert mon.tick() == "INACTIVE"
+        assert close_attempts == [40]
+        assert list(live_notifs.keys()) == [40]
+        assert notifier._notify_id == 40, f"{kind} dropped ID on AccessDenied refusal"
+
+        # 3) Next inactive tick retries CloseNotification(40) and succeeds.
+        assert mon.tick() == "INACTIVE"
+        assert close_attempts == [40, 40], (kind, close_attempts)
+        assert live_notifs == {}
+        assert notifier._notify_id == 0
+
+        # 4) Positive control: explicit unknown notification ID clears the ID without retrying.
+        close_mode["step"] = "unknown_id"
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+            "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.5,
+        }), encoding="utf-8")
+        assert mon.tick() == "ACTIVE"
+        assert list(live_notifs.keys()) == [41]
+        notice_path.unlink()
+        assert mon.tick() == "INACTIVE"
+        assert close_attempts == [40, 40, 41]
+        assert notifier._notify_id == 0
+        assert mon.tick() == "INACTIVE"
+        assert close_attempts == [40, 40, 41]
