@@ -127,6 +127,8 @@ def _entries(fd, names, mount):
 def _empty_stage(staging, name, owner, owner_info):
     mount = read_fd_mount_id(staging)
     _private_dir(owner, mount=mount)
+    if not _still_named(staging, name, owner):
+        raise _invalid("capture staging owner identity")
     entries = set(os.listdir(owner))
     if entries - {_OWNER_LOCK, PAYLOAD}:
         raise _invalid("capture staging contents")

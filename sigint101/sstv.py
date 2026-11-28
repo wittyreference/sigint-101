@@ -31,7 +31,9 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
+from .staging import _CREATE_LOCK as _CREATE_LOCK
 from .staging import (
+    _CREATE_WAIT_S,
     _DIR_FLAGS,
     _OWNER_LOCK,
     _close_all,
@@ -182,7 +184,7 @@ class _StagingOwner:
     def create(cls, parent: Path, staging_name: str, gallery_name: str) -> _StagingOwner:
         staging_fd, gallery = _open_staging(parent, staging_name, gallery_name)
         try:
-            name, sub_fd, lock_fd = create_owner(staging_fd, "SSTV")
+            name, sub_fd, lock_fd = create_owner(staging_fd, "SSTV", wait_s=_CREATE_WAIT_S)
         except BaseException:
             os.close(staging_fd)
             raise

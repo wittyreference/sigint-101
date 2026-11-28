@@ -47,9 +47,9 @@ def _still_named(dir_fd: int, name: str, fd: int) -> bool:
         return False
 
 
-def _take_create_lock_shared(fd: int, label: str) -> None:
+def _take_create_lock_shared(fd: int, label: str, wait_s: float) -> None:
     """Take the creation lock shared, retrying briefly; refuse if a sweeper keeps it."""
-    deadline = time.monotonic() + _CREATE_WAIT_S
+    deadline = time.monotonic() + wait_s
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
@@ -69,14 +69,14 @@ def _close_all(fds: tuple) -> None:
             pass
 
 
-def create_owner(staging_fd: int, label: str):
+def create_owner(staging_fd: int, label: str, *, wait_s: float = _CREATE_WAIT_S):
     """Keep the creation lock shared until the owner lock is installed and visible."""
     name = uuid.uuid4().hex
     pending = f".new-{name}"
     create_fd = sub_fd = lock_fd = None
     try:
         create_fd = _open_lock_file(staging_fd, _CREATE_LOCK, create=True)
-        _take_create_lock_shared(create_fd, label)
+        _take_create_lock_shared(create_fd, label, wait_s)
         if not _still_named(staging_fd, _CREATE_LOCK, create_fd):
             raise _UntrustedStaging(f"{_CREATE_LOCK} was replaced while it was taken")
         os.mkdir(pending, 0o700, dir_fd=staging_fd)
@@ -125,7 +125,7 @@ def sweep_owners(staging_fd, cleanup, on_error, *, own=None):
                     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
                         raise _UntrustedStaging("the owner lock is not this account's regular file")
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    if _still_named(fd, _OWNER_LOCK, lock) and _still_named(staging_fd, name, fd):
+                    if _still_named(fd, _OWNER_LOCK, lock):
                         cleanup(staging_fd, name, fd, os.fstat(fd))
                 finally:
                     os.close(lock)
