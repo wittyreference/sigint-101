@@ -349,14 +349,46 @@ def test_owned_group_can_retry_kill_after_public_poll_error(monkeypatch, guard_e
 _SAFE_SIGNALS = {sig.name for sig in signal.Signals} - {"SIGCHLD", "SIGCLD"}
 
 
-def _is_explicit_non_chld_signal(arg, names):
-    """True only when `arg` statically resolves to a known non-SIGCHLD signal constant."""
-    if not isinstance(arg, (ast.Name, ast.Attribute)):
-        return False
-    head, dot, tail = ast.unparse(arg).partition(".")
-    resolved = names.get(head, head) + dot + tail
-    module, _, attr = resolved.rpartition(".")
-    return module == "signal" and attr in _SAFE_SIGNALS
+def _signal_module_is_unshadowed(tree):
+    """True only when `signal` is imported as the stdlib module and never rebound or shadowed."""
+    imported = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.partition(".")[0]
+                if bound == "signal":
+                    if alias.name == "signal" and alias.asname is None:
+                        imported = True
+                    else:
+                        return False
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if (alias.asname or alias.name) == "signal":
+                    return False
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if node.id == "signal":
+                return False
+        elif isinstance(node, ast.arg) and node.arg == "signal":
+            return False
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == "signal":
+                return False
+        elif isinstance(node, ast.ExceptHandler) and node.name == "signal":
+            return False
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == "signal":
+            return False
+    return imported
+
+
+def _is_explicit_non_chld_signal(arg, *, signal_unshadowed):
+    """True only when `arg` is an explicit `signal.<CONST>` for an unshadowed `signal` import."""
+    return (
+        signal_unshadowed
+        and isinstance(arg, ast.Attribute)
+        and isinstance(arg.value, ast.Name)
+        and arg.value.id == "signal"
+        and arg.attr in _SAFE_SIGNALS
+    )
 
 
 def _signal_arg(node):
@@ -399,6 +431,7 @@ def _foreign_reapers(source, *, childproc_source=False):
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.update((alias.asname or alias.name, f"{node.module}.{alias.name}")
                          for alias in node.names)
+    signal_unshadowed = _signal_module_is_unshadowed(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and node not in allowed:
             name, dot, suffix = ast.unparse(node.func).partition(".")
@@ -410,7 +443,9 @@ def _foreign_reapers(source, *, childproc_source=False):
             )
             if (call in forbidden or call.endswith((".set_child_watcher", ".get_child_watcher"))
                     or (registers_signal
-                        and not _is_explicit_non_chld_signal(_signal_arg(node), names))):
+                        and not _is_explicit_non_chld_signal(
+                            _signal_arg(node), signal_unshadowed=signal_unshadowed
+                        ))):
                 yield node.lineno
 
 
@@ -433,6 +468,14 @@ def test_sigint101_has_no_reaper_outside_group_popen():
     "import signal; signal.signal(signal.SIGCHLD, signal.SIG_IGN)",
     "import signal; signal.signal(signalnum=signal.SIGCHLD, handler=signal.SIG_IGN)",
     "import signal; sig = signal.SIGCHLD; signal.signal(sig, signal.SIG_IGN)",
+    "import signal\nfrom signal import SIGTERM as sig\nsig = signal.SIGCHLD\n"
+    "signal.signal(sig, signal.SIG_IGN)",
+    "import signal\nfrom signal import SIGTERM as sig\ndef register(sig):\n"
+    " signal.signal(sig, signal.SIG_IGN)",
+    "from signal import SIGTERM as sig\ndef register(loop, sig, cb):\n"
+    " loop.add_signal_handler(sig, cb)",
+    "import signal\nsignal = fake\nsignal.signal(signal.SIGTERM, cb)",
+    "import signal\ndef register(signal, cb):\n signal.signal(signal.SIGTERM, cb)",
     "import signal; signal.signal(17, signal.SIG_IGN)",
     "import signal; loop.add_signal_handler(signal.SIGCHLD, cb)",
     "loop.add_signal_handler(sig, cb)",
@@ -448,6 +491,7 @@ def test_reaping_source_guard_rejects_an_independent_reaper(source):
     "import signal; signal.signal(signal.SIGTERM, cb)",
     "import signal; signal.signal(signalnum=signal.SIGINT, handler=cb)",
     "import signal; loop.add_signal_handler(signal.SIGTERM, cb)",
+    "import signal; loop.add_signal_handler(signal.SIGINT, cb)",
 ])
 def test_reaping_source_guard_allows_explicit_non_sigchld_handlers(source):
     assert list(_foreign_reapers(source)) == []

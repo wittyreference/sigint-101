@@ -693,7 +693,15 @@ class SupervisedReceiver:
                     # Keep the ticket open if shutdown arrived mid-short-attempt so
                     # shutdown gets its own bounded STOP_WAIT_S pass on the next cycle.
                     if run.reaped or closing or not self._closing:
-                        self._ack_retry(run, ticket)
+                        if closing and not run.reaped:
+                            # Close retry admission atomically with acknowledging the final
+                            # shutdown pass so a duplicate shutdown cannot queue another KILL.
+                            run.ready.set()
+                        self._ack_retry(
+                            run, run.retry_done if (run.reaped or closing) else ticket
+                        )
+                        if run.reaped or closing:
+                            return
 
     def _report(self, run):
         """Streaming receivers already report each item from their reader."""

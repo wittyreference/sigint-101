@@ -2025,3 +2025,114 @@ def test_shutdown_during_inflight_ticketed_short_retry_gets_its_own_bounded_atte
         proc.code = -signal.SIGKILL
         monkeypatch.setattr(decoder, "_wait_physical", wait_physical)
         _finish_fault_fake(decoder)
+
+
+@pytest.mark.parametrize("timing", ["after-ack", "during-final-pass"])
+def test_duplicate_shutdown_after_final_pass_ack_never_queues_extra_kill(monkeypatch, timing):
+    # C90: closing retry admission must be atomic with acknowledging the final shutdown pass.
+    # A duplicate shutdown in the ack-to-next-loop gap (or during the final pass) must consume
+    # the existing outcome or wait on the current ticket and never queue another KILL-only pass.
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.02)
+    ack_unlocked, resume_loop, in_final_wait, release_final = (
+        threading.Event() for _ in range(4)
+    )
+
+    class Proc(Child):
+        def wait(self, timeout=None):
+            if timing == "during-final-pass" and len(self.sent) == 3:
+                in_final_wait.set()
+                assert release_final.wait(5)
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return super().wait(timeout)
+
+    proc = Proc(["rtl_433", "-f", "433920000"], unkillable=True)
+    decoder = _sensors(lambda *_: proc)
+    decoder.STOP_WAIT_S = 0.05
+    decoder.start()
+    decoder.stop()
+    assert proc.sent == ["TERM", "KILL"]
+
+    real_life = decoder._life
+    real_ack = decoder._ack_retry
+    real_wait = decoder._wait_physical
+    acked_tid = [None]
+    ready_after_ack = []
+    depth = {}
+    second_waiting = threading.Event()
+    wait_calls = [0]
+
+    def observe_wait(run, intent, ticket):
+        wait_calls[0] += 1
+        if wait_calls[0] == 2:
+            second_waiting.set()
+        return real_wait(run, intent, ticket)
+
+    class _PauseAfterAckUnlock:
+        def __enter__(self):
+            real_life.acquire()
+            tid = threading.get_ident()
+            depth[tid] = depth.get(tid, 0) + 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            tid = threading.get_ident()
+            depth[tid] -= 1
+            outermost = depth[tid] == 0
+            pause = outermost and acked_tid[0] == tid and timing == "after-ack"
+            if pause:
+                acked_tid[0] = None
+            real_life.release()
+            if pause:
+                ack_unlocked.set()
+                assert resume_loop.wait(5)
+            return False
+
+    def observe_ack(run, ticket):
+        real_ack(run, ticket)
+        ready_after_ack.append(run.ready.is_set())
+        if timing == "after-ack" and ticket is not None:
+            acked_tid[0] = threading.get_ident()
+
+    decoder._life = _PauseAfterAckUnlock()
+    monkeypatch.setattr(decoder, "_ack_retry", observe_ack)
+    monkeypatch.setattr(decoder, "_wait_physical", observe_wait)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as controls:
+            first = controls.submit(decoder.shutdown)
+            try:
+                if timing == "after-ack":
+                    assert ack_unlocked.wait(3)
+                    # Supervisor has acknowledged the final pass and released _life; a duplicate
+                    # shutdown here must consume the existing outcome and NOT queue a fourth KILL.
+                    second = controls.submit(decoder.shutdown)
+                    assert second_waiting.wait(3)
+                    resume_loop.set()
+                    with pytest.raises(decode.DecodeUnavailable, match="survived kill"):
+                        second.result(timeout=5)
+                else:
+                    assert in_final_wait.wait(3)
+                    second = controls.submit(decoder.shutdown)
+                    assert second_waiting.wait(3)
+                    assert not second.done()
+                    release_final.set()
+                    with pytest.raises(decode.DecodeUnavailable, match="survived kill"):
+                        second.result(timeout=5)
+            finally:
+                release_final.set()
+                resume_loop.set()
+            with pytest.raises(decode.DecodeUnavailable, match="survived kill"):
+                first.result(timeout=5)
+
+        assert proc.sent == ["TERM", "KILL", "KILL"]
+        assert ready_after_ack == [True]
+        assert decoder._run.ready.is_set()
+        assert not decoder._run.reaped
+    finally:
+        release_final.set()
+        resume_loop.set()
+        decoder._life = real_life
+        monkeypatch.setattr(decoder, "_ack_retry", real_ack)
+        monkeypatch.setattr(decoder, "_wait_physical", real_wait)
+        proc.code = -signal.SIGKILL
+        decoder._run.complete.wait(3)
