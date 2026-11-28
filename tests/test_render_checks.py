@@ -27,6 +27,7 @@ SURVEY = REPO / "tools" / "render" / "render_survey.py"
 RECALL = REPO / "tools" / "render" / "render_recall.py"
 LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 FIELD = REPO / "tools" / "render" / "render_field.py"
+BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
 CLOSING = REPO / "tools" / "render" / "render_closing.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
@@ -438,7 +439,8 @@ def render_make(tmp_path, console_url, devtools):
     )
     chromium.chmod(0o755)
     for script in (
-        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD, CLOSING
+        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD,
+        BANDMAP, CLOSING,
     ):
         (screen / script.name).write_text(
             "import os, sys\n"
@@ -482,12 +484,12 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     "failing",
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, CLOSING.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name, CLOSING.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails", "field-fails", "closing-fails",
+        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails", "closing-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -503,6 +505,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {RECALL.name} {console_url}",
         f"ran {LIVE_FIND.name} {console_url}",
         f"ran {FIELD.name} {console_url}",
+        f"ran {BANDMAP.name} {console_url}",
         f"ran {CLOSING.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
@@ -1103,6 +1106,109 @@ def test_field_render_fails_on_split_hyphen_overflow_or_small_font(devtools, def
     proc = run(FIELD, "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - field red-night"
+
+
+BANDMAP_HOME_FITS = {
+    "doc": [800, 480],
+    "bandsKey": [76, 72],
+    "bandsInViewport": True,
+    "titleUnclipped": True,
+    "exitWhole": True,
+}
+BANDMAP_PAGE_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "captionSingleLine": True,
+    "captionUnclipped": True,
+    "keyVisible": True,
+    "headingsForcedUpper": False,
+    "overviewBounds": [18, 782],
+    "entriesClientH": 308,
+    "rowCount": 24,
+    "minRowH": 76,
+    "rowsOverlap": False,
+    "clippedLines": 0,
+    "replayRadius": "0px",
+    "replayText": "REPLAY ONLY",
+    "lessonBordersDouble": True,
+    "offDialBordersDashed": True,
+    "minFontPx": 18,
+}
+BANDMAP_END_FITS = {
+    "scrollTop": 1800,
+    "lastOffDialVisible": True,
+    "noRadioVisible": True,
+}
+
+
+def _bandmap_pages(*, home_defect=None, page_defect=None, end_defect=None):
+    pages = {}
+    for theme in THEMES:
+        home = {**BANDMAP_HOME_FITS, "theme": theme}
+        page = {**BANDMAP_PAGE_FITS, "theme": theme}
+        end = {**BANDMAP_END_FITS, "theme": theme}
+        if theme == "red-night":
+            home.update(home_defect or {})
+            page.update(page_defect or {})
+            end.update(end_defect or {})
+        pages[f"measureBandmapHome({json.dumps(theme)})"] = home
+        pages[f"measureBandmapPage({json.dumps(theme)})"] = page
+        pages[f"measureBandmapEnd({json.dumps(theme)})"] = end
+    return pages
+
+
+def test_bandmap_render_checks_home_and_bands_in_all_three_themes(devtools):
+    port = devtools(_bandmap_pages())
+    proc = run(BANDMAP, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - bandmap home dark",
+        "VERDICT: PASS - bandmap dark",
+        "VERDICT: PASS - bandmap home sunlight",
+        "VERDICT: PASS - bandmap sunlight",
+        "VERDICT: PASS - bandmap home red-night",
+        "VERDICT: PASS - bandmap red-night",
+    ]
+
+
+@pytest.mark.parametrize("kind, defect", [
+    ("home", {"doc": [800, 481]}),
+    ("home", {"bandsKey": [71, 75]}),
+    ("home", {"bandsKey": [76, 71]}),
+    ("home", {"bandsInViewport": False}),
+    ("home", {"titleUnclipped": False}),
+    ("home", {"exitWhole": False}),
+    ("page", {"doc": [801, 480]}),
+    ("page", {"back": False}),
+    ("page", {"captionSingleLine": False}),
+    ("page", {"captionUnclipped": False}),
+    ("page", {"keyVisible": False}),
+    ("page", {"headingsForcedUpper": True}),
+    ("page", {"overviewBounds": [17, 782]}),
+    ("page", {"overviewBounds": [18, 783]}),
+    ("page", {"entriesClientH": 279}),
+    ("page", {"minRowH": 71}),
+    ("page", {"rowsOverlap": True}),
+    ("page", {"clippedLines": 1}),
+    ("page", {"replayRadius": "16px"}),
+    ("page", {"replayText": "REPLAY"}),
+    ("page", {"lessonBordersDouble": False}),
+    ("page", {"offDialBordersDashed": False}),
+    ("page", {"minFontPx": 16}),
+    ("end", {"lastOffDialVisible": False}),
+    ("end", {"noRadioVisible": False}),
+])
+def test_bandmap_render_fails_on_layout_or_shape_defects(devtools, kind, defect):
+    kwargs = {f"{kind}_defect": defect}
+    port = devtools(_bandmap_pages(**kwargs))
+    proc = run(BANDMAP, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    expected = (
+        "VERDICT: FAIL - bandmap home red-night"
+        if kind == "home"
+        else "VERDICT: FAIL - bandmap red-night"
+    )
+    assert expected in _verdicts(proc)
 
 
 CLOSING_PREDICT_FITS = {

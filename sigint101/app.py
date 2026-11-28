@@ -35,6 +35,9 @@ from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
+from .bandmap import CAPTION as BANDMAP_CAPTION
+from .bandmap import KEY_LINE as BANDMAP_KEY_LINE
+from .bandmap import build_map as build_band_map
 from .battery import BatteryGauge
 from .challenges import (
     challenge_for,
@@ -76,6 +79,7 @@ from .kiosk import request_exit
 from .law import LAW_CAUTION, LAW_SECTIONS
 from .lessons import CHECK_STAGE, COMMIT_STAGE, SORT_ANSWERS, load_lessons
 from .lora import LoRaListener, LoRaSendLost, LoRaTxDisabled, LoRaUnavailable
+from .meteor import MeteorDecoder, MeteorUnavailable
 from .operate import (
     DEFAULT_INSTRUMENT,
     INSTRUMENTS,
@@ -126,7 +130,8 @@ DATA_DIR = REPO_DIR / "data"
 
 # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
 SDR_CONSUMERS = (
-    "sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr", "apt", "sstv"
+    "sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
+    "apt", "sstv", "meteor",
 )
 
 # The line glyph a home tile falls back to. The waterfall glyph is the one every lesson earns —
@@ -335,6 +340,7 @@ def build_receiver_factories(
     dmr_factory=None,
     apt_factory=None,
     sstv_factory=None,
+    meteor_factory=None,
     flock_factory=None,
     rayhunter_factory=None,
     flipper_factory=None,
@@ -385,6 +391,14 @@ def build_receiver_factories(
                 output_dir=Path(data_dir) / "sstv",
                 data_dir=Path(data_dir),
                 **_sdr_kwargs(),
+                sync_assets=managed,
+            )
+        ),
+        "meteor": meteor_factory or (
+            lambda: MeteorDecoder(
+                data_dir=data_dir,
+                radio_present=lambda: probe().present,
+                list_devices=enumerate_radios,
                 sync_assets=managed,
             )
         ),
@@ -440,6 +454,7 @@ def initialize_console_state(
     state.data_dir = resolved_data
     state.pool_path = resolved_pool if resolved_pool is not None else DEFAULT_POOL_PATH
     state.lessons = load_lessons(resolved_pack)
+    state.band_map = build_band_map(state.lessons)
     state.progress = Progress(
         resolved_data / "progress.db", managed=managed, read_only=read_only
     )
@@ -542,7 +557,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
-               apt_factory=None, sstv_factory=None,
+               apt_factory=None, sstv_factory=None, meteor_factory=None,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
@@ -596,6 +611,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         dmr_factory=dmr_factory,
         apt_factory=apt_factory,
         sstv_factory=sstv_factory,
+        meteor_factory=meteor_factory,
         flock_factory=flock_factory,
         rayhunter_factory=rayhunter_factory,
         flipper_factory=flipper_factory,
@@ -693,6 +709,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             context={"title": "SIGINT 101", "back_href": "/", "back_label": "Home",
                      "exit_to_desktop": True, "tiles": tiles,
                      "exam_disabled": app.state.exam_disabled_reason is not None},
+        )
+
+    @app.get("/bands", response_class=HTMLResponse)
+    def bands_view(request: Request):
+        """Where each lesson tunes on the radio dial, read-only: touches no radio or progress."""
+        return templates.TemplateResponse(
+            request=request,
+            name="bands.html",
+            context={
+                "title": "Band map",
+                "back_href": "/",
+                "back_label": "Home",
+                "caption": BANDMAP_CAPTION,
+                "key_line": BANDMAP_KEY_LINE,
+                "bandmap": app.state.band_map,
+            },
         )
 
     @app.post("/api/kiosk/exit")
@@ -1566,21 +1598,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # by naming only itself to _claim_sdr, which stands every other consumer down (release) and
     # clears any prior stand-down on the caller (resume). LoRa (meshtasticd) and Flock (wlan1
     # monitor) ride their own radios and are deliberately absent from this set.
-    sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
-                     "apt", "sstv")
-
     unavailable = {
         "ppm": PpmUnavailable, "sweeper": SpectrumUnavailable, "decoder": DecodeUnavailable,
         "rds": RDSUnavailable, "adsb": AdsbUnavailable, "aprs": AprsUnavailable,
         "pocsag": PocsagUnavailable, "acars": AcarsUnavailable, "ais": AisUnavailable,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
+        "meteor": MeteorUnavailable,
     }
 
     def _claim_sdr(target: str, start=None, *, reclaim=True):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
         deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
         refusal = unavailable[target]
-        consumers = {name: getattr(app.state, name) for name in sdr_consumers}
+        consumers = {name: getattr(app.state, name) for name in SDR_CONSUMERS}
         receiver = consumers.get(target)
         intent = None
         prepare = getattr(receiver, "prepare_start", None)
@@ -2149,6 +2179,27 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "images": decoder.images(limit),
         }
 
+    @app.get("/api/meteor")
+    def meteor_status():
+        return app.state.meteor.snapshot()
+
+    @app.post("/api/meteor/listen")
+    def meteor_listen():
+        decoder = app.state.meteor
+        if decoder.running:
+            return decoder.snapshot()
+        try:
+            launched = _claim_sdr("meteor")
+        except MeteorUnavailable as exc:
+            empty = decoder.snapshot()
+            for key in ("available", "reason", "command", "retry_in"):
+                empty.pop(key, None)
+            return _refused("meteor", exc, empty, decoder.watch)
+        status = decoder.snapshot()
+        if launched:
+            _started("meteor", {"freq_hz": status["freq_hz"], "mode": status["mode"]})
+        return status
+
     # The image decoders (APT, SSTV) write their decoded PNGs under data/apt and data/sstv; this
     # serves those files to the panels and nothing else. The path is confined to those two folders
     # and to .png files, so the console never serves the progress or events stores that also live
@@ -2174,7 +2225,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         else:
             busy = (app.state.radio_arbiter.busy
                     or app.state.ppm_calibration.release_failure() is not None)
-            for name in sdr_consumers:
+            for name in SDR_CONSUMERS:
                 if busy:
                     break
                 receiver = getattr(app.state, name)

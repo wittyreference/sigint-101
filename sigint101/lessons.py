@@ -91,6 +91,10 @@ KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 # lesson on a narrow signal can ask for a finer step; 100 kHz is the FM-band default.
 DEFAULT_TUNE_STEP_HZ = 100_000
 
+# Optional band-map metadata on a lesson pack (e.g. M24's NOAA APT replay-only marker).
+BAND_MAP_STATUSES = ("replay-only",)
+BAND_MAP_NOTE_MAX_CHARS = 44
+
 # What a lesson tile says the learner must bring, keyed by the pack's `hardware:` names. The
 # RTL-SDR and host Wi-Fi radio are built into the Recon, so they earn no badge. LoRa's radio is
 # built in too, but its lessons need a second node to talk to, so that is the badge.
@@ -103,6 +107,7 @@ HARDWARE_BADGES = {
     "lora": "2nd node",
     "flipper": "Flipper",
 }
+KNOWN_HARDWARE = (*BUILT_IN_HARDWARE, *HARDWARE_BADGES)
 
 
 class LessonError(ValueError):
@@ -146,6 +151,7 @@ class Lesson:
     check: dict | None = None
     predict_kind: str = "instrument"
     sort: list | None = None
+    band_map: dict | None = None
     field_instrument: str | None = None
 
     @property
@@ -462,6 +468,42 @@ def _parse_tune(data: dict, ctx: str) -> dict | None:
             "low_hz": low, "high_hz": high}
 
 
+def _parse_band_map(data: dict, ctx: str) -> dict | None:
+    """Validate optional `band_map: {status, note}` metadata for the /bands view.
+
+    Currently accepts only `status: replay-only`, paired with a single-line `note` of at most
+    44 characters so the row fits cleanly inside 764x76 at 18 px. Both fields are required
+    together; returns None when omitted.
+    """
+    raw = data.get("band_map")
+    if raw in (None, {}):
+        return None
+    if not isinstance(raw, dict):
+        raise LessonError(f"{ctx}: 'band_map' must be a mapping of status/note")
+    raw_status = raw.get("status")
+    raw_note = raw.get("note")
+    for field_name, value in (("status", raw_status), ("note", raw_note)):
+        if isinstance(value, bool):
+            raise LessonError(
+                f"{ctx}: band_map {field_name} {value!r} is a YAML boolean — quote it in the pack"
+            )
+    status = str(raw_status).strip() if raw_status is not None else ""
+    note = str(raw_note).strip() if raw_note is not None else ""
+    if not status or not note:
+        raise LessonError(f"{ctx}: 'band_map' requires both non-empty 'status' and 'note'")
+    if status not in BAND_MAP_STATUSES:
+        allowed = ", ".join(BAND_MAP_STATUSES)
+        raise LessonError(f"{ctx}: band_map status '{status}' must be one of {allowed}")
+    if "\n" in note:
+        raise LessonError(f"{ctx}: band_map 'note' must be one line")
+    if len(note) > BAND_MAP_NOTE_MAX_CHARS:
+        raise LessonError(
+            f"{ctx}: band_map 'note' is {len(note)} characters; "
+            f"keep it to {BAND_MAP_NOTE_MAX_CHARS} or fewer"
+        )
+    return {"status": status, "note": note}
+
+
 def _parse_answer(data: dict, choices: list, ctx: str) -> tuple:
     """Validate an optional `answer` (one key or a list) and its one-line `verdict`.
 
@@ -721,6 +763,7 @@ def parse_lesson(data: dict) -> Lesson:
         check=_parse_check(data, ctx),
         predict_kind=predict_kind,
         sort=_parse_sort(data, ctx),
+        band_map=_parse_band_map(data, ctx),
         field_instrument=_parse_field_instrument(data, ctx),
     )
 
@@ -740,6 +783,12 @@ def load_lessons(pack_dir) -> dict:
     lessons: dict = {}
     for path in sorted(pack_dir.glob("*.yaml")):
         lesson = load_lesson_file(path)
+        for hw in lesson.hardware:
+            if hw not in KNOWN_HARDWARE:
+                known = ", ".join(KNOWN_HARDWARE)
+                raise LessonError(
+                    f"lesson {lesson.id}: unknown hardware {hw!r} (known: {known})"
+                )
         if lesson.id in lessons:
             raise LessonError(f"duplicate lesson id {lesson.id} in {path}")
         lessons[lesson.id] = lesson
