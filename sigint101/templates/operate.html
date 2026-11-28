@@ -18,7 +18,8 @@
 {% set FIXED = {
   'adsb': ('1090', 'MHz', 'Mode S · dump1090'),
   'ais': ('162.0', 'MHz', 'Marine AIS · 161.975 + 162.025 · rtl_ais'),
-  'apt': (none, 'MHz', 'NOAA APT · satdump'),
+  'apt': (none, 'MHz', 'NOAA APT · retired Aug 2025'),
+  'meteor': (none, 'MHz', 'Meteor-M LRPT · satdump'),
   'sstv': (none, 'MHz', 'SSTV · rtl_fm|sox|sstv decoding a picture'),
   'flock': ('2.4', 'GHz', 'WiFi · monitor mode, receive-only'),
   'rayhunter': ('ORBIC', '·4G', 'Rayhunter · control plane, read-only'),
@@ -43,7 +44,7 @@
      Flock names the tool of the source the site configured (tcpdump, or Marauder). #}
   <div class="scroll-frame rack__chooser">
     {% set picker_groups = {
-      'Spectrum': {'waterfall': 'Band sweep', 'rds': 'FM metadata', 'apt': 'Sat weather'},
+      'Spectrum': {'waterfall': 'Band sweep', 'rds': 'FM metadata', 'meteor': 'Sat weather', 'apt': 'APT replay'},
       'Aircraft and ships': {'adsb': 'Air traffic', 'acars': 'Air reports', 'ais': 'Ship tracks'},
       'Pagers and packets': {'ism': 'Sensor data', 'aprs': 'Ham packets', 'pager': 'Page frames',
                             'dmr': 'Radio voice', 'sstv': 'Radio image', 'lora': 'Mesh radio'},
@@ -108,7 +109,8 @@
       {% elif inst.key == 'ais' %}{{ panels.ais(head_command=false) }}
       {% elif inst.key == 'rds' %}{{ panels.rds(head_command=false) }}
       {% elif inst.key == 'dmr' %}{{ panels.dmr(freq_hz / 1000000, head_command=false) }}
-      {% elif inst.key == 'apt' %}{{ panels.apt(head_command=false) }}
+      {% elif inst.key == 'apt' %}{{ panels.apt_replay_placeholder() }}
+      {% elif inst.key == 'meteor' %}{{ panels.meteor(head_command=false) }}
       {% elif inst.key == 'sstv' %}{{ panels.sstv(freq_hz / 1000000, head_command=false) }}
       {% elif inst.key == 'lora' %}{{ panels.lora() }}
       {% elif inst.key == 'flock' %}{{ panels.flock(flock_tool, head_command=false) }}
@@ -165,7 +167,7 @@
     </a>
   </section>
 </div>
-{% if inst.key in ('apt', 'sstv') %}
+{% if inst.key in ('apt', 'sstv', 'meteor') %}
 {{ panels.gallery_ink_filter() }}
 {% endif %}
 {% endblock %}
@@ -187,6 +189,7 @@
 <script src="/static/ais.js"></script>
 <script src="/static/dmr.js"></script>
 <script src="/static/apt.js"></script>
+<script src="/static/meteor.js"></script>
 <script src="/static/sstv.js"></script>
 <script src="/static/flock.js"></script>
 <script src="/static/rayhunter.js"></script>

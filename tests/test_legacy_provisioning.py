@@ -88,21 +88,30 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "usr/local/lib/sigint101-power/sigint101/battery.py",
         "33e91635e86833a459f812bcadb51a90337734779c7d5e7d221fec0b08562451",
     ),
-    # Safe shutdown slice 2a (round 2 N2): low-battery watcher, disarmed until 2b; logs notice
-    # write errors instead of blocking power-off.
+    # Safe shutdown slice 2b (round 5 LOCK/F1b/F3): hard-disarm lock in parse_threshold (lifted
+    # in 2c), canonical /etc/sigint101/power.conf only, strict newline + control-char refusal,
+    # and full notice span/retry-interval validation.
     (
         "sigint101/power.py",
         "sysroot",
         "usr/local/lib/sigint101-power/sigint101/power.py",
-        "10757067da00987274006c864f2ee91decfb4006aa42e54111c86677e648d8d4",
+        "7355cedc711ffce4f934cce8aff2f40779437626ef60cad8011b6ef2daacfa53",
     ),
-    # Safe shutdown slice 2a (round 2 F2): hardened non-root unit installed under
-    # /usr/local/lib/systemd/system so owner masks in /etc/systemd/system work and win.
+    # Safe shutdown slice 2b (round 5 F4): close-capable gdbus/busctl D-Bus with close retry and
+    # strict AccessDenied/refusal retention.
+    (
+        "sigint101/power_desktop.py",
+        "sysroot",
+        "usr/local/lib/sigint101-power/sigint101/power_desktop.py",
+        "2f5cba89a6a3fb22f67330cb3144b7f67cf1b139dcbc89e20ea81c6d735feb88",
+    ),
+    # Safe shutdown slice 2b (round 3 F1): hardened non-root unit under /usr/local/lib/systemd/
+    # system without EnvironmentFile (watcher reads power.conf itself).
     (
         "deploy/system/sigint101-power.service",
         "sysroot",
         "usr/local/lib/systemd/system/sigint101-power.service",
-        "b63f4ea7d457355c1c082c2075c27b8b6f60e5ba6718f9b562607d240df71d2a",
+        "fc0d643bcedde97b8a85be3f8cbd26c0f6e8a7485588e659e876d8ce68bf0c81",
     ),
     # Safe shutdown slice 2a: self-locating python3 -I launcher for the power watcher.
     (
@@ -110,6 +119,20 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "sysroot",
         "usr/local/bin/sigint101-power",
         "6dfb10dcd1309d5a0c6771b750cc034c0bccd59e15fe94c04a8c2ae53e92b68e",
+    ),
+    # Safe shutdown slice 2b: self-locating python3 -I launcher for the learner desktop notice.
+    (
+        "deploy/system/sigint101-power-notice",
+        "sysroot",
+        "usr/local/bin/sigint101-power-notice",
+        "a15c2f64fa7016698bdb3f93ddc93b6b5c57747526ecaa7213ea6d80f739478b",
+    ),
+    # Safe shutdown slice 2b: user systemd unit for the learner-session low-battery notice.
+    (
+        "deploy/system/sigint101-power-notice.service",
+        "home",
+        ".config/systemd/user/sigint101-power-notice.service",
+        "b9738c2d8effd3bf88c9c2b25abb34b3a5d85d2d64ac2e161f1c53185af13e20",
     ),
     # Safe shutdown slice 2a: polkit rule granting only logind power-off actions to sigint101-power.
     (
@@ -170,7 +193,7 @@ class StatefulLegacyBox:
         (self.course / "requirements.txt").write_text("pytest\n", encoding="utf-8")
         shutil.copytree(REPO / "deploy", self.course / "deploy")
         (self.course / "sigint101" / "static").mkdir(parents=True)
-        for py_name in ("__init__.py", "battery.py", "power.py"):
+        for py_name in ("__init__.py", "battery.py", "power.py", "power_desktop.py"):
             shutil.copyfile(REPO / "sigint101" / py_name, self.course / "sigint101" / py_name)
         (self.course / "sigint101" / "static" / "fonts").symlink_to(
             REPO / "sigint101" / "static" / "fonts"
@@ -387,19 +410,24 @@ class StatefulLegacyBox:
         return proc, launched
 
     def run_installed_power_launcher(self) -> subprocess.CompletedProcess:
-        """Run the installed /usr/local/bin/sigint101-power --startup-only under real python3 -I."""
+        """Run installed power watcher and desktop notice launchers under real python3 -I."""
         launcher = self.sysroot / "usr" / "local" / "bin" / "sigint101-power"
         assert launcher.is_file(), f"missing installed power launcher: {launcher}"
         # Run with minimal system PATH and no PYTHONPATH so real /usr/bin/python3 -I proves the
         # self-locating launcher resolves ../lib/sigint101-power cleanly inside the sysroot.
+        # Unset threshold stays disarmed (never touches I2C or polkit on this host).
         env = {
             "PATH": "/usr/bin:/bin",
             "LANG": "C.UTF-8",
-            "SIGINT101_POWER_THRESHOLD_V": "9.50",
         }
         notice_path = self.sysroot / "run" / "sigint101-power" / "notice.json"
         proc = subprocess.run(
-            [str(launcher), "--startup-only", "--notice-path", str(notice_path)],
+            [
+                str(launcher),
+                "--startup-only",
+                "--notice-path",
+                str(notice_path),
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -409,7 +437,56 @@ class StatefulLegacyBox:
         combined = proc.stdout + proc.stderr
         assert "power.py sha256=" in combined, combined
         assert "battery.py sha256=" in combined, combined
-        assert "arming waits on the notice slice (2b)" in combined, combined
+        assert "disarmed" in combined and "armed at" not in combined, combined
+
+        # Environment variable NEVER arms (F1 / LOCK).
+        env_only = {**env, "SIGINT101_POWER_THRESHOLD_V": "9.50"}
+        proc_env = subprocess.run(
+            [
+                str(launcher),
+                "--startup-only",
+                "--notice-path",
+                str(notice_path),
+            ],
+            env=env_only,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert proc_env.returncode == 0, (proc_env.stdout, proc_env.stderr)
+        combined_env = proc_env.stdout + proc_env.stderr
+        assert "disarmed" in combined_env and "armed at" not in combined_env, combined_env
+
+        # Passing an alternate --config-path to the installed launcher is refused (F1a).
+        alt_conf = self.root / "alt-power.conf"
+        alt_conf.write_text("SIGINT101_POWER_THRESHOLD_V=9.50\n", encoding="utf-8")
+        proc_alt = subprocess.run(
+            [
+                str(launcher),
+                "--startup-only",
+                "--config-path",
+                str(alt_conf),
+                "--notice-path",
+                str(notice_path),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert proc_alt.returncode != 0, (proc_alt.stdout, proc_alt.stderr)
+
+        # Learner-session desktop notice launcher also self-locates cleanly under python3 -I.
+        notice_launcher = self.sysroot / "usr" / "local" / "bin" / "sigint101-power-notice"
+        assert notice_launcher.is_file(), f"missing desktop notice launcher: {notice_launcher}"
+        proc_notice = subprocess.run(
+            [str(notice_launcher), "--once", "--notice-path", str(notice_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert proc_notice.returncode == 0, (proc_notice.stdout, proc_notice.stderr)
         return proc
 
 

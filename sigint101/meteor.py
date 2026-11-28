@@ -3,19 +3,27 @@
 
 from __future__ import annotations
 
+import copy
 import fcntl
+import hashlib
+import json
+import logging
+import math
 import os
 import re
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 import threading
 import time
+import zlib
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from pathlib import Path
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from . import childproc, receiver_lifecycle
@@ -28,6 +36,7 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
+from .storage import fsync_dir, fsync_file, sync_media_asset
 
 SATDUMP = "satdump"
 MODE_ENV = "SIGINT101_METEOR_MODE"
@@ -36,11 +45,15 @@ DEFAULT_MODE = "72k"
 DEFAULT_HZ = 137_900_000
 PIPELINES = {"72k": "meteor_m2-x_lrpt", "80k": "meteor_m2-x_lrpt_80k"}
 CHANNELS = ("137900000", "137100000")
+_CHANNEL_INTS = frozenset(int(c) for c in CHANNELS)
 CAPTURE_S = 900
 FINISH_CAP_S = 600  # Measure the longest product processing time on the kiosk.
 RELEASE_GRACE_S = 3.0
 KILL_GRACE_S = 3.0
 FINISH_NICE = 10
+MAX_PUBLISHED_PASSES = 20
+MAX_QUIET_RUNS = 5
+UNIDENTIFIED_SATELLITE = "Meteor (unidentified)"
 
 _CLOSE_MARKER = "Stop processing"
 _LOG_PREFIX = re.compile(r"^\[\d{2}:\d{2}:\d{2}(?: - \d{2}/\d{2}/\d{4})?\] \([TDIWEC]\) ")
@@ -50,11 +63,43 @@ _STATUS = re.compile(
     r"\s*Deframer\s*:\s*(NOSYNC|SYNCING|SYNCED)"
 )
 _PRODUCT = re.compile(r"MSU[-_]MR[-_]([A-Za-z0-9][A-Za-z0-9 _-]{0,95})\.png")
+_PASS_ID = re.compile(r"[0-9a-f]{32}")
+_PENDING_NAME = re.compile(r"\.new-[0-9a-f]{32}")
+_OWNER_LOCK = ".owner.lock"
+_CREATE_LOCK = ".create.lock"
+_CREATE_WAIT_S = 1.5
+_CREATE_RETRY_S = 0.05
 _DIR_FLAGS = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _PNG = b"\x89PNG\r\n\x1a\n"
+_GALLERY_INDEX = "gallery.json"
 _MAX_LINE = 1024
 _MAX_ENTRIES = 4096
 _MAX_DEPTH = 8
+_MAX_MANIFEST_BYTES = 65536
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_MAX_DECODED_PNG_BYTES = 96 * 1024 * 1024
+_MAX_PNG_DIM = 16384
+_MAX_PNG_PIXELS = 64_000_000
+_MAX_TIMESTAMP_S = 4_102_444_800.0
+_MAX_TIMESTAMP_INT = int(_MAX_TIMESTAMP_S)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_PNG_COLOR_SPECS = {
+    0: (1, (1, 2, 4, 8, 16)),
+    2: (3, (8, 16)),
+    3: (1, (1, 2, 4, 8)),
+    4: (2, (8, 16)),
+    6: (4, (8, 16)),
+}
+_ADAM7_PASSES = (
+    (0, 0, 8, 8),
+    (4, 0, 8, 8),
+    (0, 4, 4, 8),
+    (2, 0, 4, 4),
+    (0, 2, 2, 4),
+    (1, 0, 2, 2),
+    (0, 1, 1, 2),
+)
+_log = logging.getLogger(__name__)
 
 
 class MeteorUnavailable(RuntimeError):
@@ -88,6 +133,40 @@ def _directory(path, parent=None, *, create=False, private=True):
         os.close(fd)
 
 
+def _open_lock_file(dir_fd: int, name: str, *, create: bool) -> int:
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = os.open(name, flags | (os.O_CREAT if create else 0), 0o600, dir_fd=dir_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise PermissionError(f"{name} is not this account's regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _still_named(dir_fd: int, name: str, fd: int) -> bool:
+    try:
+        return os.path.samestat(
+            os.stat(name, dir_fd=dir_fd, follow_symlinks=False), os.fstat(fd)
+        )
+    except FileNotFoundError:
+        return False
+
+
+def _take_create_lock_shared(fd: int) -> None:
+    deadline = time.monotonic() + _CREATE_WAIT_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise OSError("another console is tidying Meteor staging") from None
+            time.sleep(_CREATE_RETRY_S)
+
+
 @dataclass
 class _Stage:
     output: Path
@@ -97,31 +176,49 @@ class _Stage:
 
     @classmethod
     def create(cls, path: Path, work: int, name: str):
-        # The visible owner name only appears after the lock is held. SatDump inherits the lock.
-        pending = f".pending-{name}"
-        os.mkdir(pending, 0o700, dir_fd=work)
-        fd = lock = parent = None
+        # PR 154 registration protocol: hold shared .create.lock across the .new-<id> window
+        # so a concurrent sweep taking .create.lock exclusively never touches an active creation.
+        pending = f".new-{name}"
+        create_fd = fd = lock = parent = None
         named = False
+        created = False
         try:
+            create_fd = _open_lock_file(work, _CREATE_LOCK, create=True)
+            _take_create_lock_shared(create_fd)
+            if not _still_named(work, _CREATE_LOCK, create_fd):
+                raise PermissionError(f"{_CREATE_LOCK} was replaced while it was taken")
+            os.mkdir(pending, 0o700, dir_fd=work)
+            created = True
             fd = os.open(pending, _DIR_FLAGS, dir_fd=work)
-            lock = os.open(".owner.lock", os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
+            lock = os.open(_OWNER_LOCK, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
                            0o600, dir_fd=fd)
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             parent = os.dup(work)
             os.rename(pending, name, src_dir_fd=work, dst_dir_fd=work)
             named = True
+            os.close(create_fd)
+            create_fd = None
             stage = cls(path / name, parent, fd, lock)
             stage.verify()
             return stage
         except BaseException:
             if lock is not None:
                 os.close(lock)
-                os.unlink(".owner.lock", dir_fd=fd)
+                try:
+                    os.unlink(_OWNER_LOCK, dir_fd=fd)
+                except OSError:
+                    pass
             if fd is not None:
                 os.close(fd)
             if parent is not None:
                 os.close(parent)
-            os.rmdir(name if named else pending, dir_fd=work)
+            if created:
+                try:
+                    os.rmdir(name if named else pending, dir_fd=work)
+                except OSError:
+                    pass
+            if create_fd is not None:
+                os.close(create_fd)
             raise
 
     def verify(self):
@@ -170,6 +267,230 @@ def _clear_run(fd, device, depth, budget):
                 os.unlink(entry.name, dir_fd=fd)
 
 
+def _is_valid_png(data: bytes) -> bool:
+    """Fully decode and validate a PNG byte stream without external imaging dependencies."""
+    if (not isinstance(data, (bytes, bytearray))
+            or len(data) < 33 or len(data) > _MAX_IMAGE_BYTES or not data.startswith(_PNG)):
+        return False
+    pos = len(_PNG)
+    n = len(data)
+    saw_ihdr = False
+    saw_iend = False
+    saw_plte = False
+    plte_entries: int | None = None
+    in_idat = False
+    after_idat = False
+    idat_parts: list[bytes] = []
+    width = height = bit_depth = color_type = interlace = channels = 0
+    while pos < n:
+        if pos + 12 > n:
+            return False
+        length = struct.unpack_from(">I", data, pos)[0]
+        ctype = bytes(data[pos + 4 : pos + 8])
+        if not all(65 <= b <= 90 or 97 <= b <= 122 for b in ctype):
+            return False
+        data_start = pos + 8
+        data_end = data_start + length
+        if data_end + 4 > n:
+            return False
+        expected_crc = struct.unpack_from(">I", data, data_end)[0]
+        if (zlib.crc32(data[pos + 4 : data_end]) & 0xFFFFFFFF) != expected_crc:
+            return False
+        chunk = data[data_start:data_end]
+        pos = data_end + 4
+        if not saw_ihdr:
+            if ctype != b"IHDR" or length != 13:
+                return False
+            width, height, bit_depth, color_type, comp, filt, interlace = struct.unpack(
+                ">IIBBBBB", chunk
+            )
+            if (width < 1 or height < 1 or width > _MAX_PNG_DIM or height > _MAX_PNG_DIM
+                    or width * height > _MAX_PNG_PIXELS
+                    or comp != 0 or filt != 0 or interlace not in (0, 1)):
+                return False
+            spec = _PNG_COLOR_SPECS.get(color_type)
+            if spec is None or bit_depth not in spec[1]:
+                return False
+            channels = spec[0]
+            saw_ihdr = True
+            continue
+        if ctype == b"IHDR":
+            return False
+        if ctype == b"PLTE":
+            if (saw_plte or in_idat or after_idat or color_type in (0, 4)
+                    or length == 0 or length % 3 != 0):
+                return False
+            entries = length // 3
+            max_entries = 1 << min(bit_depth, 8)
+            if entries > max_entries:
+                return False
+            saw_plte = True
+            plte_entries = entries
+            continue
+        if ctype == b"IDAT":
+            if after_idat:
+                return False
+            in_idat = True
+            idat_parts.append(bytes(chunk))
+            continue
+        if in_idat:
+            in_idat = False
+            after_idat = True
+        if ctype == b"IEND":
+            if length != 0 or pos != n:
+                return False
+            saw_iend = True
+            break
+        if (ctype[0] & 0x20) == 0:
+            return False
+    if not saw_ihdr or not saw_iend or not idat_parts:
+        return False
+    if color_type == 3 and plte_entries is None:
+        return False
+
+    bpp = channels * bit_depth
+    bpp_bytes = max(1, (bpp + 7) // 8)
+    if interlace == 0:
+        passes = [(height, width, (width * bpp + 7) // 8)]
+    else:
+        passes = []
+        for x0, y0, dx, dy in _ADAM7_PASSES:
+            pw = (width - x0 + dx - 1) // dx if width > x0 else 0
+            ph = (height - y0 + dy - 1) // dy if height > y0 else 0
+            if pw > 0 and ph > 0:
+                passes.append((ph, pw, (pw * bpp + 7) // 8))
+    expected_len = sum(ph * (1 + row_bytes) for ph, _, row_bytes in passes)
+    if expected_len <= 0 or expected_len > _MAX_DECODED_PNG_BYTES:
+        return False
+    decomp = zlib.decompressobj()
+    try:
+        raw = decomp.decompress(b"".join(idat_parts), expected_len + 1)
+        if decomp.unconsumed_tail:
+            return False
+        raw += decomp.flush()
+    except zlib.error:
+        return False
+    if not decomp.eof or decomp.unused_data or len(raw) != expected_len:
+        return False
+    return _reconstruct_and_check_png(
+        raw,
+        passes,
+        bpp_bytes=bpp_bytes,
+        color_type=color_type,
+        bit_depth=bit_depth,
+        plte_entries=plte_entries,
+    )
+
+
+def _check_indexed_scanline(cur: bytearray, pw: int, bit_depth: int, plte_entries: int) -> bool:
+    """Verify every pixel sample (ignoring trailing pad bits) is within the PLTE bounds."""
+    if bit_depth == 8:
+        return max(cur) < plte_entries
+    if bit_depth == 4:
+        full = pw // 2
+        for b in cur[:full]:
+            if (b >> 4) >= plte_entries or (b & 0x0F) >= plte_entries:
+                return False
+        if (pw & 1) and (cur[full] >> 4) >= plte_entries:
+            return False
+        return True
+    if bit_depth == 2:
+        full = pw // 4
+        for b in cur[:full]:
+            if ((b >> 6) >= plte_entries or ((b >> 4) & 0x03) >= plte_entries
+                    or ((b >> 2) & 0x03) >= plte_entries or (b & 0x03) >= plte_entries):
+                return False
+        rem = pw & 3
+        if rem:
+            tail = cur[full]
+            for shift in (6, 4, 2)[:rem]:
+                if ((tail >> shift) & 0x03) >= plte_entries:
+                    return False
+        return True
+    # 1-bit indexed samples are 0 or 1; only a 1-entry palette can reject sample 1.
+    if plte_entries >= 2:
+        return True
+    full = pw // 8
+    if any(cur[:full]):
+        return False
+    rem = pw & 7
+    if rem:
+        mask = (0xFF << (8 - rem)) & 0xFF
+        if cur[full] & mask:
+            return False
+    return True
+
+
+def _reconstruct_and_check_png(
+    raw: bytes,
+    passes: list[tuple[int, int, int]],
+    *,
+    bpp_bytes: int,
+    color_type: int,
+    bit_depth: int,
+    plte_entries: int | None,
+) -> bool:
+    """Reverse PNG filters across every scanline and pass, checking indexed samples."""
+    offset = 0
+    for ph, pw, row_bytes in passes:
+        prev = bytearray(row_bytes)
+        for _ in range(ph):
+            flt = raw[offset]
+            src = raw[offset + 1 : offset + 1 + row_bytes]
+            offset += 1 + row_bytes
+            if flt == 0:
+                cur = bytearray(src)
+            elif flt == 1:
+                cur = bytearray(row_bytes)
+                for i in range(row_bytes):
+                    a = cur[i - bpp_bytes] if i >= bpp_bytes else 0
+                    cur[i] = (src[i] + a) & 0xFF
+            elif flt == 2:
+                cur = bytearray((s + p) & 0xFF for s, p in zip(src, prev))
+            elif flt == 3:
+                cur = bytearray(row_bytes)
+                for i in range(row_bytes):
+                    a = cur[i - bpp_bytes] if i >= bpp_bytes else 0
+                    cur[i] = (src[i] + ((a + prev[i]) >> 1)) & 0xFF
+            elif flt == 4:
+                cur = bytearray(row_bytes)
+                for i in range(row_bytes):
+                    a = cur[i - bpp_bytes] if i >= bpp_bytes else 0
+                    b = prev[i]
+                    c = prev[i - bpp_bytes] if i >= bpp_bytes else 0
+                    p = a + b - c
+                    pa = abs(p - a)
+                    pb = abs(p - b)
+                    pc = abs(p - c)
+                    pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                    cur[i] = (src[i] + pr) & 0xFF
+            else:
+                return False
+            if color_type == 3 and not _check_indexed_scanline(cur, pw, bit_depth, plte_entries):
+                return False
+            prev = cur
+    return True
+
+
+def _is_valid_timestamp(value: object) -> bool:
+    """Accept only finite POSIX timestamps that render cleanly as UTC datetimes."""
+    if type(value) is int:
+        if value < 0 or value > _MAX_TIMESTAMP_INT:
+            return False
+        ts = float(value)
+    elif type(value) is float:
+        if not math.isfinite(value) or value < 0.0 or value > _MAX_TIMESTAMP_S:
+            return False
+        ts = value
+    else:
+        return False
+    try:
+        datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return False
+    return True
+
+
 def _pictures(fd, device, prefix=(), budget=None):
     """Inspect only bounded, same-owner, same-device contents beneath the owned pass."""
     if budget is None:
@@ -194,11 +515,276 @@ def _pictures(fd, device, prefix=(), budget=None):
                     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
                     with os.fdopen(os.open(entry.name, flags, dir_fd=fd), "rb") as image:
                         current = os.fstat(image.fileno())
-                        if (os.path.samestat(current, info) and current.st_size > len(_PNG)
-                                and image.read(len(_PNG)) == _PNG):
-                            yield {"path": "/".join(parts), "product": product[1]}
+                        if (os.path.samestat(current, info)
+                                and 0 < current.st_size <= _MAX_IMAGE_BYTES):
+                            raw = image.read(_MAX_IMAGE_BYTES + 1)
+                            if len(raw) <= _MAX_IMAGE_BYTES and _is_valid_png(raw):
+                                yield {
+                                    "path": "/".join(parts),
+                                    "product": product[1],
+                                    "size": len(raw),
+                                    "sha256": hashlib.sha256(raw).hexdigest(),
+                                }
             except OSError:
                 continue
+
+
+def _read_regular_bytes(dir_fd: int, rel_parts: tuple[str, ...], *,
+                        max_bytes: int) -> bytes | None:
+    """Open a regular same-owner file under dir_fd using O_NOFOLLOW at every path component."""
+    if not rel_parts or any(p in ("", ".", "..") or "/" in p for p in rel_parts):
+        return None
+    cur_fd = dir_fd
+    opened: list[int] = []
+    try:
+        root_dev = os.fstat(dir_fd).st_dev
+        for part in rel_parts[:-1]:
+            info = os.stat(part, dir_fd=cur_fd, follow_symlinks=False)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_dev != root_dev
+                    or info.st_uid != os.geteuid()):
+                return None
+            nxt = os.open(part, _DIR_FLAGS, dir_fd=cur_fd)
+            opened.append(nxt)
+            if not os.path.samestat(os.fstat(nxt), info):
+                return None
+            cur_fd = nxt
+        leaf = rel_parts[-1]
+        info = os.stat(leaf, dir_fd=cur_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_dev != root_dev
+                or info.st_uid != os.geteuid() or info.st_size <= 0
+                or info.st_size > max_bytes):
+            return None
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        fd = os.open(leaf, flags, dir_fd=cur_fd)
+        try:
+            st = os.fstat(fd)
+            if not os.path.samestat(st, info) or not stat.S_ISREG(st.st_mode):
+                return None
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(fd, max_bytes + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > max_bytes:
+                    return None
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
+def _read_satellite_name(stage_fd: int) -> str:
+    """Read satellite identity from the same-pass dataset.json, or unidentified fallback."""
+    raw = _read_regular_bytes(stage_fd, ("dataset.json",), max_bytes=_MAX_MANIFEST_BYTES)
+    if not raw:
+        return UNIDENTIFIED_SATELLITE
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return UNIDENTIFIED_SATELLITE
+    if not isinstance(data, dict):
+        return UNIDENTIFIED_SATELLITE
+    for key in ("satellite", "satellite_name"):
+        val = data.get(key)
+        if isinstance(val, str):
+            cleaned = " ".join(val.split())
+            if cleaned and len(cleaned) <= 80 and all(ord(c) >= 32 for c in cleaned):
+                return cleaned
+    return UNIDENTIFIED_SATELLITE
+
+
+def _remove_dir_descriptor(parent_fd: int, name: str) -> None:
+    """Remove a private child directory under parent_fd via descriptors, never following links."""
+    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise PermissionError(f"refused to remove non-owned directory {name!r}")
+    parent_dev = os.fstat(parent_fd).st_dev
+    if info.st_dev != parent_dev:
+        raise PermissionError(f"refused to cross device removing {name!r}")
+    with _directory(name, parent_fd, private=False) as fd:
+        if not os.path.samestat(os.fstat(fd), info):
+            raise OSError(f"directory {name!r} changed during cleanup")
+        _clear_run(fd, parent_dev, 0, [_MAX_ENTRIES])
+        try:
+            os.unlink(_OWNER_LOCK, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+    if os.path.samestat(os.stat(name, dir_fd=parent_fd, follow_symlinks=False), info):
+        os.rmdir(name, dir_fd=parent_fd)
+
+
+def _read_gallery_index(root_fd: int) -> tuple[int, list[str]] | None:
+    """Read committed gallery order from data/meteor/gallery.json without following links."""
+    raw = _read_regular_bytes(root_fd, (_GALLERY_INDEX,), max_bytes=_MAX_MANIFEST_BYTES)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return None
+    seq = data.get("seq")
+    if type(seq) is not int or seq < 0:
+        return None
+    raw_passes = data.get("passes")
+    if not isinstance(raw_passes, list):
+        return None
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in raw_passes:
+        if isinstance(item, str) and _PASS_ID.fullmatch(item) and item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return seq, ordered
+
+
+def _write_gallery_index(root_fd: int, root_path: Path, *, seq: int, pass_ids: list[str],
+                         tmp_name: str, sync: bool) -> None:
+    """Atomically write and optionally fsync the committed gallery index."""
+    payload = {"version": 1, "seq": seq, "passes": pass_ids}
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(tmp_name, flags, 0o644, dir_fd=root_fd)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+    if sync:
+        fsync_file(root_path / tmp_name)
+    os.rename(tmp_name, _GALLERY_INDEX, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+
+
+def _public_pass_row(row: dict) -> dict:
+    """Return a deep copy of a pass row with internal image digest fields stripped."""
+    public = copy.deepcopy(row)
+    public["images"] = [
+        {"path": img["path"], "product": img["product"]}
+        for img in row["images"]
+    ]
+    return public
+
+
+def _fit_manifest_within_limit(
+    base_row: dict,
+    verified_files: list[tuple[str, str, bytes, int, str]],
+    *,
+    max_bytes: int | None = None,
+) -> tuple[list[tuple[str, str, bytes, int, str]], dict, bytes] | None:
+    """Select the largest prefix of verified_files whose serialized manifest fits max_bytes."""
+    limit = _MAX_MANIFEST_BYTES if max_bytes is None else max_bytes
+    pass_id = base_row["id"]
+    all_meta = [
+        {
+            "path": f"meteor/{pass_id}/{fname}",
+            "product": product,
+            "size": size,
+            "sha256": digest,
+        }
+        for fname, product, _, size, digest in verified_files
+    ]
+
+    def _encode(count: int) -> tuple[dict, bytes]:
+        row = {**base_row, "images": all_meta[:count]}
+        return row, json.dumps(row, sort_keys=True).encode("utf-8")
+
+    full_row, full_raw = _encode(len(all_meta))
+    if len(full_raw) <= limit:
+        return verified_files, full_row, full_raw
+
+    lo, hi = 1, len(all_meta) - 1
+    best: tuple[int, dict, bytes] | None = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        row, raw = _encode(mid)
+        if len(raw) <= limit:
+            best = (mid, row, raw)
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best is None:
+        return None
+    keep, best_row, best_raw = best
+    return verified_files[:keep], best_row, best_raw
+
+
+def _validate_manifest(pass_id: str, data: object) -> dict | None:
+    """Validate a saved pass manifest.json and its digest-bound image entries."""
+    if not isinstance(data, dict) or data.get("id") != pass_id:
+        return None
+    mode = data.get("mode")
+    if not isinstance(mode, str) or mode not in PIPELINES:
+        return None
+    freq_hz = data.get("freq_hz")
+    if type(freq_hz) is not int or freq_hz not in _CHANNEL_INTS:
+        return None
+    command = data.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    radio = data.get("radio")
+    if not isinstance(radio, dict):
+        return None
+    satellite = data.get("satellite")
+    if not isinstance(satellite, str) or not satellite.strip():
+        return None
+    started_at = data.get("started_at")
+    ended_at = data.get("ended_at")
+    if not _is_valid_timestamp(started_at) or not _is_valid_timestamp(ended_at):
+        return None
+    lock_ever = data.get("lock_ever")
+    if data.get("result") != "done" or type(lock_ever) is not bool:
+        return None
+    ended_by = data.get("ended_by")
+    if not isinstance(ended_by, str) or not ended_by.strip():
+        return None
+    images = data.get("images")
+    if not isinstance(images, list) or not images:
+        return None
+    clean_images = []
+    seen_paths: set[str] = set()
+    for img in images:
+        if not isinstance(img, dict):
+            return None
+        path = img.get("path")
+        product = img.get("product")
+        size = img.get("size")
+        sha256 = img.get("sha256")
+        if not isinstance(path, str) or not isinstance(product, str) or not product.strip():
+            return None
+        if type(size) is not int or size <= 0 or size > _MAX_IMAGE_BYTES:
+            return None
+        if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
+            return None
+        parts = PurePosixPath(path).parts
+        if (len(parts) != 3 or parts[0] != "meteor" or parts[1] != pass_id
+                or parts[2] in ("", ".", "..") or not parts[2].endswith(".png")
+                or path in seen_paths):
+            return None
+        seen_paths.add(path)
+        clean_images.append({
+            "path": path,
+            "product": product,
+            "size": size,
+            "sha256": sha256,
+        })
+    return {
+        "id": pass_id,
+        "started_at": float(started_at),
+        "ended_at": float(ended_at),
+        "freq_hz": freq_hz,
+        "mode": mode,
+        "command": command,
+        "radio": dict(radio),
+        "satellite": satellite,
+        "result": "done",
+        "lock_ever": lock_ever,
+        "ended_by": ended_by,
+        "images": clean_images,
+    }
 
 
 @dataclass
@@ -227,6 +813,7 @@ class _Capture:
     tail: deque = field(default_factory=lambda: deque(maxlen=3))
     result: tuple | None = None
     pictures: tuple = ()
+    publish_error: str | None = None
 
     @property
     def output(self):
@@ -261,7 +848,7 @@ class MeteorDecoder(SupervisedReceiver):
                  spawn=childproc.spawn, which=shutil.which, clock=time.time,
                  monotonic=time.monotonic, sync_assets=False):
         self.data_dir = Path(data_dir).resolve()
-        self.freq_hz = DEFAULT_HZ  # The next launch reads the site settings.
+        self._last_hz = DEFAULT_HZ
         self._radio_present = radio_present or (lambda: probe_rtlsdr().present)
         self._list_devices = list_devices
         self._spawn = spawn
@@ -270,10 +857,485 @@ class MeteorDecoder(SupervisedReceiver):
         self._monotonic = monotonic
         self._sync_assets = bool(sync_assets)
         self._runs = childproc.RunGuard()
+        self._gallery_lock = threading.Lock()
+        self._passes: list[dict] = []
+        self._seq: int = 0
+        self._has_index: bool = False
+        self._root_parent_synced: bool = False
+        self._media_index: dict[str, tuple[str, str, int, str]] = {}
         self.watch = childproc.ChildWatch(SATDUMP, finite=True, clock=monotonic)
         self._init_lifecycle()
         self.error = None
         self.on_reception = None
+        self.reception_sink = None
+        self._load_passes()
+
+    @property
+    def freq_hz(self) -> int:
+        run = self._run
+        if run and not run.ready.is_set():
+            return run.args[0].hz
+        try:
+            return _settings()[1]
+        except MeteorUnavailable:
+            return self._last_hz
+
+    @freq_hz.setter
+    def freq_hz(self, value: int) -> None:
+        self._last_hz = int(value)
+
+    def handoff_in_progress(self) -> bool:
+        """True while Meteor is releasing the radio for another claimant or cancelling a spawn."""
+        intent, run = self._intent, self._run
+        if intent and intent.spawning and intent.cancelled and intent.run is None:
+            return True
+        if run and not run.ready.is_set() and not run.physical.is_set():
+            capture, = run.args
+            if run.cancel.is_set() or capture.handoff_deadline is not None:
+                return True
+        return False
+
+    def prepare_start(self, *, for_claim=False, deadline=None):
+        if self.handoff_in_progress():
+            raise MeteorUnavailable(
+                self.release_failure(pending=True) or "SatDump is still releasing the radio"
+            )
+        return super().prepare_start(for_claim=for_claim, deadline=deadline)
+
+    def passes(self) -> list[dict]:
+        """Deep copy of the verified published passes, newest first."""
+        with self._gallery_lock:
+            return [_public_pass_row(row) for row in self._passes]
+
+    def _rebuild_media_index_unlocked(self) -> None:
+        index: dict[str, tuple[str, str, int, str]] = {}
+        for row in self._passes:
+            pid = row["id"]
+            for img in row["images"]:
+                fname = PurePosixPath(img["path"]).parts[2]
+                index[img["path"]] = (pid, fname, img["size"], img["sha256"])
+        self._media_index = index
+
+    def _load_passes(self) -> None:
+        """Read committed verified passes on startup using manifest size + SHA-256."""
+        root = self.data_dir / "meteor"
+        if not root.is_dir():
+            return
+        loaded: list[dict] = []
+        seq = 0
+        has_index = False
+        try:
+            with _directory(self.data_dir, private=False) as data_fd:
+                with _directory("meteor", data_fd, private=False) as root_fd:
+                    index = _read_gallery_index(root_fd)
+                    if index is None:
+                        return
+                    seq, ordered_ids = index
+                    has_index = True
+                    root_dev = os.fstat(root_fd).st_dev
+                    for pass_id in ordered_ids:
+                        try:
+                            info = os.stat(pass_id, dir_fd=root_fd, follow_symlinks=False)
+                            if (not stat.S_ISDIR(info.st_mode)
+                                    or info.st_dev != root_dev
+                                    or info.st_uid != os.geteuid()):
+                                continue
+                            with _directory(pass_id, root_fd, private=False) as pfd:
+                                if not os.path.samestat(os.fstat(pfd), info):
+                                    continue
+                                raw = _read_regular_bytes(
+                                    pfd, ("manifest.json",), max_bytes=_MAX_MANIFEST_BYTES
+                                )
+                                if not raw:
+                                    continue
+                                manifest = _validate_manifest(
+                                    pass_id, json.loads(raw.decode("utf-8"))
+                                )
+                                if manifest is None:
+                                    continue
+                                valid = True
+                                for img in manifest["images"]:
+                                    fname = PurePosixPath(img["path"]).parts[2]
+                                    png_bytes = _read_regular_bytes(
+                                        pfd, (fname,), max_bytes=_MAX_IMAGE_BYTES
+                                    )
+                                    if (not png_bytes or len(png_bytes) != img["size"]
+                                            or hashlib.sha256(png_bytes).hexdigest()
+                                            != img["sha256"]):
+                                        valid = False
+                                        break
+                                if valid:
+                                    loaded.append(manifest)
+                        except (OSError, UnicodeDecodeError, ValueError, TypeError, OverflowError):
+                            continue
+        except OSError:
+            return
+        with self._gallery_lock:
+            self._passes = loaded[:max(0, int(MAX_PUBLISHED_PASSES))]
+            self._seq = max(seq, len(loaded))
+            self._has_index = has_index
+            self._rebuild_media_index_unlocked()
+
+    def read_media(self, rel_path: str) -> bytes | None:
+        """Serve only a manifest member matching its recorded size and SHA-256, with O_NOFOLLOW."""
+        with self._gallery_lock:
+            target = self._media_index.get(rel_path)
+        if target is None:
+            return None
+        pass_id, fname, expected_size, expected_sha256 = target
+        try:
+            with _directory(self.data_dir, private=False) as data_fd:
+                with _directory("meteor", data_fd, private=False) as root_fd:
+                    data = _read_regular_bytes(
+                        root_fd, (pass_id, fname), max_bytes=_MAX_IMAGE_BYTES
+                    )
+        except OSError:
+            return None
+        if (not data or len(data) != expected_size
+                or hashlib.sha256(data).hexdigest() != expected_sha256):
+            return None
+        return data
+
+    def sweep_work(self) -> None:
+        """Remove retired owned staging folders and crashed .new- folders safely by descriptor."""
+        work_path = self.data_dir / "meteor" / "work"
+        if not work_path.exists():
+            return
+        active_id = None
+        run = self._run
+        if run and not run.ready.is_set():
+            active_id = run.args[0].id
+        try:
+            with _directory(self.data_dir, private=False) as data_fd:
+                with _directory("meteor", data_fd, private=False) as root_fd:
+                    with _directory("work", root_fd, private=True) as work_fd:
+                        names = os.listdir(work_fd)
+                        for name in names:
+                            if name == active_id or not _PASS_ID.fullmatch(name):
+                                continue
+                            self._sweep_retired_owner(work_fd, name)
+                        pending = [n for n in names if _PENDING_NAME.fullmatch(n)]
+                        if pending:
+                            self._tidy_pending(work_fd, pending)
+        except OSError as exc:
+            _log.warning("Meteor work sweep skipped: %s", exc)
+
+    @staticmethod
+    def _sweep_retired_owner(work_fd: int, name: str) -> None:
+        try:
+            info = os.stat(name, dir_fd=work_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+                return
+            with _directory(name, work_fd, private=True) as sub_fd:
+                if not os.path.samestat(os.fstat(sub_fd), info):
+                    return
+                lock_fd = os.open(
+                    _OWNER_LOCK,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                    dir_fd=sub_fd,
+                )
+                try:
+                    linfo = os.fstat(lock_fd)
+                    if not stat.S_ISREG(linfo.st_mode) or linfo.st_uid != os.geteuid():
+                        return
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return  # Live owner or child holding inherited lock.
+                    if not os.path.samestat(
+                        os.stat(_OWNER_LOCK, dir_fd=sub_fd, follow_symlinks=False), linfo
+                    ):
+                        return
+                    _clear_run(sub_fd, os.fstat(work_fd).st_dev, 0, [_MAX_ENTRIES])
+                    os.unlink(_OWNER_LOCK, dir_fd=sub_fd)
+                    if os.path.samestat(
+                        os.stat(name, dir_fd=work_fd, follow_symlinks=False), info
+                    ):
+                        os.rmdir(name, dir_fd=work_fd)
+                finally:
+                    os.close(lock_fd)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            _log.warning("Meteor left staging folder %s in place: %s", name, exc)
+
+    @staticmethod
+    def _tidy_pending(work_fd: int, names: list[str]) -> None:
+        try:
+            create_fd = _open_lock_file(work_fd, _CREATE_LOCK, create=True)
+        except OSError as exc:
+            _log.warning("Meteor left interrupted staging folders in place: %s", exc)
+            return
+        try:
+            try:
+                fcntl.flock(create_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            if not _still_named(work_fd, _CREATE_LOCK, create_fd):
+                return
+            for name in names:
+                try:
+                    _remove_dir_descriptor(work_fd, name)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    _log.warning("Meteor left pending folder %s in place: %s", name, exc)
+        finally:
+            os.close(create_fd)
+
+    def _record_quiet_run(self, capture: _Capture, phase: str, reason: str | None) -> None:
+        """Record a compact quiet/interrupted run metadata file and prune to MAX_QUIET_RUNS."""
+        try:
+            with _directory(self.data_dir, private=False) as data_fd:
+                with _directory("meteor", data_fd, create=True) as root_fd:
+                    with _directory("quiet", root_fd, create=True) as quiet_fd:
+                        record = {
+                            "id": capture.id,
+                            "started_at": capture.started_at,
+                            "ended_at": capture.ended_at,
+                            "freq_hz": capture.hz,
+                            "mode": capture.mode,
+                            "result": phase,
+                            "reason": reason,
+                            "lock_ever": capture.lock_ever,
+                            "ended_by": capture.ended_by,
+                        }
+                        fname = f"{capture.id}.json"
+                        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+                        fd = os.open(fname, flags, 0o600, dir_fd=quiet_fd)
+                        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                            json.dump(record, handle, sort_keys=True)
+                        # Prune oldest quiet records independently of published passes.
+                        records = []
+                        with os.scandir(quiet_fd) as entries:
+                            for entry in entries:
+                                if not entry.name.endswith(".json"):
+                                    continue
+                                stem = entry.name[:-5]
+                                if not _PASS_ID.fullmatch(stem):
+                                    continue
+                                try:
+                                    info = entry.stat(follow_symlinks=False)
+                                    if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid():
+                                        records.append((info.st_mtime_ns, entry.name))
+                                except OSError:
+                                    continue
+                        records.sort(reverse=True)
+                        for _, old_name in records[MAX_QUIET_RUNS:]:
+                            try:
+                                os.unlink(old_name, dir_fd=quiet_fd)
+                            except OSError:
+                                pass
+        except OSError as exc:
+            _log.warning("Meteor could not record quiet run %s: %s", capture.id, exc)
+
+    def _publish_pass(self, run, capture: _Capture) -> bool:
+        """Stage verified PNGs + manifest, sync in order when managed, commit, then emit."""
+        sink = getattr(self, "reception_sink", None)
+        publication = sink.publication() if sink is not None else nullcontext(True)
+        with publication as admitted:
+            if not admitted:
+                return False
+            pass_row = self._commit_gallery_pass(capture)
+            if pass_row is None:
+                return False
+            run.ready.set()
+            hook = self.on_reception
+            if hook is not None:
+                for img in pass_row["images"]:
+                    item = {
+                        "pass_id": pass_row["id"],
+                        "path": img["path"],
+                        "product": img["product"],
+                        "satellite": pass_row["satellite"],
+                        "mode": pass_row["mode"],
+                        "started_at": pass_row["started_at"],
+                        "ended_at": pass_row["ended_at"],
+                        "ended_by": pass_row["ended_by"],
+                    }
+                    childproc.emit_reception(
+                        hook, item, command=pass_row["command"],
+                        freq_hz=pass_row["freq_hz"], radio=pass_row["radio"],
+                    )
+            return True
+
+    def _commit_gallery_pass(self, capture: _Capture) -> dict | None:
+        """Decode and stage PNGs + manifest, sync durably, commit gallery.json, reconcile cap."""
+        if (not _is_valid_timestamp(capture.started_at)
+                or not _is_valid_timestamp(capture.ended_at)):
+            return None
+        stage_fd = capture.stage.fd
+        satellite = _read_satellite_name(stage_fd)
+        verified_files: list[tuple[str, str, bytes, int, str]] = []
+        used_names: set[str] = set()
+        for pic in sorted(capture.pictures, key=lambda p: (p["path"], p["product"])):
+            rel_parts = tuple(PurePosixPath(pic["path"]).parts)
+            data = _read_regular_bytes(stage_fd, rel_parts, max_bytes=_MAX_IMAGE_BYTES)
+            if (not data or len(data) != pic["size"]
+                    or hashlib.sha256(data).hexdigest() != pic["sha256"]):
+                continue
+            base = rel_parts[-1]
+            fname = base
+            idx = 2
+            while fname in used_names:
+                stem, ext = os.path.splitext(base)
+                fname = f"{stem}-{idx}{ext}"
+                idx += 1
+            used_names.add(fname)
+            verified_files.append((fname, pic["product"], data, pic["size"], pic["sha256"]))
+        if not verified_files:
+            return None
+
+        base_row = {
+            "id": capture.id,
+            "started_at": float(capture.started_at),
+            "ended_at": float(capture.ended_at),
+            "freq_hz": capture.hz,
+            "mode": capture.mode,
+            "command": shlex.join(capture.argv),
+            "radio": capture.radio.copy(),
+            "satellite": satellite,
+            "result": "done",
+            "lock_ever": capture.lock_ever,
+            "ended_by": capture.ended_by,
+            "images": [],
+        }
+        fitted = _fit_manifest_within_limit(base_row, verified_files)
+        if fitted is None:
+            capture.publish_error = "Meteor pass manifest exceeded the size limit."
+            return None
+        selected_files, pass_row, manifest_bytes = fitted
+        if len(selected_files) < len(verified_files):
+            _log.warning(
+                "Meteor pass %s kept %d of %d products to fit the %d-byte manifest limit",
+                capture.id,
+                len(selected_files),
+                len(verified_files),
+                _MAX_MANIFEST_BYTES,
+            )
+
+        candidate_name = f".publish-{capture.id}"
+        index_tmp_name = f".gallery-{capture.id}.tmp"
+        root_path = self.data_dir / "meteor"
+        candidate_path = root_path / candidate_name
+        renamed_pass = False
+        renamed_index = False
+        with self._gallery_lock:
+            cap = max(0, int(MAX_PUBLISHED_PASSES))
+            prev_pass_ids = [row["id"] for row in self._passes]
+            next_pass_ids = ([capture.id] + prev_pass_ids)[:cap]
+            if capture.id not in next_pass_ids:
+                return None
+            prev_seq = self._seq
+            next_seq = prev_seq + 1
+            had_index = self._has_index
+            try:
+                with _directory(self.data_dir, private=False) as data_fd:
+                    with _directory("meteor", data_fd, create=True) as root_fd:
+                        os.mkdir(candidate_name, 0o700, dir_fd=root_fd)
+                        try:
+                            with _directory(candidate_name, root_fd, private=True) as cand_fd:
+                                png_paths = []
+                                for fname, _product, data, _size, _digest in selected_files:
+                                    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                             | os.O_NOFOLLOW | os.O_CLOEXEC)
+                                    fd = os.open(fname, flags, 0o644, dir_fd=cand_fd)
+                                    with os.fdopen(fd, "wb") as handle:
+                                        handle.write(data)
+                                    png_paths.append(candidate_path / fname)
+
+                                mflags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                          | os.O_NOFOLLOW | os.O_CLOEXEC)
+                                mfd = os.open("manifest.json", mflags, 0o644, dir_fd=cand_fd)
+                                with os.fdopen(mfd, "wb") as handle:
+                                    handle.write(manifest_bytes)
+                                manifest_path = candidate_path / "manifest.json"
+
+                            if self._sync_assets:
+                                for png_path in png_paths:
+                                    sync_media_asset(png_path)
+                                fsync_file(manifest_path)
+                                fsync_dir(candidate_path)
+                                if not self._root_parent_synced:
+                                    fsync_dir(self.data_dir)
+                                    self._root_parent_synced = True
+
+                            os.rename(
+                                candidate_name, capture.id,
+                                src_dir_fd=root_fd, dst_dir_fd=root_fd,
+                            )
+                            renamed_pass = True
+
+                            if self._sync_assets:
+                                fsync_dir(root_path)
+
+                            _write_gallery_index(
+                                root_fd, root_path,
+                                seq=next_seq, pass_ids=next_pass_ids,
+                                tmp_name=index_tmp_name, sync=self._sync_assets,
+                            )
+                            renamed_index = True
+
+                            if self._sync_assets:
+                                fsync_dir(root_path)
+                        except OSError as exc:
+                            capture.publish_error = f"could not publish Meteor pass: {exc}"[:160]
+                            if renamed_index:
+                                rb_name = f".gallery-rb-{capture.id}.tmp"
+                                try:
+                                    if had_index:
+                                        _write_gallery_index(
+                                            root_fd, root_path,
+                                            seq=prev_seq, pass_ids=prev_pass_ids,
+                                            tmp_name=rb_name, sync=False,
+                                        )
+                                    else:
+                                        os.unlink(_GALLERY_INDEX, dir_fd=root_fd)
+                                except OSError:
+                                    try:
+                                        os.unlink(rb_name, dir_fd=root_fd)
+                                    except OSError:
+                                        pass
+                            try:
+                                os.unlink(index_tmp_name, dir_fd=root_fd)
+                            except OSError:
+                                pass
+                            cleanup_target = capture.id if renamed_pass else candidate_name
+                            try:
+                                _remove_dir_descriptor(root_fd, cleanup_target)
+                            except OSError:
+                                pass
+                            return None
+
+                        self._passes = ([pass_row] + self._passes)[:cap]
+                        self._seq = next_seq
+                        self._has_index = True
+                        self._rebuild_media_index_unlocked()
+                        self._reconcile_gallery_overflow(root_fd, {r["id"] for r in self._passes})
+                        return _public_pass_row(pass_row)
+            except OSError as exc:
+                capture.publish_error = f"could not publish Meteor pass: {exc}"[:160]
+                return None
+
+    @staticmethod
+    def _reconcile_gallery_overflow(root_fd: int, keep_ids: set[str]) -> None:
+        """Prune evicted or unconfirmed pass directories under data/meteor safely by descriptor."""
+        try:
+            with os.scandir(root_fd) as entries:
+                stale = [
+                    entry.name for entry in entries
+                    if _PASS_ID.fullmatch(entry.name) and entry.name not in keep_ids
+                ]
+        except OSError as exc:
+            _log.warning("Meteor could not scan gallery for overflow: %s", exc)
+            return
+        for stale_id in stale:
+            try:
+                _remove_dir_descriptor(root_fd, stale_id)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                _log.warning("Meteor could not prune old pass %s: %s", stale_id, exc)
 
     @contextmanager
     def _work(self):
@@ -299,6 +1361,7 @@ class MeteorDecoder(SupervisedReceiver):
             with self._work() as work:
                 if not os.access(".", os.W_OK | os.X_OK, dir_fd=work):
                     raise PermissionError("Meteor work directory is not writable")
+            self.sweep_work()
         except (OSError, ValueError, DeviceSelectionError) as exc:
             raise MeteorUnavailable(f"cannot prepare Meteor: {exc}" if isinstance(exc, OSError)
                                     else str(exc)) from exc
@@ -536,13 +1599,21 @@ class MeteorDecoder(SupervisedReceiver):
                 run.diagnostic_fault = f"could not inspect SatDump work: {exc}"[:160]
         with capture.control:
             phase, reason = self._classify(capture, code, eof)
-            capture.result = phase, reason
             if phase != "done":
                 capture.pictures = ()
             if capture.ended_by is None:
                 capture.ended_by = ("handoff" if capture.term_sent else
                                     "timeout" if self._monotonic() >= capture.launched + CAPTURE_S
                                     else "self_exit")
+        if phase == "done":
+            published = self._publish_pass(run, capture)
+            if not published:
+                phase = "no_picture"
+                reason = capture.publish_error or "Meteor pass could not be published."
+        with capture.control:
+            capture.result = phase, reason
+        if phase != "done":
+            self._record_quiet_run(capture, phase, reason)
         if phase == "stopped":
             when = self._monotonic() if observed_at is None else observed_at
             with self._runs:
@@ -597,7 +1668,7 @@ class MeteorDecoder(SupervisedReceiver):
 
     def snapshot(self):
         run = self._run
-        body = {"available": True, "passes": [], "command": None}
+        body = {"available": True, "passes": self.passes(), "command": None}
         if run is None:
             try:
                 mode, hz = _settings()

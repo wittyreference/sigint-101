@@ -1696,7 +1696,7 @@ def test_the_scratch_console_listens_on_loopback_only_and_has_no_radio(tmp_path,
 
 
 LOGBOOK_FITS = {"back": True, "doc": [800, 480], "scrolls": True, "lastVisible": True,
-                "contrast": [8, 9], "differentMarks": True}
+                "contrast": [8, 9], "differentMarks": True, "meteorBadge": True}
 RACK_FITS = {"doc": [800, 480], "visible": True, "stripVisible": True, "target": [76, 72]}
 THEMES = ("dark", "sunlight", "red-night")
 
@@ -1747,7 +1747,7 @@ def test_logbook_render_checks_all_three_themes(devtools):
 @pytest.mark.parametrize("defect", [
     {"back": False}, {"doc": [801, 480]}, {"doc": [800, 481]}, {"scrolls": False},
     {"lastVisible": False}, {"contrast": [4.49, 9]}, {"differentMarks": False},
-    {"theme": "dark"},
+    {"meteorBadge": False}, {"theme": "dark"},
 ])
 def test_logbook_verdict_fails_when_a_later_theme_does_not_fit(devtools, defect):
     port = devtools(_logbook_pages(logbook_defect=defect))
@@ -2731,3 +2731,121 @@ def test_capture_check_is_discovered_and_covers_the_capture_screen():
     check, = [check for check in CHECKS if check.name == "capture"]
     assert check.pages == ("/capture", "/operate/waterfall")
     assert "/capture" in RENDER_CHECK_PAGES
+
+
+POWER_NOTICE_OK = {
+    "doc": [800, 480],
+    "roleAlert": True,
+    "initialHidden": True,
+    "countdownOk": True,
+    "failedOk": True,
+    "hiddenAfterClear": True,
+    "aboveFigure": True,
+    "countdownH": 68,
+    "failedH": 88,
+    "noticeTop": 75,
+    "backBottom": 75,
+    "headlinePx": 20,
+    "detailPx": 18,
+}
+
+
+def _power_notice_pages(*, defect=None):
+    pages = {}
+    for theme in THEMES:
+        def _answer(url, t=theme):
+            m = {**POWER_NOTICE_OK, "theme": t}
+            if t == "red-night" and url.endswith("/exam/review/T6C02") and defect:
+                m.update(defect)
+            return m
+        pages[f"measurePowerNotice({json.dumps(theme)},"] = _answer
+    return pages
+
+
+def test_power_notice_render_checks_all_four_screens_in_all_three_themes(devtools):
+    port = devtools(_power_notice_pages())
+    proc = run(render_tool("power_notice"), "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    expected = [
+        f"VERDICT: PASS - power-notice {name} {theme}"
+        for theme in THEMES
+        for name in ("home", "lesson1", "predict29", "figure")
+    ]
+    assert _verdicts(proc) == expected
+
+
+@pytest.mark.parametrize("defect", [
+    {"countdownOk": False},
+    {"failedOk": False},
+    {"hiddenAfterClear": False},
+    {"aboveFigure": False},
+    {"initialHidden": False},
+    {"roleAlert": False},
+])
+def test_power_notice_render_fails_on_banner_or_zindex_defects(devtools, defect):
+    port = devtools(_power_notice_pages(defect=defect))
+    proc = run(render_tool("power_notice"), "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "VERDICT: FAIL - power-notice figure red-night" in _verdicts(proc)
+
+
+METEOR_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "minBackH": 75,
+    "listen": True,
+    "minListenH": 72,
+    "listenOutsideGallery": True,
+    "noHorizOverflow": True,
+    "unclippedText": True,
+    "maxPhaseLen": 42,
+    "maxNoteLen": 73,
+    "minFontPx": 18,
+    "imageLoaded": True,
+    "detailsVisible": True,
+    "redNightFiltered": True,
+    "statesChecked": 8,
+}
+
+
+def _meteor_pages(*, defect=None):
+    pages = {}
+    for theme in THEMES:
+        row = {**METEOR_FITS, "theme": theme}
+        if theme == "red-night" and defect:
+            row.update(defect)
+        pages[f"measureMeteor({json.dumps(theme)},"] = row
+    return pages
+
+
+def test_meteor_render_checks_all_states_in_all_three_themes(devtools):
+    port = devtools(_meteor_pages())
+    proc = run(render_tool("meteor"), "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - meteor dark",
+        "VERDICT: PASS - meteor sunlight",
+        "VERDICT: PASS - meteor red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"doc": [800, 481]},
+    {"back": False},
+    {"listen": False},
+    {"listenOutsideGallery": False},
+    {"noHorizOverflow": False},
+    {"unclippedText": False},
+    {"maxPhaseLen": 65},
+    {"maxNoteLen": 120},
+    {"minFontPx": 17},
+    {"imageLoaded": False},
+    {"detailsVisible": False},
+    {"redNightFiltered": False},
+    {"statesChecked": 7},
+])
+def test_meteor_render_fails_on_layout_clip_font_or_filter_defects(devtools, defect):
+    port = devtools(_meteor_pages(defect=defect))
+    proc = run(render_tool("meteor"), "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - meteor red-night"
