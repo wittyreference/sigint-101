@@ -11,6 +11,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
+from . import childproc
 from .childproc import (
     ChildWatch,
     command_line,
@@ -50,6 +51,38 @@ REPEAT_WINDOW_S = 2.0
 # The refusal for an rtl_433 that a stop could not end. It is the radio's state, not the run's,
 # so a retune keeps it.
 SURVIVED_KILL = f"{RTL_433} survived kill; the dongle may still be held"
+
+
+def _unconfirmed(exc) -> str:
+    return f"{RTL_433} could not be confirmed stopped ({exc}); the dongle may still be held"
+
+
+def _kill_and_confirm(proc) -> str | None:
+    """SIGKILL a retiring child that is still ours, then wait for its reap.
+
+    Returns None once its exit is confirmed, else why not. The signal goes to the kept process
+    object only after poll() shows it still unreaped, so a reaped child's PID, which may be
+    another process's by now, is never signalled. An error in the poll, the signal or the wait
+    confirms nothing.
+    """
+    try:
+        if proc.poll() is not None:
+            return None
+    except Exception as exc:
+        return _unconfirmed(exc)                # cannot tell it is still ours: no signal
+    try:
+        proc.kill()
+    except OSError:
+        pass                                    # gone already; the wait says
+    except Exception as exc:
+        return _unconfirmed(exc)
+    try:
+        proc.wait(timeout=childproc.STOP_WAIT_S)
+    except subprocess.TimeoutExpired:
+        return SURVIVED_KILL
+    except Exception as exc:
+        return _unconfirmed(exc)
+    return None
 
 
 class DecodeUnavailable(RuntimeError):
@@ -446,17 +479,27 @@ class Decoder:
         if proc is not None:
             try:
                 failure = None if stop_process(proc) else SURVIVED_KILL
-            except Exception as exc:            # a wait or reap that errs confirms nothing
-                failure = (f"{RTL_433} could not be confirmed stopped ({exc}); "
-                           "the dongle may still be held")
-            if failure is None:
-                self._retiring = None
-            else:
-                self._retire_failure = failure
-                self.error = failure
+            except Exception:
+                # A wait that errs skipped the SIGKILL that follows it: escalate now, so a tool
+                # that ignores SIGTERM is not left holding the radio.
+                failure = _kill_and_confirm(proc)
+            self._settle_retirement(failure)
+        elif self._retiring is not None:
+            # A child an earlier stop could not confirm: signal it again and retry its reap.
+            self._settle_retirement(_kill_and_confirm(self._retiring))
         if self._thread is not None:
             self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
+
+    def _settle_retirement(self, failure: str | None) -> None:
+        """Drop the retiring child once its exit is confirmed; otherwise keep it, and say why."""
+        if failure is None:
+            prior, self._retiring, self._retire_failure = self._retire_failure, None, None
+            if prior is not None and self.error == prior:
+                self.error = None
+        else:
+            self._retire_failure = failure
+            self.error = failure
 
     def drain(self, timeout: float = 5.0) -> None:
         """Wait for a finite source to be fully consumed. A real decode stream never ends."""

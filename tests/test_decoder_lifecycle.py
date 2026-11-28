@@ -578,10 +578,10 @@ def test_rtl_433_retune_counts_a_status_exit_without_waiting_on_its_diagnostic(
 
 
 class _WaitFails(Child):
-    """A tool that ignores SIGTERM and whose stop's reap wait fails with an OS error."""
+    """A tool that survives the stop's signals and whose reap wait fails with an OS error."""
 
     def __init__(self):
-        super().__init__(["rtl_433"], stubborn=True)
+        super().__init__(["rtl_433"], unkillable=True)
 
     def wait(self, timeout=None):
         if self.code is None and "TERM" in self.sent:
@@ -608,6 +608,69 @@ def test_rtl_433_whose_stop_wait_fails_is_kept_until_its_exit_is_confirmed(tmp_p
     assert len(spawned) == 2 and dec.error is None
     spawned[1].code = 0
     dec.stop()
+
+
+class _OneWaitFails(Child):
+    """A tool that ignores SIGTERM, whose first wait after it fails once with an OS error."""
+
+    def __init__(self, *, unkillable=False):
+        super().__init__(["rtl_433"], stubborn=True, unkillable=unkillable)
+        self.failed = False
+
+    def wait(self, timeout=None):
+        if self.code is None and "TERM" in self.sent and not self.failed:
+            self.failed = True
+            raise OSError("interrupted wait")
+        return super().wait(timeout)
+
+
+def test_rtl_433_stop_escalates_to_kill_after_a_wait_error(tmp_path):
+    # Codex D-096 F1: the wait error skipped SIGKILL, so an rtl_433 that ignores SIGTERM kept the
+    # radio reserved for good.
+    dec, _, spawned, _ = _build("decode", tmp_path, _OneWaitFails)
+    dec.start()
+    dec.retune(315_000_000)
+    assert spawned[0].sent == ["TERM", "KILL"]
+    assert dec.release_failure(pending=True) is None   # the kill landed and its reap was seen
+    dec.start()
+    assert len(spawned) == 2
+    spawned[1].failed = True
+    dec.stop()
+
+
+@pytest.mark.parametrize("again", ["stop", "release", "retune"])
+def test_a_later_stop_signals_a_kept_rtl_433_again_and_retries_its_reap(tmp_path, again):
+    # Codex D-096 F1: a child the first stop could not confirm was never signalled again.
+    dec, unavailable, spawned, _ = _build("decode", tmp_path,
+                                          lambda: _OneWaitFails(unkillable=True))
+    dec.start()
+    dec.retune(315_000_000)                     # TERM ignored, the wait errs, KILL ignored too
+    assert spawned[0].sent == ["TERM", "KILL"]
+    with pytest.raises(unavailable, match="survived kill"):
+        dec.start()
+    assert dec.release_failure() is not None
+    spawned[0].unkillable = False               # the next SIGKILL lands
+    {"stop": dec.stop, "release": dec.release,
+     "retune": lambda: dec.retune(868_000_000)}[again]()
+    assert spawned[0].sent == ["TERM", "KILL", "KILL"]
+    assert dec.release_failure(pending=True) is None
+    dec.resume()
+    dec.start()
+    assert len(spawned) == 2 and dec.error is None
+    spawned[1].unkillable = False
+    spawned[1].failed = True
+    dec.stop()
+
+
+def test_a_kept_rtl_433_is_not_signalled_once_its_exit_shows(tmp_path):
+    # A reaped child's PID may be another process's by now: only a child still ours is signalled.
+    dec, _, spawned, _ = _build("decode", tmp_path, lambda: _OneWaitFails(unkillable=True))
+    dec.start()
+    dec.retune(315_000_000)
+    spawned[0].code = -signal.SIGKILL           # it exited, and poll() has its status
+    dec.stop()
+    assert spawned[0].sent == ["TERM", "KILL"]  # no further signal
+    assert dec.release_failure(pending=True) is None
 
 
 class _SlowToStop(Child):

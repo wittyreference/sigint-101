@@ -122,7 +122,7 @@ def test_a_legacy_retune_hands_the_radio_on_without_waiting_on_an_exit_diagnosti
 
 class _WaitFails(Child):
     def __init__(self):
-        super().__init__(["rtl_433"], stubborn=True)
+        super().__init__(["rtl_433"], unkillable=True)   # survives the escalated SIGKILL too
 
     def wait(self, timeout=None):
         if self.code is None and "TERM" in self.sent:   # the stop's wait, not the reader's
