@@ -77,6 +77,19 @@ CREATE TABLE IF NOT EXISTS stamp_events (
 ) WITHOUT ROWID;
 """
 
+# Card-sort answers (M5's 12-card law sort): additive table so existing databases gain it on open.
+# Score is shown to the learner for feedback and never gates completion (D16).
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS sort_answers (
+    lesson_id INTEGER NOT NULL,
+    card_key  TEXT NOT NULL,
+    choice    TEXT NOT NULL,
+    correct   INTEGER NOT NULL,
+    updated   REAL,
+    PRIMARY KEY (lesson_id, card_key)
+);
+"""
+
 # The `kind` key for the learner's pre-observation guess. A constant because the predict
 # gate and the lesson view must agree on the exact string, or the gate would never unlock.
 PREDICTION = "prediction"
@@ -229,6 +242,37 @@ class Progress:
         if row is None:
             return None
         return {"choice": row["body"], "correct": bool(row["correct"])}
+
+    def record_sort_answer(self, lesson_id: int, card_key: str, choice: str, *,
+                           correct: bool, clock=None) -> None:
+        """Store one card-sort answer, updating in place if re-sorted."""
+        card_key = (card_key or "").strip()
+        choice = (choice or "").strip()
+        if not card_key:
+            raise ValueError("a sort card key cannot be blank")
+        if not choice:
+            raise ValueError("a sort choice cannot be blank")
+        updated = clock() if clock else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO sort_answers(lesson_id, card_key, choice, correct, updated) "
+                "VALUES(?, ?, ?, ?, ?) ON CONFLICT(lesson_id, card_key) DO UPDATE SET "
+                "choice=excluded.choice, correct=excluded.correct, updated=excluded.updated",
+                (lesson_id, card_key, choice, int(bool(correct)), updated),
+            )
+            self._conn.commit()
+
+    def get_sort_answers(self, lesson_id: int) -> dict[str, dict]:
+        """All recorded card-sort answers for a lesson, keyed by card_key."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT card_key, choice, correct FROM sort_answers WHERE lesson_id=?",
+                (lesson_id,),
+            ).fetchall()
+        return {
+            row["card_key"]: {"choice": row["choice"], "correct": bool(row["correct"])}
+            for row in rows
+        }
 
     def get_prediction(self, lesson_id: int):
         """What the learner said they expected to see, or None if they have not said.

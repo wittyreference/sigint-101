@@ -298,6 +298,21 @@ def test_provision_node_check_is_idempotent_across_two_runs(box, version):
     assert _node_section(first.stdout) == _node_section(second.stdout)
 
 
+def test_check_reports_an_installed_course_launcher_that_differs_from_the_checkout(box):
+    """A box keeps running its installed launcher until install.sh copies the new one over, so a
+    launcher fix (the full-panel window bounds) reaches the panel only if --check flags it."""
+    kiosk = box.home / "sigint-101" / "deploy" / "kiosk"
+    kiosk.mkdir()
+    (kiosk / "start-kiosk.sh").write_text((REPO / "deploy" / "kiosk" / "start-kiosk.sh")
+                                          .read_text(encoding="utf-8"), encoding="utf-8")
+    result = box.run("--check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    [line] = [ln for ln in result.stdout.splitlines() if "run deploy/install.sh" in ln]
+    assert line.startswith("  would  "), line
+    assert "course launcher" in line, line
+    assert "install.sh" not in box.calls(), "--check ran install.sh"
+
+
 @pytest.mark.parametrize("region,preset,use_preset,tx_enabled", [(0, 0, False, False),
                                                                  (1, 0, True, True)])
 def test_provision_sets_us_long_turbo_and_power_and_preserves_tx_enabled(

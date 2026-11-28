@@ -460,6 +460,99 @@ def test_queued_claim_uses_the_current_holder_bound_after_ppm(
     assert waits == [radio_control.PPM_HOLD_S, *ordinary_wait]
 
 
+def _queue_behind(monkeypatch, holder, started, takeover, arrival=0):
+    """Queue a spectrum claim at `arrival` behind `holder`; `takeover(now, left)` drives waits."""
+    arbiter = radio_control.RadioArbiter()
+    clock = SimpleNamespace(now=started, waits=[], granted=None, refused_at=None)
+    monkeypatch.setattr(radio_control, "time", SimpleNamespace(monotonic=lambda: clock.now))
+
+    def wait(left):
+        assert left > 0, "the queued claim waited for no time (busy-wait)"
+        assert len(clock.waits) < 50, "the queued claim kept waiting without a ceiling"
+        clock.waits.append(left)
+        claim = takeover(clock.now, left)
+        if claim is False:
+            clock.now += left
+        else:
+            clock.now, arbiter._claim = claim
+
+    monkeypatch.setattr(arbiter._lock, "wait", wait)
+    with arbiter.reserve(holder, AssertionError, float("inf")):
+        clock.now = arrival
+        try:
+            with arbiter.reserve("spectrum", RuntimeError,
+                                 arrival + radio_control.CLAIM_QUEUE_WAIT_S):
+                clock.granted = arbiter._claim
+        except RuntimeError as exc:
+            assert str(exc) == "the radio is busy finishing another request"
+            clock.refused_at = clock.now
+    return clock
+
+
+def test_queued_claim_gives_up_at_its_own_ppm_ceiling_when_a_second_ppm_takes_over(monkeypatch):
+    def takeover(now, left):
+        # ppm claim B wins the wake-up at t=12; after that every wait runs out.
+        return (12, ("ppm", 12)) if now == 0 else False
+
+    clock = _queue_behind(monkeypatch, "ppm", 0, takeover)
+    assert clock.granted is None
+    assert clock.refused_at == pytest.approx(radio_control.PPM_HOLD_S)
+    assert clock.waits == [radio_control.PPM_HOLD_S, radio_control.PPM_HOLD_S - 12]
+
+
+@pytest.mark.parametrize("period", [1, 5, 12, 19.5])
+def test_a_stream_of_ppm_claims_cannot_hold_a_queued_claim_past_a_fixed_ceiling(
+        monkeypatch, period):
+    def takeover(now, left):
+        # A fresh ppm claim takes the radio every `period` seconds for as long as anyone waits.
+        if left <= period:
+            return False
+        return (now + period, ("ppm", now + period))
+
+    clock = _queue_behind(monkeypatch, "ppm", 0, takeover)
+    assert clock.granted is None
+    assert clock.refused_at == pytest.approx(radio_control.PPM_HOLD_S)
+
+
+def test_a_single_ppm_holder_keeps_its_own_bound_and_hands_over_on_release(monkeypatch):
+    # ppm started 5 s before the claim queued: its own bound ends first, at t=15.
+    clock = _queue_behind(monkeypatch, "ppm", -5, lambda now, left: False)
+    assert clock.waits == [radio_control.PPM_HOLD_S - 5]
+    assert clock.refused_at == pytest.approx(radio_control.PPM_HOLD_S - 5)
+
+    # A second ppm claim that releases inside the ceiling hands the radio to the queued claim.
+    def takeover(now, left):
+        return {0: (12, ("ppm", 12)), 12: (18, None)}[now]
+
+    clock = _queue_behind(monkeypatch, "ppm", 0, takeover)
+    assert clock.refused_at is None
+    assert clock.granted == ("spectrum", 18)
+
+
+def test_the_ppm_ceiling_counts_from_the_claims_arrival_not_the_first_ppm_start(monkeypatch):
+    # ppm A started at t=0, the claim queued at t=5, ppm B took over at t=12.
+    def takeover(now, left):
+        return (12, ("ppm", 12)) if now == 5 else False
+
+    clock = _queue_behind(monkeypatch, "ppm", 0, takeover, arrival=5)
+    assert clock.granted is None
+    assert clock.refused_at == pytest.approx(5 + radio_control.PPM_HOLD_S)
+
+
+def test_a_nearly_finished_ppm_holder_still_leaves_the_ordinary_deadline(monkeypatch):
+    # ppm's own bound ends 1 s after the claim queued; the claim still waits its 2 s.
+    clock = _queue_behind(monkeypatch, "ppm", 1 - radio_control.PPM_HOLD_S,
+                          lambda now, left: False)
+    assert clock.waits == [radio_control.CLAIM_QUEUE_WAIT_S]
+    assert clock.refused_at == pytest.approx(radio_control.CLAIM_QUEUE_WAIT_S)
+
+
+def test_a_queued_claim_behind_an_ordinary_holder_keeps_the_ordinary_deadline(monkeypatch):
+    clock = _queue_behind(monkeypatch, "aprs", 0, lambda now, left: False)
+    assert clock.waits == [radio_control.CLAIM_QUEUE_WAIT_S]
+    assert clock.refused_at == pytest.approx(radio_control.CLAIM_QUEUE_WAIT_S)
+
+
 def test_ppm_retains_its_long_capture_window_without_losing_typed_queue_refusals(
         tmp_path, monkeypatch):
     entered, released, measuring, capture_done = (threading.Event() for _ in range(4))

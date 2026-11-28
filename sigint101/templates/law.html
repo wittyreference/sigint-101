@@ -1,0 +1,29 @@
+<!-- ABOUTME: "Show me the law" quick-reference reading page (/law): one short section per
+     ABOUTME: authority with its citation and caution; scrolls cleanly with Back pinned. -->
+{% extends "base.html" %}
+
+{% block title %}The Law{% endblock %}
+
+{% block content %}
+<section class="law" aria-label="Radio law quick reference">
+  <div class="law__head">
+    <h1 class="law__title">Show me the law</h1>
+    <p class="law__caution">{{ caution }}</p>
+  </div>
+  <div class="scroll-frame law__frame">
+    <div class="law__entries" tabindex="0">
+      <div class="law__list">
+        {% for item in sections %}
+        <article class="law__section" data-law-section="{{ item.id }}">
+          <div class="law__section-head">
+            <h2 class="law__section-title">{{ item.title }}</h2>
+            <code class="law__cite">{{ item.cite }}</code>
+          </div>
+          <p class="law__summary">{{ item.summary }}</p>
+        </article>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}

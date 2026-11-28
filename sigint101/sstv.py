@@ -14,7 +14,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import childproc
+from . import childproc, receiver_lifecycle
 from .childproc import (
     ChildWatch,
     Pipeline,
@@ -307,7 +307,10 @@ class SstvDecoder(SupervisedReceiver):
             with self._staging_lock:
                 self._staged_cleanup.add(capture.staged_path)
             return
-        run.diagnosed.wait()
+        if not run.diagnosed.wait(receiver_lifecycle.DIAGNOSTIC_WAIT_S):
+            # The reap is confirmed and clean, so the picture may still publish with the fault.
+            if run.diagnostic_fault is None:
+                run.diagnostic_fault = "exit diagnostic did not finish"
         try:
             info = capture.staged_path.lstat()
         except FileNotFoundError:
