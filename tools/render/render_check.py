@@ -38,6 +38,7 @@ def run_checks(console, port, output):
         ("render_recall.py", console),
         ("render_live_find.py", console),
         ("render_field.py", console),
+        ("render_bandmap.py", console),
     )
     no_proxy = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))
     no_proxy = f"{no_proxy},127.0.0.1" if no_proxy else "127.0.0.1"

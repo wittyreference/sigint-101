@@ -3,6 +3,9 @@
 {% extends "base.html" %}
 
 {% block title %}{{ title|default('SIGINT 101') }}{% endblock %}
+{% block status_actions %}
+<a class="rack__log-link" href="/bands" aria-label="Open band map">BANDS</a>
+{% endblock %}
 
 {% block content %}
   <div class="scroll-frame home-grid">
