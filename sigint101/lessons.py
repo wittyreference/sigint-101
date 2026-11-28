@@ -46,6 +46,11 @@ CHECK_STAGE = "check"
 # The allowed bucket keys on an optional `sort:` card deck (M5's 12-card law sort).
 SORT_ANSWERS = ("legal", "illegal", "depends")
 
+# The longest a sort card's why may run. Its feedback ("Missed Depends: <why> <cite>") must stay
+# on two lines at 800x480, because the card has less than one line of slack. Measured on the
+# console, a why past about 94 characters wraps to a third line even beside the shortest cite.
+SORT_WHY_MAX_CHARS = 90
+
 # What a predict asks about, which sets how the explain names its answer. An instrument predict
 # asks what the radio will show or do, so the reveal reads "What the radio does"; a knowledge
 # predict asks what is true (the law, what a detection proves, what you need), so it reads "In
@@ -75,9 +80,10 @@ SSTV_PANEL = "sstv"
 FLOCK_PANEL = "flock"
 RAYHUNTER_PANEL = "rayhunter"
 FLIPPER_PANEL = "flipper"
+SURVEY_PANEL = "survey"
 INSTRUMENT_PANELS = (DECODE_PANEL, LORA_PANEL, RDS_PANEL, ADSB_PANEL, APRS_PANEL,
                      POCSAG_PANEL, ACARS_PANEL, AIS_PANEL, DMR_PANEL, APT_PANEL, SSTV_PANEL,
-                     FLOCK_PANEL, RAYHUNTER_PANEL, FLIPPER_PANEL)
+                     FLOCK_PANEL, RAYHUNTER_PANEL, FLIPPER_PANEL, SURVEY_PANEL)
 KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 
 # The tune buttons step by this much when a pack declares a band but not its own step. A
@@ -85,9 +91,9 @@ KNOWN_PANELS = (*OVERLAY_PANELS, *INSTRUMENT_PANELS)
 DEFAULT_TUNE_STEP_HZ = 100_000
 
 # What a lesson tile says the learner must bring, keyed by the pack's `hardware:` names. The
-# RTL-SDR is built into the Recon, so it earns no badge. LoRa's radio is built in too, but its
-# lessons need a second node to talk to, so that is the badge.
-BUILT_IN_HARDWARE = ("rtl-sdr",)
+# RTL-SDR and host Wi-Fi radio are built into the Recon, so they earn no badge. LoRa's radio is
+# built in too, but its lessons need a second node to talk to, so that is the badge.
+BUILT_IN_HARDWARE = ("rtl-sdr", "wifi")
 HARDWARE_BADGES = {
     # The site's Flock source is wlan1's USB adapter or the Flipper's Wi-Fi devboard: both are a
     # Wi-Fi radio in monitor mode, and the tile reads the same for either.
@@ -337,6 +343,15 @@ class Lesson:
         return FLIPPER_PANEL in self.panels
 
     @property
+    def uses_survey(self) -> bool:
+        """True when the instrument is the read-only Wi-Fi survey (survey panel), not a waterfall.
+
+        It runs a read-only nmcli scan on the host's Wi-Fi radio and groups visible beacons into a
+        per-channel metadata census from /api/survey, never touching the SDR.
+        """
+        return SURVEY_PANEL in self.panels
+
+    @property
     def stage_order(self) -> tuple:
         """The stages this lesson walks, in order: fixed by its type, then its check if any."""
         return REQUIRED_STAGES[self.type] + ((CHECK_STAGE,) if self.check else ())
@@ -537,8 +552,10 @@ def _parse_sort(data: dict, ctx: str) -> list | None:
     """Validate an optional `sort:` card deck (key, text, answer, why, cite).
 
     Mirrors `_parse_check`: a malformed card fails at load rather than mid-lesson. Each card's
-    answer must be legal, illegal, or depends, and its why and cite stay single-line so feedback
-    fits on the 800x480 screen. Returns None when a pack declares no sort deck.
+    answer must be legal, illegal, or depends, and its why and cite stay single-line, with the why
+    capped at SORT_WHY_MAX_CHARS, so feedback fits on the 800x480 screen. A long cite still eats
+    into that room; the card render check is the guard for the pair. Returns None when a pack
+    declares no sort deck.
     """
     raw = data.get("sort")
     if raw in (None, []):
@@ -573,6 +590,11 @@ def _parse_sort(data: dict, ctx: str) -> list | None:
                 raise LessonError(
                     f"{ctx}: sort card '{fields['key']}' '{line_field}' must be one line"
                 )
+        if len(fields["why"]) > SORT_WHY_MAX_CHARS:
+            raise LessonError(
+                f"{ctx}: sort card '{fields['key']}' 'why' is {len(fields['why'])} characters; "
+                f"keep it to {SORT_WHY_MAX_CHARS} so its feedback fits two lines at 800x480"
+            )
         cards.append(fields)
     return cards
 

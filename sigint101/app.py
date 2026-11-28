@@ -33,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .acars import AcarsDecoder, AcarsUnavailable
-from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbPortOccupied, AdsbUnavailable
+from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
@@ -87,6 +87,7 @@ from .provenance import (
 from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, finish_console
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
+from .receiver_socket import PortOccupied
 from .safety import notice_for, rack_lora_send
 from .spectrum import (
     DEFAULT_BIN,
@@ -102,6 +103,7 @@ from .spectrum import (
 )
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
 from .stamps import STAMP_INSTRUMENTS, mint, stamps_from_log
+from .survey import SurveyUnavailable, WifiSurvey
 from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -302,9 +304,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
                apt_factory=None, sstv_factory=None,
-               flock_factory=None, rayhunter_factory=None, flipper_factory=None, pool_path=None,
+               flock_factory=None, rayhunter_factory=None, flipper_factory=None,
+               survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
-               kiosk_exit=request_exit, battery_gauge=None) -> FastAPI:
+               kiosk_exit=request_exit, battery_gauge=None,
+               managed: bool = False) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -483,6 +487,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
                 list_devices=enumerate_radios,
+                sync_assets=managed,
             )
     else:
         build_apt = apt_factory
@@ -497,6 +502,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
                 list_devices=enumerate_radios,
+                sync_assets=managed,
             )
     else:
         build_sstv = sstv_factory
@@ -525,6 +531,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     else:
         build_flipper = flipper_factory
 
+    # The Wi-Fi survey runs one bounded read-only nmcli scan on the host's Wi-Fi radio — separate
+    # from the SDR, with no long-lived daemon to tear down on shutdown.
+    if survey_factory is None:
+        build_survey = WifiSurvey
+    else:
+        build_survey = survey_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Open the console's state for the server's lifetime, and put it away cleanly.
@@ -533,7 +546,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         and the next start would find the radio busy with nothing visibly running.
         """
         app.state.lessons = load_lessons(pack_dir)
-        app.state.progress = Progress(Path(data_dir) / "progress.db")
+        app.state.progress = Progress(Path(data_dir) / "progress.db", managed=managed)
         app.state.events_path = Path(data_dir) / "events.jsonl"
         # The provenance panel asks for the baseline every poll; this follows the log as it grows
         # rather than re-reading all of it each time.
@@ -554,6 +567,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.flock = build_flock()
         app.state.rayhunter = build_rayhunter()
         app.state.flipper = build_flipper()
+        app.state.survey = build_survey()
         # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
         # spaced-retrieval store, persisted beside the lesson progress so study history
         # survives a kiosk power-cut the same way. The pool must pass its correctness guard to be
@@ -572,7 +586,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "exam_disabled", {"reason": reason})
         else:
             app.state.exam_pool = pool
-        app.state.exam_store = ExamStore(Path(data_dir) / "exam.db")
+        app.state.exam_store = ExamStore(Path(data_dir) / "exam.db", managed=managed)
         # Injected so a test drives the ppm route without 8 s of real IQ capture; the default is
         # the real pilot measurement, which holds the dongle exclusively (the route stands the
         # sweeper down first, below).
@@ -596,6 +610,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             receiver = getattr(app.state, attr)
             receiver.on_reception = _heard(inst, receiver)
             receiver.reception_sink = app.state.reception_sink
+        if isinstance(app.state.ais, AisDecoder):
+            app.state.ais.on_foreign_datagrams = _log_foreign_ais
         try:
             yield
         finally:
@@ -800,7 +816,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "prediction_refused",
                       {"lesson": lesson_id, "reason": str(exc)})
             return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "prediction", {"lesson": lesson_id, "correct": correct})
+        try:
+            log_event(
+                app.state.events_path,
+                "prediction",
+                {"lesson": lesson_id, "correct": correct},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         # Committing walks the learner past the gate, so the lesson reopens on the first sealed
         # stage rather than resuming on the predict screen they just left.
         lesson = app.state.lessons[lesson_id]
@@ -835,7 +862,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.progress.record_check(lesson_id, choice, correct=correct)
         except CheckAlreadyAnswered as exc:
             return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "check", {"lesson": lesson_id, "correct": correct})
+        try:
+            log_event(app.state.events_path, "check", {"lesson": lesson_id, "correct": correct},
+                      sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         app.state.progress.record_stage(lesson_id, CHECK_STAGE,
                                         lesson.stage_order.index(CHECK_STAGE))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
@@ -863,8 +897,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 "recorded": False, "reason": f"'{choice}' is not a valid sort answer"})
         fb = lesson.sort_feedback(card, choice)
         app.state.progress.record_sort_answer(lesson_id, card, choice, correct=fb["correct"])
-        log_event(app.state.events_path, "sort_answer",
-                  {"lesson": lesson_id, "card": card, "choice": choice, "correct": fb["correct"]})
+        try:
+            log_event(
+                app.state.events_path,
+                "sort_answer",
+                {"lesson": lesson_id, "card": card, "choice": choice, "correct": fb["correct"]},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         saved = app.state.progress.get_sort_answers(lesson_id)
         answered = sum(1 for c in lesson.sort if c["key"] in saved)
         score = sum(1 for c in lesson.sort if saved.get(c["key"], {}).get("correct"))
@@ -930,7 +974,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"lesson": lesson_id, "reason": reason})
             return JSONResponse(status_code=400, content={"completed": False, "reason": reason})
         app.state.progress.mark_completed(lesson_id)
-        log_event(app.state.events_path, "completed", {"lesson": lesson_id})
+        try:
+            log_event(app.state.events_path, "completed", {"lesson": lesson_id}, sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "completed": False, "reason": f"event log sync failed: {exc}"})
         return {"completed": True, "lesson": lesson_id}
 
     def _require_trainer():
@@ -993,8 +1043,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         choice = (await _field(request, "choice")).strip().upper()
         correct = choice == question.answer
         app.state.exam_store.record(question_id, correct)
-        log_event(app.state.events_path, "exam_answer",
-                  {"question": question_id, "choice": choice, "correct": correct})
+        try:
+            log_event(app.state.events_path, "exam_answer",
+                      {"question": question_id, "choice": choice, "correct": correct},
+                      sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(f"/exam/review/{question_id}?choice={choice}", status_code=303)
 
     @app.get("/exam/review/{question_id}", response_class=HTMLResponse)
@@ -1092,8 +1149,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if app.state.exam_store.record_sim_answer(question_id, choice):
             # Also credit the Leitner history so the sim feeds the study card's weak-first order.
             app.state.exam_store.record(question_id, correct)
-            log_event(app.state.events_path, "exam_sim_answer",
-                      {"question": question_id, "choice": choice, "correct": correct})
+            try:
+                log_event(app.state.events_path, "exam_sim_answer",
+                          {"question": question_id, "choice": choice, "correct": correct},
+                          sync=managed)
+            except OSError as exc:
+                if not managed:
+                    raise
+                return JSONResponse(status_code=500, content={
+                    "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(f"/exam/sim/review/{question_id}", status_code=303)
 
     @app.post("/api/exam/sim/skip")
@@ -1339,8 +1403,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reason.startswith("no RTL-SDR on the USB bus"):
             return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
                     "next_step": "Plug in the RTL-SDR."}
-        if isinstance(exc, AdsbPortOccupied):
-            return {"cause": "unavailable", "next_step": "Free the port, then retry ADS-B."}
+        if isinstance(exc, PortOccupied):
+            label = "ADS-B" if kind == "adsb" else "AIS"
+            return {"cause": "unavailable", "next_step": f"Free the port, then retry {label}."}
         if reason == "no Flipper on USB":
             return {"cause": "no_radio", "message": "No Flipper on USB.",
                     "next_step": "Connect the Flipper over USB."}
@@ -1348,6 +1413,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return {"cause": "no_radio", "next_step": "Connect the Flipper over USB."}
         if reason.startswith("no monitor radio:"):
             return {"cause": "no_radio"}  # This refusal already says how to seat the devboard.
+        if reason.startswith(("no Wi-Fi radio", "Wi-Fi radio is off", "no managed Wi-Fi device")):
+            return {"cause": "no_radio"}
 
         missing = re.match(r"(?:cannot survey the bus: )?([\w.+-]+) is not installed\b", reason)
         tool = missing[1] if missing else None
@@ -1359,6 +1426,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             command = "Run deploy/provision.sh"
             if tool in {"dsd-fme", "satdump", "sstv"}:
                 command += " --with-optional"
+            if tool == "nmcli":
+                # nmcli ships with NetworkManager, so it is missing only where something else runs
+                # the network (dhcpcd, ifupdown). Installing NetworkManager there takes over the
+                # interfaces and can drop a Wi-Fi SSH link, so no one-line command: say why.
+                command = ("NetworkManager doesn't run this box's network, so the survey can't "
+                           "read Wi-Fi here. Switching is a bench job for the box's owner.")
             return {"cause": "missing_tool", "message": f"{tool} is not installed.",
                     "next_step": command}
         return {"cause": "unavailable"}
@@ -1602,6 +1675,23 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # Each read is one short CLI session, not a tool left running: no command line.
         return {"available": True, "command": None, "device": device}
 
+    @app.get("/api/survey")
+    def survey():
+        """One read-only Wi-Fi metadata census per channel via nmcli.
+
+        Reads SSID, BSSID, channel, signal and security only — never connects and carries no
+        payload field. Uses the host Wi-Fi radio, so it never disturbs an SDR sweep or decoder.
+        Missing nmcli, no Wi-Fi radio or a scan failure is a 503 with the reason, never an
+        invented network.
+        """
+        scanner = app.state.survey
+        try:
+            result = scanner.scan()
+        except SurveyUnavailable as exc:
+            return _refused("survey", exc, {"total": 0, "channels": [], "networks": []})
+        last_refusal.pop("survey", None)
+        return {"available": True, **result}
+
     @app.get("/api/rds")
     def rds():
         """The RDS station assembled off the tuned FM frequency. No radio / no redsea is a 503.
@@ -1720,6 +1810,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": decoder.freq_hz,
             "messages": decoder.messages(limit),
         }
+
+    def _log_foreign_ais(count, source_port):
+        try:
+            log_event(app.state.events_path, "ais_foreign_datagrams",
+                      {"count": count, "source_port": source_port})
+        except OSError as exc:
+            logging.getLogger(__name__).warning("could not log rejected AIS datagrams: %s", exc)
 
     @app.get("/api/ais")
     def ais(limit: int | None = None):
@@ -2005,7 +2102,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     return
                 try:
                     event = log_event(app.state.events_path, "reception", record,
-                                      event_id=uuid4().hex)
+                                      event_id=uuid4().hex, sync=managed)
                 except OSError as exc:
                     app.state.reception_error = f"a reception could not be logged: {exc}"
                     return
