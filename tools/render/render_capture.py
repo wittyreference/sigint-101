@@ -47,6 +47,21 @@ MEASURE = r"""
     return within(el) && height >= 72 && height <= 80;
   };
   const law = pick('.capture__law');
+  const bar = pick('.statusbar');
+  const barRect = bar.getBoundingClientRect();
+  const fitsBar = el => {
+    if (!within(el)) return false;
+    const box = el.getBoundingClientRect();
+    return box.left >= barRect.left && box.top >= barRect.top &&
+      box.right <= barRect.right && box.bottom <= barRect.bottom;
+  };
+  const siblingsFit = parent => {
+    const shown = [...parent.children].filter(el => el.getClientRects().length);
+    if (!shown.every(fitsBar)) return false;
+    const boxes = shown.map(el => el.getBoundingClientRect());
+    return boxes.every((a, i) => boxes.slice(i + 1).every(b =>
+      a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top));
+  };
   const status = pick('[data-capture-state]');
   return {
     theme: pick('.app').dataset.theme,
@@ -64,6 +79,12 @@ MEASURE = r"""
       discard: pick('[data-capture-stop]').textContent === 'Stop and discard',
     } : null,
     entry: control('a.capture-link'),
+    header: barRect.width === 800 && barRect.height === 75 && within(bar) &&
+      siblingsFit(bar) && siblingsFit(pick('.statusbar__status')) &&
+      siblingsFit(pick('.statusbar__readouts')) &&
+      ['.btn-back', 'a.capture-link', 'a[href="/logbook"]', 'a[href="/field"]', '.btn-theme']
+        .every(selector => control('.statusbar ' + selector) &&
+          fitsBar(pick('.statusbar ' + selector))),
   };
 })()
 """
@@ -90,7 +111,10 @@ def main(console):
                 ("saving", "Saving…", ""),
                 ("saved", "Capture saved", ""),
                 ("error", "no RTL-SDR on the USB bus", "no RTL-SDR on the USB bus"),
-                ("error", "Capture storage is full", "Capture storage is full"),
+                ("error", "Capture storage is full: 25 MB capture quota",
+                 "Capture storage is full: 25 MB capture quota"),
+                ("error", "Capture storage is full: keep 64 MiB free",
+                 "Capture storage is full: keep 64 MiB free"),
             ):
                 browser.ev(f"sessionStorage.setItem('capture-fixture-state', {json.dumps(state)})")
                 browser.ev(
@@ -106,7 +130,8 @@ def main(console):
                     })
                     measure = browser.ev(MEASURE)
                 screens[expected] = measure
-            ok = rack["back"] and rack["entry"]
+            ok = (rack["theme"] == theme and rack["width"] == 800 and rack["height"] == 480
+                  and rack["back"] and rack["entry"] and rack["header"])
             for expected, measure in screens.items():
                 capture = measure["capture"]
                 ok &= (measure["theme"] == theme and measure["width"] == 800

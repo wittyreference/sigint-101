@@ -189,17 +189,25 @@ def _measure_files(parent):
 def _used(root, staging, mount):
     size = 0
     for stem in os.listdir(root):
-        if STEM.fullmatch(stem):
+        if not STEM.fullmatch(stem):
+            continue
+        try:
             with _directory(root, stem, mount) as clip:
                 size += _measure_files(clip)
+        except OSError as exc:
+            # A stray link or a vanished name is not a clip. Checked directory opens never
+            # follow it. Ownership, mount and other verification failures still refuse.
+            if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                raise
     for name in os.listdir(staging):
-        if _OWNER_NAME.fullmatch(name) or _PENDING_NAME.fullmatch(name):
-            with _directory(staging, name, mount) as owner:
-                try:
-                    with _directory(owner, PAYLOAD, mount) as payload:
-                        size += _measure_files(payload)
-                except FileNotFoundError:
-                    pass
+        if not (_OWNER_NAME.fullmatch(name) or _PENDING_NAME.fullmatch(name)):
+            continue
+        try:
+            with (_directory(staging, name, mount) as owner,
+                  _directory(owner, PAYLOAD, mount) as payload):
+                size += _measure_files(payload)
+        except FileNotFoundError:
+            pass
     return size
 
 
@@ -211,8 +219,12 @@ def _space(root, staging, mount):
         raise CaptureStorageError("Capture storage is full: 25 MB capture quota", full=True)
 
 
+def _is_full(exc):
+    return isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EDQUOT}
+
+
 def _storage_error(exc):
-    if isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EDQUOT}:
+    if _is_full(exc):
         return CaptureStorageError("Capture storage is full: disk write refused", full=True)
     return CaptureStorageError(f"Capture storage error: {exc}")
 
@@ -324,7 +336,7 @@ class CaptureStore:
                         try:
                             fsync_fd(owner)
                             fsync_fd(root)
-                        except OSError:
+                        except OSError as publication_error:
                             self._hidden.add(stem)
                             try:
                                 if not _still_named(root, stem, payload):
@@ -332,10 +344,14 @@ class CaptureStore:
                                 _rename_new(root, stem, owner, PAYLOAD)
                                 fsync_fd(root)
                                 fsync_fd(owner)
-                            except OSError as exc:
+                            except OSError as rollback_error:
+                                full = _is_full(publication_error) or _is_full(rollback_error)
+                                label = ("Capture storage is full" if full
+                                         else "Capture storage error")
                                 raise CaptureStorageError(
-                                    f"Capture storage error: could not roll back saved pair ({exc})"
-                                ) from exc
+                                    f"{label}: could not sync saved pair ({publication_error}) "
+                                    f"or roll it back ({rollback_error})", full=full,
+                                ) from rollback_error
                             raise
                 return {"id": stem, "bytes": len(data) + len(meta)}
             finally:

@@ -1786,3 +1786,46 @@ def test_claim_precheck_refuses_published_capture_reap_failure(tmp_path, monkeyp
         finally:
             proc.unkillable = False
             proc.close_pipe()
+
+
+def test_queued_claim_does_not_retry_a_failed_capture_stop(tmp_path, monkeypatch):
+    from tests.test_capture import TUNE, Recorder, capture, client
+
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.02)
+    proc = Recorder(tmp_path, unkillable=True)
+    cap = capture(tmp_path, proc)
+    queued, proceed = threading.Event(), threading.Event()
+    measurements = []
+
+    with client(tmp_path, cap, ppm_measure=lambda **_: measurements.append(True)) as c:
+        assert c.post("/api/capture/start", json=TUNE).status_code == 200
+        arbiter = c.app.state.radio_arbiter
+        reserve = arbiter.reserve
+
+        @contextmanager
+        def parked_reserve(target, *args):
+            assert target == "ppm"
+            queued.set()
+            assert proceed.wait(5)
+            with reserve(target, *args):
+                yield
+
+        monkeypatch.setattr(arbiter, "reserve", parked_reserve)
+        try:
+            with ThreadPoolExecutor(1) as pool:
+                claim = pool.submit(c.post, "/api/ppm/measure")
+                try:
+                    assert queued.wait(3)
+                    cap.stop()
+                    reason = cap.release_failure()
+                    assert reason and proc.sent == ["TERM", "KILL"]
+                finally:
+                    proceed.set()
+                response = claim.result(5)
+            assert response.status_code == 503 and response.json()["reason"] == reason
+            assert proc.sent == ["TERM", "KILL"] and not measurements
+        finally:
+            proc.unkillable = False
+            cap.stop()
+            proc.close_pipe()

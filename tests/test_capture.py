@@ -214,6 +214,75 @@ def test_capture_preflight_refuses_before_standdown(tmp_path, case):
         proc.close_pipe()
 
 
+def test_capture_preflight_does_not_protect_the_radio(tmp_path, monkeypatch):
+    from sigint101.capture_store import CaptureStorageError
+
+    entered, allow_refusal = threading.Event(), threading.Event()
+    cap = capture(tmp_path, spawn=lambda *_a, **_kw: pytest.fail("capture must not launch"))
+
+    def preflight():
+        entered.set()
+        assert allow_refusal.wait(5)
+        raise CaptureStorageError("Capture storage is full: 25 MB capture quota", full=True)
+
+    monkeypatch.setattr(cap.store, "preflight", preflight)
+    with client(tmp_path, cap) as c, ThreadPoolExecutor(1) as pool:
+        pending = pool.submit(c.post, "/api/capture/start", json=TUNE)
+        try:
+            assert entered.wait(3)
+            assert c.get("/api/spectrum").status_code == 200
+            assert c.get("/api/capture").json()["state"] == "idle"
+            assert c.post("/api/capture/start", json=TUNE).status_code == 409
+        finally:
+            allow_refusal.set()
+        assert pending.result(3).status_code == 507
+
+
+@pytest.mark.parametrize("where", ["preflight", "claim"])
+def test_capture_refusal_preserves_a_saved_clip_and_status(tmp_path, monkeypatch, where):
+    proc = Recorder(tmp_path)
+    cap = capture(tmp_path, proc)
+    with client(tmp_path, cap) as c:
+        assert c.post("/api/capture/start", json=TUNE).status_code == 200
+        proc.feed().join(3)
+        cap.drain()
+        saved = c.get("/api/capture").json()
+        assert saved["state"] == "saved" and cap.store.catalog() == [saved["last_saved"]]
+        with monkeypatch.context() as patch:
+            if where == "preflight":
+                patch.setattr(cap, "_which", lambda _: None)
+            else:
+                patch.setattr(c.app.state.ppm_calibration, "release_failure",
+                              lambda: "the calibration child has not exited")
+            response = c.post("/api/capture/start", json=TUNE)
+        assert response.status_code == 503
+        assert c.get("/api/capture").json() == saved
+        assert cap.store.catalog() == [saved["last_saved"]]
+
+
+@pytest.mark.parametrize("where", ["preflight", "spawn"])
+def test_unexpected_capture_failure_leaves_start_available(tmp_path, monkeypatch, where):
+    proc = Recorder(tmp_path)
+    cap = capture(tmp_path, proc)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("fixture unexpectedly failed")
+
+    attr = (cap.store, "preflight") if where == "preflight" else (cap, "_spawn")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(*attr, broken)
+            with pytest.raises(RuntimeError, match="fixture unexpectedly failed"):
+                start(cap)
+        assert cap.snapshot()["state"] == "idle" and cap.protection() is None
+        assert start(cap)["state"] == "recording"
+    finally:
+        cap.shutdown()
+        proc.close_pipe()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
 @pytest.mark.parametrize("inventory", [
     INVENTORY, INVENTORY.replace("abc", "def"), INVENTORY.replace("device 0:", "device 1:"),
     INVENTORY.replace("Found 1", "Found 2"), INVENTORY.replace("SN: abc", "SN:"),
@@ -316,7 +385,7 @@ def test_capture_deadline_starts_before_spawn_and_covers_no_eof(tmp_path, monkey
             assert entered.wait(2)
             if case == "queue":
                 assert not release.wait(0.25)
-                assert cap.snapshot()["state"] == "starting"
+                assert cap.snapshot()["state"] == "idle" and cap.protection() is None
                 release.set()
                 future.result(2)
             if case == "no-eof":
@@ -603,3 +672,84 @@ def test_capture_disk_failure_keeps_previous_pairs(tmp_path, monkeypatch, op, co
     assert failed and store.catalog() == [first]
     result = store.save(b"next", b"{}")
     assert result in store.catalog() and len(store.catalog()) == 2
+
+
+@pytest.mark.parametrize("operation", ["preflight", "save"])
+@pytest.mark.parametrize("obstacle", ["symlink", "vanished-owner"])
+def test_capture_quota_survives_a_stray_entry(tmp_path, monkeypatch, operation, obstacle):
+    from sigint101 import capture_store
+
+    store = _store(tmp_path)
+    first = store.save(b"kept", b"{}")
+    if obstacle == "symlink":
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "untouched").write_text("leave this alone")
+        stray = tmp_path / "captures" / ("c-20260101t000000z-" + "0" * 32)
+        stray.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        used, listdir = capture_store._used, os.listdir
+        vanished = "0" * 32
+
+        def race(root, staging, mount):
+            # Create this owner after the sweep. It vanishes between listing and opening.
+            os.mkdir(vanished, 0o700, dir_fd=staging)
+
+            def list_then_remove(fd):
+                names = listdir(fd)
+                if fd == staging:
+                    os.rmdir(vanished, dir_fd=staging)
+                return names
+
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "listdir", list_then_remove)
+                return used(root, staging, mount)
+
+        monkeypatch.setattr(capture_store, "_used", race)
+
+    expected = [first]
+    if operation == "preflight":
+        store.preflight()
+    else:
+        expected.append(store.save(b"next", b"{}"))
+    assert sorted(store.catalog(), key=lambda item: item["id"]) == sorted(
+        expected, key=lambda item: item["id"]
+    )
+    if obstacle == "symlink":
+        assert stray.is_symlink() and (elsewhere / "untouched").read_text() == "leave this alone"
+
+
+@pytest.mark.parametrize("publish,rollback", [
+    (errno.ENOSPC, errno.EIO), (errno.EDQUOT, errno.ENOSPC), (errno.EIO, errno.EDQUOT),
+])
+def test_capture_reports_full_when_publication_and_rollback_fail(
+        tmp_path, monkeypatch, publish, rollback):
+    from sigint101 import capture_store
+
+    store = _store(tmp_path)
+    first = store.save(b"previous", b"{}")
+    root_stat = (tmp_path / "captures").stat()
+    rename, fsync = capture_store._rename_new, capture_store.fsync_fd
+    renames = 0
+
+    def track_rename(*args):
+        nonlocal renames
+        rename(*args)
+        renames += 1
+
+    def fail_parent_sync(fd):
+        if renames and os.path.samestat(os.fstat(fd), root_stat):
+            if renames == 1:
+                raise OSError(publish, "fixture publication sync failed")
+            raise OSError(rollback, "fixture rollback sync failed")
+        fsync(fd)
+
+    monkeypatch.setattr(capture_store, "_rename_new", track_rename)
+    monkeypatch.setattr(capture_store, "fsync_fd", fail_parent_sync)
+    with pytest.raises(capture_store.CaptureStorageError) as refused:
+        store.save(b"next", b"{}")
+    error = refused.value
+    assert error.full and str(error).startswith("Capture storage is full: ")
+    assert f"[Errno {publish}] fixture publication sync failed" in str(error)
+    assert f"[Errno {rollback}] fixture rollback sync failed" in str(error)
+    assert renames == 2 and store.catalog() == [first]

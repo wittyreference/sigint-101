@@ -771,6 +771,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _attach_hooks(state) -> None:
         def capture_event(kind, payload):
+            # The store syncs the saved pair. These events only describe the capture attempt.
             try:
                 log_event(state.events_path, kind, payload)
             except OSError as exc:
@@ -1930,10 +1931,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 receiver.validate_start(intent)
                             for name, consumer in consumers.items():
                                 if name != target:
-                                    if name == "capture":
-                                        consumer.release()
-                                    else:
-                                        getattr(consumer, "release_for_claim", consumer.release)()
+                                    getattr(consumer, "release_for_claim", consumer.release)()
                                     failure = getattr(consumer, "release_failure", None)
                                     if failure and (reason := failure(pending=True)):
                                         raise refusal(reason)

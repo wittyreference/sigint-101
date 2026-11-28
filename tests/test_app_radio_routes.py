@@ -698,3 +698,47 @@ def test_capture_routes_have_one_explicit_start_and_keep_result(tmp_path):
     assert _kinds(tmp_path).count("capture_start") == 1
     assert _kinds(tmp_path).count("capture_end") == _kinds(tmp_path).count("capture_saved") == 1
     assert _kinds(tmp_path).count("capture_refused") == 2
+
+
+def test_cancelled_capture_spawn_has_no_start_event_or_managed_sync(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sigint101 import app
+    from tests.test_capture import TUNE, Recorder, capture, client
+    from tests.test_updater_validation import _make_managed_generation
+
+    entered, return_child = threading.Event(), threading.Event()
+    generation = _make_managed_generation(tmp_path)
+    generation.chmod(0o700)
+    proc = Recorder(generation)
+
+    def spawn(*_args, **_kwargs):
+        entered.set()
+        assert return_child.wait(5)
+        return proc
+
+    events = []
+    log = app.log_event
+
+    def spy(path, kind, payload, **kwargs):
+        if kind.startswith("capture_"):
+            events.append((kind, kwargs.get("sync", False)))
+        return log(path, kind, payload, **kwargs)
+
+    monkeypatch.setattr(app, "log_event", spy)
+    cap = capture(generation, spawn=spawn)
+    with client(generation, cap, managed=True) as c, ThreadPoolExecutor(2) as pool:
+        starting = pool.submit(c.post, "/api/capture/start", json=TUNE)
+        try:
+            assert entered.wait(3), starting.result(1).json().get("reason")
+            ticket = cap._ticket
+            stopping = pool.submit(c.post, "/api/capture/stop")
+            assert ticket.cancelled.wait(3)
+        finally:
+            return_child.set()
+        assert starting.result(5).json()["state"] == "stopped"
+        assert stopping.result(5).status_code == 200
+        cap.drain()
+    assert proc.poll() is not None and not cap.store.catalog()
+    assert events == [("capture_end", False)]
+    assert "capture_start" not in _kinds(generation)

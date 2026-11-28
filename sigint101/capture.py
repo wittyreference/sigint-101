@@ -141,6 +141,7 @@ class Capture(SupervisedReceiver):
         self.error = None
         self._runs = childproc.RunGuard()
         self._ticket = None
+        self._pending = None  # A start request can be preparing without owning the radio.
         self._last_saved = None
         self._controls = 0
         self.on_event = None
@@ -158,9 +159,11 @@ class Capture(SupervisedReceiver):
         with self._life:
             if reason := self.release_failure():
                 raise CaptureUnavailable(reason)
-            if self._closing or self._controls or (self._ticket and self._ticket.busy):
+            previous = self._ticket
+            if (self._closing or self._controls or self._pending
+                    or (previous is not None and previous.busy)):
                 raise CaptureUnavailable("A capture is already in progress", status=409)
-            self._ticket = ticket
+            self._pending = ticket
         try:
             if not self._which(TOOL):
                 raise CaptureUnavailable("rtl_sdr is not installed")
@@ -174,28 +177,29 @@ class Capture(SupervisedReceiver):
             ticket.census_size, ticket.radio = len(census), radio
             self.store.preflight()
             claim()
-        except (CaptureUnavailable, CaptureStorageError, DeviceSelectionError) as exc:
+        except CaptureStorageError as exc:
+            raise CaptureUnavailable(str(exc), status=507 if exc.full else 503) from exc
+        except DeviceSelectionError as exc:
+            raise CaptureUnavailable(str(exc)) from exc
+        except CaptureUnavailable:
+            if not (ticket.cancelled.is_set() and ticket.state == "stopped"):
+                raise
+        finally:
             with self._life:
                 if not ticket.spawned:
                     ticket.busy = False
+                    if self._ticket is ticket:
+                        self._ticket = previous
                     if ticket.timer is not None:
                         ticket.timer.cancel()
-                if ticket.cancelled.is_set() and ticket.state == "stopped":
-                    return self.snapshot(settings())
-                if not ticket.spawned and not ticket.cancelled.is_set():
-                    ticket.state, ticket.reason = "error", str(exc)
-            if isinstance(exc, CaptureStorageError):
-                raise CaptureUnavailable(str(exc), status=507 if exc.full else 503) from exc
-            if isinstance(exc, DeviceSelectionError):
-                raise CaptureUnavailable(str(exc)) from exc
-            raise
+                self._pending = None
         return self.snapshot(settings())
 
     def validate_start(self, intent):
         super().validate_start(intent)
         ticket, = intent.args
         with self._life:
-            if not ticket.busy or ticket.cancelled.is_set() or ticket is not self._ticket:
+            if not ticket.busy or ticket.cancelled.is_set() or ticket is not self._pending:
                 raise CaptureUnavailable("Capture start was cancelled")
         if ticket.tune != ticket.settings():
             raise CaptureUnavailable("Confirm the current Waterfall dial", status=409)
@@ -203,9 +207,10 @@ class Capture(SupervisedReceiver):
         ticket.ppm = measured if measured is not None and math.isfinite(measured) else None
 
     def _prepare_launch(self, _hz, _number):
-        ticket = self._ticket
-        if ticket is None or not ticket.busy or ticket.cancelled.is_set():
-            raise CaptureUnavailable("Capture start was cancelled")
+        with self._life:
+            ticket = self._pending
+            if ticket is None or not ticket.busy or ticket.cancelled.is_set():
+                raise CaptureUnavailable("Capture start was cancelled")
         hz, gain = ticket.tune["hz"], ticket.tune["gain"]
         argv = [TOOL, "-d", str(ticket.radio["index"]), "-f", str(hz), "-s", str(RATE),
                 "-n", str(SAMPLES)]
@@ -217,6 +222,8 @@ class Capture(SupervisedReceiver):
             with self._life:
                 if ticket.cancelled.is_set():
                     raise CaptureUnavailable("Capture start was cancelled")
+                # Preflight and claim admission succeeded. Only now protect the radio.
+                self._ticket = ticket
                 ticket.launched_at = _utc()
                 ticket.deadline = time.monotonic() + CAPTURE_TIMEOUT_S
                 ticket.timer = threading.Timer(CAPTURE_TIMEOUT_S, self._expire, (ticket,))
@@ -259,7 +266,7 @@ class Capture(SupervisedReceiver):
     def _control_capture(self, control):
         with self._life:
             self._controls += 1
-            self._cancel_recording(self._ticket, "stopped", "Capture stopped")
+            self._cancel_recording(self._pending or self._ticket, "stopped", "Capture stopped")
         try:
             control()
         finally:
@@ -276,6 +283,9 @@ class Capture(SupervisedReceiver):
         self._control_capture(super().shutdown)
 
     def _read(self, proc, number, ticket):
+        with self._runs:
+            if not self._runs.is_current(number) or ticket.cancelled.is_set():
+                return
         self._event("capture_start", ticket, freq_hz=ticket.tune["hz"], gain=ticket.tune["gain"])
         try:
             fd = proc.stdout.fileno()
