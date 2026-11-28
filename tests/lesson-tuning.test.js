@@ -49,7 +49,8 @@ function stub() {
 // A lesson page in a fresh realm: a fake clock, a console whose retune lands when /api/tuning is
 // answered, and the scripts run in page order, each in its own tag. As in a browser, a script that
 // throws is reported and the next tag still runs.
-function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held" } = {}) {
+// `band` puts a lesson band on the waterfall's canvas, as the lesson page's data-tune-* do.
+function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", band = null } = {}) {
   let now = 0;
   let seq = 0;
   const timers = [];
@@ -91,6 +92,8 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held" } = 
         if (!wanted.has(sel)) return [];
         if (sel === ".waterfall-wrap") {
           const canvas = stub();
+          if (band) canvas.getAttribute = key => ({ "data-tune-low": band.low,
+                                                    "data-tune-high": band.high })[key] || null;
           return [{ querySelector: key => (key === "canvas.waterfall" ? canvas : stub()),
                     closest: () => null }];
         }
@@ -248,6 +251,24 @@ test("a refusal without a reason of its own still fits the rail, verdict and sta
   for (const line of page.note.lines) {
     assert.ok(line.length <= RAIL_CHARS, `"${line}" does not fit the rail`);
   }
+});
+
+test("on a lesson page the restore sets the band, so the waterfall posts no band tune of its own",
+     async () => {
+  // A band tune of the page's own could be refused behind an earlier lesson's stuck restore and
+  // leave the sweep off the band in silence; the restore sets it in order, under the same lock.
+  const page = lessonPage({ panels: ["waterfall"], band: { low: "432920000", high: "434920000" } });
+  await page.answer(200, { tuned: true, lesson_id: 7 });
+  assert.deepEqual(page.requests.filter(r => r.url === "/api/tune"), []);
+  assert.equal(page.polls("/api/spectrum").length, 1);
+});
+
+test("a waterfall with a band and no lesson restore still tunes to the band itself", async () => {
+  const page = lessonPage({ lessonId: null, panels: ["waterfall"],
+                            band: { low: "432920000", high: "434920000" } });
+  await settle();
+  const tunes = page.requests.filter(r => r.url === "/api/tune");
+  assert.deepEqual(tunes.map(r => r.method), ["POST"]);
 });
 
 test("a page that names no lesson posts nothing and its panels poll at once", async () => {

@@ -994,13 +994,13 @@
     return Promise.resolve();
   }
 
-  function start() { autoTuneToBand().then(tick); }
-
   say("checking", "sample", "Checking receiver…");
-  // The band tune follows the lesson's restore, as it did when the restore blocked the page.
-  // On a lesson page the first poll waits for the lesson's tuning (lesson-tuning.js), so it
-  // reads the lesson's frequency, not the one the rack left; past the timeout it polls anyway
-  // and the page says the radios are still being tuned. The rack starts at once.
-  if (window.LessonTuning) window.LessonTuning.ready.then(start);
-  else start();
+  // On a lesson page the restore (lesson-tuning.js, POST /api/tuning) sets the lesson's band
+  // itself, in order with its other resets, so a band tune of the page's own, refused behind an
+  // earlier lesson's stuck restore, can never leave the sweep off the band in silence. The first
+  // poll waits for the restore, so it reads the lesson's frequency; past the timeout it polls
+  // anyway and the rail says the radios are still being tuned. Elsewhere the panel tunes to a
+  // band it carries itself and starts at once.
+  if (window.LessonTuning) window.LessonTuning.ready.then(tick);
+  else autoTuneToBand().then(tick);
 })();

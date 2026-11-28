@@ -21,7 +21,13 @@ from sigint101.flock import FLOCK_SOURCE_ENV, FLOCK_SOURCE_MARAUDER, MarauderFlo
 from sigint101.hardware import RadioProbe
 from sigint101.operate import INSTRUMENTS
 from sigint101.pocsag import PocsagDecoder
-from sigint101.spectrum import DEFAULT_HIGH, DEFAULT_LOW, Sweeper, target_span
+from sigint101.spectrum import (
+    DEFAULT_HIGH,
+    DEFAULT_LOW,
+    Sweeper,
+    target_span,
+    validate_target_span,
+)
 from sigint101.units import unit_for_lesson
 from tests.child_fakes import Child
 
@@ -790,6 +796,76 @@ def test_a_poll_or_tune_during_a_stuck_restore_is_refused_within_the_bound(tmp_p
             assert restore.finish().status_code == 200
         assert client.get("/api/aprs").status_code == 200
         assert spawned == [144_390_000]
+
+
+BAND_HZ, BAND_SPAN_HZ = 433_920_000, 2_000_000
+
+
+def _two_lesson_packs(pack_dir):
+    """Lesson 1 has no band (its restore puts the sweep on FM); lesson 2 has the 433.92 MHz band."""
+    _radio_pack(pack_dir)
+    (pack_dir / "02-band.yaml").write_text(
+        "id: 2\nslug: band\ntitle: Band\nconcept: c\ntype: consolidation\n"
+        "hardware: [rtl-sdr]\n"
+        f"tune:\n  center_hz: {BAND_HZ}\n  span_hz: {BAND_SPAN_HZ}\n"
+        "stages:\n  predict: p\n  operate: o\n  observe: s\n  explain: e\n"
+        "choices:\n  - key: a\n    label: A\n  - key: b\n    label: B\n", encoding="utf-8")
+    return pack_dir
+
+
+def _on_the_band(sweeper):
+    low, high, bin_size = validate_target_span(BAND_HZ, BAND_SPAN_HZ)
+    return (sweeper.low, sweeper.high, sweeper.bin_size, sweeper.target) == (
+        low, high, bin_size, BAND_HZ)
+
+
+def test_opening_a_lesson_with_a_band_puts_the_sweep_on_it(tmp_path):
+    # The restore sets the band itself, as the waterfall's band tune would, so a band tune of the
+    # page's own can never be refused and leave the lesson off its band.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        _open_lesson(client, 2)
+        assert _on_the_band(client.app.state.sweeper)
+
+
+def test_the_next_lessons_band_lands_after_a_stuck_restore_from_the_lesson_before(tmp_path):
+    # The review's case: lesson A's restore is stuck in a step when the learner moves on to
+    # lesson B, which has a band. B's restore waits its turn, then sets B's band; until it does,
+    # it has not answered, so B's rail says "Tuning…" rather than nothing.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        sweeper = client.app.state.sweeper
+        with _slow_restore(client) as (held, restore_a):
+            restore_b = _Request(lambda: client.post("/api/tuning?lesson_id=2"))
+            restore_b.start()
+            time.sleep(0.3)
+            assert not _on_the_band(sweeper)
+            assert restore_b.is_alive(), "B's restore answered with the sweep still off its band"
+            held.release.set()
+            assert restore_a.finish().status_code == 200
+            assert restore_b.finish().status_code == 200
+        assert _on_the_band(sweeper), "B's sweep ended off the band its lesson names"
+
+
+def test_a_restore_that_raises_lets_go_of_the_radios(tmp_path):
+    # A restore that fails part-way must not leave every later claim and tune refused.
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/decode/tune", json={"freq_hz": 434_000_000})
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("rtl_433 would not stop")
+
+        client.app.state.decoder.retune = broken
+        with pytest.raises(RuntimeError):
+            client.post("/api/tuning?lesson_id=1")
+        started = time.monotonic()
+        assert client.get("/api/aprs").status_code == 200
+        assert client.post("/api/tune", json={"low": 100_000_000,
+                                              "high": 102_000_000}).status_code == 200
+        assert time.monotonic() - started < 1.0, "a claim or a tune waited on a dead restore"
 
 
 # --- the reception log --------------------------------------------------------------------------

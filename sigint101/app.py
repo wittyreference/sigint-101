@@ -767,8 +767,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
         The rack retunes the single-channel decoders and the sweep; a lesson's copy and panels
         name its own frequencies. Each decoder goes back to the frequency it was built for, and
-        a lesson with no band of its own gets the FM sweep it was written against (a lesson with
-        a band retunes the sweep itself when it loads). Nothing restarts that is already there.
+        the sweep goes to the lesson's band, or to the FM sweep a lesson with no band of its own
+        was written against. Nothing restarts that is already there.
 
         The page posts this without blocking, so it runs through the tuning gate: no radio claim
         starts a tool until it is done, and each reset is skipped if a tune of that receiver (the
@@ -788,14 +788,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     or getattr(sweeper, "target", None) is not None):
                 sweeper.retune(DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_BIN)
 
+        def band(sweeper):
+            # The span /api/tune builds for the waterfall's band request (centre and width, so
+            # the target lands on measured bins), set here in order with the other resets.
+            center = lesson.tune["center_hz"]
+            low, high, bin_size = validate_target_span(
+                center, lesson.tune["high_hz"] - lesson.tune["low_hz"], lesson.tune["bin_hz"])
+            if ((sweeper.low, sweeper.high, sweeper.bin_size) != (low, high, bin_size)
+                    or getattr(sweeper, "target", None) != center):
+                sweeper.retune(low, high, bin_size, target=center)
+
         try:
             for inst in INSTRUMENTS:
                 if inst.band:
                     receiver = getattr(app.state, inst.receiver)
                     gate.restore_step(inst.receiver, token, lambda r=receiver: home(r))
-            if not lesson.tune:
-                sweeper = app.state.sweeper
-                gate.restore_step("sweeper", token, lambda: fm(sweeper))
+            sweeper = app.state.sweeper
+            gate.restore_step("sweeper", token,
+                              lambda: band(sweeper) if lesson.tune else fm(sweeper))
         finally:
             gate.end_restore()
 
