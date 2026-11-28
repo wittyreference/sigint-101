@@ -9,6 +9,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -193,7 +194,7 @@ _CONSOLE = textwrap.dedent("""
             raise OSError("refused")
 
         os.rename = refuse
-        Path.unlink = refuse
+        os.unlink = refuse
         child.close_pipe()
         dec.stop()
         print(staged, flush=True)
@@ -890,18 +891,68 @@ def test_the_discard_queue_is_emptied_through_its_descriptor(tmp_path, consoles,
         ("retired.png", discard_ino)]
 
 
-def test_a_discard_queue_writable_by_others_is_left(tmp_path, consoles, caplog):
+def test_a_discard_queue_left_shared_by_an_earlier_version_is_closed_and_used(tmp_path, consoles):
+    # Earlier versions made .discard under the umask (0775). It is this account's: close it.
     staging = _staging(tmp_path)
     staging.mkdir(mode=0o700)
     discard = staging / ".discard"
     discard.mkdir(mode=0o700)
     (discard / "retired.png").write_bytes(PNG_BYTES)
-    discard.chmod(0o777)
-    dec, _, _ = consoles()
+    discard.chmod(0o775)
+    dec, launches, _ = consoles()
+    dec.start()
+    assert discard.stat().st_mode & 0o777 == 0o755
+    assert not (discard / "retired.png").exists()
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    _finish(child, code=1)
+    dec.stop()
+    assert not staged.exists() and list(discard.iterdir()) == []
+
+
+def test_a_discard_queue_that_is_not_a_folder_is_left(tmp_path, consoles, caplog):
+    staging = _staging(tmp_path)
+    staging.mkdir(mode=0o700)
+    (staging / ".discard").write_text("not a folder")
+    dec, launches, _ = consoles()
     with caplog.at_level(logging.WARNING, logger=LOG):
         dec.start()
-    assert (discard / "retired.png").is_file()
+        child, staged = launches[0]
+        staged.write_bytes(PNG_BYTES)
+        _finish(child, code=1)
+        dec.stop()
+    assert (staging / ".discard").read_text() == "not a folder"
+    assert not staged.exists()
     assert any(".discard" in record.message for record in caplog.records)
+
+
+def test_a_capture_removed_in_place_goes_by_its_folders_descriptor(tmp_path, consoles,
+                                                                   monkeypatch):
+    # When the queue cannot be used, the failed capture is unlinked relative to this decoder's
+    # own subfolder, never by a path.
+    gallery = _gallery_with_bait(tmp_path)
+    staging = _staging(tmp_path)
+    staging.mkdir(mode=0o700)
+    (staging / ".discard").symlink_to(gallery, target_is_directory=True)
+    dec, launches, _ = consoles()
+    dec.start()
+    child, staged = launches[0]
+    staged.write_bytes(PNG_BYTES)
+    owner_ino = staged.parent.stat().st_ino
+    calls = []
+    real_unlink = os.unlink
+
+    def recorded_unlink(path, *, dir_fd=None):
+        calls.append((str(path), None if dir_fd is None else os.fstat(dir_fd).st_ino))
+        return real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", recorded_unlink)
+    _finish(child, code=1)
+    dec.stop()
+    monkeypatch.undo()
+    assert not staged.exists()
+    assert [call for call in calls if call[0].endswith(staged.name)] == [
+        (staged.name, owner_ino)]
 
 
 # --- a creation cut short by a crash (agy2 F4) -------------------------------------------------
@@ -943,3 +994,80 @@ def test_a_creation_still_in_progress_is_not_tidied(tmp_path, consoles):
     second, _, _ = consoles()
     second.start()
     assert not pending.exists()
+
+
+# Holds the creation lock exclusively, as a sweeper frozen mid-tidy would, until told to let go.
+_FROZEN_SWEEPER = textwrap.dedent("""
+    import fcntl, os, sys
+    fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    print("held", flush=True)
+    sys.stdin.readline()
+""")
+
+
+def test_a_frozen_sweeper_makes_a_start_refuse_within_its_bound(tmp_path, consoles,
+                                                                monkeypatch):
+    assert sstv._CREATE_WAIT_S <= 2.0
+    monkeypatch.setattr(sstv, "_CREATE_WAIT_S", 0.3)
+    _staging(tmp_path).mkdir(mode=0o700)
+    lock = _staging(tmp_path) / sstv._CREATE_LOCK
+    sweeper = subprocess.Popen([sys.executable, "-c", _FROZEN_SWEEPER, str(lock)],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert sweeper.stdout.readline().strip() == "held"
+        dec, launches, _ = consoles()
+        # A start that blocked on the lock would never return; run it where it can be abandoned.
+        box = {}
+
+        def start():
+            began = time.monotonic()
+            try:
+                dec.start()
+            except SstvUnavailable as exc:
+                box["refused"] = str(exc)
+            box["took"] = time.monotonic() - began
+
+        starter = threading.Thread(target=start, daemon=True)
+        starter.start()
+        starter.join(5)
+        assert "took" in box, "the start hung on the creation lock"
+        assert "another console" in box.get("refused", "")
+        assert box["took"] < 3
+        assert launches == []
+    finally:
+        sweeper.stdin.write("go\n")
+        sweeper.stdin.flush()
+        sweeper.wait(timeout=10)
+        sweeper.stdin.close()
+        sweeper.stdout.close()
+    later, launches, _ = consoles()
+    later.start()
+    assert len(launches) == 1
+
+
+def test_a_creation_lock_replaced_while_it_is_taken_refuses_the_start(tmp_path, consoles,
+                                                                      monkeypatch):
+    _staging(tmp_path).mkdir(mode=0o700)
+    lock = _staging(tmp_path) / sstv._CREATE_LOCK
+    lock.touch(mode=0o600)
+    lock_ino = lock.stat().st_ino
+    real_flock = fcntl.flock
+    swapped = []
+
+    def flock_then_replace(fd, operation):
+        result = real_flock(fd, operation)
+        if not swapped and os.fstat(fd).st_ino == lock_ino:
+            swapped.append(True)
+            replacement = lock.with_name("replacement")
+            replacement.touch(mode=0o600)
+            replacement.rename(lock)
+        return result
+
+    monkeypatch.setattr(fcntl, "flock", flock_then_replace)
+    dec, launches, _ = consoles()
+    with pytest.raises(SstvUnavailable, match="cannot stage"):
+        dec.start()
+    monkeypatch.undo()
+    assert swapped and launches == []
+    assert not [p for p in _staging(tmp_path).iterdir() if p.name.startswith(".new-")]
