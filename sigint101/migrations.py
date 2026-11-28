@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import shutil
 import sqlite3
-import tempfile
 from pathlib import Path
 
 from .storage import SchemaError, fsync_dir, fsync_file, schema_signature
@@ -130,16 +130,35 @@ def _target_head(store: str) -> int:
     raise ValueError(f"unknown store: {store!r}")
 
 
+def _validate_scratch_dir(dest_path: Path, scratch_dir: Path) -> Path:
+    """Require an exclusive private scratch directory outside the destination generation."""
+    dest_gen = dest_path.parent.resolve()
+    scratch = scratch_dir.resolve()
+    if scratch == dest_gen or scratch.is_relative_to(dest_gen):
+        raise ValueError(
+            f"recovery scratch directory must stay outside destination generation {dest_gen}: "
+            f"{scratch}"
+        )
+    if scratch.exists():
+        raise FileExistsError(f"recovery scratch directory already exists: {scratch}")
+    return scratch
+
+
 def _copy_sqlite_to_standalone_delete(
     source_path: Path,
     dest_path: Path,
     *,
+    scratch_dir: Path,
     allow_missing_source: bool,
 ) -> None:
-    """Copy a quiesced SQLite DB (recovering any journal/WAL on a private scratch copy) to dest."""
+    """Copy a quiesced SQLite DB (recovering any journal/WAL in scratch_dir) to dest_path.
+
+    Recovery scratch is created exclusively outside the destination generation and left with the
+    operation's records — never placed inside the generation and never recursively deleted.
+    """
+    scratch = _validate_scratch_dir(dest_path, scratch_dir)
     if dest_path.exists():
         raise FileExistsError(f"migration destination already exists: {dest_path}")
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     sidecars = [Path(f"{source_path}{ext}") for ext in _SQLITE_SIDECARS
                 if Path(f"{source_path}{ext}").exists()]
@@ -150,6 +169,9 @@ def _copy_sqlite_to_standalone_delete(
             )
         if not allow_missing_source:
             raise SchemaError(f"source database is missing: {source_path.name}")
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(os.fspath(dest_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
         conn = sqlite3.connect(dest_path)
         try:
             conn.execute("PRAGMA journal_mode = DELETE")
@@ -158,40 +180,52 @@ def _copy_sqlite_to_standalone_delete(
             conn.close()
         return
 
-    # Copy source + sidecars into private scratch first so hot-journal or WAL recovery NEVER
-    # mutates the archived/source database files.
-    with tempfile.TemporaryDirectory(prefix="sigint101-sql-recover-", dir=dest_path.parent) as td:
-        scratch_src = Path(td) / source_path.name
-        shutil.copy2(source_path, scratch_src)
-        for sidecar in sidecars:
-            shutil.copy2(sidecar, Path(td) / sidecar.name)
+    # Copy source + sidecars into the caller-supplied private scratch dir with writable 0600 modes
+    # so hot-journal or WAL recovery succeeds even on a 0444/0555 read-only source, without ever
+    # touching the source files or writing scratch inside the destination generation.
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.mkdir(mode=0o700, exist_ok=False)
+    scratch_src = scratch / source_path.name
+    shutil.copyfile(source_path, scratch_src)
+    scratch_src.chmod(0o600)
+    for sidecar in sidecars:
+        scratch_sidecar = scratch / sidecar.name
+        shutil.copyfile(sidecar, scratch_sidecar)
+        scratch_sidecar.chmod(0o600)
 
-        src_conn = sqlite3.connect(scratch_src)
-        dst_conn = sqlite3.connect(dest_path)
-        try:
-            check = src_conn.execute("PRAGMA integrity_check").fetchone()[0]
-            if check != "ok":
-                raise SchemaError(f"source database failed integrity_check: {check}")
-            src_conn.backup(dst_conn)
-            dst_conn.execute("PRAGMA journal_mode = DELETE")
-            dst_conn.commit()
-        except BaseException:
-            dst_conn.close()
-            if dest_path.exists():
-                dest_path.unlink()
-            raise
-        finally:
-            src_conn.close()
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(os.fspath(dest_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+
+    src_conn = sqlite3.connect(scratch_src)
+    dst_conn = sqlite3.connect(dest_path)
+    try:
+        check = src_conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if check != "ok":
+            raise SchemaError(f"source database failed integrity_check: {check}")
+        src_conn.backup(dst_conn)
+        dst_conn.execute("PRAGMA journal_mode = DELETE")
+        dst_conn.commit()
+    except BaseException:
         dst_conn.close()
+        if dest_path.exists():
+            dest_path.unlink()
+        raise
+    finally:
+        src_conn.close()
+    dst_conn.close()
 
 
 def _snapshot_rows(conn: sqlite3.Connection, tables: dict) -> dict[str, tuple[list[str], list]]:
-    """Capture every row of every existing table before migration for pre-commit equality check."""
+    """Capture every row of every existing table using SQLite quote() for type-exact equality."""
     snap: dict[str, tuple[list[str], list]] = {}
     for table, info in tables.items():
         cols = [col[1] for col in info["columns"]]
-        col_sql = ", ".join(f'"{c}"' for c in cols)
-        rows = conn.execute(f'SELECT {col_sql} FROM "{table}" ORDER BY {col_sql}').fetchall()
+        quote_sql = ", ".join(f'quote("{c}")' for c in cols)
+        order_sql = ", ".join(f'"{c}"' for c in cols)
+        rows = conn.execute(
+            f'SELECT {quote_sql} FROM "{table}" ORDER BY {order_sql}, {quote_sql}'
+        ).fetchall()
         snap[table] = (cols, rows)
     return snap
 
@@ -201,8 +235,11 @@ def _verify_preserved_rows(
     before: dict[str, tuple[list[str], list]],
 ) -> None:
     for table, (cols, expected_rows) in before.items():
-        col_sql = ", ".join(f'"{c}"' for c in cols)
-        actual = conn.execute(f'SELECT {col_sql} FROM "{table}" ORDER BY {col_sql}').fetchall()
+        quote_sql = ", ".join(f'quote("{c}")' for c in cols)
+        order_sql = ", ".join(f'"{c}"' for c in cols)
+        actual = conn.execute(
+            f'SELECT {quote_sql} FROM "{table}" ORDER BY {order_sql}, {quote_sql}'
+        ).fetchall()
         if actual != expected_rows:
             raise SchemaError(f"migration altered pre-existing rows in table {table!r}")
 
@@ -238,15 +275,17 @@ def migrate_store_copy(
     dest_path: str | Path,
     *,
     store: str,
+    scratch_dir: str | Path,
     allow_missing_source: bool = False,
     _after_step_hook=None,
     _after_version_hook=None,
 ) -> dict:
     """Copy `source_path` to an exclusive `dest_path` and migrate v0 -> v1 in one transaction.
 
-    Never writes to `source_path`. Executes every DDL step and `PRAGMA user_version=1` inside
-    one explicit `BEGIN IMMEDIATE` transaction (never `executescript`), verifies schema and
-    preserved rows before commit, reopens to confirm integrity and head, and fsyncs dest + parent.
+    Never writes to `source_path` and never places recovery scratch inside `dest_path.parent`.
+    Executes every DDL step and `PRAGMA user_version=1` inside one explicit `BEGIN IMMEDIATE`
+    transaction (never `executescript`), verifies schema and preserved rows before commit,
+    reopens to confirm integrity and head, and fsyncs dest + parent.
     """
     target_head = _target_head(store)
     fixtures = reviewed_signatures(store)
@@ -254,7 +293,9 @@ def migrate_store_copy(
     src = Path(source_path)
     dst = Path(dest_path)
 
-    _copy_sqlite_to_standalone_delete(src, dst, allow_missing_source=allow_missing_source)
+    _copy_sqlite_to_standalone_delete(
+        src, dst, scratch_dir=Path(scratch_dir), allow_missing_source=allow_missing_source
+    )
 
     conn = sqlite3.connect(dst, isolation_level=None)
     matched_v0 = None

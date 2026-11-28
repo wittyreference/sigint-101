@@ -4,16 +4,13 @@
 from __future__ import annotations
 
 import os
-import re
 import sqlite3
 from pathlib import Path
 
 # R2-4: deploy/desktop/apply-theme.sh writes wallpaper.png into ~/.local/share/sigint101, so the
-# updater's private root must never sit there or beneath it.
+# updater's private root must never sit there, beneath it, or above it as an ancestor.
 FORBIDDEN_ROOT_REL = Path(".local") / "share" / "sigint101"
 DEFAULT_UPDATER_ROOT_REL = Path(".local") / "state" / "sigint101-updater"
-
-_CHECK_RE = re.compile(r"CHECK\s*\(([^()]+)\)", re.IGNORECASE)
 
 
 class SchemaError(RuntimeError):
@@ -28,9 +25,13 @@ def validate_updater_root(root: str | Path, *, home: str | Path | None = None) -
     resolved = root_path.resolve()
     home_dir = Path(home).resolve() if home is not None else Path.home().resolve()
     forbidden = (home_dir / FORBIDDEN_ROOT_REL).resolve()
-    if resolved == forbidden or resolved.is_relative_to(forbidden):
+    if (
+        resolved == forbidden
+        or resolved.is_relative_to(forbidden)
+        or forbidden.is_relative_to(resolved)
+    ):
         raise ValueError(
-            f"updater root must not be {FORBIDDEN_ROOT_REL} or inside it: {resolved}"
+            f"updater root must not be, inside, or an ancestor of {FORBIDDEN_ROOT_REL}: {resolved}"
         )
     return resolved
 
@@ -71,19 +72,80 @@ def sync_media_asset(png_path: str | Path, *, sidecar_path: str | Path | None = 
     fsync_dir(png.parent)
 
 
-def _normalized_checks(sql: str | None) -> list[str]:
+def _normalize_sql(sql: str | None) -> str:
+    """Normalize SQLite DDL whitespace and case outside quoted literals/identifiers."""
     if not sql:
-        return []
-    checks = []
-    for match in _CHECK_RE.finditer(sql):
-        expr = re.sub(r"\s+", "", match.group(1)).lower()
-        checks.append(f"check({expr})")
-    checks.sort()
-    return checks
+        return ""
+    tokens: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            newline = sql.find("\n", i + 2)
+            i = n if newline == -1 else newline + 1
+            continue
+        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            start = i
+            i += 1
+            while i < n:
+                if sql[i] == quote:
+                    i += 1
+                    if i < n and sql[i] == quote:
+                        i += 1
+                        continue
+                    break
+                i += 1
+            tokens.append(sql[start:i])
+            continue
+        if ch == "[":
+            end = sql.find("]", i + 1)
+            if end == -1:
+                tokens.append(sql[i:])
+                i = n
+            else:
+                tokens.append(sql[i:end + 1])
+                i = end + 1
+            continue
+        if ch in ("(", ")", ",", ";"):
+            tokens.append(ch)
+            i += 1
+            continue
+        start = i
+        stop_chars = ("(", ")", ",", ";", "'", '"', "`", "[")
+        while i < n and not sql[i].isspace() and sql[i] not in stop_chars:
+            if sql[i] == "-" and i + 1 < n and sql[i + 1] == "-":
+                break
+            if sql[i] == "/" and i + 1 < n and sql[i + 1] == "*":
+                break
+            i += 1
+        tokens.append(sql[start:i].lower())
+
+    while tokens and tokens[-1] == ";":
+        tokens.pop()
+
+    out: list[str] = []
+    for tok in tokens:
+        if not out:
+            out.append(tok)
+        elif tok in (")", ",", ";") or out[-1] == "(":
+            out.append(tok)
+        else:
+            out.append(" ")
+            out.append(tok)
+    return "".join(out)
 
 
 def schema_signature(conn: sqlite3.Connection) -> dict:
-    """Return a canonical structural signature of every table, index, constraint, trigger, view."""
+    """Return a canonical signature of every table, column, index, constraint, trigger, and view."""
     tables: dict[str, dict] = {}
     rows = conn.execute(
         "SELECT name, sql FROM sqlite_master "
@@ -91,42 +153,58 @@ def schema_signature(conn: sqlite3.Connection) -> dict:
     ).fetchall()
     for row in rows:
         name, sql = row[0], row[1]
+        norm_sql = _normalize_sql(sql)
         cols = [
-            [r[0], r[1], r[2], r[3], r[4], r[5]]
-            for r in conn.execute(f'PRAGMA table_info("{name}")').fetchall()
+            list(r)
+            for r in conn.execute(f'PRAGMA table_xinfo("{name}")').fetchall()
         ]
         idxs = []
         for idx in conn.execute(f'PRAGMA index_list("{name}")').fetchall():
+            idx_name = idx[1]
+            idx_sql_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                (idx_name,),
+            ).fetchone()
+            idx_sql = _normalize_sql(idx_sql_row[0] if idx_sql_row else None)
             idx_cols = [
-                [c[0], c[1], c[2]]
-                for c in conn.execute(f'PRAGMA index_info("{idx[1]}")').fetchall()
+                list(c)
+                for c in conn.execute(f'PRAGMA index_xinfo("{idx_name}")').fetchall()
             ]
             idxs.append({
                 "unique": idx[2],
                 "origin": idx[3],
                 "partial": idx[4],
                 "cols": idx_cols,
+                "sql": idx_sql,
             })
-        idxs.sort(key=lambda item: (item["unique"], item["origin"], item["partial"], item["cols"]))
+        idxs.sort(
+            key=lambda item: (
+                item["unique"],
+                item["origin"],
+                item["partial"],
+                item["sql"],
+                item["cols"],
+            )
+        )
         fks = [
             list(fk) for fk in conn.execute(f'PRAGMA foreign_key_list("{name}")').fetchall()
         ]
         tables[name] = {
+            "sql": norm_sql,
             "columns": cols,
             "indexes": idxs,
-            "without_rowid": "without rowid" in (sql or "").lower(),
-            "checks": _normalized_checks(sql),
+            "without_rowid": "without rowid" in norm_sql,
             "foreign_keys": fks,
         }
 
     triggers = [
-        [r[0], r[1], " ".join((r[2] or "").split())]
+        [r[0], r[1], _normalize_sql(r[2])]
         for r in conn.execute(
             "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='trigger' ORDER BY name"
         ).fetchall()
     ]
     views = [
-        [r[0], " ".join((r[1] or "").split())]
+        [r[0], _normalize_sql(r[1])]
         for r in conn.execute(
             "SELECT name, sql FROM sqlite_master WHERE type='view' ORDER BY name"
         ).fetchall()
@@ -173,6 +251,17 @@ def open_managed_sqlite(
     path = Path(db_path)
     if not path.is_file():
         raise SchemaError(f"managed store file is missing: {path.name}")
+    # Inspect the 100-byte SQLite header before connecting so a WAL-mode store (version bytes 2)
+    # is refused without sqlite3.connect checkpointing the WAL or rewriting its -shm file.
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(100)
+    except OSError as exc:
+        raise SchemaError(f"cannot read managed store {path.name}: {exc}") from exc
+    if len(header) >= 20 and header[:16] == b"SQLite format 3\x00":
+        if header[18] == 2 or header[19] == 2:
+            raise SchemaError("managed store requires journal_mode=delete, found 'wal'")
+
     mode = "ro" if read_only else "rw"
     uri = f"{path.resolve().as_uri()}?mode={mode}"
     try:
@@ -181,8 +270,6 @@ def open_managed_sqlite(
         raise SchemaError(f"cannot open managed store {path.name}: {exc}") from exc
     conn.row_factory = sqlite3.Row
     try:
-        # Read journal_mode before issuing any PRAGMA write so an unexpected WAL file is refused
-        # without ever touching a byte on disk.
         jmode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
         if jmode != "delete":
             raise SchemaError(f"managed store requires journal_mode=delete, found {jmode!r}")

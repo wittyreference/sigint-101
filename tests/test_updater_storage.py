@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import shutil
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from sigint101 import events as events_mod
+from sigint101 import sstv as sstv_mod
 from sigint101 import storage as storage_mod
 from sigint101.app import create_app
 from sigint101.apt import AptDecoder
@@ -20,6 +25,8 @@ from sigint101.hardware import RadioProbe
 from sigint101.migrations import (
     EXAM_SCHEMA_VERSION,
     PROGRESS_SCHEMA_VERSION,
+    _snapshot_rows,
+    _verify_preserved_rows,
     match_v0_signature,
     migrate_store_copy,
     reviewed_signatures,
@@ -30,6 +37,7 @@ from sigint101.storage import (
     DEFAULT_UPDATER_ROOT_REL,
     FORBIDDEN_ROOT_REL,
     SchemaError,
+    open_managed_sqlite,
     schema_signature,
     validate_updater_root,
     verify_managed_connection,
@@ -296,13 +304,15 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
 
     dst_p = dst_dir / "progress.db"
     dst_e = dst_dir / "exam.db"
+    scratch = tmp_path / "staging" / "sqlite"
 
-    rp = migrate_store_copy(src_p, dst_p, store="progress")
-    re_ = migrate_store_copy(src_e, dst_e, store="exam")
+    rp = migrate_store_copy(src_p, dst_p, store="progress", scratch_dir=scratch / "progress")
+    re_ = migrate_store_copy(src_e, dst_e, store="exam", scratch_dir=scratch / "exam")
 
-    # Source files are NEVER touched.
+    # Source files are NEVER touched, and destination generation has only the two DBs (no scratch).
     assert src_p.read_bytes() == orig_p_bytes
     assert src_e.read_bytes() == orig_e_bytes
+    assert sorted(p.name for p in dst_dir.iterdir()) == ["exam.db", "progress.db"]
 
     assert rp["from_version"] == 0 and rp["to_version"] == PROGRESS_SCHEMA_VERSION
     assert rp["migrated"] is True
@@ -345,22 +355,32 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     assert writes_e == [], f"managed ExamStore open/read wrote: {writes_e}"
 
     # Re-migrating an already-v1 copy reports migrated=False and keeps exact bytes/rows.
-    dst_p2 = tmp_path / "dst2_progress.db"
-    dst_e2 = tmp_path / "dst2_exam.db"
-    rp2 = migrate_store_copy(dst_p, dst_p2, store="progress")
-    re2 = migrate_store_copy(dst_e, dst_e2, store="exam")
+    dst2_dir = tmp_path / "dst2"
+    dst2_dir.mkdir()
+    dst_p2 = dst2_dir / "progress.db"
+    dst_e2 = dst2_dir / "exam.db"
+    rp2 = migrate_store_copy(dst_p, dst_p2, store="progress", scratch_dir=scratch / "progress2")
+    re2 = migrate_store_copy(dst_e, dst_e2, store="exam", scratch_dir=scratch / "exam2")
     assert rp2["migrated"] is False and rp2["from_version"] == 1 and rp2["to_version"] == 1
     assert re2["migrated"] is False and re2["from_version"] == 1 and re2["to_version"] == 1
 
 
 def test_missing_legacy_store_bootstraps_v1_only_when_explicitly_allowed(tmp_path):
     missing = tmp_path / "absent.db"
-    dst = tmp_path / "bootstrapped.db"
+    gen = tmp_path / "gen"
+    gen.mkdir()
+    dst = gen / "bootstrapped.db"
     with pytest.raises(SchemaError, match="missing"):
-        migrate_store_copy(missing, dst, store="progress", allow_missing_source=False)
+        migrate_store_copy(
+            missing, dst, store="progress", allow_missing_source=False,
+            scratch_dir=tmp_path / "scratch1",
+        )
     assert not dst.exists()
 
-    receipt = migrate_store_copy(missing, dst, store="progress", allow_missing_source=True)
+    receipt = migrate_store_copy(
+        missing, dst, store="progress", allow_missing_source=True,
+        scratch_dir=tmp_path / "scratch2",
+    )
     assert receipt["from_version"] == 0 and receipt["to_version"] == 1
     assert not missing.exists()
     prog = Progress(dst, managed=True)
@@ -375,7 +395,9 @@ def test_missing_legacy_store_bootstraps_v1_only_when_explicitly_allowed(tmp_pat
 @pytest.mark.parametrize("fail_point", ["after_step", "after_version"])
 def test_failed_migration_rolls_back_schema_rows_and_version(tmp_path, store, fail_point):
     src = tmp_path / f"src_{store}.db"
-    dst = tmp_path / f"dst_{store}.db"
+    gen = tmp_path / "gen"
+    gen.mkdir()
+    dst = gen / f"dst_{store}.db"
     if store == "progress":
         expected = _build_progress_v0(src, "v0_72ddf9c")
     else:
@@ -394,7 +416,7 @@ def test_failed_migration_rolls_back_schema_rows_and_version(tmp_path, store, fa
         else {"_after_version_hook": boom}
     )
     with pytest.raises(RuntimeError, match=fail_point):
-        migrate_store_copy(src, dst, store=store, **kwargs)
+        migrate_store_copy(src, dst, store=store, scratch_dir=tmp_path / "scratch", **kwargs)
 
     # Source DB is completely untouched.
     assert src.read_bytes() == src_bytes
@@ -422,7 +444,9 @@ def test_failed_migration_rolls_back_schema_rows_and_version(tmp_path, store, fa
 @pytest.mark.parametrize("bad_kind", ["extra_table", "unsupported_head", "v1_corrupt_schema"])
 def test_unknown_schema_or_head_is_refused_before_any_write(tmp_path, store, bad_kind):
     src = tmp_path / f"bad_{store}_{bad_kind}.db"
-    dst = tmp_path / f"out_{store}_{bad_kind}.db"
+    gen = tmp_path / "gen"
+    gen.mkdir()
+    dst = gen / f"out_{store}_{bad_kind}.db"
     if store == "progress":
         _build_progress_v0(src, "v0_1a35a1a")
     else:
@@ -441,7 +465,7 @@ def test_unknown_schema_or_head_is_refused_before_any_write(tmp_path, store, bad
 
     orig_bytes = src.read_bytes()
     with pytest.raises(SchemaError) as exc_info:
-        migrate_store_copy(src, dst, store=store)
+        migrate_store_copy(src, dst, store=store, scratch_dir=tmp_path / "scratch")
 
     msg = str(exc_info.value).lower()
     if bad_kind == "unsupported_head":
@@ -484,8 +508,10 @@ def test_managed_open_does_not_create_or_migrate_stores(tmp_path, store, cls, re
 
     # Migrated v1 DB opens cleanly in both managed writable and read-only trial modes;
     # read-only trial mode rejects any write attempt.
-    migrated = tmp_path / f"v1_{store}.db"
-    migrate_store_copy(stale, migrated, store=store)
+    gen = tmp_path / "gen"
+    gen.mkdir()
+    migrated = gen / f"v1_{store}.db"
+    migrate_store_copy(stale, migrated, store=store, scratch_dir=tmp_path / "scratch")
     inst = cls(migrated, managed=True, read_only=read_only)
     try:
         if read_only:
@@ -541,9 +567,11 @@ def test_acknowledged_learning_and_assets_are_synced_before_success(tmp_path, mo
     gen_dir = tmp_path / "gen"
     gen_dir.mkdir()
     migrate_store_copy(tmp_path / "m_p.db", gen_dir / "progress.db",
-                       store="progress", allow_missing_source=True)
+                       store="progress", allow_missing_source=True,
+                       scratch_dir=tmp_path / "scratch_p")
     migrate_store_copy(tmp_path / "m_e.db", gen_dir / "exam.db",
-                       store="exam", allow_missing_source=True)
+                       store="exam", allow_missing_source=True,
+                       scratch_dir=tmp_path / "scratch_e")
 
     app = create_app(data_dir=gen_dir, probe=_absent, managed=True)
     with TestClient(app) as client:
@@ -563,10 +591,12 @@ def test_acknowledged_learning_and_assets_are_synced_before_success(tmp_path, mo
         assert failed.status_code >= 500
         assert app.state.progress.get(1)["completed"] == 1
 
-    # 3) Completed media assets (SSTV PNG + JSON sidecar + dir, and APT PNG + dir):
-    # restore working spies, verify file+sidecar+dir sync order, and verify failure blocks ack.
+    # 3) Completed media assets:
+    # SSTV (F7): fsyncs staged PNG + staged sidecar BEFORE os.link publishes them into the
+    # gallery, then fsyncs the gallery directory. If staged fsync fails, neither file is linked.
     media_calls: list[tuple[str, str]] = []
     real_fsync_file = storage_mod.fsync_file
+    real_link = os.link
 
     def spy_media_file(path):
         media_calls.append(("file", Path(path).name))
@@ -576,8 +606,15 @@ def test_acknowledged_learning_and_assets_are_synced_before_success(tmp_path, mo
         media_calls.append(("dir", Path(path).name))
         real_fsync_dir(path)
 
+    def spy_link(src, dst):
+        media_calls.append(("link", Path(dst).name))
+        real_link(src, dst)
+
     monkeypatch.setattr(storage_mod, "fsync_file", spy_media_file)
     monkeypatch.setattr(storage_mod, "fsync_dir", spy_media_dir)
+    monkeypatch.setattr(sstv_mod, "fsync_file", spy_media_file)
+    monkeypatch.setattr(sstv_mod, "fsync_dir", spy_media_dir)
+    monkeypatch.setattr(os, "link", spy_link)
 
     sstv_dir = tmp_path / "sstv"
     sstv_dir.mkdir()
@@ -590,16 +627,19 @@ def test_acknowledged_learning_and_assets_are_synced_before_success(tmp_path, mo
                    decoded_at=100.0, mode="Martin 1")
     assert sstv._publish_capture(cap) is True
     assert media_calls == [
-        ("file", published.name),
-        ("file", published.with_suffix(".json").name),
+        ("file", staged.name),
+        ("file", staged.with_suffix(".json").name),
+        ("link", published.name),
+        ("link", published.with_suffix(".json").name),
         ("dir", "sstv"),
     ]
 
-    # Inject media sync failure -> _publish_capture must return False (blocks emission/ack).
+    # Inject media sync failure -> _publish_capture returns False AND never links into gallery.
     def fail_media_file(_path):
         raise OSError("media fsync failed")
 
     monkeypatch.setattr(storage_mod, "fsync_file", fail_media_file)
+    monkeypatch.setattr(sstv_mod, "fsync_file", fail_media_file)
     staged2 = sstv_dir / ".staging" / "cap2.png"
     staged2.write_bytes(b"\x89PNG\r\n\x1a\nfake2")
     published2 = sstv_dir / "20261128_000002_martin1.png"
@@ -607,10 +647,14 @@ def test_acknowledged_learning_and_assets_are_synced_before_success(tmp_path, mo
                     decoded_at=101.0, mode="Martin 1")
     assert sstv._publish_capture(cap2) is False
     assert sstv.error and "media fsync failed" in sstv.error
+    assert not published2.exists()
+    assert not published2.with_suffix(".json").exists()
+    assert all(Path(img["path"]).name != published2.name for img in sstv.images())
 
     # APT media publication sync fence: restores working spy, verifies sync before emit, then
     # injects failure and verifies emit is blocked.
     monkeypatch.setattr(storage_mod, "fsync_file", spy_media_file)
+    monkeypatch.setattr(os, "link", real_link)
     apt_dir = tmp_path / "apt"
     apt_dir.mkdir()
     apt = AptDecoder(output_dir=apt_dir, data_dir=tmp_path, sync_assets=True)
@@ -634,9 +678,11 @@ def test_managed_live_connections_use_extra_delete(tmp_path):
     gen_dir = tmp_path / "managed_gen"
     gen_dir.mkdir()
     migrate_store_copy(tmp_path / "none_p.db", gen_dir / "progress.db",
-                       store="progress", allow_missing_source=True)
+                       store="progress", allow_missing_source=True,
+                       scratch_dir=tmp_path / "scratch_p")
     migrate_store_copy(tmp_path / "none_e.db", gen_dir / "exam.db",
-                       store="exam", allow_missing_source=True)
+                       store="exam", allow_missing_source=True,
+                       scratch_dir=tmp_path / "scratch_e")
 
     app = create_app(data_dir=gen_dir, probe=_absent, managed=True)
     with TestClient(app) as client:
@@ -720,8 +766,10 @@ def test_current_legacy_constructor_signatures_are_in_reviewed_set(tmp_path):
     # Exercise migrated pre-PR-134 and PR-134/current DBs with seeded first evidence & watermarks.
     pre_134 = tmp_path / "pre134.db"
     _build_progress_v0(pre_134, "v0_02c2095")
-    pre_out = tmp_path / "pre134_v1.db"
-    migrate_store_copy(pre_134, pre_out, store="progress")
+    pre_gen = tmp_path / "pre_gen"
+    pre_gen.mkdir()
+    pre_out = pre_gen / "progress.db"
+    migrate_store_copy(pre_134, pre_out, store="progress", scratch_dir=tmp_path / "scratch_pre")
     p_pre = Progress(pre_out, managed=True)
     assert p_pre.stamps() == []
     assert p_pre.get(1)["completed"] == 1
@@ -729,20 +777,20 @@ def test_current_legacy_constructor_signatures_are_in_reviewed_set(tmp_path):
 
     pr_134 = tmp_path / "pr134.db"
     _build_progress_v0(pr_134, "v0_e72c706")
-    pr_out = tmp_path / "pr134_v1.db"
-    migrate_store_copy(pr_134, pr_out, store="progress")
+    pr_gen = tmp_path / "pr_gen"
+    pr_gen.mkdir()
+    pr_out = pr_gen / "progress.db"
+    migrate_store_copy(pr_134, pr_out, store="progress", scratch_dir=tmp_path / "scratch_pr")
     p_134 = Progress(pr_out, managed=True)
     stamps = p_134.stamps()
     assert len(stamps) == 1 and stamps[0]["instrument"] == "ism" and stamps[0]["count"] == 3
     p_134.close()
 
 
-# --- WAL recovery on private copy + R2-4 root check + R2-1 routine site settings --------------
+# --- WAL recovery on private copy + R2-4 root check + managed boot smoke ----------------------
 
 
 def test_wal_source_is_recovered_on_private_copy_without_mutating_source(tmp_path):
-    import shutil
-
     live = tmp_path / "live_progress.db"
     _build_progress_v0(live, "v0_1a35a1a")
     conn = sqlite3.connect(live)
@@ -765,8 +813,10 @@ def test_wal_source_is_recovered_on_private_copy_without_mutating_source(tmp_pat
     src_before = src.read_bytes()
     wal_before = wal_path.read_bytes()
 
-    dst = tmp_path / "recovered_v1.db"
-    receipt = migrate_store_copy(src, dst, store="progress")
+    gen = tmp_path / "gen"
+    gen.mkdir()
+    dst = gen / "recovered_v1.db"
+    receipt = migrate_store_copy(src, dst, store="progress", scratch_dir=tmp_path / "scratch_wal")
 
     assert receipt["to_version"] == 1
     assert src.read_bytes() == src_before
@@ -783,10 +833,15 @@ def test_r2_4_updater_root_never_uses_local_share_sigint101(tmp_path):
     fake_home.mkdir()
     forbidden = fake_home / FORBIDDEN_ROOT_REL
     assert FORBIDDEN_ROOT_REL == Path(".local/share/sigint101")
-    with pytest.raises(ValueError, match="local/share/sigint101"):
-        validate_updater_root(forbidden, home=fake_home)
-    with pytest.raises(ValueError, match="local/share/sigint101"):
-        validate_updater_root(forbidden / "nested", home=fake_home)
+    for bad in (
+        forbidden,
+        forbidden / "nested",
+        fake_home,
+        fake_home / ".local",
+        fake_home / ".local" / "share",
+    ):
+        with pytest.raises(ValueError, match="local/share/sigint101"):
+            validate_updater_root(bad, home=fake_home)
     with pytest.raises(ValueError, match="absolute"):
         validate_updater_root(Path("relative/root"), home=fake_home)
 
@@ -794,18 +849,407 @@ def test_r2_4_updater_root_never_uses_local_share_sigint101(tmp_path):
     assert validate_updater_root(allowed, home=fake_home) == allowed.resolve()
 
 
-def test_r2_1_routine_managed_boot_allows_documented_site_setting_changes(tmp_path, monkeypatch):
-    # R2-1: settings parity applies only before an operation's serving marker and only to the
-    # unit's own settings; changing a documented site setting never refuses a routine managed boot.
+def test_managed_boot_smoke_with_site_env_change(tmp_path, monkeypatch):
+    # Smoke check for managed boot across env changes; real R2-1 parity check lands in PR 2.
     gen_dir = tmp_path / "gen"
     gen_dir.mkdir()
     migrate_store_copy(tmp_path / "p.db", gen_dir / "progress.db",
-                       store="progress", allow_missing_source=True)
+                       store="progress", allow_missing_source=True,
+                       scratch_dir=tmp_path / "scratch_p")
     migrate_store_copy(tmp_path / "e.db", gen_dir / "exam.db",
-                       store="exam", allow_missing_source=True)
+                       store="exam", allow_missing_source=True,
+                       scratch_dir=tmp_path / "scratch_e")
 
     for serial in ("00000001", "00000002"):
         monkeypatch.setenv("SIGINT101_RTLSDR_SERIAL", serial)
         app = create_app(data_dir=gen_dir, probe=_absent, managed=True)
         with TestClient(app) as client:
             assert client.get("/").status_code == 200
+
+
+# --- F1: signature catches nested-paren CHECK, COLLATE, AUTOINCREMENT, ON CONFLICT, generated --
+
+
+@pytest.mark.parametrize(
+    "mutation_name, old_sql, new_sql",
+    [
+        (
+            "nested_check",
+            "correct   INTEGER NOT NULL,",
+            "correct   INTEGER NOT NULL CHECK (correct IN (0, 1)),",
+        ),
+        (
+            "collate_nocase",
+            "name    TEXT PRIMARY KEY,",
+            "name    TEXT PRIMARY KEY COLLATE NOCASE,",
+        ),
+        (
+            "autoincrement",
+            "lesson_id INTEGER PRIMARY KEY,",
+            "lesson_id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        ),
+        (
+            "on_conflict",
+            "stage     TEXT NOT NULL,",
+            "stage     TEXT NOT NULL ON CONFLICT REPLACE,",
+        ),
+        (
+            "generated_column",
+            "updated   REAL,\n    PRIMARY KEY (lesson_id, card_key)",
+            "updated   REAL,\n    label TEXT GENERATED ALWAYS AS (card_key || ':' || choice) "
+            "VIRTUAL,\n    PRIMARY KEY (lesson_id, card_key)",
+        ),
+    ],
+)
+def test_schema_signature_catches_five_constraint_mutations(
+    tmp_path, mutation_name, old_sql, new_sql
+):
+    from sigint101 import progress as progress_mod
+
+    assert old_sql in progress_mod.SCHEMA
+    mutated_schema = progress_mod.SCHEMA.replace(old_sql, new_sql, 1)
+    db_path = tmp_path / f"mut_{mutation_name}.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(mutated_schema)
+    progress_mod._add_correct_column(conn)
+    conn.commit()
+    sig = schema_signature(conn)
+
+    # Guard must reject the mutated v0 schema (not in reviewed set).
+    assert match_v0_signature("progress", sig) is None, mutation_name
+    assert sig != reviewed_signatures("progress")["v1"], mutation_name
+
+    # Even if stamped user_version = 1, managed open must refuse the mutated store.
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    with pytest.raises(SchemaError, match="signature"):
+        Progress(db_path, managed=True)
+
+
+# --- F3: read-only source with a hot journal migrates cleanly without touching source ----------
+
+
+def test_read_only_hot_journal_source_migrates_without_touching_source(tmp_path):
+    src_dir = tmp_path / "ro_src"
+    src_dir.mkdir()
+    src = src_dir / "progress.db"
+    _build_progress_v0(src, "v0_1a35a1a")
+
+    # Produce a real hot journal: a child opens a transaction with cache_size=1 so dirty pages
+    # spill into progress.db + progress.db-journal, then dies with SIGKILL before committing.
+    killer = (
+        "import os, signal, sqlite3, sys\n"
+        "conn = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "conn.execute('PRAGMA journal_mode = DELETE')\n"
+        "conn.execute('PRAGMA cache_size = 1')\n"
+        "conn.execute('BEGIN IMMEDIATE')\n"
+        "for i in range(100, 180):\n"
+        "    conn.execute('INSERT INTO progress(lesson_id, opened, completed, updated) "
+        "VALUES(?, 1, 1, 500.0)', (i,))\n"
+        "os.kill(os.getpid(), signal.SIGKILL)\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", killer, str(src)], check=False)
+    assert proc.returncode != 0
+    journal = Path(f"{src}-journal")
+    assert journal.exists() and journal.stat().st_size > 0
+
+    src_before = src.read_bytes()
+    journal_before = journal.read_bytes()
+    src.chmod(0o444)
+    journal.chmod(0o444)
+    src_dir.chmod(0o555)
+    try:
+        gen = tmp_path / "gen"
+        gen.mkdir()
+        dst = gen / "progress.db"
+        receipt = migrate_store_copy(
+            src, dst, store="progress", scratch_dir=tmp_path / "staging" / "ro_hot"
+        )
+        assert receipt["to_version"] == 1
+        assert src.read_bytes() == src_before
+        assert journal.read_bytes() == journal_before
+        assert (src.stat().st_mode & 0o777) == 0o444
+        assert (journal.stat().st_mode & 0o777) == 0o444
+
+        prog = Progress(dst, managed=True)
+        try:
+            # Committed pre-crash row kept; uncommitted hot-journal rows rolled back.
+            assert prog.get(1)["completed"] == 1
+            assert prog.get(100) is None
+        finally:
+            prog.close()
+    finally:
+        src_dir.chmod(0o700)
+        src.chmod(0o600)
+        journal.chmod(0o600)
+
+
+# --- F4: recovery scratch lives outside destination generation, never recursively removed ------
+
+
+def test_recovery_scratch_lives_outside_generation_and_is_not_recursively_removed(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src.db"
+    _build_progress_v0(src, "v0_1a35a1a")
+    gen = tmp_path / "gen"
+    gen.mkdir()
+    dst = gen / "progress.db"
+
+    # Refuse scratch equal to or nested under destination generation.
+    for bad_scratch in (gen, gen / "scratch", gen / "nested" / "sqlite"):
+        with pytest.raises(ValueError, match="generation|destination"):
+            migrate_store_copy(src, dst, store="progress", scratch_dir=bad_scratch)
+    assert list(gen.iterdir()) == []
+
+    # Refuse non-exclusive (already-existing) scratch directory.
+    existing_scratch = tmp_path / "already_exists"
+    existing_scratch.mkdir()
+    with pytest.raises(FileExistsError):
+        migrate_store_copy(src, dst, store="progress", scratch_dir=existing_scratch)
+    assert list(gen.iterdir()) == []
+
+    # Forbid rmtree completely during migration; scratch must stay outside gen and be preserved.
+    def forbid_rmtree(*_args, **_kwargs):
+        raise AssertionError("migrate_store_copy must never call shutil.rmtree")
+
+    monkeypatch.setattr(shutil, "rmtree", forbid_rmtree)
+    scratch = tmp_path / "staging" / "op1" / "sqlite" / "progress"
+    receipt = migrate_store_copy(src, dst, store="progress", scratch_dir=scratch)
+    assert receipt["to_version"] == 1
+    assert [p.name for p in gen.iterdir()] == ["progress.db"]
+    assert (scratch / src.name).is_file()
+
+
+# --- F5: unfenced create or rotation is directory-synced on the next acknowledged write --------
+
+
+def test_events_dir_synced_after_unfenced_create_or_rotation(tmp_path, monkeypatch):
+    calls: list[tuple[str, str]] = []
+    real_fsync_handle = storage_mod.fsync_handle
+    real_fsync_dir = storage_mod.fsync_dir
+
+    def spy_handle(handle):
+        calls.append(("file", Path(handle.name).name))
+        real_fsync_handle(handle)
+
+    def spy_dir(path):
+        calls.append(("dir", Path(path).name))
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(events_mod, "fsync_handle", spy_handle)
+    monkeypatch.setattr(events_mod, "fsync_dir", spy_dir)
+
+    # 1) Direct log_event: unfenced create -> next fenced write MUST fsync dir.
+    log_dir = tmp_path / "f5_direct"
+    log_path = log_dir / "events.jsonl"
+    events_mod.log_event(log_path, "completion_refused", {"lesson": 1}, sync=False)
+    assert calls == []
+
+    events_mod.log_event(log_path, "prediction", {"lesson": 1}, sync=True)
+    assert calls == [("file", "events.jsonl"), ("dir", "f5_direct")]
+
+    # Steady-state fenced write on the already-synced inode syncs only the file.
+    calls.clear()
+    events_mod.log_event(log_path, "check", {"lesson": 1}, sync=True, max_bytes=10_000)
+    assert calls == [("file", "events.jsonl")]
+
+    # 2) Direct log_event: unfenced rotation -> next fenced write MUST fsync dir.
+    calls.clear()
+    events_mod.log_event(log_path, "tune", {"center_hz": 100_000_000},
+                         sync=False, max_bytes=1, keep=2)
+    assert calls == []
+    assert (log_dir / "events.jsonl.1").is_file()
+
+    events_mod.log_event(log_path, "completed", {"lesson": 1}, sync=True, max_bytes=10_000)
+    assert calls == [("file", "events.jsonl"), ("dir", "f5_direct")]
+
+    # 3) Failed dir fsync after unfenced create must NOT mark the inode synced.
+    retry_dir = tmp_path / "f5_retry"
+    retry_log = retry_dir / "events.jsonl"
+    events_mod.log_event(retry_log, "tune", {"x": 1}, sync=False)
+    calls.clear()
+
+    def fail_dir_once(_path):
+        raise OSError("transient dir sync failure")
+
+    monkeypatch.setattr(events_mod, "fsync_dir", fail_dir_once)
+    with pytest.raises(OSError, match="transient dir sync failure"):
+        events_mod.log_event(retry_log, "prediction", {"lesson": 1}, sync=True)
+
+    monkeypatch.setattr(events_mod, "fsync_dir", spy_dir)
+    calls.clear()
+    events_mod.log_event(retry_log, "prediction", {"lesson": 1}, sync=True)
+    assert calls == [("file", "events.jsonl"), ("dir", "f5_retry")]
+
+    # 4) End-to-end managed app: refused completion (unfenced create) followed by /api/predict.
+    gen_dir = tmp_path / "f5_gen"
+    gen_dir.mkdir()
+    migrate_store_copy(tmp_path / "p.db", gen_dir / "progress.db",
+                       store="progress", allow_missing_source=True,
+                       scratch_dir=tmp_path / "f5_scratch_p")
+    migrate_store_copy(tmp_path / "e.db", gen_dir / "exam.db",
+                       store="exam", allow_missing_source=True,
+                       scratch_dir=tmp_path / "f5_scratch_e")
+    app = create_app(data_dir=gen_dir, probe=_absent, managed=True)
+    with TestClient(app) as client:
+        calls.clear()
+        refused = client.post("/api/complete?lesson_id=1")
+        assert refused.status_code == 400
+        assert calls == []
+        assert (gen_dir / "events.jsonl").is_file()
+
+        pred = client.post("/api/predict?lesson_id=1", data={"prediction": "a"},
+                           follow_redirects=False)
+        assert pred.status_code == 303
+        assert ("file", "events.jsonl") in calls
+        assert ("dir", "f5_gen") in calls
+
+
+# --- F6: main-side / legacy baseline comparisons required by plan §8 ---------------------------
+
+
+def test_legacy_baseline_differs_from_managed_contract(tmp_path, monkeypatch):
+    # 1) Legacy constructors evolve stale v0 stores IN PLACE and keep user_version == 0.
+    stale_p = tmp_path / "legacy_stale_progress.db"
+    stale_e = tmp_path / "legacy_stale_exam.db"
+    _build_progress_v0(stale_p, "v0_72ddf9c")
+    _build_exam_v0(stale_e, "v0_32ec4a0")
+    before_p = stale_p.read_bytes()
+    before_e = stale_e.read_bytes()
+
+    prog = Progress(stale_p)
+    exam = ExamStore(stale_e)
+    try:
+        assert prog._conn.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert exam._conn.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert "sort_answers" in schema_signature(prog._conn)["tables"]
+        assert "skipped" in {
+            c[1] for c in schema_signature(exam._conn)["tables"]["sim"]["columns"]
+        }
+    finally:
+        prog.close()
+        exam.close()
+    assert stale_p.read_bytes() != before_p
+    assert stale_e.read_bytes() != before_e
+
+    # 2) Legacy constructors open a store with an extra table and head 99 without refusing.
+    rogue_p = tmp_path / "rogue_progress.db"
+    rogue_e = tmp_path / "rogue_exam.db"
+    _build_progress_v0(rogue_p, "v0_1a35a1a")
+    _build_exam_v0(rogue_e, "v0_02c2095")
+    for path in (rogue_p, rogue_e):
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE rogue_table (id INTEGER PRIMARY KEY)")
+        c.execute("PRAGMA user_version = 99")
+        c.commit()
+        c.close()
+    p_rogue = Progress(rogue_p)
+    e_rogue = ExamStore(rogue_e)
+    try:
+        assert p_rogue._conn.execute("PRAGMA user_version").fetchone()[0] == 99
+        assert e_rogue._conn.execute("PRAGMA user_version").fetchone()[0] == 99
+    finally:
+        p_rogue.close()
+        e_rogue.close()
+
+    # 3) Legacy constructors create missing files and parent directories on open.
+    missing_p = tmp_path / "legacy_auto_dir" / "progress.db"
+    missing_e = tmp_path / "legacy_auto_dir" / "exam.db"
+    assert not missing_p.parent.exists()
+    p_new = Progress(missing_p)
+    e_new = ExamStore(missing_e)
+    try:
+        assert missing_p.is_file() and missing_e.is_file()
+        assert p_new._conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+        assert e_new._conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+    finally:
+        p_new.close()
+        e_new.close()
+
+    # 4) Legacy app runs synchronous=2 and completes lessons with zero Python fsync calls.
+    fsync_calls: list[str] = []
+    monkeypatch.setattr(events_mod, "fsync_handle", lambda _h: fsync_calls.append("file"))
+    monkeypatch.setattr(events_mod, "fsync_dir", lambda _p: fsync_calls.append("dir"))
+    legacy_dir = tmp_path / "legacy_app"
+    app = create_app(data_dir=legacy_dir, probe=_absent)
+    with TestClient(app) as client:
+        assert app.state.progress._conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+        assert app.state.exam_store._conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+        pred = client.post("/api/predict?lesson_id=1", data={"prediction": "a"},
+                           follow_redirects=False)
+        assert pred.status_code == 303
+        comp = client.post("/api/complete?lesson_id=1")
+        assert comp.status_code == 200
+        assert fsync_calls == []
+
+
+# --- F9, F11, F14 one-liner NIT regressions ----------------------------------------------------
+
+
+def test_legacy_event_log_oserror_not_rewritten_as_sync_error(tmp_path, monkeypatch):
+    legacy_dir = tmp_path / "legacy_enospc"
+    app = create_app(data_dir=legacy_dir, probe=_absent)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.post(
+            "/api/predict?lesson_id=1", data={"prediction": "a"}, follow_redirects=False
+        ).status_code == 303
+
+        def boom(*_args, **_kwargs):
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr("sigint101.app.log_event", boom)
+        res = client.post("/api/complete?lesson_id=1")
+        assert res.status_code == 500
+        assert "event log sync failed" not in res.text
+
+
+def test_managed_open_refuses_wal_without_touching_disk_bytes(tmp_path):
+    gen = tmp_path / "wal_managed"
+    gen.mkdir()
+    db_path = gen / "progress.db"
+    migrate_store_copy(tmp_path / "none.db", db_path, store="progress",
+                       allow_missing_source=True, scratch_dir=tmp_path / "scratch_w")
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA wal_autocheckpoint = 0")
+    conn.execute("INSERT INTO progress(lesson_id, opened, completed, updated) VALUES(1, 1, 0, 1.0)")
+    conn.commit()
+    # Copy active WAL triple before closing so -wal and -shm are present on disk.
+    snap_dir = tmp_path / "wal_snap"
+    snap_dir.mkdir()
+    snap = snap_dir / "progress.db"
+    shutil.copy2(db_path, snap)
+    shutil.copy2(Path(f"{db_path}-wal"), Path(f"{snap}-wal"))
+    shutil.copy2(Path(f"{db_path}-shm"), Path(f"{snap}-shm"))
+    conn.close()
+
+    before_db = snap.read_bytes()
+    before_wal = Path(f"{snap}-wal").read_bytes()
+    before_shm = Path(f"{snap}-shm").read_bytes()
+
+    for read_only in (False, True):
+        with pytest.raises(SchemaError, match="journal_mode=delete"):
+            open_managed_sqlite(
+                snap,
+                expected_version=PROGRESS_SCHEMA_VERSION,
+                expected_signature=reviewed_signatures("progress")["v1"],
+                read_only=read_only,
+            )
+        assert snap.read_bytes() == before_db
+        assert Path(f"{snap}-wal").read_bytes() == before_wal
+        assert Path(f"{snap}-shm").read_bytes() == before_shm
+
+
+def test_migration_row_preservation_distinguishes_int_from_float(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val)")
+    conn.execute("INSERT INTO t(id, val) VALUES(1, 1)")
+    conn.commit()
+    sig = schema_signature(conn)
+    before = _snapshot_rows(conn, sig["tables"])
+    conn.execute("UPDATE t SET val = 1.0 WHERE id = 1")
+    with pytest.raises(SchemaError, match="altered pre-existing rows"):
+        _verify_preserved_rows(conn, before)
+    conn.close()

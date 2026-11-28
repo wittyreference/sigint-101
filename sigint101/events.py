@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -20,6 +21,11 @@ KEEP_ROTATED = 3
 # Request threads log concurrently; rotating and appending happen as one step so no line lands
 # in a file that is mid-rename.
 _WRITE_LOCK = threading.Lock()
+
+# Tracks the (st_dev, st_ino) of each resolved log path whose parent directory entry has been
+# fsynced. If an unfenced writer created or rotated events.jsonl, the next fenced write sees a
+# different (or absent) identity and syncs the directory before acknowledging.
+_SYNCED_LOG_IDENTITY: dict[Path, tuple[int, int]] = {}
 
 
 def _generation(path: Path, n: int) -> Path:
@@ -62,20 +68,27 @@ def log_event(path, kind: str, payload: dict, *, clock=time.time,
     if event_id is not None:
         event["event_id"] = event_id
     line = json.dumps(event, sort_keys=True) + "\n"
+    resolved = path.resolve() if sync else None
     with _WRITE_LOCK:
-        existed = path.exists()
         rotated = _rotate_if_full(
             path,
             MAX_LOG_BYTES if max_bytes is None else max_bytes,
             KEEP_ROTATED if keep is None else keep,
             sync=sync,
         )
+        if rotated:
+            _SYNCED_LOG_IDENTITY.pop(path.resolve() if resolved is None else resolved, None)
+        file_id: tuple[int, int] | None = None
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(line)
             if sync:
                 fsync_handle(handle)
-        if sync and (rotated or not existed):
+                st = os.fstat(handle.fileno())
+                file_id = (st.st_dev, st.st_ino)
+        if sync and (rotated or _SYNCED_LOG_IDENTITY.get(resolved) != file_id):
             fsync_dir(path.parent)
+            assert resolved is not None and file_id is not None
+            _SYNCED_LOG_IDENTITY[resolved] = file_id
     return json.loads(line)
 
 

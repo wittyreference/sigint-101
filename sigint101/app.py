@@ -811,6 +811,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 sync=managed,
             )
         except OSError as exc:
+            if not managed:
+                raise
             return JSONResponse(status_code=500, content={
                 "recorded": False, "reason": f"event log sync failed: {exc}"})
         # Committing walks the learner past the gate, so the lesson reopens on the first sealed
@@ -851,6 +853,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "check", {"lesson": lesson_id, "correct": correct},
                       sync=managed)
         except OSError as exc:
+            if not managed:
+                raise
             return JSONResponse(status_code=500, content={
                 "recorded": False, "reason": f"event log sync failed: {exc}"})
         app.state.progress.record_stage(lesson_id, CHECK_STAGE,
@@ -888,6 +892,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 sync=managed,
             )
         except OSError as exc:
+            if not managed:
+                raise
             return JSONResponse(status_code=500, content={
                 "recorded": False, "reason": f"event log sync failed: {exc}"})
         saved = app.state.progress.get_sort_answers(lesson_id)
@@ -958,6 +964,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         try:
             log_event(app.state.events_path, "completed", {"lesson": lesson_id}, sync=managed)
         except OSError as exc:
+            if not managed:
+                raise
             return JSONResponse(status_code=500, content={
                 "completed": False, "reason": f"event log sync failed: {exc}"})
         return {"completed": True, "lesson": lesson_id}
@@ -1027,6 +1035,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"question": question_id, "choice": choice, "correct": correct},
                       sync=managed)
         except OSError as exc:
+            if not managed:
+                raise
             return JSONResponse(status_code=500, content={
                 "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(f"/exam/review/{question_id}?choice={choice}", status_code=303)
@@ -1131,6 +1141,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                           {"question": question_id, "choice": choice, "correct": correct},
                           sync=managed)
             except OSError as exc:
+                if not managed:
+                    raise
                 return JSONResponse(status_code=500, content={
                     "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(f"/exam/sim/review/{question_id}", status_code=303)

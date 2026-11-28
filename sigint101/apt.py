@@ -149,7 +149,11 @@ class AptDecoder(SupervisedReceiver):
         return launch, (freq_hz, before, radio)
 
     def _sync_published_image(self, png: Path) -> bool:
-        """Fsync a completed APT PNG and its directory before acknowledging it when managed."""
+        """Fsync a completed APT PNG and its directory before announcing it when managed.
+
+        satdump writes directly into output_dir rather than a private staging file, so APT
+        fences the reception announcement here rather than pre-link visibility.
+        """
         if not self._sync_assets:
             return True
         try:

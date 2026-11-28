@@ -29,7 +29,7 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
-from .storage import sync_media_asset
+from .storage import fsync_dir, fsync_file
 
 # The colaclanth/sstv command-line decoder. It turns one WAV of SSTV audio into one PNG, printing
 # the mode it detected to stdout. Its binary name lives here, not in hardware.py, so parallel
@@ -345,7 +345,7 @@ class SstvDecoder(SupervisedReceiver):
                                          freq_hz=capture.freq_hz, radio=radio)
 
     def _publish_capture(self, capture: _Capture) -> bool:
-        """The exclusive PNG link commits publication. Install its metadata afterwards."""
+        """The exclusive PNG link commits legacy publication; managed mode syncs before ack."""
         png = capture.published_path
         sidecar = png.with_suffix(".json")
         staged_sidecar = None
@@ -359,12 +359,20 @@ class SstvDecoder(SupervisedReceiver):
                     staged_sidecar = candidate
                     json.dump({"mode": capture.mode, "freq_hz": capture.freq_hz,
                                "decoded_at": capture.decoded_at}, handle, sort_keys=True)
+            if self._sync_assets:
+                # Sync staged file bytes BEFORE linking into the gallery so a crash or sync
+                # failure never exposes an unsynced or zero-length picture.
+                fsync_file(capture.staged_path)
+                if staged_sidecar is not None:
+                    fsync_file(staged_sidecar)
             os.link(capture.staged_path, png)
+            if not self._sync_assets:
+                committed = True
             if staged_sidecar is not None:
                 os.link(staged_sidecar, sidecar)
             if self._sync_assets:
-                sync_media_asset(png, sidecar_path=sidecar if staged_sidecar is not None else None)
-            committed = True
+                fsync_dir(png.parent)
+                committed = True
         except OSError as exc:
             if self.error is None:
                 self.error = str(exc)

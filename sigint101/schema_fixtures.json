@@ -9,9 +9,6 @@
       "v0_02c2095": {
         "tables": {
           "sim": {
-            "checks": [
-              "check(id=1)"
-            ],
             "columns": [
               [
                 0,
@@ -19,7 +16,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -27,6 +25,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -35,6 +34,7 @@
                 "TEXT",
                 1,
                 "'{}'",
+                0,
                 0
               ],
               [
@@ -43,6 +43,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ],
               [
@@ -51,15 +52,16 @@
                 "TEXT",
                 1,
                 "'[]'",
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table sim (id integer primary key check (id = 1), question_ids text not null, answers text not null default '{}', created real, skipped text not null default '[]')",
             "without_rowid": false
           },
           "srs": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -67,7 +69,8 @@
                 "TEXT",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -75,6 +78,7 @@
                 "INTEGER",
                 1,
                 "1",
+                0,
                 0
               ],
               [
@@ -83,6 +87,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ],
               [
@@ -91,6 +96,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -99,6 +105,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ]
             ],
@@ -109,14 +116,27 @@
                   [
                     0,
                     0,
-                    "question_id"
+                    "question_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table srs (question_id text primary key, box integer not null default 1, last_seen real, seen integer not null default 0, correct integer not null default 0)",
             "without_rowid": false
           }
         },
@@ -126,9 +146,6 @@
       "v0_32ec4a0": {
         "tables": {
           "sim": {
-            "checks": [
-              "check(id=1)"
-            ],
             "columns": [
               [
                 0,
@@ -136,7 +153,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -144,6 +162,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -152,6 +171,7 @@
                 "TEXT",
                 1,
                 "'{}'",
+                0,
                 0
               ],
               [
@@ -160,15 +180,16 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table sim (id integer primary key check (id = 1), question_ids text not null, answers text not null default '{}', created real)",
             "without_rowid": false
           },
           "srs": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -176,7 +197,8 @@
                 "TEXT",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -184,6 +206,7 @@
                 "INTEGER",
                 1,
                 "1",
+                0,
                 0
               ],
               [
@@ -192,6 +215,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ],
               [
@@ -200,6 +224,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -208,6 +233,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ]
             ],
@@ -218,14 +244,27 @@
                   [
                     0,
                     0,
-                    "question_id"
+                    "question_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table srs (question_id text primary key, box integer not null default 1, last_seen real, seen integer not null default 0, correct integer not null default 0)",
             "without_rowid": false
           }
         },
@@ -235,7 +274,6 @@
       "v0_b90e589": {
         "tables": {
           "srs": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -243,7 +281,8 @@
                 "TEXT",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -251,6 +290,7 @@
                 "INTEGER",
                 1,
                 "1",
+                0,
                 0
               ],
               [
@@ -259,6 +299,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ],
               [
@@ -267,6 +308,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -275,6 +317,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ]
             ],
@@ -285,14 +328,27 @@
                   [
                     0,
                     0,
-                    "question_id"
+                    "question_id",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table srs (question_id text primary key, box integer not null default 1, last_seen real, seen integer not null default 0, correct integer not null default 0)",
             "without_rowid": false
           }
         },
@@ -303,9 +359,6 @@
     "v1": {
       "tables": {
         "sim": {
-          "checks": [
-            "check(id=1)"
-          ],
           "columns": [
             [
               0,
@@ -313,7 +366,8 @@
               "INTEGER",
               0,
               null,
-              1
+              1,
+              0
             ],
             [
               1,
@@ -321,6 +375,7 @@
               "TEXT",
               1,
               null,
+              0,
               0
             ],
             [
@@ -329,6 +384,7 @@
               "TEXT",
               1,
               "'{}'",
+              0,
               0
             ],
             [
@@ -337,6 +393,7 @@
               "REAL",
               0,
               null,
+              0,
               0
             ],
             [
@@ -345,15 +402,16 @@
               "TEXT",
               1,
               "'[]'",
+              0,
               0
             ]
           ],
           "foreign_keys": [],
           "indexes": [],
+          "sql": "create table sim (id integer primary key check (id = 1), question_ids text not null, answers text not null default '{}', created real, skipped text not null default '[]')",
           "without_rowid": false
         },
         "srs": {
-          "checks": [],
           "columns": [
             [
               0,
@@ -361,7 +419,8 @@
               "TEXT",
               0,
               null,
-              1
+              1,
+              0
             ],
             [
               1,
@@ -369,6 +428,7 @@
               "INTEGER",
               1,
               "1",
+              0,
               0
             ],
             [
@@ -377,6 +437,7 @@
               "REAL",
               0,
               null,
+              0,
               0
             ],
             [
@@ -385,6 +446,7 @@
               "INTEGER",
               1,
               "0",
+              0,
               0
             ],
             [
@@ -393,6 +455,7 @@
               "INTEGER",
               1,
               "0",
+              0,
               0
             ]
           ],
@@ -403,14 +466,27 @@
                 [
                   0,
                   0,
-                  "question_id"
+                  "question_id",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
                 ]
               ],
               "origin": "pk",
               "partial": 0,
+              "sql": "",
               "unique": 1
             }
           ],
+          "sql": "create table srs (question_id text primary key, box integer not null default 1, last_seen real, seen integer not null default 0, correct integer not null default 0)",
           "without_rowid": false
         }
       },
@@ -428,7 +504,6 @@
       "v0_02c2095": {
         "tables": {
           "places": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -436,7 +511,8 @@
                 "TEXT",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -444,6 +520,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -452,6 +529,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
@@ -462,18 +540,30 @@
                   [
                     0,
                     0,
-                    "name"
+                    "name",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table places (name text primary key, value text not null, updated real)",
             "without_rowid": false
           },
           "progress": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -481,7 +571,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -489,6 +580,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -497,6 +589,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -505,15 +598,16 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
             "without_rowid": false
           },
           "responses": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -521,7 +615,8 @@
                 "INTEGER",
                 1,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -529,7 +624,8 @@
                 "TEXT",
                 1,
                 null,
-                2
+                2,
+                0
               ],
               [
                 2,
@@ -537,6 +633,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -545,6 +642,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ],
               [
@@ -553,6 +651,7 @@
                 "INTEGER",
                 0,
                 null,
+                0,
                 0
               ]
             ],
@@ -563,23 +662,38 @@
                   [
                     0,
                     0,
-                    "lesson_id"
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
                   ],
                   [
                     1,
                     1,
-                    "kind"
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
             "without_rowid": false
           },
           "stages": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -587,7 +701,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -595,6 +710,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -603,6 +719,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -611,11 +728,13 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
             "without_rowid": false
           }
         },
@@ -625,7 +744,6 @@
       "v0_1a35a1a": {
         "tables": {
           "places": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -633,7 +751,8 @@
                 "TEXT",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -641,6 +760,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -649,6 +769,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
@@ -659,18 +780,30 @@
                   [
                     0,
                     0,
-                    "name"
+                    "name",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table places (name text primary key, value text not null, updated real)",
             "without_rowid": false
           },
           "progress": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -678,7 +811,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -686,6 +820,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -694,6 +829,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -702,15 +838,16 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
             "without_rowid": false
           },
           "responses": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -718,7 +855,8 @@
                 "INTEGER",
                 1,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -726,7 +864,8 @@
                 "TEXT",
                 1,
                 null,
-                2
+                2,
+                0
               ],
               [
                 2,
@@ -734,6 +873,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -742,6 +882,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ],
               [
@@ -750,6 +891,7 @@
                 "INTEGER",
                 0,
                 null,
+                0,
                 0
               ]
             ],
@@ -760,23 +902,38 @@
                   [
                     0,
                     0,
-                    "lesson_id"
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
                   ],
                   [
                     1,
                     1,
-                    "kind"
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
             "without_rowid": false
           },
           "sort_answers": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -784,7 +941,8 @@
                 "INTEGER",
                 1,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -792,7 +950,8 @@
                 "TEXT",
                 1,
                 null,
-                2
+                2,
+                0
               ],
               [
                 2,
@@ -800,6 +959,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -808,6 +968,7 @@
                 "INTEGER",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -816,6 +977,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
@@ -826,23 +988,38 @@
                   [
                     0,
                     0,
-                    "lesson_id"
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
                   ],
                   [
                     1,
                     1,
-                    "card_key"
+                    "card_key",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table sort_answers (lesson_id integer not null, card_key text not null, choice text not null, correct integer not null, updated real, primary key (lesson_id, card_key))",
             "without_rowid": false
           },
           "stages": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -850,7 +1027,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -858,6 +1036,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -866,6 +1045,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -874,15 +1054,16 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
             "without_rowid": false
           },
           "stamp_events": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -890,7 +1071,8 @@
                 "BLOB",
                 1,
                 null,
-                1
+                1,
+                0
               ]
             ],
             "foreign_keys": [],
@@ -900,18 +1082,22 @@
                   [
                     0,
                     0,
-                    "digest"
+                    "digest",
+                    0,
+                    "BINARY",
+                    1
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table stamp_events (digest blob primary key) without rowid",
             "without_rowid": true
           },
           "stamps": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -919,7 +1105,8 @@
                 "TEXT",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -927,6 +1114,7 @@
                 "REAL",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -935,6 +1123,7 @@
                 "INTEGER",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -943,6 +1132,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -951,6 +1141,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ]
             ],
@@ -961,14 +1152,27 @@
                   [
                     0,
                     0,
-                    "instrument"
+                    "instrument",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table stamps (instrument text primary key, first_ts real not null, count integer not null, provenance text not null, digest text not null)",
             "without_rowid": false
           }
         },
@@ -978,7 +1182,6 @@
       "v0_72ddf9c": {
         "tables": {
           "progress": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -986,7 +1189,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -994,6 +1198,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -1002,6 +1207,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -1010,15 +1216,16 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
             "without_rowid": false
           },
           "responses": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -1026,7 +1233,8 @@
                 "INTEGER",
                 1,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -1034,7 +1242,8 @@
                 "TEXT",
                 1,
                 null,
-                2
+                2,
+                0
               ],
               [
                 2,
@@ -1042,6 +1251,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -1050,6 +1260,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
@@ -1060,19 +1271,35 @@
                   [
                     0,
                     0,
-                    "lesson_id"
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
                   ],
                   [
                     1,
                     1,
-                    "kind"
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, primary key (lesson_id, kind))",
             "without_rowid": false
           }
         },
@@ -1082,7 +1309,6 @@
       "v0_e72c706": {
         "tables": {
           "places": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -1090,7 +1316,8 @@
                 "TEXT",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -1098,6 +1325,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -1106,6 +1334,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
@@ -1116,18 +1345,30 @@
                   [
                     0,
                     0,
-                    "name"
+                    "name",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table places (name text primary key, value text not null, updated real)",
             "without_rowid": false
           },
           "progress": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -1135,7 +1376,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -1143,6 +1385,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -1151,6 +1394,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -1159,15 +1403,16 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
             "without_rowid": false
           },
           "responses": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -1175,7 +1420,8 @@
                 "INTEGER",
                 1,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -1183,7 +1429,8 @@
                 "TEXT",
                 1,
                 null,
-                2
+                2,
+                0
               ],
               [
                 2,
@@ -1191,6 +1438,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -1199,6 +1447,7 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ],
               [
@@ -1207,6 +1456,7 @@
                 "INTEGER",
                 0,
                 null,
+                0,
                 0
               ]
             ],
@@ -1217,23 +1467,38 @@
                   [
                     0,
                     0,
-                    "lesson_id"
+                    "lesson_id",
+                    0,
+                    "BINARY",
+                    1
                   ],
                   [
                     1,
                     1,
-                    "kind"
+                    "kind",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    2,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
             "without_rowid": false
           },
           "stages": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -1241,7 +1506,8 @@
                 "INTEGER",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -1249,6 +1515,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -1257,6 +1524,7 @@
                 "INTEGER",
                 1,
                 "0",
+                0,
                 0
               ],
               [
@@ -1265,15 +1533,16 @@
                 "REAL",
                 0,
                 null,
+                0,
                 0
               ]
             ],
             "foreign_keys": [],
             "indexes": [],
+            "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
             "without_rowid": false
           },
           "stamp_events": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -1281,7 +1550,8 @@
                 "BLOB",
                 1,
                 null,
-                1
+                1,
+                0
               ]
             ],
             "foreign_keys": [],
@@ -1291,18 +1561,22 @@
                   [
                     0,
                     0,
-                    "digest"
+                    "digest",
+                    0,
+                    "BINARY",
+                    1
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table stamp_events (digest blob primary key) without rowid",
             "without_rowid": true
           },
           "stamps": {
-            "checks": [],
             "columns": [
               [
                 0,
@@ -1310,7 +1584,8 @@
                 "TEXT",
                 0,
                 null,
-                1
+                1,
+                0
               ],
               [
                 1,
@@ -1318,6 +1593,7 @@
                 "REAL",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -1326,6 +1602,7 @@
                 "INTEGER",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -1334,6 +1611,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ],
               [
@@ -1342,6 +1620,7 @@
                 "TEXT",
                 1,
                 null,
+                0,
                 0
               ]
             ],
@@ -1352,14 +1631,27 @@
                   [
                     0,
                     0,
-                    "instrument"
+                    "instrument",
+                    0,
+                    "BINARY",
+                    1
+                  ],
+                  [
+                    1,
+                    -1,
+                    null,
+                    0,
+                    "BINARY",
+                    0
                   ]
                 ],
                 "origin": "pk",
                 "partial": 0,
+                "sql": "",
                 "unique": 1
               }
             ],
+            "sql": "create table stamps (instrument text primary key, first_ts real not null, count integer not null, provenance text not null, digest text not null)",
             "without_rowid": false
           }
         },
@@ -1370,7 +1662,6 @@
     "v1": {
       "tables": {
         "places": {
-          "checks": [],
           "columns": [
             [
               0,
@@ -1378,7 +1669,8 @@
               "TEXT",
               0,
               null,
-              1
+              1,
+              0
             ],
             [
               1,
@@ -1386,6 +1678,7 @@
               "TEXT",
               1,
               null,
+              0,
               0
             ],
             [
@@ -1394,6 +1687,7 @@
               "REAL",
               0,
               null,
+              0,
               0
             ]
           ],
@@ -1404,18 +1698,30 @@
                 [
                   0,
                   0,
-                  "name"
+                  "name",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
                 ]
               ],
               "origin": "pk",
               "partial": 0,
+              "sql": "",
               "unique": 1
             }
           ],
+          "sql": "create table places (name text primary key, value text not null, updated real)",
           "without_rowid": false
         },
         "progress": {
-          "checks": [],
           "columns": [
             [
               0,
@@ -1423,7 +1729,8 @@
               "INTEGER",
               0,
               null,
-              1
+              1,
+              0
             ],
             [
               1,
@@ -1431,6 +1738,7 @@
               "INTEGER",
               1,
               "0",
+              0,
               0
             ],
             [
@@ -1439,6 +1747,7 @@
               "INTEGER",
               1,
               "0",
+              0,
               0
             ],
             [
@@ -1447,15 +1756,16 @@
               "REAL",
               0,
               null,
+              0,
               0
             ]
           ],
           "foreign_keys": [],
           "indexes": [],
+          "sql": "create table progress (lesson_id integer primary key, opened integer not null default 0, completed integer not null default 0, updated real)",
           "without_rowid": false
         },
         "responses": {
-          "checks": [],
           "columns": [
             [
               0,
@@ -1463,7 +1773,8 @@
               "INTEGER",
               1,
               null,
-              1
+              1,
+              0
             ],
             [
               1,
@@ -1471,7 +1782,8 @@
               "TEXT",
               1,
               null,
-              2
+              2,
+              0
             ],
             [
               2,
@@ -1479,6 +1791,7 @@
               "TEXT",
               1,
               null,
+              0,
               0
             ],
             [
@@ -1487,6 +1800,7 @@
               "REAL",
               0,
               null,
+              0,
               0
             ],
             [
@@ -1495,6 +1809,7 @@
               "INTEGER",
               0,
               null,
+              0,
               0
             ]
           ],
@@ -1505,23 +1820,38 @@
                 [
                   0,
                   0,
-                  "lesson_id"
+                  "lesson_id",
+                  0,
+                  "BINARY",
+                  1
                 ],
                 [
                   1,
                   1,
-                  "kind"
+                  "kind",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  2,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
                 ]
               ],
               "origin": "pk",
               "partial": 0,
+              "sql": "",
               "unique": 1
             }
           ],
+          "sql": "create table responses (lesson_id integer not null, kind text not null, body text not null, updated real, correct integer, primary key (lesson_id, kind))",
           "without_rowid": false
         },
         "sort_answers": {
-          "checks": [],
           "columns": [
             [
               0,
@@ -1529,7 +1859,8 @@
               "INTEGER",
               1,
               null,
-              1
+              1,
+              0
             ],
             [
               1,
@@ -1537,7 +1868,8 @@
               "TEXT",
               1,
               null,
-              2
+              2,
+              0
             ],
             [
               2,
@@ -1545,6 +1877,7 @@
               "TEXT",
               1,
               null,
+              0,
               0
             ],
             [
@@ -1553,6 +1886,7 @@
               "INTEGER",
               1,
               null,
+              0,
               0
             ],
             [
@@ -1561,6 +1895,7 @@
               "REAL",
               0,
               null,
+              0,
               0
             ]
           ],
@@ -1571,23 +1906,38 @@
                 [
                   0,
                   0,
-                  "lesson_id"
+                  "lesson_id",
+                  0,
+                  "BINARY",
+                  1
                 ],
                 [
                   1,
                   1,
-                  "card_key"
+                  "card_key",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  2,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
                 ]
               ],
               "origin": "pk",
               "partial": 0,
+              "sql": "",
               "unique": 1
             }
           ],
+          "sql": "create table sort_answers (lesson_id integer not null, card_key text not null, choice text not null, correct integer not null, updated real, primary key (lesson_id, card_key))",
           "without_rowid": false
         },
         "stages": {
-          "checks": [],
           "columns": [
             [
               0,
@@ -1595,7 +1945,8 @@
               "INTEGER",
               0,
               null,
-              1
+              1,
+              0
             ],
             [
               1,
@@ -1603,6 +1954,7 @@
               "TEXT",
               1,
               null,
+              0,
               0
             ],
             [
@@ -1611,6 +1963,7 @@
               "INTEGER",
               1,
               "0",
+              0,
               0
             ],
             [
@@ -1619,15 +1972,16 @@
               "REAL",
               0,
               null,
+              0,
               0
             ]
           ],
           "foreign_keys": [],
           "indexes": [],
+          "sql": "create table stages (lesson_id integer primary key, stage text not null, furthest integer not null default 0, updated real)",
           "without_rowid": false
         },
         "stamp_events": {
-          "checks": [],
           "columns": [
             [
               0,
@@ -1635,7 +1989,8 @@
               "BLOB",
               1,
               null,
-              1
+              1,
+              0
             ]
           ],
           "foreign_keys": [],
@@ -1645,18 +2000,22 @@
                 [
                   0,
                   0,
-                  "digest"
+                  "digest",
+                  0,
+                  "BINARY",
+                  1
                 ]
               ],
               "origin": "pk",
               "partial": 0,
+              "sql": "",
               "unique": 1
             }
           ],
+          "sql": "create table stamp_events (digest blob primary key) without rowid",
           "without_rowid": true
         },
         "stamps": {
-          "checks": [],
           "columns": [
             [
               0,
@@ -1664,7 +2023,8 @@
               "TEXT",
               0,
               null,
-              1
+              1,
+              0
             ],
             [
               1,
@@ -1672,6 +2032,7 @@
               "REAL",
               1,
               null,
+              0,
               0
             ],
             [
@@ -1680,6 +2041,7 @@
               "INTEGER",
               1,
               null,
+              0,
               0
             ],
             [
@@ -1688,6 +2050,7 @@
               "TEXT",
               1,
               null,
+              0,
               0
             ],
             [
@@ -1696,6 +2059,7 @@
               "TEXT",
               1,
               null,
+              0,
               0
             ]
           ],
@@ -1706,14 +2070,27 @@
                 [
                   0,
                   0,
-                  "instrument"
+                  "instrument",
+                  0,
+                  "BINARY",
+                  1
+                ],
+                [
+                  1,
+                  -1,
+                  null,
+                  0,
+                  "BINARY",
+                  0
                 ]
               ],
               "origin": "pk",
               "partial": 0,
+              "sql": "",
               "unique": 1
             }
           ],
+          "sql": "create table stamps (instrument text primary key, first_ts real not null, count integer not null, provenance text not null, digest text not null)",
           "without_rowid": false
         }
       },
