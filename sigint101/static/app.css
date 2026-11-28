@@ -2098,6 +2098,36 @@ body {
   white-space: nowrap;
 }
 
+.tune--faded {
+  gap: 6px;
+}
+.tune--faded .tune__dial {
+  padding: 4px 6px;
+}
+.tune--faded .tune__freq {
+  font-size: 24px;
+}
+.tune--faded .tune__freq span {
+  font-size: 14px;
+  margin-left: 4px;
+}
+.tune--faded .tune__caption {
+  font-size: 13px;
+}
+.tune__apply {
+  flex: none;
+  min-height: var(--touch);
+  padding: 0 12px;
+  white-space: nowrap;
+}
+.tune--faded .btn--prev {
+  padding: 0 10px;
+}
+.tune--faded .tune__next {
+  margin-left: 0;
+  padding: 0 12px;
+}
+
 .stage-foot {
   flex: none;
   display: flex;

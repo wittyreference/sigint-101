@@ -28,6 +28,7 @@ RECALL = REPO / "tools" / "render" / "render_recall.py"
 LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 FIELD = REPO / "tools" / "render" / "render_field.py"
 BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
+FADING = REPO / "tools" / "render" / "render_fading.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
 # to settle, and the fake answers at once. Nothing else changes, so the process's exit status is
@@ -438,7 +439,8 @@ def render_make(tmp_path, console_url, devtools):
     )
     chromium.chmod(0o755)
     for script in (
-        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD, BANDMAP
+        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD, BANDMAP,
+        FADING,
     ):
         (screen / script.name).write_text(
             "import os, sys\n"
@@ -482,12 +484,12 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     "failing",
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name, FADING.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails",
+        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails", "fading-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -504,6 +506,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {LIVE_FIND.name} {console_url}",
         f"ran {FIELD.name} {console_url}",
         f"ran {BANDMAP.name} {console_url}",
+        f"ran {FADING.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -1206,3 +1209,110 @@ def test_bandmap_render_fails_on_layout_or_shape_defects(devtools, kind, defect)
         else "VERDICT: FAIL - bandmap red-night"
     )
     assert expected in _verdicts(proc)
+
+
+FADING_PREDICT_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "axisText": "Marine VHF · 162 MHz band",
+    "namesBand": True,
+    "namesDecoder": False,
+    "controlsFit": True,
+    "bottomPx": 462,
+}
+FADING_UNTUNED_FITS = {
+    "stage": "operate",
+    "doc": [800, 480],
+    "back": True,
+    "badge": "UNTUNED",
+    "emptyText": "Not tuned yet — step to marine VHF (162 MHz) and tap Tune.",
+    "freqText": "100.0MHz",
+    "namesDecoder": False,
+    "chromeNamesDecoder": False,
+    "buttonsFit": True,
+    "buttonsOverlap": False,
+    "dialFits": True,
+    "dialWidth": 220,
+    "narrationH": 82,
+    "maxRight": 784,
+    "maxBottom": 360,
+}
+FADING_OFFBAND_FITS = {
+    **FADING_UNTUNED_FITS,
+    "badge": "OFF BAND",
+    "emptyText": (
+        "100.0 MHz is outside the marine VHF band (~162 MHz). Step to ~162 MHz and tap Tune."
+    ),
+}
+FADING_TUNED_FITS = {
+    **FADING_UNTUNED_FITS,
+    "badge": "NO RADIO",
+    "emptyText": "No RTL-SDR radio detected.",
+    "freqText": "162.0MHz",
+}
+FADING_OBSERVE_FITS = {
+    **FADING_TUNED_FITS,
+    "stage": "observe",
+    "dialWidth": 192,
+}
+FADING_EXPLAIN_FITS = {
+    "doc": [800, 480],
+    "completeFits": True,
+    "completeBottom": 464,
+}
+
+
+def _fading_pages(*, kind=None, defect=None):
+    pages = {}
+    for theme in THEMES:
+        pred = {**FADING_PREDICT_FITS, "theme": theme}
+        untuned = {**FADING_UNTUNED_FITS, "theme": theme}
+        offband = {**FADING_OFFBAND_FITS, "theme": theme}
+        tuned = {**FADING_TUNED_FITS, "theme": theme}
+        obs = {**FADING_OBSERVE_FITS, "theme": theme}
+        exp = {**FADING_EXPLAIN_FITS, "theme": theme}
+        if theme == "red-night" and kind and defect:
+            {"predict": pred, "untuned": untuned, "offband": offband,
+             "tuned": tuned, "observe": obs, "explain": exp}[kind].update(defect)
+        pages[f"measureFadingPredict({json.dumps(theme)})"] = pred
+        pages[f"measureFadingStage('operate') /* untuned {theme} */"] = untuned
+        pages[f"measureFadingStage('operate') /* offband {theme} */"] = offband
+        pages[f"measureFadingStage('operate') /* tuned {theme} */"] = tuned
+        pages[f"measureFadingStage('observe') /* observe {theme} */"] = obs
+        pages[f"measureFadingExplain({json.dumps(theme)})"] = exp
+    return pages
+
+
+def test_fading_render_checks_all_stages_in_all_three_themes(devtools):
+    port = devtools(_fading_pages())
+    proc = run(FADING, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    expected = []
+    for theme in THEMES:
+        expected.extend([
+            f"VERDICT: PASS - fading predict {theme}",
+            f"VERDICT: PASS - fading operate untuned {theme}",
+            f"VERDICT: PASS - fading operate offband {theme}",
+            f"VERDICT: PASS - fading operate tuned {theme}",
+            f"VERDICT: PASS - fading observe {theme}",
+            f"VERDICT: PASS - fading explain {theme}",
+        ])
+    assert _verdicts(proc) == expected
+
+
+@pytest.mark.parametrize("kind, label, defect", [
+    ("predict", "fading predict red-night", {"namesDecoder": True}),
+    ("predict", "fading predict red-night", {"namesBand": False}),
+    ("untuned", "fading operate untuned red-night", {"badge": "LIVE"}),
+    ("untuned", "fading operate untuned red-night", {"freqText": "162.0MHz"}),
+    ("untuned", "fading operate untuned red-night", {"narrationH": 50}),
+    ("offband", "fading operate offband red-night", {"badge": "LIVE"}),
+    ("tuned", "fading operate tuned red-night", {"badge": "UNTUNED"}),
+    ("observe", "fading observe red-night", {"buttonsOverlap": True}),
+    ("explain", "fading explain red-night", {"completeFits": False}),
+])
+def test_fading_render_fails_on_decoder_leak_dishonest_badge_or_clip(devtools, kind, label, defect):
+    port = devtools(_fading_pages(kind=kind, defect=defect))
+    proc = run(FADING, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert f"VERDICT: FAIL - {label}" in _verdicts(proc)

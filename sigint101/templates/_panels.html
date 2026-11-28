@@ -272,15 +272,15 @@
    which a waterfall shows only as a GMSK burst. rtl_ais decodes the AIVDM sentences; ais.js polls
    /api/ais and lists each vessel by MMSI. No radio / no rtl_ais / an inland empty sea shows an
    honest empty roster, never a fabricated vessel. Opts into .decoder--fits-refusal in a lesson. ---- #}
-{% macro ais(head_command=true) %}
-              <div class="decoder decoder--fits-refusal" data-ais-panel aria-label="Live AIS vessel roster">
+{% macro ais(head_command=true, faded=false) %}
+              <div class="decoder decoder--fits-refusal" data-ais-panel{% if faded %} data-ais-faded{% endif %} aria-label="Live AIS vessel roster">
                 <div class="decoder__head">
-                  <span class="decoder__title">rtl_ais &middot; AIS</span>
-                  {% if head_command %}{{ command_strip() }}{% endif %}
-                  <span class="decoder__status" data-ais-badge>CHECKING</span>
+                  <span class="decoder__title">{% if faded %}Marine VHF &middot; Vessel roster{% else %}rtl_ais &middot; AIS{% endif %}</span>
+                  {% if head_command and not faded %}{{ command_strip() }}{% endif %}
+                  <span class="decoder__status{% if faded %} decoder__status--empty{% endif %}" data-ais-badge>{% if faded %}UNTUNED{% else %}CHECKING{% endif %}</span>
                 </div>
                 <ul class="decoder__list" data-ais-list></ul>
-                <div class="decoder__empty" data-ais-empty>Checking receiver…</div>
+                <div class="decoder__empty" data-ais-empty>{% if faded %}Not tuned yet — step to marine VHF (162 MHz) and tap Tune.{% else %}Checking receiver…{% endif %}</div>
               </div>
 {% endmacro %}
 

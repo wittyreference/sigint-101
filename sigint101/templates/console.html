@@ -169,7 +169,7 @@
                   <span>&mdash; VESSELS HIDDEN &mdash;</span>
                   <small>Predict first &middot; &#1054;&#1046;&#1048;&#1044;&#1040;&#1053;&#1048;&#1045;</small>
                 </div>
-                <div class="decoder__axis" aria-hidden="true">rtl_ais &middot; AIS on 161.975 / 162.025 MHz</div>
+                <div class="decoder__axis" aria-hidden="true">{% if lesson.is_faded %}Marine VHF &middot; 162 MHz band{% else %}rtl_ais &middot; AIS on 161.975 / 162.025 MHz{% endif %}</div>
               </div>
             </div>
             {% elif lesson.uses_dmr %}
@@ -472,9 +472,28 @@
               {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_ais %}
-            {# AIS roster (M26): the rtl_ais vessel roster (panels.ais) over a fixed dial. #}
+            {# AIS roster (M26): faded consolidation lets the learner tune from the band named in the
+               frame; a non-faded pack shows the fixed dial directly. #}
             <div class="instrument instrument--decode">
-              {{ panels.ais() }}
+              {{ panels.ais(head_command=not lesson.is_faded, faded=lesson.is_faded) }}
+              {% if lesson.is_faded %}
+              <div class="tune tune--faded" data-faded-tune="ais"
+                   data-freq-hz="100000000" data-step-hz="10000000" data-steps="10000000,1000000,100000">
+                <button class="tune-btn" type="button" data-faded-dir="-1" aria-label="Tune down">&minus;</button>
+                <div class="tune__dial">
+                  <div class="tune__freq tune__freq--pending" data-faded-freq>100.0<span>MHz</span></div>
+                  <div class="tune__caption">Marine VHF &middot; 162 MHz band</div>
+                </div>
+                <button class="tune-btn" type="button" data-faded-dir="1" aria-label="Tune up">+</button>
+                <button class="tune-btn tune-btn--step" type="button" data-faded-step aria-label="Change tuning step">
+                  <span class="tune-btn__label">STEP</span>
+                  <span class="tune-btn__val" data-faded-step-val>10 MHz</span>
+                </button>
+                <button class="btn tune__apply" type="button" data-faded-apply>Tune</button>
+                {{ prev_step(loop.first) }}
+                <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
+              </div>
+              {% else %}
               <div class="tune tune--fixed">
                 <div class="tune__dial">
                   <div class="tune__freq">162.0<span>MHz</span></div>
@@ -483,6 +502,7 @@
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
+              {% endif %}
               {{ scroll_text(lesson.stages[stage]) }}
             </div>
             {% elif lesson.uses_dmr %}
@@ -706,64 +726,64 @@
 {% block scripts %}
 <!-- The live waterfall: polls /api/spectrum and draws one pixel per rtl_power bin, replacing the
      SAMPLE badge with the live (or clearly-labelled no-radio) state. It never invents a signal. -->
-<!-- Shared by the panels below: the STOPPED state of a tool that died, and the command strip. -->
+{# Shared by the panels below: the STOPPED state of a tool that died, and the command strip. #}
 <script src="/static/decoder-panel.js"></script>
 <script src="/static/waterfall.js"></script>
 <script src="/static/prov.js"></script>
 <script src="/static/ppm.js"></script>
-<!-- The live decoder (M10): polls /api/decode and lists what rtl_433 read off the ISM band.
-     No radio / no rtl_433 shows an honest empty state; it never invents a sensor read. -->
+{# The live decoder (M10): polls /api/decode and lists what rtl_433 read off the ISM band.
+   No radio / no rtl_433 shows an honest empty state; it never invents a sensor read. #}
 <script src="/static/decode.js"></script>
-<!-- The live LoRa panel (M11): polls /api/lora and lists packets meshtasticd decoded, with the SNR
-     each landed at. No meshtasticd shows an honest empty state; it never invents a packet. -->
+{# The live LoRa panel (M11): polls /api/lora and lists packets meshtasticd decoded, with the SNR
+   each landed at. No meshtasticd shows an honest empty state; it never invents a packet. #}
 <script src="/static/lora.js"></script>
-<!-- The live RDS panel (M12): polls /api/rds and fills the station card redsea assembles from the
-     57 kHz subcarrier. No radio / no redsea shows an honest empty state; it never invents a station. -->
+{# The live RDS panel (M12): polls /api/rds and fills the station card redsea assembles from the
+   57 kHz subcarrier. No radio / no redsea shows an honest empty state; it never invents a station. #}
 <script src="/static/rds.js"></script>
-<!-- The live ADS-B radar (M13): polls /api/adsb and places each aircraft dump1090 decodes on the
-     scope by range and bearing. No radio / no dump1090 / empty sky shows honestly; never a fake plane. -->
+{# The live ADS-B radar (M13): polls /api/adsb and places each aircraft dump1090 decodes on the
+   scope by range and bearing. No radio / no dump1090 / empty sky shows honestly; never a fake plane. #}
 <script src="/static/adsb.js"></script>
-<!-- The live APRS roster (M14): polls /api/aprs and lists each station multimon-ng decoded on 2m,
-     with its latest packet. No radio / no multimon-ng / quiet channel shows honestly; never a fake station. -->
+{# The live APRS roster (M14): polls /api/aprs and lists each station multimon-ng decoded on 2m,
+   with its latest packet. No radio / no multimon-ng / quiet channel shows honestly; never a fake station. #}
 <script src="/static/aprs.js"></script>
-<!-- The live POCSAG log (M15): polls /api/pocsag and lists each pager message multimon-ng decoded,
-     with its address. No radio / no multimon-ng / silent channel shows honestly; never a fake page. -->
+{# The live POCSAG log (M15): polls /api/pocsag and lists each pager message multimon-ng decoded,
+   with its address. No radio / no multimon-ng / silent channel shows honestly; never a fake page. #}
 <script src="/static/pocsag.js"></script>
-<!-- The live ACARS log (M16): polls /api/acars and lists each aircraft message acarsdec decoded.
-     No radio / no acarsdec / quiet channel shows honestly; never a fake message. -->
+{# The live ACARS log (M16): polls /api/acars and lists each aircraft message acarsdec decoded.
+   No radio / no acarsdec / quiet channel shows honestly; never a fake message. #}
 <script src="/static/acars.js"></script>
-<!-- The live AIS roster (M26): polls /api/ais and lists each vessel rtl_ais decoded from AIVDM,
-     keyed by MMSI. No radio / no rtl_ais / inland empty sea shows honestly; never a fabricated vessel. -->
+{# The live AIS roster (M26): polls /api/ais and lists each vessel decoded from AIVDM, keyed by
+   MMSI. On a faded consolidation lesson, polling waits until the learner tunes to marine VHF. #}
 <script src="/static/ais.js"></script>
-<!-- The live DMR/P25 log (M27): polls /api/dmr and lists each call dsd-fme decoded, by talkgroup +
-     source. No radio / no dsd-fme / quiet channel shows honestly; never a fabricated call. -->
+{# The live DMR/P25 log (M27): polls /api/dmr and lists each call dsd-fme decoded, by talkgroup +
+   source. No radio / no dsd-fme / quiet channel shows honestly; never a fabricated call. #}
 <script src="/static/dmr.js"></script>
-<!-- The live NOAA APT image (M24): polls /api/apt and shows the newest weather image satdump
-     decoded (served from /media). No radio / no satdump / no pass shows honestly; never a placeholder. -->
+{# The live NOAA APT image (M24): polls /api/apt and shows the newest weather image satdump
+   decoded (served from /media). No radio / no satdump / no pass shows honestly; never a placeholder. #}
 <script src="/static/apt.js"></script>
-<!-- The live SSTV image (M25): polls /api/sstv and shows the newest picture the rtl_fm|sox|sstv
-     pipeline decoded (served from /media). No radio / no tools / nothing decoded shows honestly. -->
+{# The live SSTV image (M25): polls /api/sstv and shows the newest picture the rtl_fm|sox|sstv
+   pipeline decoded (served from /media). No radio / no tools / nothing decoded shows honestly. #}
 <script src="/static/sstv.js"></script>
-<!-- The live Flock detections (M18): polls /api/flock and lists each device matched by OUI + IE
-     fingerprint on wlan1 in monitor mode. No monitor radio / no tcpdump / no camera shows honestly;
-     never a fabricated detection. -->
+{# The live Flock detections (M18): polls /api/flock and lists each device matched by OUI + IE
+   fingerprint on wlan1 in monitor mode. No monitor radio / no tcpdump / no camera shows honestly;
+   never a fabricated detection. #}
 <script src="/static/flock.js"></script>
-<!-- The live Rayhunter monitor (M19): polls /api/rayhunter and shows the recording line + heuristic
-     findings from the Orbic. No Orbic reachable shows honestly; a quiet line never proves no catcher. -->
+{# The live Rayhunter monitor (M19): polls /api/rayhunter and shows the recording line + heuristic
+   findings from the Orbic. No Orbic reachable shows honestly; a quiet line never proves no catcher. #}
 <script src="/static/rayhunter.js"></script>
-<!-- The attached Flipper (M29+): polls /api/flipper and shows the device identity + radio state
-     over the USB serial CLI. No Flipper on USB shows the reason, never a fabricated device. -->
+{# The attached Flipper (M29+): polls /api/flipper and shows the device identity + radio state
+   over the USB serial CLI. No Flipper on USB shows the reason, never a fabricated device. #}
 <script src="/static/flipper.js"></script>
-<!-- The read-only Wi-Fi survey (M39): polls /api/survey and lists the per-channel metadata census
-     (never payload). No Wi-Fi radio / no nmcli shows the reason, never a fabricated network. -->
+{# The read-only Wi-Fi survey (M39): polls /api/survey and lists the per-channel metadata census
+   (never payload). No Wi-Fi radio / no nmcli shows the reason, never a fabricated network. #}
 <script src="/static/survey.js"></script>
-<!-- Shell behaviour that is NOT the waterfall lives in its own files: stepping between the
-     lesson's rendered stage panels in /static/lesson-nav.js (below), and the tune strip (+/- and
-     tap-to-tune retune the live sweep) in /static/waterfall.js, which alone paints the canvas — a
-     placeholder spectrogram would be invented signal, which the RF honesty invariant forbids.
-     Keyboard scrolling is shared across screens — see /static/scroll-keys.js (loaded in base). -->
-<!-- Stage navigation: Next and Previous; each step is remembered server-side so a
-     reload resumes in place, and Complete leads on to the next lesson or back to the unit. -->
+{# Shell behaviour that is NOT the waterfall lives in its own files: stepping between the
+   lesson's rendered stage panels in /static/lesson-nav.js (below), and the tune strip (+/- and
+   tap-to-tune retune the live sweep) in /static/waterfall.js, which alone paints the canvas — a
+   placeholder spectrogram would be invented signal, which the RF honesty invariant forbids.
+   Keyboard scrolling is shared across screens — see /static/scroll-keys.js (loaded in base). #}
+{# Stage navigation: Next and Previous; each step is remembered server-side so a
+   reload resumes in place, and Complete leads on to the next lesson or back to the unit. #}
 <script src="/static/lesson-nav.js"></script>
 <script src="/static/card-sort.js"></script>
 {% endblock %}

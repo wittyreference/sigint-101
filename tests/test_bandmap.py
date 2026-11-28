@@ -85,9 +85,14 @@ def test_real_packs_frequencies_separate_rows_sorting_and_tools():
     for row in band_map.dial_rows:
         lesson = lessons[row.lesson_id]
         if row.kind == "tuned":
-            assert row.center_hz == lesson.tune["center_hz"]
-            assert row.low_hz == lesson.tune["center_hz"]
-            assert row.high_hz == lesson.tune["center_hz"]
+            expected = (
+                lesson.tune["center_hz"]
+                if lesson.tune is not None
+                else sum(row.fixed_hz) // len(row.fixed_hz)
+            )
+            assert row.center_hz == expected
+            assert row.low_hz == expected
+            assert row.high_hz == expected
         else:
             assert row.kind == "default_sweep"
             assert (row.low_hz, row.high_hz) == (DEFAULT_LOW, DEFAULT_HIGH)

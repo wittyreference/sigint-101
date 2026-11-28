@@ -388,6 +388,27 @@ def build_map(lessons: dict) -> BandMap:
 
         if "rtl-sdr" in lesson.hardware:
             inst = _instrument_for_lesson(lesson)
+            fixed_hz = tuple(inst.fixed_hz) if inst else ()
+            if fixed_hz:
+                center = sum(fixed_hz) // len(fixed_hz)
+                between = len(fixed_hz) == 2 and min(fixed_hz) < center < max(fixed_hz)
+                dial_rows.append(
+                    BandRow(
+                        lesson_id=lesson.id,
+                        title=lesson.title,
+                        kind="tuned",
+                        low_hz=center,
+                        high_hz=center,
+                        center_hz=center,
+                        tool=inst.tool,
+                        instrument_label=inst.label,
+                        fixed_hz=fixed_hz,
+                        between_channels=between,
+                        status=status,
+                        note=note,
+                    )
+                )
+                continue
             dial_rows.append(
                 BandRow(
                     lesson_id=lesson.id,
@@ -398,7 +419,7 @@ def build_map(lessons: dict) -> BandMap:
                     center_hz=None,
                     tool=inst.tool if inst else None,
                     instrument_label=inst.label if inst else None,
-                    fixed_hz=tuple(inst.fixed_hz) if inst else (),
+                    fixed_hz=fixed_hz,
                     status=status,
                     note=note,
                 )

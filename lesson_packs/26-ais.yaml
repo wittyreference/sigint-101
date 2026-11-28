@@ -4,37 +4,24 @@
 id: 26
 slug: ais
 title: "The Sea Talks"
-type: intro
+type: consolidation
 concept: >-
   In Lesson 13 the sky talked; here the sea does. Big ships broadcast who they are, where they sit
   and which way they are steaming — in the clear, on marine VHF around 162 MHz, to anyone with a
-  receiver. AIS rides two channels at once, 161.975 and 162.025 MHz, as 9600-bps GMSK bursts. rtl_ais
-  demodulates them into AIVDM sentences; the console sorts the sentences into a roster, one row per
-  vessel, keyed by the ship's MMSI — the sea's twin of the ADS-B radar, keyed by ICAO hex.
+  receiver. AIS rides two channels at once, 161.975 and 162.025 MHz, as 9600-bps GMSK bursts. The
+  receiver demodulates them into AIVDM sentences; the console sorts the sentences into a roster, one
+  row per vessel, keyed by the ship's MMSI — the sea's twin of the ADS-B radar, keyed by ICAO hex.
 requires_tx: false
 hardware: [rtl-sdr]
 panels: [ais]
-tune:
-  center_hz: 162000000
-  span_hz: 200000
-  step_hz: 25000
 
 stages:
-  frame: >-
-    A cousin of Lesson 13, comrade, and the same trick on the water. Up there, airliners shouted their
-    names into the sky; down here every big ship does the same across the harbour. AIS — the sea's own
-    collision-avoidance chatter — rides marine VHF around 162 megahertz: a vessel announces who it is,
-    where it sits, which way it is steaming, several times a minute, in the clear, to anyone listening.
-    No permit, no key, no secret. Tonight you build the radar again, this time for the sea.
-  demo: >-
-    Watch — hands off. rtl_ais hears 161.975 and 162.025 MHz, turning GMSK into AIVDM sentences.
-    Position and name ride separate messages, yet both land on one row.
-  try: >-
-    Read a row, comrade: the nine-digit MMSI, position, course; the name fills in with the slower
-    static message. Empty? Inland, an empty roster is the honest answer.
   predict: >-
     A ship's position and its name ride in two different AIS messages. What stitches them into one
     vessel? Lock it in.
+  operate: >-
+    Tune to marine VHF around 162 MHz. Read a row, comrade: the nine-digit MMSI, position, course;
+    the name arrives in the slower static message. Inland, empty is honest.
   observe: >-
     Position arrived in one burst, name in another, yet both land on one row. What did the console
     match to link them — and did the sky's radar do anything different?

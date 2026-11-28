@@ -25,3 +25,29 @@ test("the motion shows speed and course, each only when reported", () => {
   assert.equal(panel.motion({}), "");
   assert.equal(panel.motion(null), "");
 });
+
+test("faded AIS tuning refuses off-band, prompts before tuning, and opens on marine VHF 162 MHz", () => {
+  const untuned = panel.fadedTuneState(100_000_000, false);
+  assert.equal(untuned.tuned, false);
+  assert.equal(untuned.badge, "UNTUNED");
+  assert.match(untuned.message, /162 MHz/);
+
+  const offBand = panel.fadedTuneState(150_000_000, true);
+  assert.equal(offBand.tuned, false);
+  assert.equal(offBand.badge, "OFF BAND");
+  assert.match(offBand.message, /150\.0 MHz/);
+  assert.match(offBand.message, /162 MHz/);
+
+  for (const hz of [161_975_000, 162_000_000, 162_025_000]) {
+    const ok = panel.fadedTuneState(hz, true);
+    assert.equal(ok.tuned, true);
+    assert.equal(ok.badge, "CHECKING");
+  }
+  assert.equal(panel.inAisBand(161_800_000), false);
+  assert.equal(panel.inAisBand(162_200_000), false);
+
+  assert.equal(panel.stepFadedFreq(100_000_000, 1, 10_000_000), 110_000_000);
+  assert.equal(panel.stepFadedFreq(24_000_000, -1, 10_000_000), 24_000_000);
+  assert.equal(panel.nextFadedStep([10_000_000, 1_000_000, 100_000], 10_000_000), 1_000_000);
+  assert.equal(panel.nextFadedStep([10_000_000, 1_000_000, 100_000], 100_000), 10_000_000);
+});

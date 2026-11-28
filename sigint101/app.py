@@ -937,14 +937,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
-        _restore_lesson_tuning(lesson)
-        app.state.progress.mark_opened(lesson_id)
+        if not lesson.is_faded:
+            _restore_lesson_tuning(lesson)
+            app.state.progress.mark_opened(lesson_id)
         saved_stage = app.state.progress.get_stage(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
         unit = unit_for_lesson(lesson_id)
         sources = _recall_sources()
         now = clock()
-        app.state.progress.enroll_recall(sources, now=now)
+        if not lesson.is_faded:
+            app.state.progress.enroll_recall(sources, now=now)
         if saved_stage is None and prediction is None:
             recall_page = _recall_response(request, lesson, unit, sources, now)
             if recall_page is not None:

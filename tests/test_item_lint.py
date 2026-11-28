@@ -244,7 +244,6 @@ WAIVERS = {
     (20, "giveaway"): "MINOR (R+, D) in the review: the demo says the first stage sets sensitivity",
     (22, "giveaway"): "OK in the review: the 2.4 MSPS rate must be shown to pose the question",
     (24, "giveaway"): "MINOR (K, H) in the review: 'picture' is the lesson's subject, not a cue",
-    (26, "giveaway"): "MINOR (D) in the review, which notes the demo and try cue the shared ID",
     (29, "giveaway"): "OK in the review: 'screen' only describes the device in frame and demo",
 }
 

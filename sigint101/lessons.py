@@ -212,6 +212,20 @@ class Lesson:
         return bool(self.hardware)
 
     @property
+    def is_faded(self) -> bool:
+        """True when a consolidation SDR lesson fades pre-tuning and decoder scaffolding.
+
+        The pack removes its `tune:` block so the learner tunes from the band named in the frame
+        instead of landing on a pre-tuned decoder panel.
+        """
+        return (
+            self.type == "consolidation"
+            and self.tune is None
+            and "rtl-sdr" in self.hardware
+            and any(panel in INSTRUMENT_PANELS for panel in self.panels)
+        )
+
+    @property
     def hardware_badges(self) -> list:
         """The kit this lesson needs beyond the built-in radio, as the learner should read it.
 
