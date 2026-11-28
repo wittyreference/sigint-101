@@ -177,11 +177,24 @@ class TuningGate:
 
     def skip_restore(self, at: float) -> None:
         """Order a faded lesson that restores no receiver against earlier restores and tunes,
-        without holding radio claims or touching any receiver."""
+        without holding radio claims or touching any receiver.
+
+        Publishes `at` at once so earlier restores that have not yet entered a step are cancelled,
+        then fences any already-admitted step under `_step` (bounded by TUNING_WAIT_S) so a faded
+        load never acknowledges completion while an older reset can still write.
+        """
         with self._state:
             if at < self._newest_restore:
                 raise Superseded(STALE_REASON)
             self._newest_restore = at
+        if not self._step.acquire(timeout=TUNING_WAIT_S):
+            raise TuningBusy("an earlier restore is still in progress")
+        try:
+            with self._state:
+                if at < self._newest_restore:
+                    raise Superseded(STALE_REASON)
+        finally:
+            self._step.release()
 
     def restore_step(self, receiver: str, token: float, reset) -> str:
         """Run `reset` for `receiver` unless a newer action overtook restore `token`; say which."""

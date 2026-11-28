@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from sigint101 import radio_control
 from sigint101.app import create_app
 from sigint101.hardware import RadioProbe
 from sigint101.lessons import REQUIRED_STAGES, load_lesson_file
@@ -446,3 +449,248 @@ def test_m26_faded_load_preserves_c81_action_ordering(tmp_path):
         r_stale_faded = client.post(f"/api/tuning?lesson_id=26&epoch={epoch}&at={base - 5}")
         assert r_stale_faded.status_code == 409
         assert r_stale_faded.json()["stale"] is True
+
+
+def _make_parked_rack(parked_step: str):
+    """Build a rack sweeper and APRS fake where `parked_step` blocks after step admission."""
+    entered = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    class _ParkedSweeper:
+        low = 432_920_000
+        high = 434_920_000
+        bin_size = 25_000
+        target = 433_920_000
+
+        def __init__(self):
+            self.running = True
+            self.rows = [{"low": self.low, "high": self.high, "bins": [-45.0, -40.0]}]
+
+        def retune(self, low, high, bin_size, target=None):
+            if parked_step == "sweep":
+                entered.set()
+                assert release.wait(5), "parked sweep step was never released"
+            self.low, self.high, self.bin_size, self.target = low, high, bin_size, target
+            self.running = False
+            self.rows.clear()
+            order.append("sweep_step_done")
+
+        def stop(self):
+            self.running = False
+
+        def release(self):
+            pass
+
+        def resume(self):
+            pass
+
+    class _ParkedAprs:
+        home_hz = 144_390_000
+
+        def __init__(self):
+            self.freq_hz = 144_800_000
+            self.running = False
+
+        def retune(self, freq_hz):
+            if parked_step == "aprs":
+                entered.set()
+                assert release.wait(5), "parked APRS step was never released"
+            self.freq_hz = freq_hz
+            order.append("aprs_step_done")
+
+        def stop(self):
+            self.running = False
+
+        def release(self):
+            pass
+
+        def resume(self):
+            pass
+
+    return _ParkedSweeper(), _ParkedAprs(), entered, release, order
+
+
+@pytest.mark.parametrize("parked_step", ["aprs", "sweep"])
+def test_m26_faded_load_fences_already_admitted_restore_step_before_settling(
+    tmp_path, parked_step
+):
+    """F5: faded load must not report settled while an already-admitted older step can write."""
+    sweeper, aprs, entered, release, order = _make_parked_rack(parked_step)
+    app = create_app(
+        pack_dir=PACK_DIR,
+        data_dir=tmp_path,
+        probe=_absent_probe,
+        sweeper_factory=lambda: sweeper,
+        aprs_factory=lambda: aprs,
+    )
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+        epoch, base = app.state.tuning_gate.anchor()
+        old_future = pool.submit(
+            client.post, f"/api/tuning?lesson_id=1&epoch={epoch}&at={base - 20}"
+        )
+        try:
+            assert entered.wait(3), f"older restore never entered {parked_step} step"
+            assert client.get("/lesson/26").status_code == 200
+            faded_done = threading.Event()
+
+            def _run_faded():
+                resp = client.post(f"/api/tuning?lesson_id=26&epoch={epoch}&at={base - 5}")
+                order.append("faded_returned")
+                faded_done.set()
+                return resp
+
+            faded_future = pool.submit(_run_faded)
+            assert client.post("/api/opened?lesson_id=26").status_code == 200
+
+            # Faded POST must stay fenced (not settled) while the admitted step is still in flight.
+            assert not faded_done.wait(0.15), (
+                f"faded load reported settled before parked {parked_step} step finished"
+            )
+            # Newer faded action must already be published so subsequent older steps cancel.
+            assert app.state.tuning_gate._newest_restore == pytest.approx(base - 5)
+        finally:
+            release.set()
+
+        old_resp = old_future.result(timeout=5)
+        faded_resp = faded_future.result(timeout=5)
+        sweeper_running = sweeper.running
+
+    assert faded_resp.status_code == 200
+    assert faded_resp.json() == {"tuned": False, "lesson_id": 26, "faded": True}
+    step_label = f"{parked_step}_step_done"
+    assert step_label in order and "faded_returned" in order
+    assert order.index(step_label) < order.index("faded_returned"), (
+        f"admitted {parked_step} step wrote after faded load settled: {order}"
+    )
+    if parked_step == "aprs":
+        assert "sweep_step_done" not in order
+        assert old_resp.json()["skipped"]["sweeper"] == radio_control.NEWER_LESSON
+        assert (sweeper.low, sweeper.high, sweeper.target) == (
+            432_920_000,
+            434_920_000,
+            433_920_000,
+        )
+        assert sweeper_running is True and len(sweeper.rows) == 1
+
+
+@pytest.mark.parametrize("parked_step", ["aprs", "sweep"])
+def test_m26_faded_load_reports_busy_when_admitted_restore_exceeds_wait_bound(
+    tmp_path, monkeypatch, parked_step
+):
+    """F5: bounded fence refuses to report settled when an older step outlasts TUNING_WAIT_S."""
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.05)
+    sweeper, aprs, entered, release, order = _make_parked_rack(parked_step)
+    app = create_app(
+        pack_dir=PACK_DIR,
+        data_dir=tmp_path,
+        probe=_absent_probe,
+        sweeper_factory=lambda: sweeper,
+        aprs_factory=lambda: aprs,
+    )
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        epoch, base = app.state.tuning_gate.anchor()
+        old_future = pool.submit(
+            client.post, f"/api/tuning?lesson_id=1&epoch={epoch}&at={base - 20}"
+        )
+        try:
+            assert entered.wait(3), f"older restore never entered {parked_step} step"
+            assert client.get("/lesson/26").status_code == 200
+            faded_resp = client.post(f"/api/tuning?lesson_id=26&epoch={epoch}&at={base - 5}")
+            assert client.post("/api/opened?lesson_id=26").status_code == 200
+            assert faded_resp.status_code == 503
+            body = faded_resp.json()
+            assert body["tuned"] is False and body["faded"] is True and body["busy"] is True
+            assert "earlier restore" in body["reason"].lower()
+        finally:
+            release.set()
+
+        old_resp = old_future.result(timeout=5)
+        sweeper_running = sweeper.running
+
+    if parked_step == "aprs":
+        assert "sweep_step_done" not in order
+        assert old_resp.json()["skipped"]["sweeper"] == radio_control.NEWER_LESSON
+        assert sweeper.target == 433_920_000 and sweeper_running is True and len(sweeper.rows) == 1
+
+
+def test_m26_faded_load_preserves_launch_permit_and_cancels_queued_older_restore(tmp_path):
+    """F5: faded load does not block on a held claim permit and cancels queued restores."""
+    sweeper, aprs, _, _, order = _make_parked_rack("none")
+    app = create_app(
+        pack_dir=PACK_DIR,
+        data_dir=tmp_path,
+        probe=_absent_probe,
+        sweeper_factory=lambda: sweeper,
+        aprs_factory=lambda: aprs,
+    )
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        gate = app.state.tuning_gate
+        epoch, base = gate.anchor()
+        assert gate.admit_claim() is True
+        old_future = pool.submit(
+            client.post, f"/api/tuning?lesson_id=1&epoch={epoch}&at={base - 20}"
+        )
+        try:
+            # Wait until the older restore is registered and queued behind our claim permit.
+            deadline = radio_control.time.monotonic() + 3.0
+            while not gate.state()["restoring"]:
+                assert radio_control.time.monotonic() < deadline
+                radio_control.time.sleep(0.01)
+
+            faded_resp = client.post(f"/api/tuning?lesson_id=26&epoch={epoch}&at={base - 5}")
+            assert faded_resp.status_code == 200
+            assert faded_resp.json() == {"tuned": False, "lesson_id": 26, "faded": True}
+            # Launch permit is still held intact.
+            assert gate._claims == 1
+        finally:
+            gate.end_claim()
+
+        old_resp = old_future.result(timeout=5)
+        sweeper_running = sweeper.running
+
+    assert old_resp.status_code == 200
+    assert old_resp.json()["tuned"] is False
+    assert old_resp.json()["skipped"]["aprs"] == radio_control.NEWER_LESSON
+    assert old_resp.json()["skipped"]["sweeper"] == radio_control.NEWER_LESSON
+    assert order == []
+    assert aprs.freq_hz == 144_800_000
+    assert sweeper.target == 433_920_000 and sweeper_running is True and len(sweeper.rows) == 1
+
+
+def test_m26_faded_load_overtaken_while_fencing_parked_step_returns_stale(tmp_path):
+    """F5: a newer lesson arriving while a faded load waits on _step supersedes the faded load."""
+    sweeper, aprs, entered, release, _ = _make_parked_rack("aprs")
+    app = create_app(
+        pack_dir=PACK_DIR,
+        data_dir=tmp_path,
+        probe=_absent_probe,
+        sweeper_factory=lambda: sweeper,
+        aprs_factory=lambda: aprs,
+    )
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+        gate = app.state.tuning_gate
+        epoch, base = gate.anchor()
+        old_future = pool.submit(
+            client.post, f"/api/tuning?lesson_id=1&epoch={epoch}&at={base - 30}"
+        )
+        try:
+            assert entered.wait(3)
+            faded_future = pool.submit(
+                client.post, f"/api/tuning?lesson_id=26&epoch={epoch}&at={base - 15}"
+            )
+            deadline = radio_control.time.monotonic() + 3.0
+            while gate._newest_restore < base - 15:
+                assert radio_control.time.monotonic() < deadline
+                radio_control.time.sleep(0.01)
+            # A newer lesson overtakes the waiting faded load before the parked step releases.
+            with gate._state:
+                gate._newest_restore = base - 5
+        finally:
+            release.set()
+
+        old_future.result(timeout=5)
+        faded_resp = faded_future.result(timeout=5)
+
+    assert faded_resp.status_code == 409
+    assert faded_resp.json()["stale"] is True

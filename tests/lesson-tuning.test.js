@@ -526,3 +526,14 @@ test("a faded lesson's tuning answer leaves the rail quiet and opens panels at o
   assert.equal(page.full.hidden, true);
   assert.equal(page.polls("/api/decode").length, 1);
 });
+
+test("a faded lesson refused while an earlier restore is still in progress shows the note", async () => {
+  const page = lessonPage({ lessonId: "26", panels: ["decode"] });
+  const reason = "an earlier restore is still in progress";
+  await page.answer(503, { tuned: false, lesson_id: 26, faded: true, busy: true, reason });
+  assert.equal(page.note.hidden, false);
+  assert.deepEqual(page.note.lines, ["Not retuned", reason]);
+  assert.equal(page.full.hidden, false);
+  assert.equal(page.fullText.textContent, reason);
+  assert.equal(page.polls("/api/decode").length, 1);
+});

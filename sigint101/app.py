@@ -1418,7 +1418,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         a request that arrives late is ordered by when the learner acted. The answer says what
         happened, never more: {"tuned": true} only when every receiver is on the lesson's
         frequency; {"tuned": false, "faded": true} when a faded consolidation lesson skips
-        receiver resets while still ordering against older actions; {"tuned": false, "skipped":
+        receiver resets while still ordering against older actions; 503 with "busy" when an
+        already-admitted earlier restore step is still running past the wait bound;
+        {"tuned": false, "skipped":
         {receiver: why}} when a step gave way to a newer action; 409 with "stale" when a newer
         lesson's restore already ran; 422 with the sweep's own reason when the lesson's band is
         one it cannot take.
@@ -1432,6 +1434,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         except Superseded as exc:
             return JSONResponse(status_code=409, content={
                 "tuned": False, "lesson_id": lesson_id, "stale": True, "reason": str(exc)})
+        except TuningBusy as exc:
+            return JSONResponse(status_code=503, content={
+                "tuned": False, "lesson_id": lesson_id, "faded": lesson.is_faded,
+                "busy": True, "reason": str(exc)})
         if lesson.is_faded:
             return {"tuned": False, "lesson_id": lesson_id, "faded": True}
         if refusal is not None:
