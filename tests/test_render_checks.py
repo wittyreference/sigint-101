@@ -1122,6 +1122,14 @@ def test_every_discovered_check_starts_and_its_pages_are_walked(render_make):
     assert len(_pages_loaded_from(_proxy_url(proc)[0], calls)) >= 10
 
 
+def test_replay_check_is_discovered_and_its_pages_are_walked():
+    replay = next((check for check in CHECKS if check.path == render_tool("replay")), None)
+    assert replay is not None, "the replay check must be discovered"
+    assert not replay.scratch
+    assert set(replay.pages) == {"/operate/ism", "/lesson/10", "/logbook"}
+    assert set(replay.pages) <= set(RENDER_CHECK_PAGES)
+
+
 def test_make_render_check_picks_up_a_dropped_script(render_make):
     (render_make.screen / "render_extra.py").write_text(
         'RENDER_CHECK = {"name": "extra", "pages": ("/",), "scratch": False}\n'

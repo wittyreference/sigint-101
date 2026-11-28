@@ -1109,7 +1109,8 @@ def test_a_tuning_post_for_a_lesson_the_course_lacks_is_refused_and_changes_noth
 
 
 def test_the_lesson_page_restores_its_tuning_before_any_panel_starts_polling(tmp_path):
-    # lesson-tuning.js posts synchronously, so it must load ahead of every panel script.
+    # lesson-tuning.js sets up the gate the panels' first polls wait on, so it must load ahead of
+    # every panel script.
     with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
         html = client.get("/lesson/1").text
     tag = re.search(r'<script src="/static/lesson-tuning\.js"([^>]*)>', html)
@@ -1118,6 +1119,35 @@ def test_the_lesson_page_restores_its_tuning_before_any_panel_starts_polling(tmp
     first_panel = min(html.index(f'src="/static/{name}.js"')
                       for name in ("decoder-panel", "waterfall", "decode", "aprs"))
     assert tag.start() < first_panel
+
+
+def test_the_lesson_page_has_a_note_that_says_when_its_tuning_is_late_or_refused(tmp_path):
+    # lesson-tuning.js writes into it once the panels stop waiting for a slow restore, or when the
+    # restore is refused. Hidden until then: a restore that worked has nothing to say.
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        html = client.get("/lesson/1").text
+    note = re.search(r"<[a-z]+[^>]*\bdata-lesson-tuning\b[^>]*>", html)
+    assert note, "the lesson page has no tuning note for lesson-tuning.js to fill"
+    assert 'role="status"' in note.group(0)
+    assert re.search(r"\shidden\b", note.group(0))
+    # Its two lines, the verdict and why, so neither is cut to fit the rail beside the other.
+    rest = html[note.end():]
+    assert re.match(r'\s*<span[^>]*data-lesson-tuning-head[^>]*></span>'
+                    r'\s*<span[^>]*data-lesson-tuning-why[^>]*></span>\s*</span>', rest)
+    # A reason too long for the rail opens whole under it: a hidden band that is its own button
+    # (a tap closes it), with the reason in a status line.
+    full = re.search(r"<button[^>]*\bdata-lesson-tuning-full\b[^>]*>(.*?)</button>", html, re.S)
+    assert full, "the lesson page has no band for a reason too long for the rail"
+    assert re.search(r"\shidden\b", full.group(0).split(">")[0])
+    assert re.search(r'<span[^>]*role="status"[^>]*data-lesson-tuning-full-text', full.group(1))
+
+
+def test_the_rack_never_restores_a_lessons_tuning(tmp_path):
+    # The rack's polls never wait on, or apply, a lesson's tuning: it loads no lesson-tuning.js.
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        html = client.get("/operate/ism").text
+    assert 'src="/static/decode.js"' in html
+    assert "lesson-tuning" not in html
 
 
 # Walk the pages declared by the discovered checks. test_render_checks.py verifies those
@@ -1165,6 +1195,29 @@ def test_a_render_check_walk_against_a_live_console_changes_none_of_its_state(tm
         assert app.state.decoder.freq_hz == RACK_ISM_HZ
         assert app.state.progress.get_retrieval([source]) == {}
         assert _stored_state(tmp_path) == before
+
+
+def test_reading_the_tuning_gates_state_writes_nothing_and_starts_nothing(tmp_path):
+    # GET /api/tuning (the lesson rail asks it once a restore runs late) only reads the gate:
+    # no row, no event, no retune, no receiver started, and no restore registered, so an older
+    # restore that comes after it is still taken, not refused as stale.
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        _tuned_away(client)
+        before = _stored_state(tmp_path)
+        running = {name: getattr(app.state, name).running for name in ("aprs", "decoder",
+                                                                       "sweeper")}
+        for _ in range(3):
+            resp = client.get("/api/tuning")
+            assert resp.status_code == 200
+            assert resp.json() == {"restoring": False, "waiting_on": None}
+        assert _stored_state(tmp_path) == before
+        assert app.state.aprs.freq_hz == RACK_APRS_HZ
+        assert app.state.decoder.freq_hz == RACK_ISM_HZ
+        assert {name: getattr(app.state, name).running for name in running} == running
+        epoch = app.state.tuning_gate.epoch
+        lesson = min(app.state.lessons)
+        assert client.post(f"/api/tuning?lesson_id={lesson}&epoch={epoch}&at=1").status_code == 200
 
 
 def test_a_lesson_get_enrols_no_completed_check_lesson_for_recall(tmp_path):
@@ -1760,12 +1813,13 @@ def test_pocsag_never_serves_the_words_of_a_commercial_page(tmp_path):
 
     class _Pipeline:
         stdout = iter([line])
+        code = None
 
         def poll(self):
-            return None
+            return self.code
 
         def terminate(self):
-            pass
+            self.code = 0
 
         def wait(self, timeout=None):
             return 0
@@ -2554,12 +2608,13 @@ class _IdleProc:
 
     def __init__(self):
         self.stdout = iter(())
+        self.code = None
 
     def poll(self):
-        return None
+        return self.code
 
     def terminate(self):
-        pass
+        self.code = 0
 
     def wait(self, timeout=None):
         return 0
@@ -3238,6 +3293,7 @@ class _FmSweep(_IdleProc):
     """A launched rtl_power at the process boundary, printing a real capture of the FM band."""
 
     def __init__(self):
+        super().__init__()
         self.stdout = iter(FM_LINES)
 
 

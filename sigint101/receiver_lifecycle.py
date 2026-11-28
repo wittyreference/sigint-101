@@ -56,6 +56,8 @@ class Run:
     ready: threading.Event = field(default_factory=threading.Event)
     complete: threading.Event = field(default_factory=threading.Event)
     diagnosed: threading.Event = field(default_factory=threading.Event)
+    retry_wake: threading.Event = field(default_factory=threading.Event)
+    retry_done: threading.Event | None = None
     diagnostic_lock: threading.Lock = field(default_factory=threading.Lock)
     deferred_stderr: tuple = ()
     reader: threading.Thread | None = None
@@ -142,13 +144,19 @@ class SupervisedReceiver:
     def _clear(self):
         """A finite capture keeps its saved output across controls."""
 
-    def release(self):
+    def release_for_claim(self):
+        """Stand down for another claimant without driving a failed reap retry."""
+        self.release(for_claim=True)
+
+    def release(self, *, for_claim=False):
         with self._life:
+            if for_claim and self.release_failure():
+                return
             self._released = True
-            run, intent = self._cancel()
+            run, intent, retry = self._cancel(request_retry=not for_claim)
             with self._runs:
                 self._clear()
-        self._wait_physical(run, intent)
+        self._wait_physical(run, intent, retry)
 
     def retune(self, freq_hz):
         with self._life:
@@ -156,12 +164,12 @@ class SupervisedReceiver:
             if freq_hz == self.freq_hz:
                 return
             self._count_visible_exit(self._run)
-            run, intent = self._cancel()
+            run, intent, retry = self._cancel()
             with self._runs:
                 self.freq_hz = freq_hz
                 self._clear()
                 self._drop_death(run)
-        self._wait_physical(run, intent)
+        self._wait_physical(run, intent, retry)
 
     def _count_visible_exit(self, run):
         """Record a streaming child's exit that is visible but not yet observed, before the fence.
@@ -199,8 +207,8 @@ class SupervisedReceiver:
 
     def stop(self):
         with self._life:
-            run, intent = self._cancel()
-        run = self._wait_physical(run, intent)
+            run, intent, retry = self._cancel()
+        run = self._wait_physical(run, intent, retry)
         if run and run.reaped and run.watch.finite:
             if not run.complete.wait(DIRECT_CAPTURE_WAIT_S):
                 raise self._unavailable("receiver is finishing its capture")
@@ -208,8 +216,8 @@ class SupervisedReceiver:
     def shutdown(self):
         with self._life:
             self._closing = True
-            run, intent = self._cancel()
-        self._wait_physical(run, intent)
+            run, intent, retry = self._cancel()
+        self._wait_physical(run, intent, retry)
         with self._reports_lock:
             reports = tuple(self._reports)
         # Older runs can still be reporting. Give the whole set one budget.
@@ -231,7 +239,7 @@ class SupervisedReceiver:
             intent = None
         return intent
 
-    def _cancel(self):
+    def _cancel(self, *, request_retry=True):
         intent = self._cancel_intent()
         run = self._run
         if run:
@@ -250,17 +258,35 @@ class SupervisedReceiver:
             if not run.preserve_drain:
                 self._fence(run)
             run.wake.set()
-        return run, intent
+        return run, intent, self._request_retry(run) if request_retry else None
+
+    def _request_retry(self, run):
+        # Called under _life. Keep the ticket sticky even if the supervisor has not
+        # entered its retry loop, and coalesce controls while its attempt is in flight.
+        if run and run.reap_failed and not run.reaped and not run.ready.is_set():
+            if run.retry_done is None:
+                run.retry_done = threading.Event()
+            run.retry_wake.set()
+            return run.retry_done
+
+    def _ack_retry(self, run, ticket):
+        with self._life:
+            if ticket is not None and run.retry_done is ticket:
+                ticket.set()
+                run.retry_done = None
 
     def _fence(self, run):
         self._runs.end(run.watch, expected=run.number)
 
-    def _wait_physical(self, run, intent):
+    def _physical_wait_event(self, run):
+        return run.physical
+
+    def _wait_physical(self, run, intent, retry=None):
         deadline = time.monotonic() + PHYSICAL_WAIT_S
-        if intent and intent.done.wait(max(0, deadline - time.monotonic())):
-            run = intent.run or run
+        if intent and intent.done.wait(max(0, deadline - time.monotonic())) and intent.run:
+            run, retry = intent.run, intent.run.retry_done
         if run:
-            run.physical.wait(max(0, deadline - time.monotonic()))
+            (retry or self._physical_wait_event(run)).wait(max(0, deadline - time.monotonic()))
         return run
 
     def release_failure(self, *, pending=False):
@@ -482,21 +508,27 @@ class SupervisedReceiver:
                 streams, run.deferred_stderr = run.deferred_stderr, ()
             self._close_stderr(streams)
 
-    def _stop_child(self, proc):
-        stop = getattr(proc, "stop_child", None)
+    def _stop_run(self, run, *, kill_only=False, wait_s=None):
+        if wait_s is None:
+            wait_s = min(self.STOP_WAIT_S, childproc.STOP_WAIT_S)
+        stop = getattr(run.proc, "stop_child", None)
         if stop is None:
-            childproc.stop_process(proc)
-        else:
-            stop()
-
-    def _stop_run(self, run):
-        self._stop_child(run.proc)
+            return childproc.stop_and_confirm(run.proc, kill_only=kill_only, wait_s=wait_s)
+        return stop(kill_only=kill_only, wait_s=wait_s)
 
     def _notify_physical(self, run):
         run.physical.set()
 
-    def _unreaped_reason(self, run):
-        return f"{run.watch.tool} survived kill; the dongle may still be held"
+    def _stop_reason(self, run, result):
+        return result.reason(run.watch.tool)
+
+    def _apply_stop_result(self, run, result):
+        if result.reaped:
+            if result.error is not None:
+                run.diagnostic_fault = str(result.error)
+        else:
+            run.failure = self._stop_reason(run, result)
+        return result.reaped
 
     def _retire_reaped(self, run, observed_at):
         """Finish run-specific retirement before making this run ready for replacement."""
@@ -545,16 +577,20 @@ class SupervisedReceiver:
             except Exception as exc:
                 # The process must still be stopped. The final close verifies the transport.
                 run.failure = f"{run.watch.tool} transport could not close: {exc}"
+        reaped = False
         try:
-            self._stop_run(run)
-            reaped = all(code is not None for _, code in self._statuses(run))
+            result = self._stop_run(run)
+            reaped = self._apply_stop_result(run, result)
             if reaped and not hasattr(run.proc, "close_transport"):
                 run.reaped = True
+                run.failure = None
                 self._notify_physical(run)
-            if reaped and (ended or run.preserve_drain):
-                self._drain_reader(run)
+            if reaped and result.error is None and (ended or run.preserve_drain):
+                try:
+                    self._drain_reader(run)
+                except Exception as exc:
+                    run.diagnostic_fault = f"reader drain failed: {exc}"
         except Exception as exc:
-            reaped = False
             run.failure = f"{run.watch.tool} cleanup failed: {exc}"
         finally:
             if not self.RETIRE_BEFORE_FENCE or not reaped:
@@ -566,9 +602,9 @@ class SupervisedReceiver:
                 run.failure = f"{run.watch.tool} transport could not close: {exc}"
             run.reaped = reaped
             run.reap_failed = not reaped
-            if not reaped and not run.failure:
-                run.failure = self._unreaped_reason(run)
             self._notify_physical(run)
+            if reaped:
+                run.failure = None
         try:
             if not run.reaped:
                 self._retry(run)
@@ -616,32 +652,44 @@ class SupervisedReceiver:
                 pass
 
     def _retry_reap(self, run, timeout):
-        deadline = time.monotonic() + timeout
-        try:
-            for stage, code in self._statuses(run):
-                if code is None:
-                    stage.kill()
-            for stage, code in self._statuses(run):
-                if code is None:
-                    stage.wait(timeout=max(0, deadline - time.monotonic()))
-            if all(code is not None for _, code in self._statuses(run)):
+        result = self._stop_run(run, kill_only=True, wait_s=timeout)
+        if self._apply_stop_result(run, result):
+            try:
                 self._close_transport(run.proc)
-                run.reaped = True
-                self._notify_physical(run)
-                return True
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        except Exception as exc:
-            run.failure = f"{run.watch.tool} cleanup retry failed: {exc}"
-        return False
+            except Exception as exc:
+                run.failure = f"{run.watch.tool} transport could not close: {exc}"
+                return
+            run.reaped = True
+            run.failure = None
+            self._notify_physical(run)
 
     def _retry(self, run):
-        while not self._closing:
-            run.wake.clear()
-            if self._closing:
-                return
-            if not run.wake.wait(REAP_RETRY_MIN_S) and self._retry_reap(run, REAP_RETRY_WAIT_S):
-                return
+        deadline = time.monotonic() + REAP_RETRY_MIN_S
+        while True:
+            with self._life:
+                ticket, closing = run.retry_done, self._closing
+                if run.reaped:
+                    # A control queued during a successful periodic reap can finish now.
+                    self._ack_retry(run, ticket)
+                    return
+                if closing and ticket is None:
+                    # Close admission before leaving, so a later control cannot queue a ticket.
+                    run.ready.set()
+                    return
+                run.retry_wake.clear()
+            now = time.monotonic()
+            if ticket is None and now < deadline:
+                run.retry_wake.wait(deadline - now)
+                continue
+            if now >= deadline:
+                deadline = now + REAP_RETRY_MIN_S
+            try:
+                timeout = self.STOP_WAIT_S if closing else REAP_RETRY_WAIT_S
+                self._retry_reap(run, timeout)
+            except Exception as exc:
+                run.failure = f"{run.watch.tool} cleanup retry failed: {exc}"
+            finally:
+                self._ack_retry(run, ticket)
 
     def _report(self, run):
         """Streaming receivers already report each item from their reader."""

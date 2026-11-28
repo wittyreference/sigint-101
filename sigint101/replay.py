@@ -24,7 +24,11 @@ from .decode import Decode, parse_decode_line
 from .events import log_event
 from .hardware import RTL_433
 from .operate import instrument, validate_decoder_hz
-from .receiver_lifecycle import DIAGNOSTIC_WAIT_S, SupervisedReceiver, daemon
+from .receiver_lifecycle import (
+    DIAGNOSTIC_WAIT_S,
+    SupervisedReceiver,
+    daemon,
+)
 from .spectrum import TuneError
 
 RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "recordings"
@@ -349,6 +353,7 @@ class ReplayDecoder(SupervisedReceiver):
         # Only competing starts share this lock. Stop and shutdown remain C40 controls.
         self._starting = Lock()
         self._recording = None
+        self.freq_hz = None
         self._start_error = None
         self._runs = RunGuard()
         self._init_lifecycle()
@@ -408,6 +413,12 @@ class ReplayDecoder(SupervisedReceiver):
         finally:
             self._recording = None
             self._starting.release()
+
+    def _stop_reason(self, run, result):
+        if result.timed_out:
+            return "rtl_433 survived kill; the replay may still be running"
+        detail = result.error if result.error is not None else "no exit status"
+        return f"rtl_433 could not be confirmed stopped: {detail}"
 
     def _expire(self, run):
         playback = run.args[0]

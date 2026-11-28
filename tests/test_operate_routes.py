@@ -3,13 +3,18 @@
 
 import json
 import re
+import shutil
+import subprocess
+import threading
+import time
+from contextlib import contextmanager
 from html import unescape
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from sigint101 import childproc
+from sigint101 import childproc, radio_control
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.decode import Decoder
@@ -18,7 +23,14 @@ from sigint101.flock import FLOCK_SOURCE_ENV, FLOCK_SOURCE_MARAUDER, MarauderFlo
 from sigint101.hardware import RadioProbe
 from sigint101.operate import INSTRUMENTS
 from sigint101.pocsag import PocsagDecoder
-from sigint101.spectrum import DEFAULT_HIGH, DEFAULT_LOW, Sweeper, target_span
+from sigint101.spectrum import (
+    DEFAULT_HIGH,
+    DEFAULT_LOW,
+    Sweeper,
+    TuneError,
+    target_span,
+    validate_target_span,
+)
 from sigint101.units import unit_for_lesson
 from tests.child_fakes import Child
 
@@ -640,6 +652,879 @@ def test_opening_a_lesson_with_no_band_puts_the_sweep_back_on_fm(tmp_path):
         assert (sweeper.low, sweeper.high, sweeper.target) == (DEFAULT_LOW, DEFAULT_HIGH, None)
 
 
+# --- a slow lesson restore against later tunes and polls (C81) ---------------------------------
+# The lesson page posts /api/tuning without blocking, so a tune or a panel poll can arrive while a
+# slow restore is still running. Each test holds the restore inside the ISM decoder's retune (the
+# first receiver it resets), as a tool that is slow to stop does, and releases it on cue.
+
+JOIN_S = 10.0   # no request may take this long: past it the test reports a hang
+
+
+class _HeldRetune:
+    """Holds one receiver's retune until released."""
+
+    def __init__(self, receiver):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        real = receiver.retune
+
+        def retune(*args, **kwargs):
+            self.entered.set()
+            assert self.release.wait(JOIN_S), "the held retune was never released"
+            return real(*args, **kwargs)
+
+        receiver.retune = retune
+
+
+class _Request(threading.Thread):
+    """One request on its own thread, so the test can act while it is in flight."""
+
+    def __init__(self, send):
+        super().__init__(daemon=True)
+        self._send = send
+        self.response = None
+        self.took = None
+
+    def run(self):
+        started = time.monotonic()
+        self.response = self._send()
+        self.took = time.monotonic() - started
+
+    def finish(self):
+        self.join(JOIN_S)
+        assert not self.is_alive(), "the request hung"
+        return self.response
+
+
+@contextmanager
+def _slow_restore(client):
+    """Lesson 1's restore, held in the ISM decoder's retune until the test releases it.
+
+    It is released on any way out of the block, so a failed assertion never leaves a request held
+    inside the console while the client shuts it down.
+    """
+    client.post("/api/decode/tune", json={"freq_hz": 434_000_000})   # the rack left it here
+    held = _HeldRetune(client.app.state.decoder)
+    restore = _Request(lambda: client.post("/api/tuning?lesson_id=1"))
+    restore.start()
+    try:
+        assert held.entered.wait(JOIN_S)
+        yield held, restore
+    finally:
+        held.release.set()
+        restore.join(JOIN_S)
+
+
+def test_a_late_restore_never_undoes_the_next_lessons_band_tune(tmp_path):
+    # The review's race: lesson A's restore is still running when lesson B's panels time out and
+    # tune the sweep to B's band. A's restore must not then put the sweep back on FM.
+    packs = _radio_pack(tmp_path / "packs")            # lesson 1 has no band: it resets the sweep
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        with _slow_restore(client) as (held, restore):
+            band = _Request(lambda: client.post(
+                "/api/tune", json={"center": 433_920_000, "span": 2_000_000}))
+            band.start()
+            time.sleep(0.2)
+            held.release.set()
+            assert restore.finish().status_code == 200
+            assert band.finish().status_code == 200
+        sweeper = client.app.state.sweeper
+        assert sweeper.target == 433_920_000
+        assert (sweeper.low, sweeper.high) != (DEFAULT_LOW, DEFAULT_HIGH)
+
+
+@pytest.mark.parametrize("route, body, where", [
+    ("/api/tune", {"low": 100_000_000, "high": 102_000_000},
+     lambda state: (state.sweeper.low, state.sweeper.high) == (100_000_000, 102_000_000)),
+    ("/api/aprs/tune", {"freq_hz": 144_800_000},
+     lambda state: state.aprs.freq_hz == 144_800_000),
+], ids=["sweep", "aprs"])
+def test_a_learners_retune_survives_a_late_restore(tmp_path, route, body, where):
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        with _slow_restore(client) as (held, restore):
+            tune = _Request(lambda: client.post(route, json=body))
+            tune.start()
+            time.sleep(0.2)
+            held.release.set()
+            assert restore.finish().status_code == 200
+            assert tune.finish().status_code == 200
+        assert where(client.app.state), "the late restore undid the learner's tune"
+
+
+def test_a_poll_during_a_restore_waits_and_starts_on_the_lessons_frequency(tmp_path):
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})   # the rack left it here
+        with _slow_restore(client) as (held, restore):
+            poll = _Request(lambda: client.get("/api/aprs"))
+            poll.start()
+            time.sleep(0.3)
+            assert spawned == [], "a poll started its receiver while the restore was still running"
+            held.release.set()
+            assert restore.finish().status_code == 200
+            assert poll.finish().status_code == 200
+        assert spawned == [144_390_000]
+
+
+def test_a_poll_or_tune_during_a_stuck_restore_is_refused_within_the_bound(tmp_path, monkeypatch):
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.3, raising=False)
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
+        before = (client.app.state.sweeper.low, client.app.state.sweeper.high)
+        with _slow_restore(client) as (held, restore):
+            poll = _Request(lambda: client.get("/api/aprs"))
+            poll.start()
+            answer = poll.finish()
+            assert answer.status_code == 503
+            assert answer.json()["reason"] == "tuning the radios for this lesson"
+            assert poll.took < 3.0
+            assert spawned == []
+
+            tune = _Request(lambda: client.post(
+                "/api/tune", json={"center": 433_920_000, "span": 2_000_000}))
+            tune.start()
+            refused = tune.finish()
+            assert refused.status_code == 409
+            assert refused.json() == {"tuned": False,
+                                      "reason": "tuning the radios for this lesson"}
+            assert tune.took < 3.0
+            assert (client.app.state.sweeper.low, client.app.state.sweeper.high) == before
+            held.release.set()
+            assert restore.finish().status_code == 200
+        assert client.get("/api/aprs").status_code == 200
+        assert spawned == [144_390_000]
+
+
+BAND_HZ, BAND_SPAN_HZ = 433_920_000, 2_000_000
+
+
+def _two_lesson_packs(pack_dir):
+    """Lesson 1 has no band (its restore puts the sweep on FM); lesson 2 has the 433.92 MHz band."""
+    _radio_pack(pack_dir)
+    (pack_dir / "02-band.yaml").write_text(
+        "id: 2\nslug: band\ntitle: Band\nconcept: c\ntype: consolidation\n"
+        "hardware: [rtl-sdr]\n"
+        f"tune:\n  center_hz: {BAND_HZ}\n  span_hz: {BAND_SPAN_HZ}\n"
+        "stages:\n  predict: p\n  operate: o\n  observe: s\n  explain: e\n"
+        "choices:\n  - key: a\n    label: A\n  - key: b\n    label: B\n", encoding="utf-8")
+    return pack_dir
+
+
+def _on_the_band(sweeper):
+    low, high, bin_size = validate_target_span(BAND_HZ, BAND_SPAN_HZ)
+    return (sweeper.low, sweeper.high, sweeper.bin_size, sweeper.target) == (
+        low, high, bin_size, BAND_HZ)
+
+
+def test_opening_a_lesson_with_a_band_puts_the_sweep_on_it(tmp_path):
+    # The restore sets the band itself, as the waterfall's band tune would, so a band tune of the
+    # page's own can never be refused and leave the lesson off its band.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        _open_lesson(client, 2)
+        assert _on_the_band(client.app.state.sweeper)
+
+
+def test_the_next_lessons_band_lands_after_a_stuck_restore_from_the_lesson_before(tmp_path):
+    # The review's case: lesson A's restore is stuck in a step when the learner moves on to
+    # lesson B, which has a band. B's restore waits its turn, then sets B's band; until it does,
+    # it has not answered, so B's rail says "Tuning…" rather than nothing.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        sweeper = client.app.state.sweeper
+        with _slow_restore(client) as (held, restore_a):
+            restore_b = _Request(lambda: client.post("/api/tuning?lesson_id=2"))
+            restore_b.start()
+            time.sleep(0.3)
+            assert not _on_the_band(sweeper)
+            assert restore_b.is_alive(), "B's restore answered with the sweep still off its band"
+            held.release.set()
+            assert restore_a.finish().status_code == 200
+            assert restore_b.finish().status_code == 200
+        assert _on_the_band(sweeper), "B's sweep ended off the band its lesson names"
+
+
+def test_a_restore_that_raises_lets_go_of_the_radios(tmp_path):
+    # A restore that fails part-way must not leave every later claim and tune refused.
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/decode/tune", json={"freq_hz": 434_000_000})
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("rtl_433 would not stop")
+
+        client.app.state.decoder.retune = broken
+        with pytest.raises(RuntimeError):
+            client.post("/api/tuning?lesson_id=1")
+        started = time.monotonic()
+        assert client.get("/api/aprs").status_code == 200
+        assert client.post("/api/tune", json={"low": 100_000_000,
+                                              "high": 102_000_000}).status_code == 200
+        assert time.monotonic() - started < 1.0, "a claim or a tune waited on a dead restore"
+
+
+# --- round 4 (Codex D-123): claims queued at the arbiter, band refusals, skipped steps, order ---
+
+
+def _epoch(client):
+    """The console's clock epoch, as the page reads it from its clock meta (or none)."""
+    return getattr(client.app.state.tuning_gate, "epoch", "")
+
+
+def _stamped(client, at):
+    """A learner action's stamp as the page sends it: the clock epoch and the action's time."""
+    return f"&epoch={_epoch(client)}&at={at}"
+
+
+class _PausedRegistration:
+    """Holds the next restore just before it registers with the gate, as a slow request is held
+    in transit or in a busy worker after the learner has already moved on."""
+
+    def __init__(self, gate):
+        self.reached = threading.Event()
+        self.release = threading.Event()
+        real = gate.begin_restore
+
+        def begin(*args, **kwargs):
+            gate.begin_restore = real
+            self.reached.set()
+            assert self.release.wait(JOIN_S), "the paused restore was never released"
+            return real(*args, **kwargs)
+
+        gate.begin_restore = begin
+
+
+def test_a_claim_queued_at_the_arbiter_never_starts_inside_a_restore(tmp_path):
+    # Codex F1: an APRS poll passes the gate while it is idle and queues at the arbiter behind
+    # another claim. A lesson's restore then begins and pauses before it reaches APRS. When the
+    # arbiter frees, the poll must not start APRS on the rack's 144.800 MHz: it lets the radio
+    # go, waits out the restore within its budget, and starts on the lesson's 144.390 MHz.
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})   # the rack left it here
+        arbiter = client.app.state.radio_arbiter
+        holding, let_go = threading.Event(), threading.Event()
+
+        def hold_the_radio():
+            with arbiter.reserve("ppm", RuntimeError, time.monotonic() + JOIN_S):
+                holding.set()
+                let_go.wait(JOIN_S)
+
+        holder = threading.Thread(target=hold_the_radio, daemon=True)
+        holder.start()
+        assert holding.wait(JOIN_S)
+        try:
+            poll = _Request(lambda: client.get("/api/aprs"))
+            poll.start()
+            time.sleep(0.2)                  # past the idle gate, queued at the arbiter
+            with _slow_restore(client) as (held, restore):
+                let_go.set()                 # the queued claim gets the radio mid-restore
+                time.sleep(0.3)
+                assert spawned == [], "a queued claim started its tool inside a restore"
+                held.release.set()
+                assert restore.finish().status_code == 200
+            assert poll.finish().status_code == 200
+        finally:
+            let_go.set()
+            holder.join(JOIN_S)
+        assert spawned == [144_390_000]
+
+
+def test_a_restore_waits_for_a_launch_already_under_way(tmp_path):
+    # The permit's other half: a claim admitted before the restore began finishes its launch
+    # before the restore takes a step, so the restore then stops that tool and the next poll
+    # starts it on the lesson's frequency, rather than both racing on the receiver at once.
+    launching, finish = threading.Event(), threading.Event()
+    spawned = []
+
+    def slow_spawn(freq_hz, device):
+        launching.set()
+        assert finish.wait(JOIN_S), "the held launch was never released"
+        spawned.append(freq_hz)
+        return Child(["rtl_fm", "-f", str(freq_hz), "-d", str(device)])
+
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs,
+                 aprs_factory=lambda: AprsDecoder(spawn=slow_spawn, **_tools())) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
+        client.post("/api/decode/tune", json={"freq_hz": 434_000_000})
+        steps = []
+        real = client.app.state.decoder.retune
+        client.app.state.decoder.retune = lambda hz: (steps.append(list(spawned)), real(hz))
+        poll = _Request(lambda: client.get("/api/aprs"))
+        poll.start()
+        try:
+            assert launching.wait(JOIN_S)
+            restore = _Request(lambda: client.post("/api/tuning?lesson_id=1"))
+            restore.start()
+            time.sleep(0.3)
+            assert steps == [], "the restore took a step while a launch was under way"
+        finally:
+            finish.set()
+        assert poll.finish().status_code == 200
+        assert restore.finish().json() == {"tuned": True, "lesson_id": 1}
+        assert steps == [[144_800_000]]                    # its first step came after the launch
+        assert client.app.state.aprs.freq_hz == 144_390_000
+
+
+def _narrow_band_packs(pack_dir):
+    """Lesson 3's band is 100 kHz wide: a pack the loader takes, but too narrow a sweep for the
+    default 125 kHz bin."""
+    pack_dir.mkdir()
+    (pack_dir / "03-narrow.yaml").write_text(
+        "id: 3\nslug: narrow\ntitle: Narrow\nconcept: c\ntype: consolidation\n"
+        "hardware: [rtl-sdr]\n"
+        f"tune:\n  center_hz: {BAND_HZ}\n  span_hz: 100000\n"
+        "stages:\n  predict: p\n  operate: o\n  observe: s\n  explain: e\n"
+        "choices:\n  - key: a\n    label: A\n  - key: b\n    label: B\n", encoding="utf-8")
+    return pack_dir
+
+
+def test_a_lesson_band_the_sweep_cannot_take_is_refused_with_the_validators_reason(tmp_path):
+    # Codex F2: the band's TuneError was a bare 500, so the rail could only say "error 500".
+    with pytest.raises(TuneError) as validator:
+        validate_target_span(BAND_HZ, 100_000)
+    packs = _narrow_band_packs(tmp_path / "packs")
+    app = create_app(pack_dir=packs, data_dir=tmp_path, probe=_present,
+                     sweeper_factory=_sweeper)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.post("/api/tuning?lesson_id=3")
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["tuned"] is False
+    assert body["reason"] == str(validator.value)
+
+
+def test_a_restore_step_skipped_for_the_learners_tune_answers_so(tmp_path):
+    # Codex F3: a step the restore skipped was dropped and the answer was "tuned: true", so the
+    # rail cleared as if the radios were on the lesson's frequencies.
+    # Codex D-139 F5: which of the restore's next step and the waiting tune takes the step lock
+    # first is up to the scheduler, so the restore is held at its sweep step until the learner's
+    # tune has landed (a barrier, not a sleep).
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        gate = client.app.state.tuning_gate
+        tuned = threading.Event()
+        real_step = gate.restore_step
+
+        def step(receiver, *args):
+            if receiver == "sweeper":
+                assert tuned.wait(JOIN_S), "the learner's tune never landed"
+            return real_step(receiver, *args)
+
+        gate.restore_step = step
+        with _slow_restore(client) as (held, restore):
+            def learner_tune():
+                try:
+                    return client.post("/api/tune", json={"low": 100_000_000,
+                                                          "high": 102_000_000})
+                finally:
+                    tuned.set()
+
+            tune = _Request(learner_tune)
+            tune.start()
+            held.release.set()
+            answer = restore.finish()
+            assert tune.finish().status_code == 200
+        sweeper = client.app.state.sweeper
+        assert (sweeper.low, sweeper.high) == (100_000_000, 102_000_000)
+    assert answer.status_code == 200
+    assert answer.json()["tuned"] is False
+    assert answer.json()["skipped"] == {"sweeper": "you retuned"}
+
+
+def test_a_restore_overtaken_by_the_next_lesson_answers_so(tmp_path):
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        with _slow_restore(client) as (held, restore_a):
+            restore_b = _Request(lambda: client.post("/api/tuning?lesson_id=2"))
+            restore_b.start()
+            time.sleep(0.3)
+            held.release.set()
+            answer = restore_a.finish()
+            assert restore_b.finish().json() == {"tuned": True, "lesson_id": 2}
+    assert answer.status_code == 200
+    assert answer.json()["tuned"] is False
+    assert set(answer.json()["skipped"].values()) == {"a newer lesson"}
+
+
+def test_an_older_lessons_restore_that_registers_late_never_undoes_the_next_lesson(tmp_path):
+    # Codex F4: lesson 1's request was sent first but paused before it registered; lesson 2's
+    # restore set its band meanwhile. The order of the learner's actions, which the page stamps,
+    # decides, not the order the requests reach the gate: lesson 1's is refused before it starts.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        paused = _PausedRegistration(client.app.state.tuning_gate)
+        older = _Request(lambda: client.post("/api/tuning?lesson_id=1" + _stamped(client, 1000)))
+        older.start()
+        assert paused.reached.wait(JOIN_S)
+        try:
+            newer = client.post("/api/tuning?lesson_id=2" + _stamped(client, 2000))
+            assert newer.json() == {"tuned": True, "lesson_id": 2}
+        finally:
+            paused.release.set()
+        late = older.finish()
+        assert _on_the_band(client.app.state.sweeper), "a stale restore put the sweep back on FM"
+    assert late.status_code == 409
+    assert late.json()["stale"] is True
+
+
+def test_an_older_lessons_restore_that_registers_late_never_undoes_a_manual_tune(tmp_path):
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        paused = _PausedRegistration(client.app.state.tuning_gate)
+        older = _Request(lambda: client.post("/api/tuning?lesson_id=1" + _stamped(client, 1000)))
+        older.start()
+        assert paused.reached.wait(JOIN_S)
+        try:
+            tuned = client.post("/api/tune", json={"low": 100_000_000, "high": 102_000_000,
+                                                   "epoch": _epoch(client), "at": 2000})
+            assert tuned.status_code == 200
+        finally:
+            paused.release.set()
+        late = older.finish()
+        sweeper = client.app.state.sweeper
+        assert (sweeper.low, sweeper.high) == (100_000_000, 102_000_000)
+    assert late.status_code == 200
+    assert late.json()["skipped"] == {"sweeper": "you retuned"}
+
+
+@pytest.mark.parametrize("newer", ["lesson", "tune"])
+def test_a_restore_that_reaches_the_console_late_is_ordered_by_the_learners_action(
+        tmp_path, newer):
+    # The delay can come before the handler too (the network, a busy worker pool), so arrival
+    # order is not enough: the page's stamp says lesson 1 was opened before the newer action.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        if newer == "lesson":
+            first = client.post("/api/tuning?lesson_id=2" + _stamped(client, 2000))
+        else:
+            first = client.post("/api/tune", json={"low": 100_000_000, "high": 102_000_000,
+                                                   "epoch": _epoch(client), "at": 2000})
+        assert first.status_code == 200
+        late = client.post("/api/tuning?lesson_id=1" + _stamped(client, 1000))
+        sweeper = client.app.state.sweeper
+        if newer == "lesson":
+            assert late.status_code == 409 and late.json()["stale"] is True
+            assert _on_the_band(sweeper)
+        else:
+            assert late.json()["skipped"] == {"sweeper": "you retuned"}
+            assert (sweeper.low, sweeper.high) == (100_000_000, 102_000_000)
+
+
+def test_a_tune_sent_before_the_newest_lesson_opened_is_refused(tmp_path):
+    # A +/- step from the lesson before, still in flight when the next lesson's restore ran,
+    # must not move the next lesson's sweep.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        assert client.post("/api/tuning?lesson_id=2" + _stamped(client, 2000)).status_code == 200
+        late = client.post("/api/tune", json={"low": 100_000_000, "high": 102_000_000,
+                                              "epoch": _epoch(client), "at": 1000})
+        assert late.status_code == 409
+        assert late.json()["tuned"] is False
+        assert _on_the_band(client.app.state.sweeper)
+
+
+def test_every_page_carries_the_consoles_clock_for_its_action_stamps(tmp_path):
+    # The page stamps each learner action on the console's own clock: the epoch and the
+    # console's time when it rendered the page. Rendering only reads the clock.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        gate = client.app.state.tuning_gate
+        for url in ("/lesson/2", "/operate/waterfall"):
+            html = client.get(url).text
+            meta = re.search(r'<meta name="sigint101-clock" content="([0-9a-f]+) ([0-9.]+)">',
+                             html)
+            assert meta, f"{url} carries no clock for its action stamps"
+            assert meta.group(1) == _epoch(client)
+            assert 0 < float(meta.group(2)) <= gate.now_ms()
+
+
+# --- round 5 (Codex D-132): one timeline, arrival before the probe, ppm's launch, the deadline ---
+
+ACTION_CLOCK = Path(__file__).resolve().parent.parent / "sigint101" / "static" / "action-clock.js"
+
+
+def _browser_stamps(anchors, script):
+    """Stamps the real action-clock.js makes, run under node.
+
+    `anchors` are the clock metas of the tabs (epoch, ms). `script` is a list of
+    [tab, received, script_at, act_at] on the browser's shared timeline: when the tab's response
+    arrived, when its script ran, and when the learner acted in it. Returns each action's stamp.
+    """
+    node = shutil.which("node")
+    assert node, "node is needed to run action-clock.js"
+    program = (
+        "const c = require(process.argv[1]);"
+        "const [anchors, script] = JSON.parse(process.argv[2]);"
+        "let now = 0;"
+        "const clocks = anchors.map(([epoch, ms], i) => {"
+        "  const [, received, scriptAt] = script.find(s => s[0] === i);"
+        "  now = scriptAt; return c.makeClock({epoch, ms}, () => now, received); });"
+        "console.log(JSON.stringify(script.map(([tab, , , actAt]) => {"
+        "  now = actAt; return clocks[tab].stamp(); })));"
+    )
+    out = subprocess.run([node, "-e", program, str(ACTION_CLOCK), json.dumps([anchors, script])],
+                         capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(out.stdout)
+
+
+def _clock_meta(client, url):
+    html = client.get(url).text
+    meta = re.search(r'<meta name="sigint101-clock" content="(\S+) ([0-9.]+)">', html)
+    assert meta, f"{url} carries no clock meta"
+    return meta.group(1), float(meta.group(2))
+
+
+def test_a_later_action_in_a_slow_tab_wins_over_an_earlier_one_in_a_fast_tab(tmp_path):
+    # Codex D-132 F1, through the endpoints with stamps the page's own clock makes. Tab A opened
+    # lesson 1 (no band) and its script ran at once; tab B opened lesson 2 (a band) a moment
+    # later, but its script ran 300 ms late. The learner acted in A first, then in B. A's restore
+    # reaches the console last and must not put B's band back to FM.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        epoch, render_a = _clock_meta(client, "/lesson/1")
+        _, render_b = _clock_meta(client, "/lesson/2")
+        browser = 10_000.0                       # the browser timeline when A's response arrived
+        gap = render_b - render_a                # B's response arrived that much later
+        script = [[0, browser + 1, browser + 1, browser + 6],
+                  [1, browser + gap + 1, browser + gap + 301, browser + gap + 46]]
+        stamp_a, stamp_b = _browser_stamps([[epoch, render_a], [epoch, render_b]], script)
+        assert stamp_b["at"] > stamp_a["at"]
+        newer = client.post("/api/tuning?lesson_id=2"
+                            f"&epoch={stamp_b['epoch']}&at={stamp_b['at']}")
+        assert newer.json() == {"tuned": True, "lesson_id": 2}
+        late = client.post(f"/api/tuning?lesson_id=1&epoch={stamp_a['epoch']}&at={stamp_a['at']}")
+        assert late.status_code == 409 and late.json()["stale"] is True
+        assert _on_the_band(client.app.state.sweeper)
+
+
+def test_an_unstamped_tune_is_ordered_by_its_arrival_not_by_when_its_probe_ended(tmp_path):
+    # Codex D-132 F3: the first tune arrived first but was held in its hardware probe; the second
+    # arrived after it and landed. When the first comes out of its probe it is the older of the
+    # two, by arrival, and must not overwrite the second.
+    entered, release = threading.Event(), threading.Event()
+    hold = {"armed": False}
+
+    def probe():
+        if hold["armed"]:
+            hold["armed"] = False
+            entered.set()
+            assert release.wait(JOIN_S), "the held probe was never released"
+        return _present()
+
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=probe, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        hold["armed"] = True
+        first = _Request(lambda: client.post("/api/tune", json={"low": 100_000_000,
+                                                                "high": 102_000_000}))
+        first.start()
+        assert entered.wait(JOIN_S)
+        try:
+            second = client.post("/api/tune", json={"low": 110_000_000, "high": 112_000_000})
+            assert second.status_code == 200
+        finally:
+            release.set()
+        assert first.finish().status_code == 409
+        sweeper = client.app.state.sweeper
+        assert (sweeper.low, sweeper.high) == (110_000_000, 112_000_000)
+
+
+def test_a_calibration_queued_at_the_arbiter_never_launches_inside_a_restore(tmp_path):
+    # Codex D-132 F4: a ppm measurement queued behind another claim reached its rtl_fm launch with
+    # a restore under way. It now waits out the restore under the same permit as a receiver.
+    launched = []
+
+    def measure(**_):
+        launched.append(client.app.state.tuning_gate._restoring)
+        return {"ppm": 1.0, "reason": None}
+
+    packs = _radio_pack(tmp_path / "packs")
+    client = _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs,
+                     ppm_measure=measure)
+    with client:
+        arbiter = client.app.state.radio_arbiter
+        holding, let_go = threading.Event(), threading.Event()
+
+        def hold_the_radio():
+            with arbiter.reserve("sweeper", RuntimeError, time.monotonic() + JOIN_S):
+                holding.set()
+                let_go.wait(JOIN_S)
+
+        holder = threading.Thread(target=hold_the_radio, daemon=True)
+        holder.start()
+        assert holding.wait(JOIN_S)
+        try:
+            ppm = _Request(lambda: client.post("/api/ppm/measure"))
+            ppm.start()
+            time.sleep(0.2)                  # queued at the arbiter
+            with _slow_restore(client) as (held, restore):
+                let_go.set()
+                time.sleep(0.3)
+                assert launched == [], "the calibration launched inside a restore"
+                held.release.set()
+                assert restore.finish().status_code == 200
+            assert ppm.finish().status_code == 200
+        finally:
+            let_go.set()
+            holder.join(JOIN_S)
+        assert launched == [0]
+
+
+def test_a_queued_claim_is_refused_at_its_deadline_even_if_the_restore_has_just_ended(
+        tmp_path, monkeypatch):
+    # Codex D-132 F5: a claim sent back by a restore past its tuning deadline started anyway once
+    # the restore had cleared. It must be refused: its time to wait on restores is spent.
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.25)
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
+        gate = client.app.state.tuning_gate
+        arbiter = client.app.state.radio_arbiter
+        holding, let_go = threading.Event(), threading.Event()
+
+        def hold_the_radio():
+            with arbiter.reserve("ppm", RuntimeError, time.monotonic() + JOIN_S):
+                holding.set()
+                let_go.wait(JOIN_S)
+
+        holder = threading.Thread(target=hold_the_radio, daemon=True)
+        holder.start()
+        assert holding.wait(JOIN_S)
+        try:
+            poll = _Request(lambda: client.get("/api/aprs"))
+            poll.start()
+            time.sleep(0.1)                  # past the idle gate, queued at the arbiter
+            with _slow_restore(client) as (held, restore):
+                real_admit = gate.admit_claim
+
+                def admit(*args):
+                    # Sent back by the restore, which then ends before the claim tries again.
+                    if real_admit(*args):
+                        return True
+                    held.release.set()
+                    restore.join(JOIN_S)
+                    return False
+
+                gate.admit_claim = admit
+                time.sleep(0.3)              # past the claim's 0.25 s deadline, still queued
+                let_go.set()
+                answer = poll.finish()
+        finally:
+            let_go.set()
+            holder.join(JOIN_S)
+        assert answer.status_code == 503
+        assert answer.json()["reason"] == "tuning the radios for this lesson"
+        assert spawned == []
+
+
+# --- round 6 (Codex D-139): one conversion per browser, navigation-start stamps, the deadline --
+
+_TABS_PROGRAM = """
+const c = require(process.argv[1]);
+const {epoch, tabs, acts} = JSON.parse(process.argv[2]);
+const stored = {};
+const storage = {getItem: k => (k in stored ? stored[k] : null),
+                 setItem: (k, v) => { stored[k] = String(v); }};
+let now = 0;
+const clocks = tabs.map(t => { now = t.script_at;
+  return c.makeClock({epoch, ms: t.render_ms}, () => now, t.received, storage, t.origin); });
+console.log(JSON.stringify(acts.map(([tab, at]) => {
+  if (at === "navigation") return clocks[tab].navigationStamp();
+  now = at; return clocks[tab].stamp(); })));
+"""
+
+
+def _tab_stamps(epoch, tabs, acts):
+    """Stamps the real action-clock.js makes for several tabs of one browser sharing storage.
+
+    `tabs` give each tab's render time on the console's clock and its navigation start, receive
+    time and script start on the browser's timeline; `acts` are [tab, browser time] or
+    [tab, "navigation"] for the stamp of the tab's navigation start.
+    """
+    node = shutil.which("node")
+    assert node, "node is needed to run action-clock.js"
+    out = subprocess.run([node, "-e", _TABS_PROGRAM, str(ACTION_CLOCK),
+                          json.dumps({"epoch": epoch, "tabs": tabs, "acts": acts})],
+                         capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(out.stdout)
+
+
+def test_a_later_action_in_a_tab_whose_response_was_delayed_wins_at_the_endpoints(tmp_path):
+    # Codex D-139 F1: a tab whose response headers were delayed 950 ms after the console rendered
+    # it underestimated the console's clock by 950 ms, so its later tune stamped earlier than an
+    # earlier tune in a prompt tab, and the earlier tune won. One browser now keeps one
+    # conversion, the tightest any of its tabs has seen, so the later action stamps later.
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        epoch = _epoch(client)
+        base = client.app.state.tuning_gate.now_ms() - 20_000   # all of it in the past
+        skew = 5_000_000.0                       # the browser's timeline runs this far ahead
+        prompt = {"render_ms": base, "origin": base + skew - 50,
+                  "received": base + skew + 1, "script_at": base + skew + 2}
+        delayed = {"render_ms": base + 500, "origin": base + skew + 450,
+                   "received": base + skew + 500 + 950, "script_at": base + skew + 1452}
+        earlier, later = _tab_stamps(epoch, [prompt, delayed],
+                                     [[0, base + skew + 2000], [1, base + skew + 2100]])
+        assert later["at"] > earlier["at"]
+        tune = {"low": 100_000_000, "high": 102_000_000}
+        first = client.post("/api/tune", json={**tune, "epoch": epoch, "at": later["at"]})
+        assert first.status_code == 200
+        late = client.post("/api/tune", json={"low": 110_000_000, "high": 112_000_000,
+                                              "epoch": epoch, "at": earlier["at"]})
+        assert late.status_code == 409
+        sweeper = client.app.state.sweeper
+        assert (sweeper.low, sweeper.high) == (100_000_000, 102_000_000)
+
+
+def test_a_lessons_first_restore_is_stamped_when_it_was_opened_not_when_its_script_ran(tmp_path):
+    # Codex D-139 F2: lesson 1 was opened first but its script ran late; lesson 2, opened after it
+    # in another tab, had already set its band. Lesson 1's restore is the learner's act of
+    # opening it, so it is stamped at its navigation start and is refused as stale.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        epoch = _epoch(client)
+        base = client.app.state.tuning_gate.now_ms() - 20_000
+        skew = 5_000_000.0
+        first = {"render_ms": base + 5, "origin": base + skew,
+                 "received": base + skew + 6, "script_at": base + skew + 3000}
+        second = {"render_ms": base + 1005, "origin": base + skew + 1000,
+                  "received": base + skew + 1006, "script_at": base + skew + 1010}
+        opened_first, opened_second = _tab_stamps(
+            epoch, [first, second], [[0, "navigation"], [1, "navigation"]])
+        assert opened_first["at"] < opened_second["at"]
+        newer = client.post(f"/api/tuning?lesson_id=2&epoch={epoch}&at={opened_second['at']}")
+        assert newer.json() == {"tuned": True, "lesson_id": 2}
+        late = client.post(f"/api/tuning?lesson_id=1&epoch={epoch}&at={opened_first['at']}")
+        assert late.status_code == 409 and late.json()["stale"] is True
+        assert _on_the_band(client.app.state.sweeper)
+
+
+def test_a_bounced_claim_checks_its_deadline_again_after_its_gate_wait(tmp_path, monkeypatch):
+    # Codex D-139 F3: a claim sent back by a restore was paused just before its retry's gate wait
+    # while its deadline ran out and the restore finished. The idle gate then let it through, and
+    # it launched past its budget. It now checks the deadline once the gate wait is over.
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.5)
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
+        gate = client.app.state.tuning_gate
+        arbiter = client.app.state.radio_arbiter
+        holding, let_go = threading.Event(), threading.Event()
+
+        def hold_the_radio():
+            with arbiter.reserve("ppm", RuntimeError, time.monotonic() + JOIN_S):
+                holding.set()
+                let_go.wait(JOIN_S)
+
+        holder = threading.Thread(target=hold_the_radio, daemon=True)
+        holder.start()
+        assert holding.wait(JOIN_S)
+        real_wait = gate.wait_idle
+        waits = []
+        paused = {}
+
+        def wait_idle(until=None):
+            waits.append(until)
+            if len(waits) == 2:                      # the bounced claim's retry: held here
+                held, restore = paused["restore"]
+                held.release.set()                   # while the restore finishes ...
+                restore.join(JOIN_S)
+                time.sleep(max(0.0, until - time.monotonic()) + 0.05)   # ... and time runs out
+            return real_wait(until=until)
+
+        gate.wait_idle = wait_idle
+        try:
+            poll = _Request(lambda: client.get("/api/aprs"))
+            poll.start()
+            time.sleep(0.1)                          # past the idle gate, queued at the arbiter
+            with _slow_restore(client) as (held, restore):
+                paused["restore"] = (held, restore)
+                let_go.set()                         # the radio frees mid-restore: bounced
+                answer = poll.finish()
+        finally:
+            let_go.set()
+            holder.join(JOIN_S)
+        assert len(waits) >= 2
+        assert answer.status_code == 503
+        assert answer.json()["reason"] == "tuning the radios for this lesson"
+        assert spawned == []
+
+
+# --- after round 5 (the EM's ruling): a calibration is named for what it is -------------------
+
+CALIBRATION_REASON = "measuring the clock error (ppm)"
+
+
+def test_a_poll_behind_a_calibration_names_the_calibration_not_a_tuning(tmp_path, monkeypatch):
+    # A restore that begins during a ppm calibration waits for it (the calibration holds the
+    # launch permit for its capture). Meanwhile the radio is held by the calibration, not by any
+    # tuning, so a poll that gives up says so, and the gate's read-only state says what the
+    # restore waits on. Show only what really happened.
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.3)
+    measuring, finish = threading.Event(), threading.Event()
+    spawned = []
+
+    def measure(**_):
+        measuring.set()
+        assert finish.wait(JOIN_S), "the held calibration was never released"
+        return {"ppm": 1.0, "reason": None}
+
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs, ppm_measure=measure) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
+        assert client.get("/api/tuning").json() == {"restoring": False, "waiting_on": None}
+        ppm = _Request(lambda: client.post("/api/ppm/measure"))
+        ppm.start()
+        try:
+            assert measuring.wait(JOIN_S)
+            restore = _Request(lambda: client.post("/api/tuning?lesson_id=1"))
+            restore.start()
+            time.sleep(0.2)
+            assert client.get("/api/tuning").json() == {"restoring": True,
+                                                        "waiting_on": "calibration"}
+            poll = client.get("/api/aprs")
+            assert poll.status_code == 503
+            assert poll.json()["reason"] == CALIBRATION_REASON
+            assert spawned == []
+        finally:
+            finish.set()
+        assert ppm.finish().status_code == 200
+        assert restore.finish().json() == {"tuned": True, "lesson_id": 1}
+        assert client.get("/api/tuning").json() == {"restoring": False, "waiting_on": None}
+        assert client.get("/api/aprs").status_code == 200
+        assert spawned == [144_390_000]
+
+
+def test_every_page_is_served_uncached_so_back_renders_a_fresh_clock(tmp_path):
+    # A page the browser served from its HTTP cache on Back still held its old clock meta, so its
+    # stamps lagged by as long as the learner had been away, and its restore was refused as stale
+    # on the lesson the learner was on. Every page is now fetched again on Back, with a fresh
+    # clock, and posts its restore. Saying so changes nothing: the GET stays read-only.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        for url in ("/lesson/1", "/lesson/2", "/operate/waterfall", "/"):
+            resp = client.get(url)
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/html")
+            assert "no-store" in resp.headers.get("cache-control", ""), url
+
+
 # --- the reception log --------------------------------------------------------------------------
 
 
@@ -745,3 +1630,90 @@ def test_a_measured_ppm_is_part_of_the_provenance(tmp_path):
     [event] = _events(tmp_path, "reception")
     assert event["payload"]["ppm"] == {"correction": "raw", "measured_ppm": 3.5}
     json.dumps(event)   # the whole record is plain JSON
+
+
+# --- round 7 (Codex D-146 F1): a claim that waited on a restore keeps its deadline ------------
+
+
+class _ConditionWaits:
+    """Signals when a claim is inside the gate's Condition.wait, and with what timeout.
+
+    The gate's own wait is wrapped on this one gate only; the implementation is unchanged. Once
+    `entered` is set the claim has released the condition and is waiting, so the test can take
+    the condition and be sure the claim is behind it."""
+
+    def __init__(self, gate):
+        self.entered = threading.Event()
+        self.started = None
+        self.timeout = None
+        real = gate._state.wait
+
+        def wait(timeout=None):
+            if not self.entered.is_set():
+                self.started, self.timeout = time.monotonic(), timeout
+                self.entered.set()
+            return real(timeout)
+
+        gate._state.wait = wait
+
+
+def _end_the_restore_late(gate, waits):
+    """Once the claim is waiting, hold the gate's condition past that wait's own timeout, then end
+    the restore under it: the claim's wait has timed out, and the gate is idle by the time it gets
+    the lock back."""
+    assert waits.entered.wait(JOIN_S), "the claim never waited on the restore"
+    with gate._state:
+        expiry = waits.started + (waits.timeout or 0.0)
+        time.sleep(max(0.0, expiry - time.monotonic()) + 0.1)
+        gate.end_restore()
+
+
+def test_the_gate_refuses_a_claim_whose_wait_ran_out_even_if_the_restore_ended_meanwhile():
+    # Codex D-146 F1: the condition wait accepted an idle gate when it got the lock back after its
+    # timeout, so a claim that had waited out its whole budget went on to launch.
+    gate = radio_control.TuningGate()
+    gate.begin_restore(gate.now_ms())
+    waits = _ConditionWaits(gate)
+    until = time.monotonic() + 0.2
+    outcome = {}
+
+    def claim():
+        try:
+            gate.wait_idle(until=until)
+            outcome["result"] = "admitted"
+        except radio_control.TuningBusy as exc:
+            outcome["result"] = str(exc)
+
+    waiter = threading.Thread(target=claim, daemon=True)
+    waiter.start()
+    _end_the_restore_late(gate, waits)
+    waiter.join(JOIN_S)
+    assert not waiter.is_alive()
+    assert outcome["result"] == radio_control.TUNING_REASON
+
+
+def test_an_idle_gate_still_admits_a_claim_at_once():
+    # No restore: nothing to wait for, so no deadline applies.
+    gate = radio_control.TuningGate()
+    gate.wait_idle(until=time.monotonic() - 1.0)
+
+
+def test_a_claims_first_wait_on_a_restore_is_refused_at_its_deadline(tmp_path, monkeypatch):
+    # Codex D-146 F1, through the route: the first APRS poll waited on a restore, the restore
+    # ended just as the wait ran out, and the claim launched past its budget. It is refused, and
+    # nothing starts.
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.3)
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        gate = client.app.state.tuning_gate
+        gate.begin_restore(gate.now_ms())
+        waits = _ConditionWaits(gate)
+        poll = _Request(lambda: client.get("/api/aprs"))
+        poll.start()
+        _end_the_restore_late(gate, waits)
+        answer = poll.finish()
+        assert answer.status_code == 503
+        assert answer.json()["reason"] == radio_control.TUNING_REASON
+        assert spawned == []
