@@ -309,7 +309,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None,
-               clock=time.time) -> FastAPI:
+               clock=time.time, managed: bool = False) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -488,6 +488,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
                 list_devices=enumerate_radios,
+                sync_assets=managed,
             )
     else:
         build_apt = apt_factory
@@ -502,6 +503,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
                 list_devices=enumerate_radios,
+                sync_assets=managed,
             )
     else:
         build_sstv = sstv_factory
@@ -545,7 +547,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         and the next start would find the radio busy with nothing visibly running.
         """
         app.state.lessons = load_lessons(pack_dir)
-        app.state.progress = Progress(Path(data_dir) / "progress.db")
+        app.state.progress = Progress(Path(data_dir) / "progress.db", managed=managed)
         app.state.events_path = Path(data_dir) / "events.jsonl"
         # The provenance panel asks for the baseline every poll; this follows the log as it grows
         # rather than re-reading all of it each time.
@@ -585,7 +587,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "exam_disabled", {"reason": reason})
         else:
             app.state.exam_pool = pool
-        app.state.exam_store = ExamStore(Path(data_dir) / "exam.db")
+        app.state.exam_store = ExamStore(Path(data_dir) / "exam.db", managed=managed)
         # Injected so a test drives the ppm route without 8 s of real IQ capture; the default is
         # the real pilot measurement, which holds the dongle exclusively (the route stands the
         # sweeper down first, below).
@@ -937,7 +939,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "prediction_refused",
                       {"lesson": lesson_id, "reason": str(exc)})
             return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "prediction", {"lesson": lesson_id, "correct": correct})
+        try:
+            log_event(
+                app.state.events_path,
+                "prediction",
+                {"lesson": lesson_id, "correct": correct},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         # Committing walks the learner past the gate, so the lesson reopens on the first sealed
         # stage rather than resuming on the predict screen they just left.
         lesson = app.state.lessons[lesson_id]
@@ -972,7 +985,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.progress.record_check(lesson_id, choice, correct=correct)
         except CheckAlreadyAnswered as exc:
             return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "check", {"lesson": lesson_id, "correct": correct})
+        try:
+            log_event(app.state.events_path, "check", {"lesson": lesson_id, "correct": correct},
+                      sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         app.state.progress.record_stage(lesson_id, CHECK_STAGE,
                                         lesson.stage_order.index(CHECK_STAGE))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
@@ -1032,8 +1052,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 "recorded": False, "reason": f"'{choice}' is not a valid sort answer"})
         fb = lesson.sort_feedback(card, choice)
         app.state.progress.record_sort_answer(lesson_id, card, choice, correct=fb["correct"])
-        log_event(app.state.events_path, "sort_answer",
-                  {"lesson": lesson_id, "card": card, "choice": choice, "correct": fb["correct"]})
+        try:
+            log_event(
+                app.state.events_path,
+                "sort_answer",
+                {"lesson": lesson_id, "card": card, "choice": choice, "correct": fb["correct"]},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         saved = app.state.progress.get_sort_answers(lesson_id)
         answered = sum(1 for c in lesson.sort if c["key"] in saved)
         score = sum(1 for c in lesson.sort if saved.get(c["key"], {}).get("correct"))
@@ -1099,7 +1129,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"lesson": lesson_id, "reason": reason})
             return JSONResponse(status_code=400, content={"completed": False, "reason": reason})
         app.state.progress.mark_completed(lesson_id)
-        log_event(app.state.events_path, "completed", {"lesson": lesson_id})
+        try:
+            log_event(app.state.events_path, "completed", {"lesson": lesson_id}, sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "completed": False, "reason": f"event log sync failed: {exc}"})
         return {"completed": True, "lesson": lesson_id}
 
     def _require_trainer():
@@ -1162,8 +1198,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         choice = (await _field(request, "choice")).strip().upper()
         correct = choice == question.answer
         app.state.exam_store.record(question_id, correct)
-        log_event(app.state.events_path, "exam_answer",
-                  {"question": question_id, "choice": choice, "correct": correct})
+        try:
+            log_event(app.state.events_path, "exam_answer",
+                      {"question": question_id, "choice": choice, "correct": correct},
+                      sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(f"/exam/review/{question_id}?choice={choice}", status_code=303)
 
     @app.get("/exam/review/{question_id}", response_class=HTMLResponse)
@@ -1261,8 +1304,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if app.state.exam_store.record_sim_answer(question_id, choice):
             # Also credit the Leitner history so the sim feeds the study card's weak-first order.
             app.state.exam_store.record(question_id, correct)
-            log_event(app.state.events_path, "exam_sim_answer",
-                      {"question": question_id, "choice": choice, "correct": correct})
+            try:
+                log_event(app.state.events_path, "exam_sim_answer",
+                          {"question": question_id, "choice": choice, "correct": correct},
+                          sync=managed)
+            except OSError as exc:
+                if not managed:
+                    raise
+                return JSONResponse(status_code=500, content={
+                    "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(f"/exam/sim/review/{question_id}", status_code=303)
 
     @app.post("/api/exam/sim/skip")
@@ -2193,7 +2243,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     return
                 try:
                     event = log_event(app.state.events_path, "reception", record,
-                                      event_id=uuid4().hex)
+                                      event_id=uuid4().hex, sync=managed)
                 except OSError as exc:
                     app.state.reception_error = f"a reception could not be logged: {exc}"
                     return
