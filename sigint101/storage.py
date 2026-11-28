@@ -36,6 +36,11 @@ def validate_updater_root(root: str | Path, *, home: str | Path | None = None) -
     return resolved
 
 
+def fsync_fd(fd: int) -> None:
+    """Sync a file or directory already opened and verified by its caller."""
+    os.fsync(fd)
+
+
 def fsync_handle(handle) -> None:
     """Flush Python buffers and fsync an open file handle to durable storage."""
     handle.flush()

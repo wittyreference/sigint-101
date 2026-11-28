@@ -1192,8 +1192,23 @@ def test_ppm_retains_its_long_capture_window_without_losing_typed_queue_refusals
         assert claims["/api/spectrum"].status_code == 200
 
 
-@pytest.mark.parametrize("transport", [False, True], ids=["pipe", "feed"])
-def test_supervised_stop_escalates_after_wait_error(monkeypatch, transport):
+def _supervised_adapter(tmp_path, proc, receiver):
+    if receiver == "capture":
+        from tests.test_capture import capture, start
+
+        output = tmp_path / "recorder-stdout"
+        output.touch()
+        proc.stdout = output.open("rb")
+        cap = capture(tmp_path, proc)
+        start(cap)
+        return cap
+    decoder = _aprs(proc)
+    decoder.start()
+    return decoder
+
+
+@pytest.mark.parametrize("transport", ["pipe", "feed", "capture"])
+def test_supervised_stop_escalates_after_wait_error(tmp_path, monkeypatch, transport):
     monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
     waits = []
 
@@ -1209,8 +1224,8 @@ def test_supervised_stop_escalates_after_wait_error(monkeypatch, transport):
             return iter(())
 
     proc = Proc(stubborn=True)
-    decoder = _aprs(Feed(proc) if transport else proc)
-    decoder.start()
+    decoder = _supervised_adapter(
+        tmp_path, Feed(proc) if transport == "feed" else proc, transport)
     try:
         decoder.stop()
         assert proc.sent == ["TERM", "KILL"]
@@ -1222,10 +1237,13 @@ def test_supervised_stop_escalates_after_wait_error(monkeypatch, transport):
 
 
 def _finish_fault_fake(decoder):
-    with suppress(aprs.AprsUnavailable):
+    from sigint101.capture import CaptureUnavailable
+
+    with suppress(aprs.AprsUnavailable, CaptureUnavailable):
         decoder.shutdown()
 
 
+@pytest.mark.parametrize("receiver", ["aprs", "capture"])
 @pytest.mark.parametrize("outcome,detail", [
     ("timeout", "survived kill"),
     ("wait-error", "KILL wait failed"),
@@ -1234,7 +1252,7 @@ def _finish_fault_fake(decoder):
     ("no-status", "no exit status"),
 ])
 def test_supervised_retained_reason_follows_kill_wait_outcome(
-        tmp_path, monkeypatch, outcome, detail):
+        tmp_path, monkeypatch, outcome, detail, receiver):
     monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
     waits = []
 
@@ -1260,10 +1278,14 @@ def test_supervised_retained_reason_follows_kill_wait_outcome(
             return super().wait(timeout)
 
     proc = Proc(unkillable=True)
-    decoder = _aprs(proc)
-    with _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
-                 sweeper_factory=lambda: _StubSweeper([])) as client:
-        decoder.start()
+    from tests.test_capture import client as capture_client
+
+    decoder = _supervised_adapter(tmp_path, proc, receiver)
+    console = (capture_client(tmp_path, decoder, sweeper_factory=lambda: _StubSweeper([]))
+               if receiver == "capture"
+               else _client(tmp_path, probe=_present, aprs_factory=lambda: decoder,
+                            sweeper_factory=lambda: _StubSweeper([])))
+    with console as client:
         try:
             decoder.stop()
             reason = decoder.release_failure(pending=True)
@@ -1281,17 +1303,21 @@ def test_supervised_retained_reason_follows_kill_wait_outcome(
             proc.code = -9
 
 
-@pytest.mark.parametrize("control", ["stop", "release", "retune", "shutdown"])
-def test_supervised_control_retries_kept_child_immediately(monkeypatch, control):
+@pytest.mark.parametrize("receiver,control", [
+    ("aprs", "stop"), ("aprs", "release"), ("aprs", "retune"), ("aprs", "shutdown"),
+    ("capture", "stop"), ("capture", "release"),
+])
+def test_supervised_control_retries_kept_child_immediately(
+        tmp_path, monkeypatch, receiver, control):
     monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
     proc = Child(unkillable=True)
-    decoder = _aprs(proc)
-    decoder.start()
+    decoder = _supervised_adapter(tmp_path, proc, receiver)
     try:
         decoder.stop()
         assert proc.sent == ["TERM", "KILL"]
         assert decoder.release_failure()
-        decoder.retune(decoder.freq_hz)
+        if receiver == "aprs":
+            decoder.retune(decoder.freq_hz)
         assert proc.sent == ["TERM", "KILL"]
         proc.unkillable = False
         if control == "retune":
@@ -1306,7 +1332,9 @@ def test_supervised_control_retries_kept_child_immediately(monkeypatch, control)
         _finish_fault_fake(decoder)
 
 
-def test_supervised_reader_wakes_do_not_postpone_pending_retry(monkeypatch):
+@pytest.mark.parametrize("receiver", ["aprs", "capture"])
+def test_supervised_reader_wakes_do_not_postpone_pending_retry(
+        tmp_path, monkeypatch, receiver):
     monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 0.2)
     done, retried = threading.Event(), threading.Event()
 
@@ -1317,8 +1345,7 @@ def test_supervised_reader_wakes_do_not_postpone_pending_retry(monkeypatch):
                 retried.set()
 
     proc = Proc(unkillable=True)
-    decoder = _aprs(proc)
-    decoder.start()
+    decoder = _supervised_adapter(tmp_path, proc, receiver)
     run = decoder._run
 
     def reader_wakes():
@@ -1690,3 +1717,115 @@ def test_shutdown_owner_probe_failure_does_not_hide_other_owners(broken, caplog)
     assert set(errors) == expected
     for lines in reports_at_close:
         assert all(f"console shutdown: {entry}" in lines for entry in expected)
+
+
+def test_capture_handoff_holds_through_reap_only(tmp_path, monkeypatch):
+    from tests.test_capture import TUNE, Recorder, _park_commit, capture, client
+
+    proc = Recorder(tmp_path)
+    cap = capture(tmp_path, proc)
+    entered, proceed = _park_commit(cap, monkeypatch)
+    with client(tmp_path, cap) as c:
+        with monkeypatch.context() as patch:
+            patch.setattr(c.app.state.ppm_calibration, "release_failure",
+                          lambda: "ppm child exit unconfirmed")
+            refused = c.post("/api/capture/start", json=TUNE)
+            assert refused.status_code == 503
+            assert refused.json()["reason"] == "ppm child exit unconfirmed"
+            assert proc.sent == [] and cap._run is None
+        assert c.post("/api/capture/start", json=TUNE).status_code == 200
+        assert c.get("/api/hardware").json()["state"] == "busy"
+        proc.feed().join(3)
+        try:
+            assert entered.wait(3)
+            assert c.get("/api/hardware").json()["state"] == "present"
+            assert c.get("/api/spectrum").status_code == 200
+        finally:
+            proceed.set()
+        cap.drain()
+        assert cap.snapshot()["state"] == "saved"
+
+
+def test_capture_is_protected_from_default_claims(tmp_path):
+    from tests.test_capture import TUNE, Recorder, capture, client
+
+    proc = Recorder(tmp_path)
+    cap = capture(tmp_path, proc)
+    with client(tmp_path, cap, ppm_measure=lambda **_: {"ppm": 2}) as c:
+        assert c.post("/api/capture/start", json=TUNE).status_code == 200
+        for url in ("/api/spectrum", "/api/decode", "/api/aprs"):
+            reply = c.get(url)
+            assert reply.status_code == 503
+            assert reply.json()["cause"] == "capturing"
+            assert 0 < reply.json()["retry_in"] <= 15
+        assert proc.sent == []
+        assert c.post("/api/ppm/measure").status_code == 200
+        assert proc.sent == ["TERM"]
+
+
+def test_claim_precheck_refuses_published_capture_reap_failure(tmp_path, monkeypatch):
+    from tests.test_capture import TUNE, Recorder, capture, client
+
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    proc = Recorder(tmp_path, unkillable=True)
+    cap = capture(tmp_path, proc)
+    with client(tmp_path, cap, ppm_measure=lambda **_: {"ppm": 2}) as c:
+        try:
+            assert c.post("/api/capture/start", json=TUNE).status_code == 200
+            c.post("/api/capture/stop")
+            reason = cap.release_failure()
+            assert reason and proc.sent == ["TERM", "KILL"]
+            assert c.get("/api/hardware").json()["state"] == "busy"
+            for reply in (c.get("/api/spectrum"), c.post("/api/ppm/measure")):
+                assert reply.status_code == 503 and reply.json()["reason"] == reason
+            assert proc.sent == ["TERM", "KILL"]
+            proc.unkillable = False
+            c.post("/api/capture/stop")
+            assert proc.sent == ["TERM", "KILL", "KILL"]
+            assert c.get("/api/hardware").json()["state"] == "present"
+        finally:
+            proc.unkillable = False
+            proc.close_pipe()
+
+
+def test_queued_claim_does_not_retry_a_failed_capture_stop(tmp_path, monkeypatch):
+    from tests.test_capture import TUNE, Recorder, capture, client
+
+    monkeypatch.setattr(receiver_lifecycle, "REAP_RETRY_MIN_S", 30)
+    monkeypatch.setattr(childproc, "STOP_WAIT_S", 0.02)
+    proc = Recorder(tmp_path, unkillable=True)
+    cap = capture(tmp_path, proc)
+    queued, proceed = threading.Event(), threading.Event()
+    measurements = []
+
+    with client(tmp_path, cap, ppm_measure=lambda **_: measurements.append(True)) as c:
+        assert c.post("/api/capture/start", json=TUNE).status_code == 200
+        arbiter = c.app.state.radio_arbiter
+        reserve = arbiter.reserve
+
+        @contextmanager
+        def parked_reserve(target, *args):
+            assert target == "ppm"
+            queued.set()
+            assert proceed.wait(5)
+            with reserve(target, *args):
+                yield
+
+        monkeypatch.setattr(arbiter, "reserve", parked_reserve)
+        try:
+            with ThreadPoolExecutor(1) as pool:
+                claim = pool.submit(c.post, "/api/ppm/measure")
+                try:
+                    assert queued.wait(3)
+                    cap.stop()
+                    reason = cap.release_failure()
+                    assert reason and proc.sent == ["TERM", "KILL"]
+                finally:
+                    proceed.set()
+                response = claim.result(5)
+            assert response.status_code == 503 and response.json()["reason"] == reason
+            assert proc.sent == ["TERM", "KILL"] and not measurements
+        finally:
+            proc.unkillable = False
+            cap.stop()
+            proc.close_pipe()

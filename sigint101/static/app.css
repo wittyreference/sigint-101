@@ -3757,6 +3757,42 @@ body {
   color: var(--fg-dim);
 }
 
+/* The capture controls stay within the viewport even when the storage reason uses two lines. */
+.capture-link {
+  min-height: 72px;
+  padding-inline: 10px;
+}
+.capture {
+  display: grid;
+  grid-template-rows: auto minmax(57px, auto) 28px var(--touch) auto;
+  align-content: start;
+  gap: 12px;
+  padding: 14px var(--gutter);
+  color: var(--fg);
+}
+.capture p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.capture [data-capture-tune] {
+  font-size: 22px;
+}
+.capture__actions {
+  display: flex;
+  gap: 12px;
+}
+.capture__actions .btn {
+  height: var(--touch);
+  min-width: 180px;
+}
+.capture__law {
+  display: flex;
+  align-items: center;
+  min-height: 72px;
+  color: var(--fg);
+  line-height: 1.25;
+}
+
 /* ===== Low-battery safe-shutdown banner =================================== */
 /* Mounted inside .app below the 75 px status bar so Back / Exit stay whole and
    tappable, and above full-screen overlays (.exam-figure z-index 50). Inverted
