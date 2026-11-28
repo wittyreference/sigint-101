@@ -144,6 +144,9 @@ function mountPanel({ saved = {}, fetchImpl, storage } = {}) {
     "answer", "why", "cite", "prev", "next"]) {
     els[name] = fakeEl({});
   }
+  // The card steps as the console template labels them.
+  els.prev.textContent = "‹ Card";
+  els.next.textContent = "Card ›";
   els.unsaved.hidden = true;
   els.deck.textContent = JSON.stringify(CARDS);
   els.saved.textContent = JSON.stringify(saved);
@@ -245,6 +248,24 @@ test("coming back from the law page reopens the card the learner left, not the f
   assert.equal(ui.els.counter.textContent, "Card 2 of 3");
   ui.els.next.click();
   assert.equal(ui.els.counter.textContent, "Card 3 of 3");
+});
+
+test("stepping the deck never relabels the card steps with a stage button's words", () => {
+  // F10: the footer's stage buttons read "‹ Prev" and "Next step"; the template labels the card
+  // steps apart from them, and the panel must not rewrite those labels as it steps.
+  const STAGE_WORDS = ["prev", "next", "step"];
+  const ui = mountPanel({ fetchImpl: () => Promise.resolve({ ok: true }) });
+  const seen = [];
+  for (let i = 0; i < CARDS.length; i += 1) {
+    seen.push(ui.els.prev.textContent, ui.els.next.textContent);
+    ui.els.next.click();
+  }
+  for (const label of seen) {
+    const words = label.toLowerCase().match(/[a-z]+/g) || [];
+    assert.ok(words.includes("card"), label);
+    assert.ok(!words.some((w) => STAGE_WORDS.includes(w)), label);
+  }
+  assert.equal(ui.els.next.disabled, true, "the last card disables the forward card step");
 });
 
 test("formatFeedback returns Right or Missed with answer label, why, and cite", () => {

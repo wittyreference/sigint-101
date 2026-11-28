@@ -650,9 +650,14 @@
             <footer class="stage-foot{% if loop.last %} predict__actions{% endif %}{% if stage == 'try' and lesson.sort %} sort-foot{% endif %}">
               {{ prev_step(loop.first) }}
               {% if stage == 'try' and lesson.sort %}
+              {# The card steps are one joined, dashed pair labelled "Card", kept apart from the
+                 stage steps ("‹ Prev", "Next step") by the law link, so a tap meant for the next
+                 card cannot land on Next step and leave the sort. #}
+              <div class="sort-step" role="group" aria-label="Step through the cards" data-sort-step>
+                <button class="btn sort-step__btn" type="button" data-sort-prev aria-label="Previous card">&lsaquo; Card</button>
+                <button class="btn sort-step__btn" type="button" data-sort-next aria-label="Next card">Card &rsaquo;</button>
+              </div>
               <a class="btn btn--secondary sort-law-link" href="/law?back=/lesson/{{ lesson.id }}">Show me the law</a>
-              <button class="btn btn--secondary sort-nav-btn" type="button" data-sort-prev aria-label="Previous card">&lsaquo; Card</button>
-              <button class="btn btn--secondary sort-nav-btn" type="button" data-sort-next>Next card</button>
               {% endif %}
               {% if safety_notice and not lesson.uses_lora %}
               {{ panels.safety_notice(safety_notice) }}

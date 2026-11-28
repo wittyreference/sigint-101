@@ -313,6 +313,51 @@ def test_lesson_5_sort_head_carries_a_hidden_not_saved_mark(tmp_path):
     assert "not saved" in mark.group(1).lower()
 
 
+def _foot_controls(footer_html: str) -> list[tuple[str, str, str]]:
+    """(opening tag, class attribute, visible label) for each button or link in a footer."""
+    controls = []
+    for m in re.finditer(r"<(button|a)\b([^>]*)>(.*?)</\1>", footer_html, re.S):
+        attrs, label = m.group(2), html_lib.unescape(re.sub(r"<[^>]+>", "", m.group(3))).strip()
+        cls = re.search(r'class="([^"]*)"', attrs)
+        controls.append((m.group(0).split(">", 1)[0], cls.group(1) if cls else "", label))
+    return controls
+
+
+def _label_words(label: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", label.lower()))
+
+
+def test_lesson_5_card_stepping_is_distinguishable_from_the_stage_buttons(tmp_path):
+    # F10: the sort footer holds both the lesson's stage steps (Prev, Next step) and the deck's card
+    # steps. They must differ by class and by label, so a mis-tap does not leave the sort.
+    with _client(tmp_path) as client:
+        html = client.get("/lesson/5").text
+    foot = re.search(r'<footer class="[^"]*\bsort-foot\b[^"]*">(.*?)</footer>', html, re.S)
+    assert foot, "expected the sort footer"
+    controls = _foot_controls(foot.group(1))
+    card = [c for c in controls if "data-sort-prev" in c[0] or "data-sort-next" in c[0]]
+    stage = [c for c in controls if "data-nav=" in c[0] or "data-complete" in c[0]]
+    assert len(card) == 2 and stage, controls
+
+    card_classes = [set(c[1].split()) for c in card]
+    stage_classes = [set(c[1].split()) for c in stage]
+    assert all("sort-step__btn" in cls for cls in card_classes), card
+    assert not any("sort-step__btn" in cls for cls in stage_classes), stage
+    for cc in card_classes:
+        for sc in stage_classes:
+            assert not (cc & sc) - {"btn"}, (cc, sc)   # only the base .btn is shared
+
+    for _, _, card_label in card:
+        assert "card" in _label_words(card_label), card_label
+        for _, _, stage_label in stage:
+            shared = _label_words(card_label) & _label_words(stage_label)
+            assert not shared, (card_label, stage_label)
+
+    # The two card steps sit together in their own group, away from the stage buttons.
+    group = re.search(r"<[^>]*\bdata-sort-step\b[^>]*>(.*?)</(?:div|span)>", foot.group(1), re.S)
+    assert group and "data-sort-prev" in group.group(1) and "data-sort-next" in group.group(1)
+
+
 def test_law_page_renders_every_authority_citation_caution_and_safe_back_link(tmp_path):
     with _client(tmp_path) as client:
         default_page = client.get("/law")

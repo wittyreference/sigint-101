@@ -194,11 +194,10 @@
       }
     }
 
+    // The card steps keep the template's "Card" labels, set apart from the stage buttons; the
+    // counter already says when this is the last card.
     if (prevBtn) prevBtn.disabled = current <= 0;
-    if (nextBtn) {
-      nextBtn.disabled = current >= cards.length - 1;
-      nextBtn.textContent = current >= cards.length - 1 ? "Last card" : "Next card";
-    }
+    if (nextBtn) nextBtn.disabled = current >= cards.length - 1;
   }
 
   function record(choice) {
