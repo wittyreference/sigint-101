@@ -673,3 +673,27 @@ def test_a_valid_sort_block_parses_onto_the_lesson_and_scores_feedback():
 def test_a_malformed_sort_block_is_refused(bad_sort, complaint):
     with pytest.raises(LessonError, match=complaint):
         parse_lesson(_intro(sort=bad_sort))
+
+
+# Measured at 800x480: with the widest tag ("Missed Depends:") and the pack's shortest cite, a why
+# past about 94 characters wraps the feedback to a third line, and the card has under one line of
+# slack. YAML folds a long why into one line with no newline, so the cap is on length.
+_WHY_AT_CAP = ("Twenty-word why that still fits two feedback lines on the card, "
+               "measured at the 800x480 screen.")[:90]
+
+
+def test_a_sort_why_at_the_length_cap_still_loads():
+    assert len(_WHY_AT_CAP) == 90
+    lesson = parse_lesson(_intro(sort=[{**_SORT_CARD, "why": _WHY_AT_CAP}]))
+    assert lesson.sort[0]["why"] == _WHY_AT_CAP
+
+
+@pytest.mark.parametrize("why", [
+    _WHY_AT_CAP + "s",
+    "A why that YAML folded from several pack lines into a single line with no newline at all, "
+    "so it runs on past the card's two feedback lines and off the 800x480 screen entirely.",
+])
+def test_a_sort_why_longer_than_two_feedback_lines_is_refused(why):
+    assert "\n" not in why
+    with pytest.raises(LessonError, match=r"'why' is \d+ characters"):
+        parse_lesson(_intro(sort=[{**_SORT_CARD, "why": why}]))

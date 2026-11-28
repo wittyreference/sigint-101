@@ -2,3 +2,6 @@
 # (git's built-in union driver). It cannot spot duplicates or tell edited lines apart, so
 # only files whose entries stand alone and whose order across branches does not matter.
 .claude/learnings.md merge=union
+
+# Unified diffs keep the upstream indentation and a leading space on context lines.
+deploy/patches/rtl-ais-companion.patch -whitespace

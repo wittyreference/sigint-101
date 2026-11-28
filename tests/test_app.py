@@ -1689,11 +1689,14 @@ def test_spectrum_releases_the_acars_decoder(tmp_path):
 
 
 def test_ais_reports_503_and_a_reason_when_no_radio(tmp_path):
-    # rtl_ais present (injected which) so this pins the no-radio refusal, not a missing-tool one.
+    # A compatible companion makes this pin the no-radio refusal.
+    companion = tmp_path / "rtl_ais-sigint101"
+    companion.write_text("#!/bin/sh\necho sigint101-ais-udp-v1\n", encoding="utf-8")
+    companion.chmod(0o755)
     with _client(tmp_path,
                  ais_factory=lambda: AisDecoder(
-                     radio_present=lambda: False,
-                     which=lambda name: "/usr/bin/" + name)) as client:
+                     radio_present=lambda: False, port=0,
+                     which=lambda _: str(companion))) as client:
         resp = client.get("/api/ais")
     assert resp.status_code == 503
     body = resp.json()

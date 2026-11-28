@@ -205,7 +205,7 @@ class GroupPopen(subprocess.Popen):
 CAPTURE = object()
 
 
-def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=False):
+def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=False, env=None):
     """Start one radio tool in its own session, tied to the console's life.
 
     stderr defaults to a scratch file rather than a pipe: nothing drains stderr while the tool
@@ -218,7 +218,7 @@ def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=Fals
         stderr = scratch
     try:
         proc = _SPAWNER.run(lambda: GroupPopen(
-            argv, stdin=stdin, stdout=stdout, stderr=stderr, text=text,
+            argv, stdin=stdin, stdout=stdout, stderr=stderr, text=text, env=env,
             start_new_session=True, preexec_fn=_die_with_parent()))
     except BaseException:
         if scratch is not None:

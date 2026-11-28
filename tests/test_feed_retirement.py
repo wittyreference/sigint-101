@@ -8,6 +8,7 @@ import pytest
 
 from sigint101 import adsb, ais
 from tests.child_fakes import Child
+from tests.test_ais import _udp_pair
 from tests.test_receiver_retirement import until
 from tests.test_stale_readers import ADSB_1, ADSB_2, AIS_1, AIS_2
 
@@ -31,19 +32,22 @@ class CountingSocket:
         self.close()
 
 
-@pytest.mark.parametrize("module,ctor,lines,field,expected,kind", [
-    (adsb, adsb.AdsbDecoder, (ADSB_1, ADSB_2), "hex_ident", ["A1B2C3", "DDEEFF"],
-     socket.SOCK_STREAM),
-    (ais, ais.AisDecoder, (AIS_1, AIS_2), "mmsi", [477553000, 265547250],
-     socket.SOCK_DGRAM),
+@pytest.mark.parametrize("module,ctor,lines,field,expected", [
+    (adsb, adsb.AdsbDecoder, (ADSB_1, ADSB_2), "hex_ident", ["A1B2C3", "DDEEFF"]),
+    (ais, ais.AisDecoder, (AIS_1, AIS_2), "mmsi", [477553000, 265547250]),
 ], ids=["adsb", "ais"])
-def test_idle_socket_feed_drains_and_closes_once(module, ctor, lines, field, expected, kind):
-    client, peer = socket.socketpair(type=kind)
+def test_idle_socket_feed_drains_and_closes_once(module, ctor, lines, field, expected):
+    peer, client = _udp_pair() if module is ais else socket.socketpair()
     with client, peer:
         child = Child(["test-decoder"])
         client.settimeout(module.FEED_POLL_S)
         transport = CountingSocket(client)
-        feed = module._Feed(child, transport)
+        sender = CountingSocket(peer) if module is ais else None
+        if sender is not None:
+            feed = ais._Feed(child, transport, sender)
+            feed.configure()
+        else:
+            feed = adsb._Feed(child, transport)
         decoder = ctor(spawn=lambda *_: feed, radio_present=lambda: True, which=lambda name: name)
         entered, drain = threading.Event(), threading.Event()
         heard = []
@@ -69,8 +73,13 @@ def test_idle_socket_feed_drains_and_closes_once(module, ctor, lines, field, exp
             assert heard == expected
             assert transport.closes == 1
             assert client.fileno() == -1
+            if sender is not None:
+                assert until(lambda: peer.fileno() == -1)
+                assert sender.closes == 1
             decoder.stop()
             assert transport.closes == 1
+            if sender is not None:
+                assert sender.closes == 1
         finally:
             drain.set()
             decoder.stop()
