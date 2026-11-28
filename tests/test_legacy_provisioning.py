@@ -17,7 +17,7 @@ BASH = shutil.which("bash")
 
 CORE_UTILS = (
     "awk", "basename", "bash", "cat", "cut", "dirname", "grep", "head", "install", "ls",
-    "mkdir", "paste", "readlink", "rm", "sed", "seq", "sleep", "sort", "timeout",
+    "mkdir", "paste", "readlink", "rm", "sed", "seq", "sha256sum", "sleep", "sort", "timeout",
 )
 
 # Frozen SHA-256 digests of every legacy-installed file from origin/main (updated only on a
@@ -28,7 +28,8 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "deploy/kiosk/sigint101.service",
         "home",
         ".config/systemd/user/sigint101.service",
-        "d9fc327d02be723342675aafd82a5fc4bd2cc83eeab451ef9c6a7d16b600c4e9",
+        # C47 (F3): the unit comment triggers the installer for a one-run AIS companion upgrade.
+        "b894c4af12ae62ddccc28dfba8b6cfd905ad6c5b91093f77f3fb64b99a116013",
     ),
     (
         "deploy/kiosk/start-kiosk.sh",
@@ -226,6 +227,8 @@ class StatefulLegacyBox:
         for tool in ("dump1090-fa", "acarsdec", "redsea", "rtl_ais", "nmcli",
                      "gsettings", "fc-cache", "pkill", "vcgencmd"):
             _stub(self.bin / tool, "exit 0")
+        _stub(self.bin / "rtl_ais-sigint101",
+              '[ "$1" = --sigint101-capability ] && echo sigint101-ais-udp-v1')
         _stub(self.bin / "getcap", 'echo "/usr/bin/tcpdump cap_net_admin,cap_net_raw=eip"')
         _stub(self.bin / "fc-list", 'echo "PT Mono"; echo "Russo One"; echo "DejaVu Sans Mono"')
         _stub(self.bin / "lsusb", 'echo "Bus 001 Device 002: ID 0bda:2838 Realtek"')

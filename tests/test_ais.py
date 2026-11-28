@@ -293,9 +293,9 @@ def test_assembler_starts_afresh_on_a_new_first_fragment():
 
 
 class _RtlAis:
-    """rtl_ais at the process boundary: alive until told otherwise."""
+    """The companion at the process boundary: alive until told otherwise."""
 
-    args = ["rtl_ais", "-d", "0", "-h", "127.0.0.1", "-P", "10110"]
+    args = ["rtl_ais-sigint101", "--sigint101-udp-stdout", "-d", "0"]
 
     def __init__(self):
         self.code = None
@@ -320,6 +320,20 @@ def _udp():
     return sock
 
 
+def _udp_pair():
+    sender, receiver = _udp(), _udp()
+    sender.connect(receiver.getsockname())
+    receiver.connect(sender.getsockname())
+    return sender, receiver
+
+
+def _feed(proc):
+    sender, receiver = _udp_pair()
+    feed = _Feed(proc, receiver, sender)
+    feed.configure()
+    return feed, sender
+
+
 def _reading(feed):
     import threading
     got = []
@@ -329,20 +343,19 @@ def _reading(feed):
 
 
 def test_ais_feed_reads_the_datagrams_rtl_ais_sends():
-    import socket
-    sock = _udp()
-    feed = _Feed(_RtlAis(), sock)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
-        sender.sendto((TYPE1 + "\n").encode(), sock.getsockname())
-    assert next(feed.stdout) == TYPE1
-    feed.terminate()
+    feed, sender = _feed(_RtlAis())
+    try:
+        sender.send((TYPE1 + "\n").encode())
+        assert next(feed.stdout) == TYPE1
+    finally:
+        feed.terminate()
 
 
 def test_ais_feed_terminate_unblocks_its_reader():
     # The audit found the reader still parked in recvfrom on a closed socket after stop, and the
     # next route waited out a 3 s join for it.
     import time
-    feed = _Feed(_RtlAis(), _udp())
+    feed, _ = _feed(_RtlAis())
     reader, _ = _reading(feed)
     time.sleep(0.1)                               # let it block in recv
     started = time.monotonic()
@@ -356,7 +369,7 @@ def test_ais_feed_ends_when_rtl_ais_dies():
     # UDP has no end-of-stream: without this the reader would wait for datagrams forever and the
     # panel would never learn rtl_ais had gone.
     proc = _RtlAis()
-    feed = _Feed(proc, _udp())
+    feed, _ = _feed(proc)
     reader, _ = _reading(feed)
     proc.code = 1
     reader.join(timeout=2.0)
