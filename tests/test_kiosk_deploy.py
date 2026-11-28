@@ -898,23 +898,24 @@ def test_install_leaves_a_lock_holder_alone_unless_bash_runs_the_launcher(box):
         proc.wait(timeout=10)
 
 
-def _stubborn_watchdog(box, extra="", stubborn=True):
+def _stubborn_watchdog(box, extra="", stubborn=True, usr1=None):
     """A watchdog by its command line (bash, the checkout launcher, watch) that holds the lock.
     Stubborn, it ignores TERM, so install.sh falls back to SIGKILL after its 15 s wait. On USR1
     it becomes another program under the same PID ("imposter", which notes the signals it gets),
-    as a test hook's stand-in for a process whose identity changes."""
+    as a test hook's stand-in for a process whose identity changes; `usr1` replaces that."""
     real_sleep = shutil.which("sleep")
     imposter = box.log.parent / "imposter.sh"
     imposter.write_text('for s in TERM INT HUP QUIT USR2; do\n'
                         f'  trap "echo $s >> {box.log.parent / "imposter-signals"}" "$s"\n'
                         'done\n'
                         f'while :; do {real_sleep} 0.1; done\n', encoding="utf-8")
+    usr1 = usr1 or f"exec 9>&-; exec -a imposter {shutil.which('bash')} {imposter}"
     return _watchdog(box, _old_install(
         box,
         "#!/bin/bash\n"
         f'exec 9>"{_lock(box)}"; flock -n 9 || exit 1\n'
         + ("trap '' TERM\n" if stubborn else "")
-        + f"trap 'exec 9>&-; exec -a imposter {shutil.which('bash')} {imposter}' USR1\n"
+        + f"trap '{usr1}' USR1\n"
         + extra
         + f'echo started > {box.log.parent / "stubborn"}\n'
         f'while :; do {real_sleep} 0.2; done\n'))
@@ -950,8 +951,9 @@ def _python_hook(box, prelude):
           f'exec {real} "$@"')
 
 
-# Runs inside the hook: on the pin for SIGNAL, the pinned process turns into the imposter (USR1)
-# before the helper checks it, so the check sees another program under the pinned PID.
+# Runs inside the hook: on the pin for SIGNAL, the pinned process changes (USR1) before the
+# helper checks it, until its command line holds MARKER: the check sees another program, or the
+# same program run from another file, under the pinned PID.
 _CHANGE_AFTER_PIN = """
 import os, time
 _pidfd_open = os.pidfd_open
@@ -962,12 +964,16 @@ def _pin(pid, flags=0):
         end = time.time() + 5
         while time.time() < end:
             with open(f"/proc/{{pid}}/cmdline", "rb") as f:
-                if f.read().startswith(b"imposter\\0"):
+                if {marker!r} in f.read():
                     break
             time.sleep(0.05)
     return fd
 os.pidfd_open = _pin
 """
+
+
+def _change_after_pin(signal_name, marker=b"imposter\0"):
+    return _CHANGE_AFTER_PIN.format(signal=signal_name, marker=marker)
 
 
 def _sent(box):
@@ -992,7 +998,7 @@ def test_install_signals_nothing_when_the_identity_changes_after_the_pin_before_
     _quiet_desktop(box)
     box.start_session()
     _installed_launcher(box)
-    _python_hook(box, _CHANGE_AFTER_PIN.format(signal="TERM"))
+    _python_hook(box, _change_after_pin("TERM"))
     old = _stubborn_watchdog(box, stubborn=False)
     try:
         assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
@@ -1011,7 +1017,7 @@ def test_install_sends_no_sigkill_when_the_identity_changes_at_the_rescan(box):
     _quiet_desktop(box)
     box.start_session()
     _installed_launcher(box)
-    _python_hook(box, _CHANGE_AFTER_PIN.format(signal="KILL"))
+    _python_hook(box, _change_after_pin("KILL"))
     old = _stubborn_watchdog(box)
     try:
         assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
@@ -1131,6 +1137,38 @@ def test_install_never_signals_a_launcher_of_the_same_name_elsewhere(box, name):
         assert box.calls("setsid") == []
         [warn] = [ln for ln in result.stderr.splitlines() if "WARN" in ln]
         assert "no watchdog" in warn, warn
+    finally:
+        _end(old)
+
+
+def test_install_sends_nothing_once_the_pinned_watchdog_runs_a_same_name_launcher(box):
+    """The check at signal time looks at the launcher's path too, not only the scan: found as the
+    watchdog, the process then execs a start-kiosk.sh from another directory (same shell, same
+    `watch`, same PID and start time, still holding the lock). Neither TERM nor KILL reaches it."""
+    _quiet_desktop(box)
+    box.start_session()
+    _installed_launcher(box)
+    _python_hook(box, _change_after_pin("TERM", marker=b"/elsewhere/"))
+    signals = box.log.parent / "elsewhere-signals"
+    other = box.log.parent / "elsewhere" / "start-kiosk.sh"
+    other.parent.mkdir()
+    other.write_text('for s in TERM INT HUP QUIT USR1 USR2; do\n'
+                     f'  trap "echo $s >> {signals}" "$s"\n'
+                     'done\n'
+                     f'while :; do {shutil.which("sleep")} 0.1; done\n', encoding="utf-8")
+    # The lock's fd 9 stays open across the exec, so the lock is still held.
+    old = _stubborn_watchdog(box, stubborn=False,
+                             usr1=f"exec {shutil.which('bash')} {other} watch")
+    try:
+        assert _wait_for(lambda: (box.log.parent / "stubborn").exists())
+        result = box.run(_install(box), timeout=40)
+        assert result.returncode == 0, result.stderr
+        argv = Path(f"/proc/{old.pid}/cmdline").read_bytes().split(b"\0")
+        assert argv[1:3] == [str(other).encode(), b"watch"], argv
+        assert old.poll() is None and not signals.exists() and _sent(box) == []
+        assert not _lock_is_free(box)
+        assert box.calls("setsid") == []
+        assert any("still held" in ln for ln in result.stderr.splitlines()), result.stderr
     finally:
         _end(old)
 
