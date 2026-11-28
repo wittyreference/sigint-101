@@ -1150,8 +1150,8 @@ def test_the_rack_never_restores_a_lessons_tuning(tmp_path):
     assert "lesson-tuning" not in html
 
 
-# Every page the render checks load, walked below. tests/render_routes.py holds the list, and
-# test_render_checks.py compares it with the pages the real checks navigate to under the runner.
+# Walk the pages declared by the discovered checks. test_render_checks.py verifies those
+# declarations against the real checks' navigations.
 from tests.render_routes import RENDER_CHECK_PAGES  # noqa: E402
 
 

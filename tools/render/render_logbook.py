@@ -7,6 +7,13 @@ import time
 
 from render_scroll import connect, fence, leave_page
 
+RENDER_CHECK = {
+    "name": "logbook",
+    "pages": ("/operate/ism", "/logbook"),
+    "scratch": False,
+    "order": 40,
+}
+
 THEMES = ("dark", "sunlight", "red-night")
 
 RACK = """

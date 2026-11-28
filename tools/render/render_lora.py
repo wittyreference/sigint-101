@@ -7,6 +7,13 @@ import sys
 from render_logbook import THEMES, load_page, verdict
 from render_scroll import connect, leave_page
 
+RENDER_CHECK = {
+    "name": "lora",
+    "pages": ("/operate/lora",),
+    "scratch": False,
+    "order": 50,
+}
+
 REFUSAL = (
     "no LoRa radio — meshtasticd is not reachable at localhost:4403 "
     "([Errno 111] Connection refused)"

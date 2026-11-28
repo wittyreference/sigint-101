@@ -1,5 +1,6 @@
 # ABOUTME: Render an exam card with a figure at a forced 800x480 over CDP, then open the diagram.
 # ABOUTME: Asserts the card still fits and the overlay's Close bar is on screen; saves PNGs.
+
 import base64
 import json
 import os
@@ -8,6 +9,15 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from render_scroll import connect, fence  # noqa: E402
+
+RENDER_CHECK = {
+    "name": "figure",
+    "pages": ("/exam/review/T6C02",),
+    "scratch": False,
+    "order": 30,
+    "target": "/exam/review/T6C02",
+    "args": ("dark", "{output}/figure"),
+}
 
 URL = sys.argv[1]
 THEME = sys.argv[2] if len(sys.argv) > 2 else "dark"
