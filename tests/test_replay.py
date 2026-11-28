@@ -10,13 +10,14 @@ import signal
 import sqlite3
 import subprocess
 import time
+from contextlib import closing
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 
 from sigint101.events import log_event, read_events
-from sigint101.migrations import migrate_store_copy, reviewed_signatures
+from sigint101.migrations import FIXTURES_PATH, migrate_store_copy, reviewed_signatures
 from sigint101.progress import Progress
 from sigint101.receiver_lifecycle import SupervisedReceiver
 from sigint101.stamps import mint, stamps_from_log
@@ -248,6 +249,8 @@ def test_pair_and_folder_caps_count_metadata_and_all_regular_files(replay, tmp_p
     assert valid == []
     assert [stem for stem, _ in refused] == ["capture", "second"]
     assert all("25 MB" in reason for _, reason in refused)
+    with pytest.raises(replay.RecordingRefused, match="recordings folder must be at most 25 MB"):
+        replay.load_recording(tmp_path, "capture")
 
 
 def test_listing_is_sorted_and_returns_refusals(replay, tmp_path):
@@ -285,6 +288,17 @@ def _decoder(replay, spawn, **kwargs):
     return replay.ReplayDecoder(spawn=spawn, which=lambda _: "rtl_433", **kwargs)
 
 
+def _snapshot(decoder, state):
+    snapshot = decoder.snapshot()
+    assert snapshot.keys() == {
+        "mode", "replay", "instrument", "state", "recording", "digest", "frequency_hz",
+        "sample_rate", "command", "input", "decodes", "reason", "retry_in",
+    }
+    assert snapshot["mode"] == "replay" and snapshot["replay"] is True
+    assert snapshot["instrument"] == "ism" and snapshot["state"] == state
+    return snapshot
+
+
 def test_replay_structure_and_read_only_reception_hook(replay):
     assert issubclass(replay.ReplayDecoder, SupervisedReceiver)
     decoder = _decoder(replay, lambda *a, **kw: pytest.fail("no replay was started"))
@@ -315,14 +329,14 @@ def test_replay_exact_command_and_checked_stdin(replay, recording, tmp_path):
         return proc
 
     decoder = _decoder(replay, spawn, events_path=tmp_path / "events.jsonl")
-    assert decoder.snapshot()["state"] == "idle"
+    _snapshot(decoder, "idle")
     assert replay.replay_command(recording) == ARGV
     decoder.start_replay(recording)
     assert decoder._run.complete.wait(3)
     with pytest.raises(OSError):
         os.fstat(opened[0])
-    snapshot = decoder.snapshot()
-    assert snapshot["state"] == "finished" and decoder.watch.blocked() is None
+    snapshot = _snapshot(decoder, "finished")
+    assert decoder.watch.blocked() is None
     assert snapshot["recording"] == "capture" and snapshot["digest"] == DIGEST
     assert snapshot["input"] == "recordings/capture.sigmf-data"
     assert snapshot["command"] == " ".join(ARGV)
@@ -339,7 +353,7 @@ def test_spawn_failure_closes_the_checked_descriptor(replay, recording):
     decoder = _decoder(replay, spawn)
     with pytest.raises(replay.ReplayUnavailable, match="spawn failed"):
         decoder.start_replay(recording)
-    assert decoder.snapshot()["state"] == "error"
+    _snapshot(decoder, "error")
     with pytest.raises(OSError):
         os.fstat(opened[0])
 
@@ -362,8 +376,8 @@ def test_a_failed_replay_restart_clears_the_previous_rows(replay, recording):
     assert decoder.snapshot()["decodes"]
     with pytest.raises(replay.ReplayUnavailable, match="spawn failed"):
         decoder.start_replay(recording)
-    failed = decoder.snapshot()
-    assert failed["state"] == "error" and "spawn failed" in failed["reason"]
+    failed = _snapshot(decoder, "error")
+    assert "spawn failed" in failed["reason"]
     assert failed["decodes"] == [] and failed["command"] is None
 
 
@@ -384,6 +398,79 @@ def test_swap_between_digest_and_spawn_never_opens_the_replacement(replay, tmp_p
         decoder.start_replay(item)
 
 
+def test_fifo_swapped_in_at_spawn_is_refused_without_a_blocking_open(replay, tmp_path, monkeypatch):
+    data = _pair(tmp_path)
+    item = replay.load_recording(tmp_path, "capture")
+    digest_of, open_file = replay.digest_of, os.open
+    hashed = swapped = False
+
+    def after_hash(recording):
+        nonlocal hashed
+        digest = digest_of(recording)
+        hashed = True
+        return digest
+
+    def race(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if hashed and Path(path).name == data.name:
+            data.unlink()
+            os.mkfifo(data)
+            swapped = True
+            # Check before the real open so the regression cannot hang the test worker.
+            assert flags & os.O_NONBLOCK
+        return open_file(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(replay, "digest_of", after_hash)
+    monkeypatch.setattr(os, "open", race)
+    decoder = _decoder(replay, lambda *a, **kw: pytest.fail("spawned with a replaced FIFO"))
+    with pytest.raises(replay.RecordingRefused, match="changed since it was listed"):
+        decoder.start_replay(item)
+    assert swapped
+    _snapshot(decoder, "error")
+
+
+def test_stop_during_spawn_leaves_replay_stopped(replay, recording, tmp_path):
+    entered, resume = Event(), Event()
+    child = Child(ARGV)
+    events_path = tmp_path / "events.jsonl"
+
+    def spawn(*_args, **_kwargs):
+        entered.set()
+        assert resume.wait(5)
+        return child
+
+    decoder = _decoder(replay, spawn, events_path=events_path)
+    refusals = []
+
+    def start():
+        try:
+            decoder.start_replay(recording)
+        except replay.ReplayUnavailable as exc:
+            refusals.append(str(exc))
+
+    starter = Thread(target=start, daemon=True)
+    stopper = Thread(target=decoder.stop, daemon=True)
+    starter.start()
+    try:
+        try:
+            assert entered.wait(3)
+            intent = decoder._intent
+            stopper.start()
+            _until(lambda: intent.cancelled)
+        finally:
+            resume.set()
+            starter.join(3)
+            if stopper.ident is not None:
+                stopper.join(3)
+        assert not starter.is_alive() and not stopper.is_alive()
+        assert refusals == ["receiver start was cancelled"]
+        assert child.sent == ["TERM"] and decoder._run.reaped
+        assert _snapshot(decoder, "stopped")["reason"] is None
+        assert read_events(events_path)[-1]["payload"]["state"] == "stopped"
+    finally:
+        decoder.shutdown()
+
+
 def test_replay_stop_fences_before_signalling_and_drops_late_lines(replay, recording, tmp_path):
     events_path = tmp_path / "events.jsonl"
     child = LateProc(ARGV)
@@ -392,6 +479,7 @@ def test_replay_stop_fences_before_signalling_and_drops_late_lines(replay, recor
     run = decoder._run
     child.feed(LINE)
     _until(lambda: len(decoder.snapshot()["decodes"]) == 1)
+    _snapshot(decoder, "replaying")
     terminate = child.terminate
 
     def signal_then_feed():
@@ -405,8 +493,8 @@ def test_replay_stop_fences_before_signalling_and_drops_late_lines(replay, recor
     try:
         decoder.stop()
         assert run.complete.wait(3)
-        assert decoder.snapshot()["state"] == "stopped"
-        assert [row["readings"]["id"] for row in decoder.snapshot()["decodes"]] == [42]
+        snapshot = _snapshot(decoder, "stopped")
+        assert [row["readings"]["id"] for row in snapshot["decodes"]] == [42]
         assert [evt["kind"] for evt in read_events(events_path)] == [
             "replay_start", "replay", "replay_end",
         ]
@@ -462,8 +550,8 @@ def test_replay_failure_diagnostic_and_then_restart_after_backoff(replay, record
     decoder.watch.clock = lambda: now[0]
     decoder.start_replay(recording)
     assert decoder._run.complete.wait(3)
-    snapshot = decoder.snapshot()
-    assert snapshot["state"] == "error" and "cannot decode samples" in snapshot["reason"]
+    snapshot = _snapshot(decoder, "error")
+    assert "cannot decode samples" in snapshot["reason"]
     assert 0 < snapshot["retry_in"] <= 2
     with pytest.raises(replay.ReplayUnavailable, match="cannot decode samples"):
         decoder.start_replay(recording)
@@ -513,7 +601,7 @@ def test_replay_cap_stops_the_exact_child(replay, recording, monkeypatch, tmp_pa
 
 
 def _read_only_stamps(db):
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn:
         return ([tuple(row) for row in conn.execute("SELECT * FROM stamps")],
                 [tuple(row) for row in conn.execute("SELECT * FROM stamp_events")])
 
@@ -595,38 +683,50 @@ def test_replay_ledger_survives_reopen_and_log_rotation_alongside_a_stamp(tmp_pa
 
 def test_existing_progress_database_gains_replay_table_without_losing_any_rows(tmp_path):
     path = tmp_path / "progress.db"
-    expected = _build_progress_v0(path, "v0_1a35a1a")
+    expected = _build_progress_v0(path, "v0_challenges_retrieval")
     progress = Progress(path)
     try:
         assert progress.replays_seen() == {}
-        with sqlite3.connect(path) as conn:
+        with closing(sqlite3.connect(path)) as conn:
             for table, rows in expected.items():
                 assert conn.execute(f'SELECT * FROM "{table}"').fetchall() == rows
     finally:
         progress.close()
 
 
-def test_replay_schema_migrates_a_managed_v1_copy_without_touching_source(tmp_path):
+def test_replay_schema_enrolls_main_legacy_layout_without_touching_source(tmp_path):
     source = tmp_path / "previous.db"
-    expected = _build_progress_v0(source, "v0_1a35a1a")
-    with sqlite3.connect(source) as conn:
-        conn.execute("PRAGMA user_version=1")
-        assert schema_signature(conn) == reviewed_signatures("progress")["v1"]
+    expected = _build_progress_v0(source, "v0_challenges_retrieval")
+    signature = reviewed_signatures("progress")["v0"]["v0_challenges_retrieval"]
+    with closing(sqlite3.connect(source)) as conn:
+        assert schema_signature(conn) == signature
+    original = source.read_bytes()
     dest = tmp_path / "next" / "progress.db"
-    report = migrate_store_copy(source, dest, store="progress", scratch_dir=tmp_path / "scratch")
-    assert report["from_version"] == 1 and report["to_version"] == 2 and report["migrated"]
-    with sqlite3.connect(source) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
-        assert schema_signature(conn) == reviewed_signatures("progress")["v1"]
-    managed = Progress(dest, managed=True)
-    try:
+    receipt = migrate_store_copy(source, dest, store="progress", scratch_dir=tmp_path / "scratch")
+    assert source.read_bytes() == original
+    assert receipt["from_version"] == 0 and receipt["to_version"] == 1 and receipt["migrated"]
+    assert receipt["matched_v0"] == "v0_challenges_retrieval"
+    with closing(Progress(dest, managed=True)) as managed:
+        assert managed.replays_seen() == {}
         assert managed.record_replay_seen("ism", recording="clip", digest="hash", ts=123)
         assert managed.replays_seen()["ism"]["count"] == 1
-        with sqlite3.connect(dest) as conn:
-            for table, rows in expected.items():
-                assert conn.execute(f'SELECT * FROM "{table}"').fetchall() == rows
-    finally:
-        managed.close()
+    with closing(sqlite3.connect(dest)) as conn:
+        for table, rows in expected.items():
+            assert conn.execute(f'SELECT * FROM "{table}"').fetchall() == rows
+
+
+@pytest.mark.parametrize(("variant", "base"), [
+    ("v0_replays_seen", "v0_1a35a1a"),
+    ("v0_retrieval_replays_seen", "v0_retrieval"),
+    ("v0_challenges_retrieval_replays_seen", "v0_challenges_retrieval"),
+])
+def test_replay_legacy_variants_are_frozen(variant, base):
+    frozen = json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))["progress"]
+    assert reviewed_signatures("progress") == frozen
+    replay = frozen["v1"]["tables"]["replays_seen"]
+    before = frozen["v0"][base]
+    tables = {**before["tables"], "replays_seen": replay}
+    assert frozen["v0"][variant] == {**before, "tables": tables}
 
 
 def test_migrating_legacy_progress_preserves_replays_already_seen(tmp_path):
@@ -639,7 +739,8 @@ def test_migrating_legacy_progress_preserves_replays_already_seen(tmp_path):
         legacy.close()
     dest = tmp_path / "next" / "progress.db"
     report = migrate_store_copy(source, dest, store="progress", scratch_dir=tmp_path / "scratch")
-    assert report["from_version"] == 0 and report["to_version"] == 2
+    assert report["from_version"] == 0 and report["to_version"] == 1
+    assert report["matched_v0"] == "v0_challenges_retrieval_replays_seen"
     managed = Progress(dest, managed=True)
     try:
         assert managed.replays_seen() == before

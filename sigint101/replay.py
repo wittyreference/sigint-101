@@ -393,11 +393,15 @@ class ReplayDecoder(SupervisedReceiver):
             if self.running:
                 raise ReplayUnavailable("a replay is already running")
             self._recording = recording
+            with self._life:
+                control = self._control
             try:
                 intent = self.prepare_start()
                 self.launch_start(intent)
             except (ReplayUnavailable, RecordingRefused) as exc:
-                self._start_error = recording, str(exc)
+                with self._life:
+                    # A Stop supersedes this start. Let the cancelled run report its state.
+                    self._start_error = (recording, str(exc)) if control == self._control else None
                 raise
             self._start_error = None
             daemon(self._expire, intent.run, name="sigint101-replay-cap")

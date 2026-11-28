@@ -29,8 +29,23 @@
 {% endmacro %}
 
 {% if tiles %}
+  {% set FIND_MARKS = {'idle': 'READY', 'active': 'HUNTING', 'passed': 'FOUND', 'expired': 'TIME UP'} %}
   <div class="tiles">
     {% for t in tiles %}
+      {% if t.kind == 'find' %}
+      {% set rem = t.remaining_s|int %}
+      <a class="tile tile--find" href="{{ t.href }}" data-find-tile data-unit-id="{{ t.unit_id }}">
+        <div class="tile__head">
+          <span class="tile__code">{{ t.code }}</span>
+        </div>
+        {{ glyph(t.glyph) }}
+        <div class="tile__name">{{ t.name }}</div>
+        <div class="tile__meta tile__meta--find">
+          <span class="find-mark find-mark--{{ t.find_state }}" data-find-mark>{{ FIND_MARKS.get(t.find_state, 'READY') }}</span>
+          <span class="find-tile__clock" data-find-clock{% if t.find_state != 'active' %} hidden{% endif %}>{{ "%02d:%02d"|format(rem // 60, rem % 60) }}</span>
+        </div>
+      </a>
+      {% else %}
       {% set pct = ((t.lessons_done / t.lessons_total * 100) | round | int) if t.lessons_total else 0 %}
       <a class="tile tile--{{ t.status }}" href="{{ t.href }}">
         <div class="tile__head">
@@ -52,6 +67,7 @@
           <span>{{ t.lessons_done }}/{{ t.lessons_total }}</span>
         </div>
       </a>
+      {% endif %}
     {% endfor %}
   </div>
 {% else %}

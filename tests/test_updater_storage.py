@@ -53,8 +53,17 @@ def _absent():
 # --- Historical v0 builders matching main's real git history -----------------------------------
 
 
+_REPLAY_PROGRESS_BASES = {
+    "v0_replays_seen": "v0_1a35a1a",
+    "v0_retrieval_replays_seen": "v0_retrieval",
+    "v0_challenges_retrieval_replays_seen": "v0_challenges_retrieval",
+}
+
+
 def _build_progress_v0(path: Path, variant: str) -> dict:
     """Create a real historical version-0 progress.db fixture and return seeded expected rows."""
+    with_replay = variant in _REPLAY_PROGRESS_BASES
+    variant = _REPLAY_PROGRESS_BASES.get(variant, variant)
     conn = sqlite3.connect(path)
     expected: dict = {}
     if variant == "empty":
@@ -168,7 +177,72 @@ def _build_progress_v0(path: Path, variant: str) -> dict:
         "VALUES(5, 'aircraft-am', 'legal', 1, 104.0)"
     )
     expected["sort_answers"] = [(5, "aircraft-am", "legal", 1, 104.0)]
-    assert variant == "v0_1a35a1a"
+    if variant == "v0_1a35a1a" and not with_replay:
+        conn.commit()
+        conn.close()
+        return expected
+
+    assert variant in ("v0_1a35a1a", "v0_challenges", "v0_retrieval",
+                       "v0_challenges_retrieval")
+    if variant in ("v0_retrieval", "v0_challenges_retrieval"):
+        conn.executescript("""
+            CREATE TABLE retrieval (
+                lesson_id   INTEGER PRIMARY KEY,
+                box         INTEGER NOT NULL DEFAULT 1,
+                last_seen   REAL NOT NULL,
+                seen        INTEGER NOT NULL DEFAULT 0,
+                correct     INTEGER NOT NULL DEFAULT 0,
+                last_choice TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
+            "VALUES(1, 2, 105.0, 3, 2, 'a')"
+        )
+        expected["retrieval"] = [(1, 2, 105.0, 3, 2, "a")]
+    if variant in ("v0_challenges", "v0_challenges_retrieval"):
+        conn.executescript("""
+            CREATE TABLE challenges (
+                unit_id    INTEGER PRIMARY KEY,
+                started_at REAL NOT NULL,
+                window_s   INTEGER NOT NULL
+            );
+            CREATE TABLE challenge_passes (
+                unit_id    INTEGER NOT NULL,
+                started_at REAL NOT NULL,
+                passed_at  REAL NOT NULL,
+                instrument TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                digest     TEXT NOT NULL,
+                PRIMARY KEY (unit_id, started_at)
+            );
+        """)
+        ch_prov = json.dumps({"instrument": "ism", "tool": "rtl_433"})
+        ch_digest = "cd" * 32
+        conn.execute(
+            "INSERT INTO challenges(unit_id, started_at, window_s) VALUES(4, 1000.0, 900)"
+        )
+        conn.execute(
+            "INSERT INTO challenge_passes("
+            "unit_id, started_at, passed_at, instrument, provenance, digest"
+            ") VALUES(4, 1000.0, 1050.0, 'ism', ?, ?)",
+            (ch_prov, ch_digest),
+        )
+        expected["challenges"] = [(4, 1000.0, 900)]
+        expected["challenge_passes"] = [(4, 1000.0, 1050.0, "ism", ch_prov, ch_digest)]
+    if with_replay:
+        conn.execute("""
+            CREATE TABLE replays_seen (
+                instrument TEXT PRIMARY KEY,
+                first_ts   REAL NOT NULL,
+                count      INTEGER NOT NULL,
+                recording  TEXT NOT NULL,
+                digest     TEXT NOT NULL
+            )
+        """)
+        replay_row = ("ism", 106.0, 2, "clip", "ab" * 32)
+        conn.execute("INSERT INTO replays_seen VALUES(?, ?, ?, ?, ?)", replay_row)
+        expected["replays_seen"] = [replay_row]
     conn.commit()
     conn.close()
     return expected
@@ -278,12 +352,16 @@ def _counting_write_authorizer(counter: list[str]):
     return auth
 
 
-# --- §8 Test 1: v0 to current head on copies, preserves every value, second pass is no-op ----
+# --- §8 Test 1: v0 -> v1 migration on copies, preserves every value, second pass is no-op ------
 
 
 @pytest.mark.parametrize(
     "p_variant",
-    ["empty", "v0_72ddf9c", "v0_02c2095", "v0_e72c706", "v0_1a35a1a"],
+    [
+        "empty", "v0_72ddf9c", "v0_02c2095", "v0_e72c706", "v0_1a35a1a",
+        "v0_retrieval", "v0_challenges", "v0_challenges_retrieval",
+        *_REPLAY_PROGRESS_BASES,
+    ],
 )
 @pytest.mark.parametrize(
     "e_variant",
@@ -319,11 +397,10 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     assert re_["from_version"] == 0 and re_["to_version"] == EXAM_SCHEMA_VERSION
     assert re_["migrated"] is True
 
-    # Verify each store's head, exact schema, and every single seeded value preserved.
+    # Verify head=1, exact v1 schema, and every single seeded value preserved.
     conn_p = sqlite3.connect(dst_p)
     assert conn_p.execute("PRAGMA user_version").fetchone()[0] == PROGRESS_SCHEMA_VERSION
-    progress_signature = reviewed_signatures("progress")[f"v{PROGRESS_SCHEMA_VERSION}"]
-    assert schema_signature(conn_p) == progress_signature
+    assert schema_signature(conn_p) == reviewed_signatures("progress")["v1"]
     for table, rows in exp_p.items():
         actual = conn_p.execute(f'SELECT * FROM "{table}"').fetchall()
         assert actual == rows, (p_variant, table, actual, rows)
@@ -342,7 +419,10 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     prog = Progress(dst_p, managed=True)
     prog._conn.set_authorizer(_counting_write_authorizer(writes_p))
     assert prog.get(1) is not None or p_variant == "empty"
-    if p_variant in ("v0_e72c706", "v0_1a35a1a"):
+    if p_variant in (
+        "v0_e72c706", "v0_1a35a1a", "v0_retrieval", "v0_challenges", "v0_challenges_retrieval",
+        *_REPLAY_PROGRESS_BASES,
+    ):
         assert len(prog.stamps()) == 1
         assert prog.stamps()[0]["count"] == 3
     prog.close()
@@ -355,19 +435,18 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     exam.close()
     assert writes_e == [], f"managed ExamStore open/read wrote: {writes_e}"
 
-    # Re-migrating an up-to-date copy reports migrated=False and keeps exact bytes/rows.
+    # Re-migrating an already-v1 copy reports migrated=False and keeps exact bytes/rows.
     dst2_dir = tmp_path / "dst2"
     dst2_dir.mkdir()
     dst_p2 = dst2_dir / "progress.db"
     dst_e2 = dst2_dir / "exam.db"
     rp2 = migrate_store_copy(dst_p, dst_p2, store="progress", scratch_dir=scratch / "progress2")
     re2 = migrate_store_copy(dst_e, dst_e2, store="exam", scratch_dir=scratch / "exam2")
-    assert rp2["migrated"] is False
-    assert rp2["from_version"] == rp2["to_version"] == PROGRESS_SCHEMA_VERSION
+    assert rp2["migrated"] is False and rp2["from_version"] == 1 and rp2["to_version"] == 1
     assert re2["migrated"] is False and re2["from_version"] == 1 and re2["to_version"] == 1
 
 
-def test_missing_legacy_store_bootstraps_only_when_explicitly_allowed(tmp_path):
+def test_missing_legacy_store_bootstraps_v1_only_when_explicitly_allowed(tmp_path):
     missing = tmp_path / "absent.db"
     gen = tmp_path / "gen"
     gen.mkdir()
@@ -383,7 +462,7 @@ def test_missing_legacy_store_bootstraps_only_when_explicitly_allowed(tmp_path):
         missing, dst, store="progress", allow_missing_source=True,
         scratch_dir=tmp_path / "scratch2",
     )
-    assert receipt["from_version"] == 0 and receipt["to_version"] == PROGRESS_SCHEMA_VERSION
+    assert receipt["from_version"] == 0 and receipt["to_version"] == 1
     assert not missing.exists()
     prog = Progress(dst, managed=True)
     assert prog.stamps() == []
@@ -508,11 +587,11 @@ def test_managed_open_does_not_create_or_migrate_stores(tmp_path, store, cls, re
         cls(stale, managed=True, read_only=read_only)
     assert stale.read_bytes() == before
 
-    # Migrated DB opens cleanly in both managed writable and read-only trial modes;
+    # Migrated v1 DB opens cleanly in both managed writable and read-only trial modes;
     # read-only trial mode rejects any write attempt.
     gen = tmp_path / "gen"
     gen.mkdir()
-    migrated = gen / f"{store}.db"
+    migrated = gen / f"v1_{store}.db"
     migrate_store_copy(stale, migrated, store=store, scratch_dir=tmp_path / "scratch")
     inst = cls(migrated, managed=True, read_only=read_only)
     try:
@@ -701,7 +780,7 @@ def test_managed_live_connections_use_extra_delete(tmp_path):
             ("progress", app.state.progress._conn, PROGRESS_SCHEMA_VERSION),
             ("exam", app.state.exam_store._conn, EXAM_SCHEMA_VERSION),
         ):
-            expected_sig = reviewed_signatures(name)[f"v{expected_ver}"]
+            expected_sig = reviewed_signatures(name)["v1"]
             verify_managed_connection(conn, expected_version=expected_ver,
                                       expected_signature=expected_sig)
             conn.execute("PRAGMA synchronous = FULL")
@@ -745,15 +824,12 @@ def test_current_legacy_constructor_signatures_are_in_reviewed_set(tmp_path):
         "Review and add its migration before shipping."
     )
 
-    # Prove the CI guard catches dropping either stamp table or adding an unreviewed table.
+    # Prove the CI guard catches dropping any stamp/sort table (leaving an unreviewed partial
+    # schema) or adding an unreviewed table.
     for drop_table in ("stamps", "stamp_events", "sort_answers"):
         mutated = copy.deepcopy(p_sig)
         del mutated["tables"][drop_table]
-        if drop_table == "stamps":
-            # Missing stamps while keeping stamp_events is an unreviewed partial schema.
-            assert match_v0_signature("progress", mutated) is None
-        elif drop_table == "stamp_events":
-            assert match_v0_signature("progress", mutated) is None
+        assert match_v0_signature("progress", mutated) is None
 
     unreviewed = copy.deepcopy(p_sig)
     unreviewed["tables"]["unreviewed_feature"] = {
@@ -817,10 +893,10 @@ def test_wal_source_is_recovered_on_private_copy_without_mutating_source(tmp_pat
 
     gen = tmp_path / "gen"
     gen.mkdir()
-    dst = gen / "recovered.db"
+    dst = gen / "recovered_v1.db"
     receipt = migrate_store_copy(src, dst, store="progress", scratch_dir=tmp_path / "scratch_wal")
 
-    assert receipt["to_version"] == PROGRESS_SCHEMA_VERSION
+    assert receipt["to_version"] == 1
     assert src.read_bytes() == src_before
     assert wal_path.read_bytes() == wal_before
     # Migrated copy recovered lesson 9 from the WAL and is now standalone in DELETE mode.
@@ -919,10 +995,10 @@ def test_schema_signature_catches_five_constraint_mutations(
 
     # Guard must reject the mutated v0 schema (not in reviewed set).
     assert match_v0_signature("progress", sig) is None, mutation_name
-    assert sig != reviewed_signatures("progress")[f"v{PROGRESS_SCHEMA_VERSION}"], mutation_name
+    assert sig != reviewed_signatures("progress")["v1"], mutation_name
 
-    # Even if stamped with the current user_version, managed open must refuse the mutated store.
-    conn.execute(f"PRAGMA user_version = {PROGRESS_SCHEMA_VERSION}")
+    # Even if stamped user_version = 1, managed open must refuse the mutated store.
+    conn.execute("PRAGMA user_version = 1")
     conn.commit()
     conn.close()
     with pytest.raises(SchemaError, match="signature"):
@@ -968,7 +1044,7 @@ def test_read_only_hot_journal_source_migrates_without_touching_source(tmp_path)
         receipt = migrate_store_copy(
             src, dst, store="progress", scratch_dir=tmp_path / "staging" / "ro_hot"
         )
-        assert receipt["to_version"] == PROGRESS_SCHEMA_VERSION
+        assert receipt["to_version"] == 1
         assert src.read_bytes() == src_before
         assert journal.read_bytes() == journal_before
         assert (src.stat().st_mode & 0o777) == 0o444
@@ -1019,7 +1095,7 @@ def test_recovery_scratch_lives_outside_generation_and_is_not_recursively_remove
     monkeypatch.setattr(shutil, "rmtree", forbid_rmtree)
     scratch = tmp_path / "staging" / "op1" / "sqlite" / "progress"
     receipt = migrate_store_copy(src, dst, store="progress", scratch_dir=scratch)
-    assert receipt["to_version"] == PROGRESS_SCHEMA_VERSION
+    assert receipt["to_version"] == 1
     assert [p.name for p in gen.iterdir()] == ["progress.db"]
     assert (scratch / src.name).is_file()
 
@@ -1236,7 +1312,7 @@ def test_managed_open_refuses_wal_without_touching_disk_bytes(tmp_path):
             open_managed_sqlite(
                 snap,
                 expected_version=PROGRESS_SCHEMA_VERSION,
-                expected_signature=reviewed_signatures("progress")[f"v{PROGRESS_SCHEMA_VERSION}"],
+                expected_signature=reviewed_signatures("progress")["v1"],
                 read_only=read_only,
             )
         assert snap.read_bytes() == before_db

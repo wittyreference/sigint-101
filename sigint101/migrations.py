@@ -1,4 +1,4 @@
-# ABOUTME: Numbered SQLite migrations on private copies, backed by reviewed schema
+# ABOUTME: Numbered SQLite migrations (v0 -> v1) on private copies, backed by reviewed schema
 # ABOUTME: fixtures from git history. Never mutates source DBs; rolls back atomically on error.
 
 from __future__ import annotations
@@ -10,10 +10,9 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from .progress import REPLAYS_SEEN_DDL
 from .storage import SchemaError, fsync_dir, fsync_file, schema_signature
 
-PROGRESS_SCHEMA_VERSION = 2
+PROGRESS_SCHEMA_VERSION = 1
 EXAM_SCHEMA_VERSION = 1
 STORES = ("progress", "exam")
 
@@ -78,6 +77,43 @@ _PROGRESS_TABLE_DDL: tuple[tuple[str, str], ...] = (
         "updated REAL, "
         "PRIMARY KEY (lesson_id, card_key))",
     ),
+    (
+        "retrieval",
+        "CREATE TABLE retrieval ("
+        "lesson_id INTEGER PRIMARY KEY, "
+        "box INTEGER NOT NULL DEFAULT 1, "
+        "last_seen REAL NOT NULL, "
+        "seen INTEGER NOT NULL DEFAULT 0, "
+        "correct INTEGER NOT NULL DEFAULT 0, "
+        "last_choice TEXT)",
+    ),
+    (
+        "challenges",
+        "CREATE TABLE challenges ("
+        "unit_id INTEGER PRIMARY KEY, "
+        "started_at REAL NOT NULL, "
+        "window_s INTEGER NOT NULL)",
+    ),
+    (
+        "challenge_passes",
+        "CREATE TABLE challenge_passes ("
+        "unit_id INTEGER NOT NULL, "
+        "started_at REAL NOT NULL, "
+        "passed_at REAL NOT NULL, "
+        "instrument TEXT NOT NULL, "
+        "provenance TEXT NOT NULL, "
+        "digest TEXT NOT NULL, "
+        "PRIMARY KEY (unit_id, started_at))",
+    ),
+    (
+        "replays_seen",
+        "CREATE TABLE replays_seen ("
+        "instrument TEXT PRIMARY KEY, "
+        "first_ts REAL NOT NULL, "
+        "count INTEGER NOT NULL, "
+        "recording TEXT NOT NULL, "
+        "digest TEXT NOT NULL)",
+    ),
 )
 
 _EXAM_TABLE_DDL: tuple[tuple[str, str], ...] = (
@@ -108,16 +144,10 @@ def _all_fixtures() -> dict:
 
 
 def reviewed_signatures(store: str) -> dict:
-    """Return frozen reviewed legacy variants and versioned signatures for `store`."""
+    """Return the frozen reviewed v0 variants and v1 target signature for `store`."""
     if store not in STORES:
         raise ValueError(f"unknown store: {store!r}")
-    fixtures = _all_fixtures()[store]
-    if store == "exam":
-        return fixtures
-    v1 = fixtures["v1"]
-    # Progress v2 and its legacy counterpart add exactly one table to the frozen v1 shape.
-    v2 = {**v1, "tables": {**v1["tables"], **fixtures["v2_added_tables"]}}
-    return {"v0": {**fixtures["v0"], "v0_replays_seen": v2}, "v1": v1, "v2": v2}
+    return _all_fixtures()[store]
 
 
 def match_v0_signature(store: str, sig: dict) -> str | None:
@@ -287,16 +317,16 @@ def migrate_store_copy(
     _after_step_hook=None,
     _after_version_hook=None,
 ) -> dict:
-    """Copy `source_path` to an exclusive `dest_path` and migrate to the store's current head.
+    """Copy `source_path` to an exclusive `dest_path` and migrate v0 -> v1 in one transaction.
 
     Never writes to `source_path` and never places recovery scratch inside `dest_path.parent`.
-    Executes every DDL step and the version change inside one explicit `BEGIN IMMEDIATE`
+    Executes every DDL step and `PRAGMA user_version=1` inside one explicit `BEGIN IMMEDIATE`
     transaction (never `executescript`), verifies schema and preserved rows before commit,
     reopens to confirm integrity and head, and fsyncs dest + parent.
     """
     target_head = _target_head(store)
     fixtures = reviewed_signatures(store)
-    expected = fixtures[f"v{target_head}"]
+    expected_v1 = fixtures["v1"]
     src = Path(source_path)
     dst = Path(dest_path)
 
@@ -312,30 +342,23 @@ def migrate_store_copy(
         sig = schema_signature(conn)
 
         if from_version == target_head:
-            if sig != expected:
+            if sig != expected_v1:
                 raise SchemaError(
                     f"unrecognized {store} schema at head {target_head}: "
                     f"tables={sorted(sig['tables'])}"
                 )
+        elif from_version != 0:
+            raise SchemaError(
+                f"unsupported {store} schema head {from_version} (expected 0 or {target_head})"
+            )
         else:
-            if from_version == 0:
-                matched_v0 = match_v0_signature(store, sig)
-                if matched_v0 is None:
-                    raise SchemaError(
-                        f"unrecognized {store} version-0 schema: tables={sorted(sig['tables'])}"
-                    )
-                steps = _migration_steps_v0_to_v1(store, sig)
-            elif store == "progress" and from_version == 1:
-                if sig != fixtures["v1"]:
-                    raise SchemaError("unrecognized progress schema at version 1")
-                steps = []
-            else:
+            matched_v0 = match_v0_signature(store, sig)
+            if matched_v0 is None:
                 raise SchemaError(
-                    f"unsupported {store} schema head {from_version} (target {target_head})"
+                    f"unrecognized {store} version-0 schema: tables={sorted(sig['tables'])}"
                 )
-            if store == "progress" and "replays_seen" not in sig["tables"]:
-                steps.append(REPLAYS_SEEN_DDL)
             before_rows = _snapshot_rows(conn, sig["tables"])
+            steps = _migration_steps_v0_to_v1(store, sig)
             conn.execute("BEGIN IMMEDIATE")
             try:
                 for stmt in steps:
@@ -345,8 +368,8 @@ def migrate_store_copy(
                 conn.execute(f"PRAGMA user_version = {target_head}")
                 if _after_version_hook is not None:
                     _after_version_hook(conn)
-                if schema_signature(conn) != expected:
-                    raise SchemaError(f"{store} post-migration schema did not match v{target_head}")
+                if schema_signature(conn) != expected_v1:
+                    raise SchemaError(f"{store} post-migration schema did not match v1 target")
                 _verify_preserved_rows(conn, before_rows)
                 conn.execute("COMMIT")
             except BaseException:
@@ -357,7 +380,7 @@ def migrate_store_copy(
     finally:
         conn.close()
 
-    # Reopen independently to verify integrity, rollback-journal mode, head, and schema.
+    # Reopen independently to verify integrity, rollback-journal mode, head, and v1 signature.
     verify = sqlite3.connect(dst)
     try:
         check = verify.execute("PRAGMA integrity_check").fetchone()[0]
@@ -369,8 +392,8 @@ def migrate_store_copy(
         head = verify.execute("PRAGMA user_version").fetchone()[0]
         if head != target_head:
             raise SchemaError(f"migrated {store} head is {head}, expected {target_head}")
-        if schema_signature(verify) != expected:
-            raise SchemaError(f"reopened {store} schema does not match v{target_head} target")
+        if schema_signature(verify) != expected_v1:
+            raise SchemaError(f"reopened {store} schema does not match v1 target")
     finally:
         verify.close()
 

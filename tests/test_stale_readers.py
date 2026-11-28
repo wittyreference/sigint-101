@@ -2080,12 +2080,13 @@ def test_pipe_decoder_diagnostic_failure_during_settle_ends_run_stops_proc_and_d
         dec.start()
         assert len(procs) == 2 and dec.running
 
-        # The detached reader cannot touch the replacement's error or reception data.
+        # The detached reader cannot stop the replacement or touch its error or reception data.
         go_on.set()
         procs[0].break_pipe(OSError("stale stdout failed"))
         procs[0].close_pipe()
         real_thread.join(5)
         assert not real_thread.is_alive()
+        assert dec.running and dec.watch.stopped is False
         assert dec.error is None
         assert [s["source"] for s in dec.stations()] == ["KD2ABC-9"]
         assert heard.log == [("KD2ABC-9", aprs.DEFAULT_APRS_HZ, _line(procs[0]))]
