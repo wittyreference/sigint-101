@@ -1,0 +1,24 @@
+<!-- ABOUTME: Shows the Waterfall tune and controls for a private, receive-only SigMF recording.
+     ABOUTME: Displays server-confirmed recording and save status beside the offline law link. -->
+{% extends "base.html" %}
+{% block title %}Capture{% endblock %}
+{% block page_title %}Capture{% endblock %}
+{% block content %}
+<section class="capture" data-capture>
+    <p data-capture-tune></p>
+    <p class="capture__status" role="status" data-capture-state>Checking capture…</p>
+    <p data-capture-saved hidden></p>
+    <div class="capture__actions">
+        <button class="btn" type="button" data-capture-start disabled>Record 9 s</button>
+        <button class="btn" type="button" data-capture-stop disabled>Stop</button>
+    </div>
+    <a class="capture__law" href="/law?back=/capture#wiretap-limits">
+        Intercepting or decoding private pages can be a crime ({{ wiretap_cite }}).
+        U.S. law limits use and sharing ({{ disclosure_cite }}).
+    </a>
+</section>
+<script type="application/json" id="capture-status">{{ capture_status|tojson }}</script>
+{% endblock %}
+{% block scripts %}
+<script src="/static/capture.js"></script>
+{% endblock %}

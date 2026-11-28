@@ -683,8 +683,8 @@ def _flipper_device():
 def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
             decoder_factory=None, lora_factory=None, rds_factory=None, adsb_factory=None,
             aprs_factory=None, pocsag_factory=None, acars_factory=None, ais_factory=None,
-            dmr_factory=None, apt_factory=None, sstv_factory=None, flock_factory=None,
-            rayhunter_factory=None, flipper_factory=None, pool_path=None):
+            dmr_factory=None, apt_factory=None, sstv_factory=None, meteor_factory=None,
+            flock_factory=None, rayhunter_factory=None, flipper_factory=None, pool_path=None):
     """Build a console against the fixture pack and a temp data dir, with injectable hardware."""
     app = create_app(pack_dir=FIXTURE_PACKS, data_dir=tmp_path,
                      probe=probe or _absent, sweeper_factory=sweeper_factory,
@@ -694,6 +694,7 @@ def _client(tmp_path, *, probe=None, sweeper_factory=None, ppm_measure=None,
                      pocsag_factory=pocsag_factory, acars_factory=acars_factory,
                      ais_factory=ais_factory, dmr_factory=dmr_factory,
                      apt_factory=apt_factory, sstv_factory=sstv_factory,
+                     meteor_factory=meteor_factory,
                      flock_factory=flock_factory, rayhunter_factory=rayhunter_factory,
                      flipper_factory=flipper_factory, pool_path=pool_path)
     return TestClient(app)
@@ -1412,8 +1413,11 @@ def test_decode_reports_503_and_a_reason_when_no_radio(tmp_path):
     assert resp.status_code == 503
     body = resp.json()
     assert body["available"] is False
+    assert body["command"] is None
     assert body["decodes"] == []         # never a fabricated read
-    assert "RTL-SDR" in body["reason"]
+    assert body["reason"] == "no RTL-SDR on the USB bus — SIGINT 101 will not fake a decode"
+    assert body["cause"] == "no_radio"
+    assert body["message"] == "No RTL-SDR on the USB bus."
 
 
 def test_decode_reports_503_when_rtl_433_is_missing(tmp_path):
@@ -1422,7 +1426,13 @@ def test_decode_reports_503_when_rtl_433_is_missing(tmp_path):
                                                  which=lambda name: None)) as client:
         resp = client.get("/api/decode")
     assert resp.status_code == 503
-    assert "rtl_433" in resp.json()["reason"]
+    body = resp.json()
+    assert body["available"] is False
+    assert body["command"] is None
+    assert body["decodes"] == []
+    assert body["reason"] == "rtl_433 is not installed, so SIGINT 101 cannot decode the ISM band"
+    assert body["cause"] == "missing_tool"
+    assert body["message"] == "rtl_433 is not installed."
 
 
 def test_decode_default_decoder_also_refuses_without_a_radio(tmp_path):

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -10,7 +11,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,7 +27,7 @@ from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -40,6 +41,7 @@ from .bandmap import CAPTION as BANDMAP_CAPTION
 from .bandmap import KEY_LINE as BANDMAP_KEY_LINE
 from .bandmap import build_map as build_band_map
 from .battery import BatteryGauge
+from .capture import Capture, CaptureUnavailable
 from .challenges import (
     CHALLENGE_KIND,
     RESERVED_EVENT_FLAGS,
@@ -95,6 +97,7 @@ from .operate import (
 )
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
+from .power import DEFAULT_NOTICE_PATH, format_power_notice, read_power_notice
 from .ppm import PpmCalibration, PpmUnavailable, measure_pilot_ppm
 from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress, RecallNotDue
 from .provenance import (
@@ -115,6 +118,7 @@ from .radio_control import (
 )
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
+from .receiver_lifecycle import OwnedRun, owned_run_scope, register_owned_run
 from .receiver_socket import PortOccupied
 from .replay import (
     RECORDINGS_DIR,
@@ -195,7 +199,7 @@ def start_replay(state, recording: Recording) -> None:
 # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
 SDR_CONSUMERS = (
     "sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
-    "apt", "sstv", "meteor",
+    "apt", "sstv", "meteor", "capture",
 )
 
 # The line glyph a home tile falls back to. The waterfall glyph is the one every lesson earns —
@@ -405,6 +409,7 @@ def build_receiver_factories(
     apt_factory=None,
     sstv_factory=None,
     meteor_factory=None,
+    capture_factory=None,
     flock_factory=None,
     rayhunter_factory=None,
     flipper_factory=None,
@@ -466,6 +471,7 @@ def build_receiver_factories(
                 sync_assets=managed,
             )
         ),
+        "capture": capture_factory or (lambda: Capture(data_dir, **_sdr_kwargs())),
         "flock": flock_factory or configured_flock_detector,
         "rayhunter": rayhunter_factory or RayhunterMonitor,
         "flipper": flipper_factory or FlipperConsole,
@@ -715,12 +721,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
-               apt_factory=None, sstv_factory=None, meteor_factory=None,
+               apt_factory=None, sstv_factory=None, meteor_factory=None, capture_factory=None,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
                recordings_dir=RECORDINGS_DIR, replay_factory=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None,
+               power_notice_path=DEFAULT_NOTICE_PATH, power_clock=time.monotonic,
                clock=time.time, managed: bool = False,
                solos=None, solo_audits=None) -> FastAPI:
     """Build the console with its collaborators injectable.
@@ -754,8 +761,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         detector = getattr(request.app.state, "flock", None)
         return {"flock_tool": getattr(detector, "tool", None) or rack_instrument("flock").tool}
 
+    def power_notice_context(_request: Request) -> dict:
+        """Read-only low-battery notice for base.html; writes nothing and never touches I2C."""
+        notice = read_power_notice(power_notice_path, clock=power_clock)
+        return {
+            "power_notice": format_power_notice(notice),
+            "power_notice_state": notice,
+        }
+
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
-                                context_processors=[status_bar, flock_tool])
+                                context_processors=[status_bar, flock_tool, power_notice_context])
 
     receiver_factories, radio_census = build_receiver_factories(
         data_dir=data_dir,
@@ -775,6 +790,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         apt_factory=apt_factory,
         sstv_factory=sstv_factory,
         meteor_factory=meteor_factory,
+        capture_factory=capture_factory,
         flock_factory=flock_factory,
         rayhunter_factory=rayhunter_factory,
         flipper_factory=flipper_factory,
@@ -804,6 +820,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             logging.getLogger(__name__).error("recall enrolment backfill: %s", exc)
 
     def _attach_hooks(state) -> None:
+        def capture_event(kind, payload):
+            # The store syncs the saved pair. These events only describe the capture attempt.
+            try:
+                log_event(state.events_path, kind, payload)
+            except OSError as exc:
+                logging.getLogger(__name__).warning("could not log %s: %s", kind, exc)
+
+        state.capture.on_event = capture_event
         for attr, inst in RECEIVERS.items():
             receiver = getattr(state, attr)
             receiver.on_reception = _heard(inst, receiver)
@@ -1415,6 +1439,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _safe_back(back: str | None) -> tuple[str, str]:
         """Resolve an optional internal back path for /law and /operate, refusing external URLs."""
+        if back == "/capture":
+            return back, "Capture"
         if back and back.startswith("/") and not back.startswith("//"):
             if re.fullmatch(r"/lesson/\d+", back):
                 return back, f"Lesson {back.rsplit('/', 1)[-1]}"
@@ -1427,6 +1453,16 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if back == "/capstone":
                 return back, "Capstone"
         return "/", "Home"
+
+    @app.get("/capture", response_class=HTMLResponse)
+    def capture_view(request: Request):
+        law = {section.id: section for section in LAW_SECTIONS}
+        return templates.TemplateResponse(request=request, name="capture.html", context={
+            "capture_status": capture_status(),
+            "back_href": "/operate/waterfall", "back_label": "Back",
+            "wiretap_cite": "18 USC " + law["wiretap-limits"].cite.rsplit(", ", 1)[1],
+            "disclosure_cite": law["divulge-605"].cite,
+        })
 
     @app.get("/law", response_class=HTMLResponse)
     def law_reference(request: Request, back: str | None = None):
@@ -1882,7 +1918,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return app.state.ppm_measure(hz=hz, seconds=PPM_SECONDS, device=_pinned_index())
 
         try:
-            result = _claim_sdr("ppm", measure)
+            result = _claim_sdr("ppm", measure, explicit=True)
         except (PpmUnavailable, DeviceSelectionError) as exc:
             reason = str(exc)
             log_event(app.state.events_path, "ppm_measure",
@@ -1916,7 +1952,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "rds": RDSUnavailable, "adsb": AdsbUnavailable, "aprs": AprsUnavailable,
         "pocsag": PocsagUnavailable, "acars": AcarsUnavailable, "ais": AisUnavailable,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
-        "meteor": MeteorUnavailable,
+        "meteor": MeteorUnavailable, "capture": CaptureUnavailable,
     }
     claim_api = {
         "sweeper": "spectrum", "decoder": "decode", "rds": "rds", "adsb": "adsb",
@@ -1946,15 +1982,59 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             else:
                 app.state.rx_start_order.pop(api, None)
 
-    claim_state_lock = threading.Lock()
-    claim_epoch: dict[str, int] = {}
+    claim_receipt_lock = threading.Lock()
+    claim_receipts: OrderedDict[str, OwnedRun] = OrderedDict()
+    request_claim_var: contextvars.ContextVar[list[tuple[str, OwnedRun]] | None] = (
+        contextvars.ContextVar("sigint101_request_claims", default=None)
+    )
 
-    def _bump_claim_epoch(target: str) -> None:
-        with claim_state_lock:
-            claim_epoch[target] = claim_epoch.get(target, 0) + 1
+    @app.middleware("http")
+    async def _attach_claim_receipt_header(request: Request, call_next):
+        box: list[tuple[str, OwnedRun]] = []
+        tok = request_claim_var.set(box)
+        try:
+            with owned_run_scope(None):
+                response = await call_next(request)
+        finally:
+            request_claim_var.reset(tok)
+        if box:
+            response.headers["X-Sigint-Claim"] = box[-1][0]
+        return response
 
-    def _claim_sdr(target: str, start=None, *, reclaim=True):
-        """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
+    def _record_owned_claim(handle: OwnedRun | None) -> OwnedRun | None:
+        if handle is None:
+            return None
+        register_owned_run(handle)
+        req_box = request_claim_var.get()
+        if req_box is not None:
+            claim_id = uuid4().hex
+            with claim_receipt_lock:
+                claim_receipts[claim_id] = handle
+                while len(claim_receipts) > 256:
+                    claim_receipts.popitem(last=False)
+            req_box.append((claim_id, handle))
+        return handle
+
+    def _owned_run_for_response(response) -> OwnedRun | None:
+        """Return the OwnedRun attached to an HTTP claim response, or None if borrowed."""
+        headers = getattr(response, "headers", None)
+        if not headers:
+            return None
+        receipt_id = headers.get("x-sigint-claim")
+        if not receipt_id:
+            return None
+        with claim_receipt_lock:
+            return claim_receipts.get(receipt_id)
+
+    def _claim_sdr_owned(
+        target: str, start=None, *, reclaim=True, explicit=False
+    ) -> tuple[object, OwnedRun | None]:
+        """Reserve the radio through stand-down and start, without holding the arbiter mutex.
+
+        Returns (result, owned_run) where owned_run is an OwnedRun iff this claim actually
+        spawned a new receiver run, or None when it borrowed an already-running receiver or
+        ran a synchronous one-shot action.
+        """
         refusal = unavailable[target]
         api = claim_api.get(target)
         consumers = {name: getattr(app.state, name) for name in SDR_CONSUMERS}
@@ -1962,6 +2042,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         prepare = getattr(receiver, "prepare_start", None)
         calibration = app.state.ppm_calibration
         gate = app.state.tuning_gate
+        def protect_capture():
+            if target != "capture" and not explicit:
+                retry_in = app.state.capture.protection()
+                if retry_in is not None:
+                    exc = refusal("Capturing a SigMF clip")
+                    exc.capture_retry = retry_in
+                    raise exc
+
         # A lesson's tuning restore must not run while a receiver launches, or the tool opens on
         # the frequency the rack left (C81). The claim's waits on restores share one budget.
         budget = gate.claim_budget()
@@ -1975,6 +2063,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     failure = getattr(consumer, "release_failure", None)
                     if failure and (reason := failure()):
                         raise refusal(reason)
+                protect_capture()
                 # Then any restore under way, bounded and refused with the reason. It comes after
                 # the refusals above, which need no wait, and before the queue's own deadline
                 # starts, so it is not taken from the arbiter's wait. A failure that arises
@@ -1995,6 +2084,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     # PPM may have failed to reap since this request joined the queue.
                     if reason := calibration.release_failure():
                         raise refusal(reason)
+                    protect_capture()
                     # A replay of a recording holds the ISM panel; the live decoder waits for it.
                     if target == "decoder" and app.state.replay.running:
                         raise refusal(REPLAY_RUNNING)
@@ -2024,26 +2114,104 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 except BaseException:
                                     _revert_rx_start_order(api, had, prev)
                                     raise
-                                _bump_claim_epoch(target)
-                                return launched
+                                if intent is None or intent.run is None:
+                                    return launched, None
+                                exact_run = intent.run
+                                handle = OwnedRun(
+                                    name=target,
+                                    run_id=exact_run,
+                                    stop=lambda rx=receiver, r=exact_run: rx.stop_owned_run(r),
+                                    result=launched,
+                                )
+                                _record_owned_claim(handle)
+                                return launched, handle
                             if receiver is not None and reclaim:
                                 receiver.resume()
+                            if (
+                                receiver is not None
+                                and hasattr(receiver, "start_owned")
+                                and (start is None or start == getattr(receiver, "start", None))
+                            ):
+                                had, prev = _bump_rx_start_order(api)
+                                try:
+                                    handle = receiver.start_owned(name=target)
+                                except BaseException:
+                                    _revert_rx_start_order(api, had, prev)
+                                    raise
+                                _record_owned_claim(handle)
+                                return (
+                                    handle.result if handle is not None else None,
+                                    handle,
+                                )
                             if start is None:
-                                _bump_claim_epoch(target)
-                                return None
+                                return None, None
+                            if receiver is not None:
+                                was_running = bool(getattr(receiver, "running", False))
+                                prev_proc = getattr(receiver, "_proc", None)
+                                had, prev = _bump_rx_start_order(api)
+                                try:
+                                    result = start()
+                                except BaseException:
+                                    _revert_rx_start_order(api, had, prev)
+                                    raise
+                                cur_proc = getattr(receiver, "_proc", None)
+                                if (
+                                    not was_running
+                                    and getattr(receiver, "running", False)
+                                    and cur_proc is not None
+                                    and cur_proc is not prev_proc
+                                ):
+                                    def _stop_stub(
+                                        rx=receiver,
+                                        expected_proc=cur_proc,
+                                        label=target,
+                                    ) -> str | None:
+                                        if (
+                                            not getattr(rx, "running", False)
+                                            or getattr(rx, "_proc", None) is not expected_proc
+                                        ):
+                                            return None
+                                        stop_fn = (
+                                            getattr(rx, "stop", None)
+                                            or getattr(rx, "release", None)
+                                        )
+                                        if stop_fn is not None:
+                                            stop_fn()
+                                        failure = getattr(rx, "release_failure", None)
+                                        if failure and (reason := failure(pending=True)):
+                                            return reason
+                                        if (
+                                            getattr(rx, "running", False)
+                                            and getattr(rx, "_proc", None) is expected_proc
+                                        ):
+                                            return f"{label} did not stop after Start failed"
+                                        return None
+
+                                    handle = OwnedRun(
+                                        name=target,
+                                        run_id=cur_proc,
+                                        stop=_stop_stub,
+                                        result=result,
+                                    )
+                                    _record_owned_claim(handle)
+                                    return result, handle
+                                return result, None
                             had, prev = _bump_rx_start_order(api)
                             try:
                                 result = start()
                             except BaseException:
                                 _revert_rx_start_order(api, had, prev)
                                 raise
-                            _bump_claim_epoch(target)
-                            return result
+                            return result, None
                         finally:
                             gate.end_claim(target)
             finally:
                 if intent is not None:
                     receiver.discard_start(intent)
+
+    def _claim_sdr(target: str, start=None, *, reclaim=True, explicit=False):
+        """Reserve the radio through stand-down and start, returning the start result."""
+        return _claim_sdr_owned(target, start, reclaim=reclaim, explicit=explicit)[0]
 
     # The last refusal logged per route. A route that cannot start answers every poll, and logging
     # every identical refusal is how events.jsonl grew by 42 lines a minute behind a dead Flock. A
@@ -2099,6 +2267,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "retrying now" for as long as the radio stayed away, though nothing was retrying.
         """
         reason = str(exc)
+        if (retry_in := getattr(exc, "capture_retry", None)) is not None:
+            return JSONResponse(status_code=503, content={
+                "available": False, "reason": reason, "command": None, **empty,
+                "cause": "capturing", "retry_in": retry_in,
+            })
         if last_refusal.get(kind) != reason:
             last_refusal[kind] = reason
             log_event(app.state.events_path, f"{kind}_blocked", {"reason": reason})
@@ -2204,9 +2377,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     def decode(limit: int | None = None):
         """Recent rtl_433 decodes on the ISM band. No radio or no rtl_433 is a 503 with the reason.
 
-        The decoder holds the dongle rtl_power otherwise sweeps, so the sweep is released first and
-        stays released until a /api/spectrum poll takes it back. resume() clears any release left on
-        the decoder by that reclaim, so flipping between the two keeps working.
+        The decoder holds the dongle rtl_power otherwise sweeps, so _claim_sdr runs its supervised
+        preflight, stands the other consumers down, and starts it via a claimed launch that clears
+        any prior release, keeping turn-taking with the sweep working.
         """
         decoder = app.state.decoder
         if app.state.replay.running:
@@ -2641,6 +2814,39 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "images": decoder.images(limit),
         }
 
+    @app.get("/api/capture")
+    def capture_status():
+        state = app.state
+        return state.capture.snapshot(state.sweeper.capture_settings())
+
+    @app.post("/api/capture/start")
+    def capture_start(payload=Body(default={})):
+        state = app.state
+        try:
+            return state.capture.request_start(
+                payload, settings=state.sweeper.capture_settings,
+                ppm=lambda: state.last_ppm,
+                claim=lambda: _claim_sdr("capture", explicit=True),
+            )
+        except CaptureUnavailable as exc:
+            reason = str(exc)
+            state.capture.on_event("capture_refused", {"reason": reason})
+            return JSONResponse(status_code=exc.status, content={
+                **capture_status(), "reason": reason,
+            })
+
+    @app.post("/api/capture/stop")
+    def capture_stop():
+        try:
+            app.state.capture.stop()
+        except CaptureUnavailable as exc:
+            return JSONResponse(status_code=exc.status, content={
+                **capture_status(), "reason": str(exc),
+            })
+        if app.state.capture.release_failure(pending=True):
+            return JSONResponse(status_code=503, content=capture_status())
+        return capture_status()
+
     @app.get("/api/meteor")
     def meteor_status():
         return app.state.meteor.snapshot()
@@ -2648,10 +2854,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.post("/api/meteor/listen")
     def meteor_listen():
         decoder = app.state.meteor
-        if decoder.running:
+        if decoder.running and not decoder.handoff_in_progress():
             return decoder.snapshot()
         try:
-            launched = _claim_sdr("meteor")
+            if decoder.handoff_in_progress():
+                raise MeteorUnavailable(
+                    decoder.release_failure(pending=True)
+                    or "SatDump is still releasing the radio"
+                )
+            launched = _claim_sdr("meteor", explicit=True)
         except MeteorUnavailable as exc:
             empty = decoder.snapshot()
             for key in ("available", "reason", "command", "retry_in"):
@@ -2662,14 +2873,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             _started("meteor", {"freq_hz": status["freq_hz"], "mode": status["mode"]})
         return status
 
-    # The image decoders (APT, SSTV) write their decoded PNGs under data/apt and data/sstv; this
-    # serves those files to the panels and nothing else. The path is confined to those two folders
-    # and to .png files, so the console never serves the progress or events stores that also live
-    # under data/. A produced PNG is a real reception; there is no placeholder to serve.
+    # The image decoders (APT, SSTV, Meteor) write their decoded PNGs under data/; this serves
+    # those files to the panels and nothing else. Meteor images are restricted to files named by
+    # each pass's verified manifest and opened with O_NOFOLLOW descriptor traversal.
     media_roots = tuple((Path(data_dir) / name).resolve() for name in ("apt", "sstv"))
 
     @app.get("/media/{path:path}")
     def media(path: str):
+        if path.startswith("meteor/"):
+            data = app.state.meteor.read_media(path)
+            if data is not None:
+                return Response(content=data, media_type="image/png")
+            raise HTTPException(status_code=404, detail="no such image")
         target = (Path(data_dir) / path).resolve()
         if (target.suffix.lower() == ".png" and target.is_file()
                 and any(target.is_relative_to(root) for root in media_roots)):
@@ -2706,6 +2921,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reading is None:
             return {"present": False, "reason": battery.reason}
         return reading.as_dict()
+
+    @app.get("/api/power")
+    def power_notice():
+        """Read-only low-battery shutdown notice written by sigint101-power.service.
+
+        Reads only notice.json (never touches I2C, SQLite, or the event log) and returns
+        {"active": False} whenever the file is absent, stale, corrupt, or non-regular.
+        """
+        return read_power_notice(power_notice_path, clock=power_clock)
 
     @app.post("/api/tune")
     def tune(request: Request, payload: dict = Body(default={})):
@@ -2959,112 +3183,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 continue
             _credit_attempts(entry.kind, progress, stamps, qualifies_fn=entry.qualifies)
 
-    _tracked_receivers = tuple(SDR_CONSUMERS) + ("lora", "flock", "rayhunter", "replay")
+    def _claim_sdr_run(
+        target: str, start=None, *, reclaim: bool = True, explicit: bool = False
+    ) -> OwnedRun | None:
+        """Claim an SDR receiver and return its OwnedRun handle, or None if borrowed."""
+        return _claim_sdr_owned(target, start, reclaim=reclaim, explicit=explicit)[1]
 
-    def _receiver_run_token(rx):
-        if rx is None:
-            return None
-        if hasattr(rx, "_cancel") and hasattr(rx, "_run"):
-            return ("supervised", getattr(rx, "_run", None))
-        if hasattr(rx, "_proc"):
-            return ("proc", bool(getattr(rx, "running", False)), getattr(rx, "_proc", None))
-        return ("running", bool(getattr(rx, "running", False)))
-
-    def _receiver_snapshot() -> dict[str, tuple[int, object]]:
-        with claim_state_lock:
-            epochs = dict(claim_epoch)
-        return {
-            name: (epochs.get(name, 0), _receiver_run_token(getattr(app.state, name, None)))
-            for name in _tracked_receivers
-        }
-
-    def _stop_owned_receiver(name: str, expected_epoch: int, expected_token) -> str | None:
-        rx = getattr(app.state, name, None)
-        if rx is None:
-            return None
-        if (expected_token is not None and expected_token[0] == "supervised"
-                and hasattr(rx, "_life") and hasattr(rx, "_run") and hasattr(rx, "_cancel")):
-            expected_run = expected_token[1]
-            with rx._life:
-                with claim_state_lock:
-                    cur_epoch = claim_epoch.get(name, 0)
-                if cur_epoch != expected_epoch or rx._run is not expected_run:
-                    return None
-                run, intent, retry = rx._cancel()
-            rx._wait_physical(run, intent, retry)
-            failure = getattr(rx, "release_failure", None)
-            if failure and (reason := failure(pending=True)):
-                return reason
-            if getattr(rx, "running", False):
-                return f"{name} did not stop after Start failed"
-            return None
-        if hasattr(rx, "_life") and hasattr(rx, "stop"):
-            with rx._life:
-                with claim_state_lock:
-                    cur_epoch = claim_epoch.get(name, 0)
-                if cur_epoch != expected_epoch or _receiver_run_token(rx) != expected_token:
-                    return None
-                rx.stop()
-            failure = getattr(rx, "release_failure", None)
-            if failure and (reason := failure(pending=True)):
-                return reason
-            if getattr(rx, "running", False):
-                return f"{name} did not stop after Start failed"
-            return None
-        with claim_state_lock:
-            if claim_epoch.get(name, 0) != expected_epoch:
-                return None
-            if _receiver_run_token(rx) != expected_token:
-                return None
-            stop_fn = getattr(rx, "stop", None) or getattr(rx, "release", None)
-            if stop_fn is not None:
-                stop_fn()
-        failure = getattr(rx, "release_failure", None)
-        if failure and (reason := failure(pending=True)):
-            return reason
-        if getattr(rx, "running", False):
-            return f"{name} did not stop after Start failed"
-        return None
-
-    def _build_launch_cleanup(before_snap, after_snap, *, launched, explicit_cleanup):
-        owned: list[tuple[str, int, object]] = []
-        for name in _tracked_receivers:
-            if before_snap.get(name) == after_snap.get(name):
-                continue
-            rx = getattr(app.state, name, None)
-            if rx is None:
-                continue
-            epoch, token = after_snap[name]
-            is_active = bool(getattr(rx, "running", False)) or (
-                token is not None and token[0] == "supervised" and token[1] is not None
-            )
-            if is_active:
-                owned.append((name, epoch, token))
-        extra_cleanup = explicit_cleanup
-        if extra_cleanup is None and callable(launched):
-            extra_cleanup = launched
-        if extra_cleanup is None and not owned:
-            return None
-
-        def _cleanup_launched() -> str | None:
-            failures: list[str] = []
-            if extra_cleanup is not None:
-                try:
-                    res = extra_cleanup()
-                    if isinstance(res, str) and res.strip():
-                        failures.append(res.strip())
-                except Exception as exc:  # noqa: BLE001
-                    failures.append(str(exc) or exc.__class__.__name__)
-            for name, epoch, token in owned:
-                try:
-                    err = _stop_owned_receiver(name, epoch, token)
-                    if err:
-                        failures.append(err)
-                except Exception as exc:  # noqa: BLE001
-                    failures.append(str(exc) or exc.__class__.__name__)
-            return "; ".join(failures) if failures else None
-
-        return _cleanup_launched
+    app.state.claim_sdr = _claim_sdr_run
+    app.state.owned_run_for_response = _owned_run_for_response
 
     def _start_attempt(
         kind: AttemptKind,
@@ -3098,96 +3224,186 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             with reception_lock:
                 _set_attempt_start_error(kind, key, start_error)
             return started_at, start_error
-        run_cleanup = None
-        if launch is not None:
-            before_snap = _receiver_snapshot()
-            try:
-                launched = launch()
-            except Exception as exc:  # noqa: BLE001
+
+        # Install the owned-run cleanup boundary BEFORE invoking launch so every run acquired
+        # during launch registers immediately, and every later failure (hook exception, handle
+        # check, clock exception, INSERT/event/COMMIT error, or any BaseException) unwinds both
+        # locks and atomically compare-and-stops only the runs owned by this Start.
+        owned_handles: list[OwnedRun] = []
+        extra_cleanups: list = []
+        if cleanup is not None:
+            extra_cleanups.append(cleanup)
+
+        def _register_handle(handle: OwnedRun) -> None:
+            if not any(
+                existing.name == handle.name and existing.run_id == handle.run_id
+                for existing in owned_handles
+            ):
+                owned_handles.append(handle)
+
+        def _collect_returned(launched) -> None:
+            if launched is None:
+                return
+            if isinstance(launched, OwnedRun):
+                _register_handle(launched)
+                return
+            if (
+                isinstance(launched, (list, tuple))
+                and all(isinstance(item, OwnedRun) for item in launched)
+            ):
+                for item in launched:
+                    _register_handle(item)
+                return
+            if hasattr(launched, "headers"):
+                receipt = _owned_run_for_response(launched)
+                if receipt is not None:
+                    _register_handle(receipt)
+                return
+            if callable(launched):
+                extra_cleanups.append(launched)
+                return
+            raise TypeError(
+                f"launch hook returned unsupported handle {type(launched).__name__}; "
+                "return an OwnedRun, HTTP response receipt, cleanup callable, or None"
+            )
+
+        def _run_owned_cleanup() -> str | None:
+            failures: list[str] = []
+            for cb in extra_cleanups:
+                try:
+                    res = cb()
+                    if isinstance(res, str) and res.strip():
+                        failures.append(res.strip())
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(str(exc) or exc.__class__.__name__)
+            for handle in owned_handles:
+                try:
+                    err = handle.stop()
+                    if isinstance(err, str) and err.strip():
+                        failures.append(err.strip())
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(str(exc) or exc.__class__.__name__)
+            return "; ".join(failures) if failures else None
+
+        succeeded = False
+        caught_exc: BaseException | None = None
+        launch_failed_msg: str | None = None
+        started_at = 0.0
+        try:
+            if launch is not None:
+                with owned_run_scope(_register_handle):
+                    try:
+                        launched = launch()
+                    except Exception as exc:  # noqa: BLE001
+                        launch_failed_msg = f"the {label} could not be launched: {exc}"
+                if launch_failed_msg is None:
+                    _collect_returned(launched)
+
+            if launch_failed_msg is not None:
+                start_error = launch_failed_msg
                 started_at = round(clock(), 3)
-                start_error = f"the {label} could not be launched: {exc}"
                 with reception_lock:
                     _set_attempt_start_error(kind, key, start_error)
-                return started_at, start_error
-            after_snap = _receiver_snapshot()
-            run_cleanup = _build_launch_cleanup(
-                before_snap, after_snap, launched=launched, explicit_cleanup=cleanup,
-            )
-        # Hold reception_lock across reading the clock, staging the attempt, and appending the
-        # start event so log order matches what live receptions see, while preserving lock order
-        # (reception_lock -> Progress._lock -> events._WRITE_LOCK).
-        with reception_lock:
-            started_at = round(clock(), 3)
-            attempt_id = uuid4().hex if kind.identity_column is not None else None
-            payload = _start_event_payload(
-                kind,
-                key,
-                started_at,
-                window_s,
-                extra_cols,
-                attempt_id=attempt_id,
-                event_fields=event_fields,
-            )
-
-            def _log_start() -> None:
-                log_event(
-                    app.state.events_path,
-                    kind.start_event,
-                    payload,
-                    sync=managed,
-                )
-
-            if kind == CHALLENGE_KIND and "start_challenge" in app.state.progress.__dict__:
-                # Preserve monkeypatch hook used by existing Tier B unit tests.
-                previous = None
-                try:
-                    previous = app.state.progress.challenge(key)["attempt"]
-                    saved = app.state.progress.start_challenge(key, started_at, window_s)
-                except (OSError, sqlite3.Error) as exc:
-                    saved = False
-                    start_error = f"the {label} could not be started: {exc}"
-                if saved:
-                    try:
-                        _log_start()
-                    except OSError as exc:
-                        start_error = f"the {label} start could not be logged: {exc}"
-                        try:
-                            app.state.progress.restore_challenge(key, previous)
-                        except (OSError, sqlite3.Error):
-                            pass
-                elif start_error is None:
-                    start_error = f"the {label} store is closed"
             else:
-                try:
-                    saved = app.state.progress.stage_attempt(
-                        kind,
-                        key,
-                        started_at,
-                        window_s,
-                        extra=extra_cols,
-                        on_staged=_log_start,
-                        attempt_id=attempt_id,
-                    )
-                except OSError as exc:
-                    start_error = f"the {label} start could not be logged: {exc}"
-                except sqlite3.Error as exc:
-                    start_error = f"the {label} could not be started: {exc}"
-                else:
-                    if not saved:
-                        start_error = f"the {label} store is closed"
-            if start_error is None:
-                with order_lock:
-                    app.state.rx_order += 1
-                    app.state.attempt_start_order[(kind.kind, key)] = app.state.rx_order
-            _set_attempt_start_error(kind, key, start_error)
-        # Both reception_lock and Progress._lock are released before running launch cleanup so
+                # Hold reception_lock across reading the clock, staging the attempt, and appending
+                # the start event so log order matches what live receptions see, while preserving
+                # lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
+                with reception_lock:
+                    started_at = round(clock(), 3)
+
+                    def _log_start(issued_id: str | None = None) -> None:
+                        payload = _start_event_payload(
+                            kind,
+                            key,
+                            started_at,
+                            window_s,
+                            extra_cols,
+                            attempt_id=issued_id,
+                            event_fields=event_fields,
+                        )
+                        log_event(
+                            app.state.events_path,
+                            kind.start_event,
+                            payload,
+                            sync=managed,
+                        )
+
+                    if kind == CHALLENGE_KIND and "start_challenge" in app.state.progress.__dict__:
+                        # Preserve monkeypatch hook used by existing Tier B unit tests.
+                        previous = None
+                        try:
+                            previous = app.state.progress.challenge(key)["attempt"]
+                            saved = app.state.progress.start_challenge(key, started_at, window_s)
+                        except (OSError, sqlite3.Error) as exc:
+                            saved = False
+                            start_error = f"the {label} could not be started: {exc}"
+                        if saved:
+                            try:
+                                _log_start()
+                            except OSError as exc:
+                                start_error = f"the {label} start could not be logged: {exc}"
+                                try:
+                                    app.state.progress.restore_challenge(key, previous)
+                                except (OSError, sqlite3.Error):
+                                    pass
+                            except BaseException:
+                                try:
+                                    app.state.progress.restore_challenge(key, previous)
+                                except (OSError, sqlite3.Error):
+                                    pass
+                                raise
+                        elif start_error is None:
+                            start_error = f"the {label} store is closed"
+                    else:
+                        try:
+                            saved = app.state.progress.stage_attempt(
+                                kind,
+                                key,
+                                started_at,
+                                window_s,
+                                extra=extra_cols,
+                                on_staged=_log_start,
+                            )
+                        except OSError as exc:
+                            start_error = f"the {label} start could not be logged: {exc}"
+                        except sqlite3.Error as exc:
+                            start_error = f"the {label} could not be started: {exc}"
+                        else:
+                            if not saved:
+                                start_error = f"the {label} store is closed"
+                    if start_error is None:
+                        with order_lock:
+                            app.state.rx_order += 1
+                            app.state.attempt_start_order[(kind.kind, key)] = app.state.rx_order
+                    _set_attempt_start_error(kind, key, start_error)
+                    succeeded = start_error is None
+        except BaseException as exc:
+            caught_exc = exc
+        # Both reception_lock and Progress._lock are released before running owned cleanup so
         # stopping a receiver that joins its reader thread cannot deadlock _heard.
-        if start_error is not None and run_cleanup is not None:
-            cleanup_err = run_cleanup()
-            if cleanup_err:
+        if not succeeded and (extra_cleanups or owned_handles):
+            cleanup_err = _run_owned_cleanup()
+            if caught_exc is not None:
+                if isinstance(caught_exc, Exception) and cleanup_err:
+                    if caught_exc.args and isinstance(caught_exc.args[0], str):
+                        caught_exc.args = (
+                            f"{caught_exc.args[0]}; {cleanup_err}",
+                            *caught_exc.args[1:],
+                        )
+                    else:
+                        caught_exc.args = (*caught_exc.args, cleanup_err)
+                    if hasattr(caught_exc, "add_note"):
+                        caught_exc.add_note(cleanup_err)
+            elif cleanup_err:
                 start_error = f"{start_error}; {cleanup_err}"
                 with reception_lock:
                     _set_attempt_start_error(kind, key, start_error)
+        if caught_exc is not None:
+            with reception_lock:
+                _set_attempt_start_error(
+                    kind, key, f"the {label} start failed: {caught_exc}",
+                )
+            raise caught_exc
         return started_at, start_error
 
     def _record_attempt_pass(
@@ -3375,12 +3591,40 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         ch = challenge_for(unit_id)
         if ch is None or get_unit(unit_id) is None:
             raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        allowed = [
+            {"key": key, "label": rack_label(key),
+             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
+            for key in ch.allowed
+        ]
         read_error = None
-        try:
-            saved = app.state.progress.challenge(unit_id)
-        except (OSError, sqlite3.Error) as exc:
-            saved = {"attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0}
-            read_error = f"the live find state could not be read: {exc}"
+        saved = None
+        if (reason := app.state.progress.quarantined_reason) is not None:
+            read_error = f"the live find state could not be read: {reason}"
+        elif app.state.progress.closed:
+            read_error = "the live find state could not be read: progress store is closed"
+        else:
+            try:
+                saved = app.state.progress.challenge(unit_id)
+            except (OSError, sqlite3.Error) as exc:
+                read_error = f"the live find state could not be read: {exc}"
+        if saved is None:
+            return {
+                "unit_id": unit_id,
+                "state": "unreadable",
+                "prompt": ch.prompt,
+                "allowed": allowed,
+                "window_s": ch.window_s,
+                "started_at": None,
+                "remaining_s": 0,
+                "reason": "store_unreadable",
+                "latest_pass": None,
+                "passes": None,
+                "error": (
+                    read_error
+                    or app.state.challenge_start_errors.get(unit_id)
+                    or app.state.challenge_error
+                ),
+            }
         now = round(clock(), 3)
         st = challenge_status(
             ch, saved["attempt"], saved["latest_pass"], now,
@@ -3391,11 +3635,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if st["state"] == "passed" and saved["attempt_pass"] is not None
             else saved["latest_pass"]
         )
-        allowed = [
-            {"key": key, "label": rack_label(key),
-             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
-            for key in ch.allowed
-        ]
         return {
             "unit_id": unit_id,
             "state": st["state"],
@@ -3663,7 +3902,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.get("/api/challenges/{unit_id}")
     def challenge_get(unit_id: int):
         """Return one unit's live-find challenge state, countdown, rack links, and pass history."""
-        return _challenge_payload(unit_id)
+        payload = _challenge_payload(unit_id)
+        if payload["state"] == "unreadable":
+            return JSONResponse(status_code=503, content=payload)
+        return payload
 
     @app.post("/api/challenges/{unit_id}/start")
     def challenge_start(unit_id: int):
@@ -3693,6 +3935,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return templates.TemplateResponse(
             request=request,
             name="challenge.html",
+            status_code=503 if payload["state"] == "unreadable" else 200,
             context={
                 "title": f"Unit {unit.id} · Live find",
                 "back_href": f"/unit/{unit.id}",

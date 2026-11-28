@@ -195,12 +195,12 @@ def list_rtlsdr_devices(*, which=shutil.which, run=subprocess.run) -> tuple:
         # about the bus this code just failed to look at.
         raise DeviceSelectionError(f"cannot survey the bus: {exc}") from exc
     # rtl_power narrates to stderr, inventory included.
-    devices = []
-    for line in (getattr(result, "stderr", "") or "").splitlines():
-        matched = _DEVICE_LINE.match(line)
-        if matched:
-            devices.append(RtlSdrDevice(int(matched.group(1)), matched.group(2)))
-    return tuple(devices)
+    return parse_rtlsdr_inventory((getattr(result, "stderr", "") or "").splitlines())
+
+
+def parse_rtlsdr_inventory(lines) -> tuple[RtlSdrDevice, ...]:
+    return tuple(RtlSdrDevice(int(match[1]), match[2]) for line in lines
+                 if (match := _DEVICE_LINE.match(line)))
 
 
 def describe_devices(devices) -> str:

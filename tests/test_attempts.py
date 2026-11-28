@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1142,7 +1143,7 @@ def _deny_sqlite_action(conn: sqlite3.Connection, action_code: int, arg1_match: 
     conn.set_authorizer(auth)
 
 
-@pytest.mark.parametrize("fail_at", ["insert", "event", "commit"])
+@pytest.mark.parametrize("fail_at", ["insert", "event", "serialize", "commit"])
 @pytest.mark.parametrize("managed", [False, True], ids=["legacy", "managed"])
 def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
     tmp_path, monkeypatch, fail_at, managed
@@ -1164,13 +1165,15 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
     )
 
     with TestClient(app) as client:
-        # 1. Fail Start at INSERT, Start event append, or COMMIT after launch claims sweeper.
+        # 1. Fail Start at INSERT, Start event I/O, journal serialization (TypeError), or COMMIT
+        # after launch claims sweeper. Cleanup must always stop sweeper after both locks unwind.
         lock_state: dict[str, bool] = {}
 
         def launch_sweeper():
             resp = client.get("/api/spectrum")
             assert resp.status_code == 200
             assert app.state.sweeper.running
+            return resp
 
         def check_locks_cleanup():
             # Verify neither DB lock nor reception lock is held during cleanup.
@@ -1178,15 +1181,19 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
             if db_free:
                 app.state.progress._lock.release()
             lock_state["db_free"] = db_free
-            if fail_at == "event":
+            if fail_at in ("event", "serialize"):
                 # Invoking _heard acquires reception_lock -> Progress._lock; would deadlock if held.
-                app.state.lora.on_reception(_lora_item(from_id="!cleanup-unlocked"))
+                app.state.lora.on_reception(_lora_item(from_id=f"!cleanup-{fail_at}"))
                 lock_state["reception_free"] = True
 
+        extra_event_fields = None
         if fail_at == "insert":
             _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_INSERT, "challenges")
         elif fail_at == "commit":
             _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_TRANSACTION, "COMMIT")
+        elif fail_at == "serialize":
+            # Reach the real journal serializer with a non-JSON value so json.dumps raises.
+            extra_event_fields = {"unserializable": object()}
         else:
             real_log = app_mod.log_event
 
@@ -1198,27 +1205,40 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
             monkeypatch.setattr(app_mod, "log_event", fail_start_log)
 
         try:
-            _, err = app.state.start_attempt(
-                challenges.CHALLENGE_KIND,
-                9,
-                900,
-                launch=launch_sweeper,
-                cleanup=check_locks_cleanup,
-            )
+            if fail_at == "serialize":
+                with pytest.raises(TypeError, match="not JSON serializable"):
+                    app.state.start_attempt(
+                        challenges.CHALLENGE_KIND,
+                        9,
+                        900,
+                        event_fields=extra_event_fields,
+                        launch=launch_sweeper,
+                        cleanup=check_locks_cleanup,
+                    )
+            else:
+                _, err = app.state.start_attempt(
+                    challenges.CHALLENGE_KIND,
+                    9,
+                    900,
+                    launch=launch_sweeper,
+                    cleanup=check_locks_cleanup,
+                )
+                assert err is not None
         finally:
             app.state.progress._conn.set_authorizer(None)
 
-        assert err is not None
         assert not app.state.sweeper.running
+        assert app.state.progress.challenge(9)["attempt"] is None
         assert lock_state.get("db_free") is True
-        if fail_at == "event":
+        if fail_at in ("event", "serialize"):
             assert lock_state.get("reception_free") is True
 
-        # 2. A newer claim taking over the sweeper before cleanup must keep running.
+        # 2a. A newer claim taking over the sweeper AFTER launch returns must keep running.
         def launch_then_superseded():
             resp = client.get("/api/spectrum")
             assert resp.status_code == 200
             assert app.state.sweeper.running
+            return resp
 
         def supersede_and_fail(path, kind, payload, **kw):
             if kind == "challenge_start":
@@ -1239,7 +1259,97 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
         assert app.state.sweeper.running
         app.state.sweeper.stop()
 
-    # 3. Unresolved reap on a decoder preserves the lifecycle's failure reason.
+        # 2b (F3a.2): A newer claim taking over the sweeper DURING the launch hook (after the
+        # first spectrum claim returned 200, before the hook returns) must ALSO keep running.
+        if fail_at == "event":
+            replacement_proc: list = []
+
+            def launch_paused_while_superseded():
+                resp = client.get("/api/spectrum")
+                assert resp.status_code == 200
+                first_proc = app.state.sweeper._proc
+                # While this hook is paused, a separate claim stops the first child and launches
+                # a replacement fixture child before this hook returns.
+                app.state.sweeper.stop()
+                assert client.get("/api/spectrum").status_code == 200
+                assert app.state.sweeper._proc is not first_proc
+                replacement_proc.append(app.state.sweeper._proc)
+                return resp
+
+            monkeypatch.setattr(
+                app_mod,
+                "log_event",
+                lambda path, kind, payload, **kw: (
+                    (_ for _ in ()).throw(OSError("event fail after mid-hook claim"))
+                    if kind == "challenge_start"
+                    else events.log_event(path, kind, payload, **kw)
+                ),
+            )
+            _, err_mid = app.state.start_attempt(
+                challenges.CHALLENGE_KIND,
+                9,
+                900,
+                launch=launch_paused_while_superseded,
+            )
+            assert err_mid is not None
+            assert app.state.sweeper.running
+            assert app.state.sweeper._proc is replacement_proc[0]
+            app.state.sweeper.stop()
+
+            # 2c (F3a.2): Explicit LaunchedRun returned by app.state.claim_sdr and explicit
+            # HTTP response carrying X-Sigint-Claim each bind cleanup strictly to their own run,
+            # even when a separate claim replaces the child during the paused launch hook.
+            replacement_proc_2: list = []
+
+            def launch_with_explicit_run():
+                run = app.state.claim_sdr("sweeper", app.state.sweeper.start)
+                assert run is not None
+                assert run.name == "sweeper"
+                assert callable(run.stop)
+                first_proc = app.state.sweeper._proc
+                app.state.sweeper.stop()
+                assert client.get("/api/spectrum").status_code == 200
+                assert app.state.sweeper._proc is not first_proc
+                replacement_proc_2.append(app.state.sweeper._proc)
+                return run
+
+            _, err_run = app.state.start_attempt(
+                challenges.CHALLENGE_KIND,
+                9,
+                900,
+                launch=launch_with_explicit_run,
+            )
+            assert err_run is not None
+            assert app.state.sweeper.running
+            assert app.state.sweeper._proc is replacement_proc_2[0]
+            app.state.sweeper.stop()
+
+            replacement_proc_3: list = []
+
+            def launch_returning_response():
+                resp = client.get("/api/spectrum")
+                assert resp.status_code == 200
+                assert "x-sigint-claim" in resp.headers
+                first_proc = app.state.sweeper._proc
+                app.state.sweeper.stop()
+                assert client.get("/api/spectrum").status_code == 200
+                assert app.state.sweeper._proc is not first_proc
+                replacement_proc_3.append(app.state.sweeper._proc)
+                return resp
+
+            _, err_resp = app.state.start_attempt(
+                challenges.CHALLENGE_KIND,
+                9,
+                900,
+                launch=launch_returning_response,
+            )
+            assert err_resp is not None
+            assert app.state.sweeper.running
+            assert app.state.sweeper._proc is replacement_proc_3[0]
+            app.state.sweeper.stop()
+
+    # 3. Unresolved reap on a decoder preserves the lifecycle's failure reason (both OSError and
+    # journal serialization TypeError).
     child = Child(["rtl_433"], unkillable=True)
     rtl = Decoder(spawn=lambda *_: child, which=lambda n: n, radio_present=lambda: True)
     data_dir2 = _prepare_managed_dir(tmp_path / "reap") if managed else (tmp_path / "reap")
@@ -1254,20 +1364,35 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
     )
     try:
         with TestClient(app2):
-            monkeypatch.setattr(
-                app_mod,
-                "log_event",
-                lambda *_a, **_kw: (_ for _ in ()).throw(OSError("event fail")),
-            )
-            _, err_reap = app2.state.start_attempt(
-                challenges.CHALLENGE_KIND,
-                4,
-                900,
-                launch=rtl.start,
-            )
-            assert err_reap is not None
-            assert "rtl_433" in err_reap
-            assert rtl.release_failure(pending=True) is not None
+            if fail_at == "serialize":
+                _patch_log_clock(monkeypatch, now)
+                with pytest.raises(TypeError) as exc_info:
+                    app2.state.start_attempt(
+                        challenges.CHALLENGE_KIND,
+                        4,
+                        900,
+                        event_fields={"bad": object()},
+                        launch=rtl.start_owned,
+                    )
+                msg = str(exc_info.value)
+                assert "not JSON serializable" in msg
+                assert "rtl_433" in msg
+                assert rtl.release_failure(pending=True) is not None
+            else:
+                monkeypatch.setattr(
+                    app_mod,
+                    "log_event",
+                    lambda *_a, **_kw: (_ for _ in ()).throw(OSError("event fail")),
+                )
+                _, err_reap = app2.state.start_attempt(
+                    challenges.CHALLENGE_KIND,
+                    4,
+                    900,
+                    launch=rtl.start_owned,
+                )
+                assert err_reap is not None
+                assert "rtl_433" in err_reap
+                assert rtl.release_failure(pending=True) is not None
             child.unkillable = False
     finally:
         child.unkillable = False
@@ -1278,13 +1403,24 @@ def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
 def test_f3b_unconfirmed_rollback_quarantines_connection_against_reception_and_next_start(
     tmp_path, monkeypatch, managed
 ):
-    """F3b: unconfirmed rollback quarantines the connection against reads, credit, and Starts."""
+    """F3b: quarantined or closed store reads unreadable and never resets passes to READY."""
     data_dir = _prepare_managed_dir(tmp_path) if managed else tmp_path
     now = [3000.0]
     _patch_log_clock(monkeypatch, now)
     app = app_mod.create_app(data_dir=data_dir, clock=lambda: now[0], managed=managed)
 
     with TestClient(app) as client:
+        # 1. Earn a real Tier B pass on Unit 4 first so preexisting progress is on disk.
+        assert client.post("/api/challenges/4/start").status_code == 200
+        now[0] = 3005.0
+        app.state.lora.on_reception(_lora_item(from_id="!f3b-earned-u4"))
+        earned = client.get("/api/challenges/4")
+        assert earned.status_code == 200
+        assert earned.json()["state"] == "passed"
+        assert earned.json()["passes"] == 1
+        assert "FOUND" in client.get("/unit/4/challenge").text
+
+        # 2. Now fail a Start on Unit 9 with ROLLBACK denied, quarantining the connection.
         real_log = app_mod.log_event
 
         def fail_start_log(path, kind, payload, **kw):
@@ -1296,18 +1432,37 @@ def test_f3b_unconfirmed_rollback_quarantines_connection_against_reception_and_n
         _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_TRANSACTION, "ROLLBACK")
         r1 = client.post("/api/challenges/9/start")
         assert r1.status_code == 500
+        assert r1.json()["state"] == "unreadable"
         assert "quarantined" in (r1.json().get("error") or "").lower()
 
-        # Restore normal log_event; quarantined connection must still refuse reads and commits.
+        # Restore normal log_event; quarantined connection must report unreadable on BOTH units.
         monkeypatch.setattr(app_mod, "log_event", real_log)
 
-        # Eligibility read via GET must not see the rejected attempt.
-        g = client.get("/api/challenges/9").json()
-        assert g["state"] == "idle"
-        assert g["passes"] == 0
-        assert g["error"] is not None
+        # Unit 4 (which has a preexisting earned pass) MUST read as unreadable, NEVER idle/READY!
+        g4 = client.get("/api/challenges/4")
+        assert g4.status_code == 503
+        g4_body = g4.json()
+        assert g4_body["state"] == "unreadable"
+        assert g4_body["passes"] is None
+        assert g4_body["error"] is not None
+        page4 = client.get("/unit/4/challenge")
+        assert page4.status_code == 503
+        assert "UNREADABLE" in page4.text
+        assert "READY" not in page4.text
 
-        # A subsequent qualifying reception must NOT credit the rejected Start or log a pass.
+        # Unit 9 also reads as unreadable (never idle/READY) and must not see the rejected attempt.
+        g9 = client.get("/api/challenges/9")
+        assert g9.status_code == 503
+        g9_body = g9.json()
+        assert g9_body["state"] == "unreadable"
+        assert g9_body["passes"] is None
+        assert g9_body["error"] is not None
+        page9 = client.get("/unit/9/challenge")
+        assert page9.status_code == 503
+        assert "UNREADABLE" in page9.text
+        assert "READY" not in page9.text
+
+        # A subsequent qualifying reception must NOT credit the rejected Start or log a pass for 9.
         now[0] = 3010.0
         app.state.lora.on_reception(_lora_item(from_id="!f3b-lora"))
 
@@ -1315,17 +1470,39 @@ def test_f3b_unconfirmed_rollback_quarantines_connection_against_reception_and_n
         now[0] = 3020.0
         r2 = client.post("/api/challenges/9/start")
         assert r2.status_code == 500
+        assert r2.json()["state"] == "unreadable"
 
-    # Independent connection confirms zero attempts and zero passes were ever committed.
+    # Independent connection confirms Unit 4's earned pass survived intact, and Unit 9 has zero
+    # attempts and zero passes.
     check_prog = Progress(data_dir / "progress.db", managed=managed)
     try:
-        saved = check_prog.challenge(9)
-        assert saved["attempt"] is None
-        assert saved["passes"] == 0
+        saved4 = check_prog.challenge(4)
+        assert saved4["passes"] == 1
+        assert saved4["attempt_pass"] is not None
+        saved9 = check_prog.challenge(9)
+        assert saved9["attempt"] is None
+        assert saved9["passes"] == 0
     finally:
         check_prog.close()
     evts = events.read_events(data_dir / "events.jsonl")
-    assert [e for e in evts if e.get("kind") == "challenge_pass"] == []
+    u9_passes = [
+        e for e in evts if e.get("kind") == "challenge_pass" and e["payload"]["unit"] == 9
+    ]
+    assert u9_passes == []
+
+    # 3. A cleanly closed (non-quarantined) store also reports unreadable, never idle/READY.
+    app_closed = app_mod.create_app(data_dir=data_dir, clock=lambda: now[0], managed=managed)
+    with TestClient(app_closed) as client_c:
+        app_closed.state.progress.close()
+        gc = client_c.get("/api/challenges/4")
+        assert gc.status_code == 503
+        assert gc.json()["state"] == "unreadable"
+        assert gc.json()["passes"] is None
+        assert gc.json()["error"] is not None
+        pc = client_c.get("/unit/4/challenge")
+        assert pc.status_code == 503
+        assert "UNREADABLE" in pc.text
+        assert "READY" not in pc.text
 
 
 def test_f2a_replay_attempts_bind_durable_identity_and_clip_across_identical_timestamps(
@@ -1537,6 +1714,60 @@ def test_f2a_replay_attempts_bind_durable_identity_and_clip_across_identical_tim
         assert stale_same_clip is False
         assert app.state.progress.attempt(bench, "b1")["passes"] == 1
 
+    # 5 (F2a): Shared store API — stage clip A, supersede with clip B before A earns credit,
+    # reopen the store, and verify A's identity can NEVER be reused via stage_attempt/start_attempt
+    # and a later Start gets a strictly monotonic durable identity that rejects A's old answer.
+    prog_reopen_1 = Progress(tmp_path / "progress.db")
+    try:
+        assert prog_reopen_1.stage_attempt(
+            bench, "b-reopen", 2000.0, 600,
+            extra={"recording": "clip-a.sigmf", "digest": "dig-a"},
+        ) is True
+        aid_superseded = prog_reopen_1.attempt(bench, "b-reopen")["attempt"]["attempt_id"]
+        assert prog_reopen_1.stage_attempt(
+            bench, "b-reopen", 2000.0, 600,
+            extra={"recording": "clip-b.sigmf", "digest": "dig-b"},
+        ) is True
+        aid_b_reopen = prog_reopen_1.attempt(bench, "b-reopen")["attempt"]["attempt_id"]
+        assert aid_b_reopen > aid_superseded
+    finally:
+        prog_reopen_1.close()
+
+    prog_reopen_2 = Progress(tmp_path / "progress.db")
+    try:
+        # Caller-supplied attempt_id (reusing superseded unpassed aid_superseded) MUST be refused.
+        with pytest.raises((ValueError, TypeError)):
+            prog_reopen_2.stage_attempt(
+                bench, "b-reopen", 2000.0, 600,
+                extra={"recording": "clip-a.sigmf", "digest": "dig-a"},
+                attempt_id=aid_superseded,
+            )
+        with pytest.raises((ValueError, TypeError)):
+            prog_reopen_2.start_attempt(
+                bench, "b-reopen", 2000.0, 600,
+                attempt_id=aid_superseded,
+                recording="clip-a.sigmf",
+                digest="dig-a",
+            )
+        # Store-issued restart for clip A at identical t=2000.0 produces a strictly newer identity.
+        assert prog_reopen_2.start_attempt(
+            bench, "b-reopen", 2000.0, 600,
+            recording="clip-a.sigmf",
+            digest="dig-a",
+        ) is True
+        aid_after_reopen = prog_reopen_2.attempt(bench, "b-reopen")["attempt"]["attempt_id"]
+        assert aid_after_reopen > aid_b_reopen
+        assert aid_after_reopen != aid_superseded
+        # Old answer carrying aid_superseded MUST NOT credit the new attempt.
+        assert prog_reopen_2.record_attempt_pass(
+            bench, "b-reopen", 2000.0, None,
+            {"passed_at": 2010.0, "recording": "clip-a.sigmf", "digest": "dig-a", "answer": "old"},
+            attempt_id=aid_superseded,
+        ) is False
+        assert prog_reopen_2.attempt(bench, "b-reopen")["passes"] == 0
+    finally:
+        prog_reopen_2.close()
+
 
 def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_path):
     """F2b: live credit refuses to insert a pass if a 2nd connection superseded the attempt."""
@@ -1546,7 +1777,7 @@ def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_p
     _create_slotted_tables(db_path)
     prog2 = Progress(db_path)
     try:
-        # 1. Tier B (single-slot CHALLENGE_KIND)
+        # 1a. Tier B (single-slot CHALLENGE_KIND) — distinct timestamp replacement.
         assert prog1.start_challenge(9, 1000.0, 900) is True
         superseded_tier_b = [False]
 
@@ -1563,13 +1794,29 @@ def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_p
         assert prog2.challenge(9)["passes"] == 0
         assert prog2.challenge(9)["attempt"]["started_at"] == 1100.0
 
-        # Normal credit against the current 1100.0 attempt still inserts once.
-        stamp2 = _make_stamp("lora", 1110.0, "d-f2b-2", event_id="ev-f2b-2")
-        assert len(prog1.credit_challenges([stamp2], lambda a, s: True)) == 1
-        assert prog1.credit_challenges([stamp2], lambda a, s: True) == []
+        # 1b. Tier B — SAME timestamp replacement with a shorter window (F2b round 4).
+        # Evidence at t=1150 qualifies under the old 900 s window, but NOT the replacement 10 s
+        # window; guarded insert must compare durable attempt identity, not just started_at.
+        superseded_same_ts_b = [False]
+
+        def tier_b_same_ts_qualifies(attempt, s):
+            if not superseded_same_ts_b[0]:
+                superseded_same_ts_b[0] = True
+                assert prog2.start_challenge(9, 1100.0, 10) is True
+            return challenges.in_window(attempt, s)
+
+        stamp_late = _make_stamp("lora", 1150.0, "d-f2b-same-ts", event_id="ev-f2b-same-ts")
+        assert prog1.credit_challenges([stamp_late], tier_b_same_ts_qualifies) == []
+        assert prog2.challenge(9)["passes"] == 0
+        assert prog2.challenge(9)["attempt"]["window_s"] == 10
+
+        # Normal credit against the current (1100.0, 10 s) attempt still inserts once.
+        stamp2 = _make_stamp("lora", 1105.0, "d-f2b-2", event_id="ev-f2b-2")
+        assert len(prog1.credit_challenges([stamp2], lambda a, s: challenges.in_window(a, s))) == 1
+        assert prog1.credit_challenges([stamp2], lambda a, s: challenges.in_window(a, s)) == []
         assert prog2.challenge(9)["passes"] == 1
 
-        # 2. Slotted live_reception kind
+        # 2a. Slotted live_reception kind — distinct timestamp replacement.
         assert prog1.start_attempt(slotted, "hunt-r", 1000.0, 900) is True
         superseded_slot = [False]
 
@@ -1584,9 +1831,28 @@ def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_p
         assert prog2.attempt(slotted, "hunt-r")["passes"] == 0
         assert prog2.attempt(slotted, "hunt-r")["attempt"]["started_at"] == 1100.0
 
-        # Normal slotted credit against current 1100.0 attempt inserts once per slot.
-        assert len(prog1.credit_attempts(slotted, [stamp2], lambda a, s: 0)) == 1
-        assert prog1.credit_attempts(slotted, [stamp2], lambda a, s: 0) == []
+        # 2b. Slotted live_reception kind — SAME timestamp replacement with a shorter window.
+        superseded_same_ts_slot = [False]
+
+        def slot_same_ts_qualifies(attempt, s):
+            if not superseded_same_ts_slot[0]:
+                superseded_same_ts_slot[0] = True
+                assert prog2.start_attempt(slotted, "hunt-r", 1100.0, 10) is True
+            return 0 if challenges.in_window(attempt, s) else None
+
+        assert prog1.credit_attempts(slotted, [stamp_late], slot_same_ts_qualifies) == []
+        assert prog2.attempt(slotted, "hunt-r")["passes"] == 0
+        assert prog2.attempt(slotted, "hunt-r")["attempt"]["window_s"] == 10
+
+        # Normal slotted credit against current (1100.0, 10 s) attempt inserts once per slot.
+        assert len(
+            prog1.credit_attempts(
+                slotted, [stamp2], lambda a, s: 0 if challenges.in_window(a, s) else None
+            )
+        ) == 1
+        assert prog1.credit_attempts(
+            slotted, [stamp2], lambda a, s: 0 if challenges.in_window(a, s) else None
+        ) == []
         assert prog2.attempt(slotted, "hunt-r")["passes"] == 1
     finally:
         prog1.close()
@@ -1693,3 +1959,695 @@ def test_f5_reserved_event_key_aliases_rejected_and_safe_alias_preserves_backfil
     assert len(passes) == 1
     assert passes[0]["payload"]["attempt_key"] == "k1"
     assert "source" not in passes[0]["payload"] and "replay" not in passes[0]["payload"]
+
+
+# --- Round 5: Owned-run handle contract, atomic compare-and-stop, pre-launch cleanup boundary ---
+
+
+def _make_live_child_cls():
+    from tests.child_fakes import Child
+
+    class _LivePipe:
+        def __init__(self, closed: threading.Event):
+            self._closed = closed
+
+        def __iter__(self):
+            self._closed.wait(timeout=15.0)
+            return iter(())
+
+        def close(self):
+            self._closed.set()
+
+    class _LiveChild(Child):
+        """Fake streaming child whose stdout stays open until terminated, killed, or closed."""
+
+        def __init__(self, args=("tool",)):
+            super().__init__(args)
+            self._closed = threading.Event()
+            self.stdout = _LivePipe(self._closed)
+
+        def terminate(self):
+            super().terminate()
+            self._closed.set()
+
+        def kill(self):
+            super().kill()
+            self._closed.set()
+
+    return _LiveChild
+
+
+def test_r5_interleaving_unrelated_claim_before_launch_and_reversed_replacement(
+    tmp_path, monkeypatch
+):
+    """R5 (codex2 interleavings): exact OwnedRun handle tracks only the run acquired by the hook;
+    no global claim-window or receiver-snapshot fallback can steal or mis-target another claim."""
+    from sigint101.decode import Decoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+    from tests.test_app import _present
+
+    LiveChild = _make_live_child_cls()
+    now = [5000.0]
+    _patch_log_clock(monkeypatch, now)
+    pwr_children: list = []
+    rtl_children: list = []
+
+    def spawn_pwr(cmd, **_kw):
+        ch = LiveChild(cmd)
+        pwr_children.append(ch)
+        return ch
+
+    def spawn_rtl(cmd, **_kw):
+        ch = LiveChild(cmd)
+        rtl_children.append(ch)
+        return ch
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=spawn_pwr, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    rtl = Decoder(
+        spawn=spawn_rtl, which=lambda n: n, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        sweeper_factory=lambda: sweeper,
+        decoder_factory=lambda: rtl,
+        clock=lambda: now[0],
+    )
+
+    real_log = app_mod.log_event
+
+    def fail_start_log(path, kind, payload, **kw):
+        if kind == "challenge_start":
+            raise OSError("append failed")
+        return real_log(path, kind, payload, **kw)
+
+    monkeypatch.setattr(app_mod, "log_event", fail_start_log)
+
+    try:
+        with TestClient(app) as client:
+            # Interleaving A: pause Start hook BEFORE its claim; an unrelated request opens rtl_433;
+            # hook then claims rtl_power via /api/spectrum and returns its response receipt.
+            # When journal append fails, rtl_power MUST be stopped and no attempt committed.
+            paused = threading.Event()
+            resume = threading.Event()
+            holder: dict = {}
+
+            def launch_after_unrelated():
+                paused.set()
+                assert resume.wait(timeout=5.0)
+                resp = client.get("/api/spectrum")
+                assert resp.status_code == 200
+                assert "x-sigint-claim" in resp.headers
+                return resp
+
+            t = threading.Thread(
+                target=lambda: holder.update(
+                    out=app.state.start_attempt(
+                        challenges.CHALLENGE_KIND, 9, 900, launch=launch_after_unrelated,
+                    )
+                )
+            )
+            t.start()
+            assert paused.wait(timeout=5.0)
+            assert client.get("/api/decode").status_code == 200
+            assert len(rtl_children) == 1 and rtl_children[-1].poll() is None
+            resume.set()
+            t.join(timeout=5.0)
+
+            assert holder["out"][1] is not None and "append failed" in holder["out"][1]
+            assert not t.is_alive()
+            assert len(pwr_children) == 1
+            assert pwr_children[-1].poll() is not None, "failed Start left rtl_power running"
+            assert not sweeper.running
+            assert app.state.progress.challenge(9)["attempt"] is None
+
+            # Interleaving B (reversed): hook opens rtl_433 directly via start_owned(), another
+            # request claims rtl_power (standing rtl_433 down), then Start fails on journal append.
+            # Cleanup must NOT stop the newer rtl_power child!
+            rtl_children.clear()
+            pwr_children.clear()
+            rtl.resume()
+
+            def launch_rtl_then_replaced():
+                handle = rtl.start_owned()
+                assert handle is not None
+                assert len(rtl_children) == 1 and rtl_children[-1].poll() is None
+                assert client.get("/api/spectrum").status_code == 200
+                assert len(pwr_children) == 1 and pwr_children[-1].poll() is None
+                return handle
+
+            _, err_b = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_rtl_then_replaced,
+            )
+            assert err_b is not None and "append failed" in err_b
+            assert len(pwr_children) == 1
+            assert pwr_children[-1].poll() is None, "cleanup killed replacement rtl_power"
+            assert sweeper.running
+            sweeper.stop()
+
+            # Fallback-deleted check: an unrelated thread starts rtl_power during a hook that
+            # itself acquired and returned NO handle. Start failure MUST NOT touch it!
+            pwr_children.clear()
+            paused2 = threading.Event()
+            resume2 = threading.Event()
+            holder2: dict = {}
+
+            def noop_hook_paused():
+                paused2.set()
+                assert resume2.wait(timeout=5.0)
+                return None
+
+            t2 = threading.Thread(
+                target=lambda: holder2.update(
+                    out=app.state.start_attempt(
+                        challenges.CHALLENGE_KIND, 9, 900, launch=noop_hook_paused,
+                    )
+                )
+            )
+            t2.start()
+            assert paused2.wait(timeout=5.0)
+            assert client.get("/api/spectrum").status_code == 200
+            assert len(pwr_children) == 1 and pwr_children[-1].poll() is None
+            resume2.set()
+            t2.join(timeout=5.0)
+            assert not t2.is_alive()
+
+            assert holder2["out"][1] is not None and "append failed" in holder2["out"][1]
+            assert pwr_children[-1].poll() is None, (
+                "deleted global claim-window fallback must not stop an unrelated thread's receiver"
+            )
+            assert sweeper.running
+            sweeper.stop()
+    finally:
+        sweeper.stop()
+        rtl.stop()
+
+
+def test_r5_overlapping_claims_on_only_receiver_vs_genuine_replacement_and_borrowed_claim(
+    tmp_path, monkeypatch
+):
+    """R5: overlapping claims on the only running receiver do not invalidate the owner's handle
+    (borrowed claims get no handle), while a genuine replacement is always spared."""
+    from sigint101.acars import AcarsDecoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+    from tests.test_app import _present
+
+    LiveChild = _make_live_child_cls()
+    now = [6000.0]
+    _patch_log_clock(monkeypatch, now)
+    pwr_children: list = []
+    spawn_entered = threading.Event()
+    release_spawn = threading.Event()
+    pause_next_spawn = [False]
+
+    def spawn_pwr(cmd, **_kw):
+        ch = LiveChild(cmd)
+        pwr_children.append(ch)
+        if pause_next_spawn[0]:
+            pause_next_spawn[0] = False
+            spawn_entered.set()
+            assert release_spawn.wait(timeout=5.0)
+        return ch
+
+    acars_children: list = []
+
+    def spawn_acars(*_a, **_kw):
+        ch = LiveChild(["acarsdec"])
+        acars_children.append(ch)
+        return ch
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=spawn_pwr, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    acars = AcarsDecoder(
+        spawn=spawn_acars, which=lambda n: n, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        sweeper_factory=lambda: sweeper,
+        acars_factory=lambda: acars,
+        clock=lambda: now[0],
+    )
+
+    real_log = app_mod.log_event
+    monkeypatch.setattr(
+        app_mod,
+        "log_event",
+        lambda path, kind, payload, **kw: (
+            (_ for _ in ()).throw(OSError("append failed"))
+            if kind == "challenge_start"
+            else real_log(path, kind, payload, **kw)
+        ),
+    )
+
+    try:
+        with TestClient(app) as client:
+            # 1. Two overlapping HTTP /api/spectrum claims on the only receiver (1 spawn total).
+            pause_next_spawn[0] = True
+            spawn_entered.clear()
+            release_spawn.clear()
+            r1_box: dict = {}
+            r2_box: dict = {}
+
+            def req1():
+                r1_box["resp"] = client.get("/api/spectrum")
+
+            def req2():
+                r2_box["resp"] = client.get("/api/spectrum")
+
+            def launch_overlapping_http():
+                t1 = threading.Thread(target=req1)
+                t2 = threading.Thread(target=req2)
+                t1.start()
+                try:
+                    assert spawn_entered.wait(timeout=5.0)
+                    t2.start()
+                    time.sleep(0.05)  # Let req2 enter the arbiter reservation queue.
+                finally:
+                    release_spawn.set()
+                    t1.join(timeout=5.0)
+                    if t2.ident is not None:
+                        t2.join(timeout=5.0)
+                assert not t1.is_alive() and not t2.is_alive()
+                assert r1_box["resp"].status_code == 200
+                assert r2_box["resp"].status_code == 200
+                assert "x-sigint-claim" in r1_box["resp"].headers
+                assert "x-sigint-claim" not in r2_box["resp"].headers
+                return r1_box["resp"]
+
+            _, err1 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_overlapping_http,
+            )
+            assert err1 is not None and "append failed" in err1
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None, (
+                "second overlapping claim invalidated owner's handle and left rtl_power running"
+            )
+            assert not sweeper.running
+
+            # 2. Two overlapping direct app.state.claim_sdr calls on the only receiver.
+            pwr_children.clear()
+            pause_next_spawn[0] = True
+            spawn_entered.clear()
+            release_spawn.clear()
+            c1_box: dict = {}
+            c2_box: dict = {}
+
+            def launch_overlapping_direct():
+                t1 = threading.Thread(
+                    target=lambda: c1_box.update(
+                        h=app.state.claim_sdr("sweeper", sweeper.start)
+                    )
+                )
+                t2 = threading.Thread(
+                    target=lambda: c2_box.update(
+                        h=app.state.claim_sdr("sweeper", sweeper.start)
+                    )
+                )
+                t1.start()
+                try:
+                    assert spawn_entered.wait(timeout=5.0)
+                    t2.start()
+                    time.sleep(0.05)
+                finally:
+                    release_spawn.set()
+                    t1.join(timeout=5.0)
+                    if t2.ident is not None:
+                        t2.join(timeout=5.0)
+                assert not t1.is_alive() and not t2.is_alive()
+                assert c1_box["h"] is not None
+                assert c2_box["h"] is None, "borrowed claim must return no handle"
+                return c1_box["h"]
+
+            _, err2 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_overlapping_direct,
+            )
+            assert err2 is not None and "append failed" in err2
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None
+            assert not sweeper.running
+
+            # 3. Genuine replacement: stop first child and spawn a second -> cleanup spares child 2.
+            pwr_children.clear()
+
+            def launch_only_h1():
+                h1 = app.state.claim_sdr("sweeper", sweeper.start)
+                assert h1 is not None
+                return h1
+
+            def replace_on_log(path, kind, payload, **kw):
+                if kind == "challenge_start":
+                    sweeper.stop()
+                    h2 = app.state.claim_sdr("sweeper", sweeper.start)
+                    assert h2 is not None
+                    raise OSError("append failed after genuine replacement")
+                return real_log(path, kind, payload, **kw)
+
+            monkeypatch.setattr(app_mod, "log_event", replace_on_log)
+            _, err3 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_only_h1,
+            )
+            assert err3 is not None
+            assert len(pwr_children) == 2
+            assert pwr_children[0].poll() is not None
+            assert pwr_children[1].poll() is None, "cleanup stopped genuine replacement child"
+            assert sweeper.running
+
+            # 4. Borrowed already-running receiver: claim returns None, Start failure leaves it up.
+            monkeypatch.setattr(
+                app_mod,
+                "log_event",
+                lambda path, kind, payload, **kw: (
+                    (_ for _ in ()).throw(OSError("append failed on borrowed"))
+                    if kind == "challenge_start"
+                    else real_log(path, kind, payload, **kw)
+                ),
+            )
+            borrowed_handles: list = []
+
+            def launch_borrowed():
+                h = app.state.claim_sdr("sweeper", sweeper.start)
+                borrowed_handles.append(h)
+                return h
+
+            _, err4 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_borrowed,
+            )
+            assert err4 is not None
+            assert borrowed_handles == [None]
+            assert pwr_children[1].poll() is None, "failed Start stopped borrowed receiver"
+            assert sweeper.running
+            sweeper.stop()
+
+            # 5. SupervisedReceiver (AcarsDecoder): overlapping claim borrows (None), owner stops.
+            def launch_acars_with_borrow():
+                h_own = app.state.claim_sdr("acars")
+                assert h_own is not None
+                h_borrow = app.state.claim_sdr("acars")
+                assert h_borrow is None
+                return h_own
+
+            _, err5 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=launch_acars_with_borrow,
+            )
+            assert err5 is not None and "append failed" in err5
+            assert len(acars_children) == 1
+            assert acars_children[0].poll() is not None
+            assert not acars.running
+    finally:
+        release_spawn.set()
+        sweeper.stop()
+        acars.shutdown()
+
+
+def test_r5_launch_hook_exception_after_successful_claim_stops_owned_run(tmp_path, monkeypatch):
+    """R5: if a launch hook claims/starts a receiver and then raises before returning, the
+    pre-installed cleanup boundary stops the registered owned run after locks unwind."""
+    from sigint101.decode import Decoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+    from tests.test_app import _present
+
+    LiveChild = _make_live_child_cls()
+    now = [7000.0]
+    _patch_log_clock(monkeypatch, now)
+    pwr_children: list = []
+    rtl_children: list = []
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=lambda cmd, **_kw: (pwr_children.append(LiveChild(cmd)) or pwr_children[-1]),
+        radio_present=lambda: True,
+        list_devices=lambda: devs,
+    )
+    rtl = Decoder(
+        spawn=lambda cmd, **_kw: (rtl_children.append(LiveChild(cmd)) or rtl_children[-1]),
+        which=lambda n: n,
+        radio_present=lambda: True,
+        list_devices=lambda: devs,
+    )
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        sweeper_factory=lambda: sweeper,
+        decoder_factory=lambda: rtl,
+        clock=lambda: now[0],
+    )
+
+    try:
+        with TestClient(app):
+            # Case 1: hook calls app.state.claim_sdr successfully, then raises OSError.
+            def claim_then_raise():
+                h = app.state.claim_sdr("sweeper", sweeper.start)
+                assert h is not None
+                assert pwr_children[-1].poll() is None
+                raise OSError("post-claim hook I/O failure")
+
+            _, err1 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=claim_then_raise,
+            )
+            assert err1 is not None and "post-claim hook I/O failure" in err1
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None, (
+                "hook exception after claim_sdr bypassed cleanup and left child running"
+            )
+            assert not sweeper.running
+            assert app.state.progress.challenge(9)["attempt"] is None
+
+            # Case 2: hook calls rtl.start_owned() directly, then raises RuntimeError.
+            rtl.resume()
+
+            def start_owned_then_raise():
+                h = rtl.start_owned()
+                assert h is not None
+                assert rtl_children[-1].poll() is None
+                raise RuntimeError("hook crashed after start_owned")
+
+            _, err2 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 9, 900, launch=start_owned_then_raise,
+            )
+            assert err2 is not None and "hook crashed after start_owned" in err2
+            assert len(rtl_children) == 1
+            assert rtl_children[0].poll() is not None, (
+                "hook exception after start_owned bypassed cleanup and left rtl_433 running"
+            )
+            assert not rtl.running
+            assert app.state.progress.challenge(9)["attempt"] is None
+    finally:
+        sweeper.stop()
+        rtl.stop()
+
+
+def test_r5_clock_exception_after_launch_stops_owned_run_and_preserves_exception(
+    tmp_path, monkeypatch
+):
+    """R5: if the injected clock raises after launch returns an owned handle, cleanup stops the
+    run after both locks unwind and the original exception is preserved."""
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.spectrum import Sweeper
+    from tests.test_app import _present
+
+    LiveChild = _make_live_child_cls()
+    pwr_children: list = []
+    devs = [RtlSdrDevice(0, "rx0")]
+    sweeper = Sweeper(
+        spawn=lambda cmd, **_kw: (pwr_children.append(LiveChild(cmd)) or pwr_children[-1]),
+        radio_present=lambda: True,
+        list_devices=lambda: devs,
+    )
+    boom_clock = [False]
+
+    def flaky_clock():
+        if boom_clock[0]:
+            raise TypeError("clock failure after launch")
+        return 8000.0
+
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        sweeper_factory=lambda: sweeper,
+        clock=flaky_clock,
+    )
+
+    try:
+        with TestClient(app):
+            lock_state: dict[str, bool] = {}
+
+            def check_locks_free():
+                db_free = app.state.progress._lock.acquire(blocking=False)
+                if db_free:
+                    app.state.progress._lock.release()
+                lock_state["db_free"] = db_free
+                app.state.lora.on_reception(_lora_item(from_id="!r5-clock-cleanup"))
+                lock_state["reception_free"] = True
+
+            def launch_and_arm_clock_fault():
+                h = app.state.claim_sdr("sweeper", sweeper.start)
+                assert h is not None
+                boom_clock[0] = True
+                return h
+
+            with pytest.raises(TypeError, match="clock failure after launch"):
+                app.state.start_attempt(
+                    challenges.CHALLENGE_KIND,
+                    9,
+                    900,
+                    launch=launch_and_arm_clock_fault,
+                    cleanup=check_locks_free,
+                )
+
+            boom_clock[0] = False
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None, (
+                "clock TypeError after launch escaped cleanup and left rtl_power running"
+            )
+            assert not sweeper.running
+            assert app.state.progress.challenge(9)["attempt"] is None
+            assert lock_state == {"db_free": True, "reception_free": True}
+
+            # Also verify an unsupported non-handle return value raises TypeError inside the
+            # cleanup boundary and still stops any run already registered during launch().
+            pwr_children.clear()
+
+            def launch_bad_return():
+                h = app.state.claim_sdr("sweeper", sweeper.start)
+                assert h is not None
+                return "not-an-owned-run-handle"
+
+            with pytest.raises(TypeError, match="unsupported handle"):
+                app.state.start_attempt(
+                    challenges.CHALLENGE_KIND, 9, 900, launch=launch_bad_return,
+                )
+            assert len(pwr_children) == 1
+            assert pwr_children[0].poll() is not None
+            assert not sweeper.running
+    finally:
+        boom_clock[0] = False
+        sweeper.stop()
+
+
+def test_r6_merged_supervised_decoder_borrowed_and_owned_compare_and_stop(tmp_path, monkeypatch):
+    """R6 (C76b merge): migrated SupervisedReceiver rtl_433 Decoder returns an OwnedRun only when
+    a claim spawns a new run, returns no handle when borrowed, and compare-and-stops only its own
+    Run under _life while sparing any genuine replacement."""
+    from sigint101.decode import Decoder
+    from sigint101.hardware import RtlSdrDevice
+    from sigint101.receiver_lifecycle import OwnedRun, SupervisedReceiver
+    from tests.test_app import _present
+
+    assert issubclass(Decoder, SupervisedReceiver)
+    LiveChild = _make_live_child_cls()
+    now = [9000.0]
+    _patch_log_clock(monkeypatch, now)
+    rtl_children: list = []
+
+    def spawn_rtl(cmd, **_kw):
+        ch = LiveChild(cmd)
+        rtl_children.append(ch)
+        return ch
+
+    devs = [RtlSdrDevice(0, "rx0")]
+    rtl = Decoder(
+        spawn=spawn_rtl, which=lambda n: n, radio_present=lambda: True, list_devices=lambda: devs,
+    )
+    app = app_mod.create_app(
+        data_dir=tmp_path,
+        probe=_present,
+        decoder_factory=lambda: rtl,
+        clock=lambda: now[0],
+    )
+
+    real_log = app_mod.log_event
+    monkeypatch.setattr(
+        app_mod,
+        "log_event",
+        lambda path, kind, payload, **kw: (
+            (_ for _ in ()).throw(OSError("append failed"))
+            if kind == "challenge_start"
+            else real_log(path, kind, payload, **kw)
+        ),
+    )
+
+    try:
+        with TestClient(app) as client:
+            # 1. Owned claim via app.state.claim_sdr("decoder") spawns child 1; an overlapping
+            # borrow via claim_sdr, GET /api/decode, and start_owned() returns no handle and
+            # does not invalidate the owner's handle.
+            def launch_decoder_with_borrows():
+                h_own = app.state.claim_sdr("decoder", rtl.start)
+                assert isinstance(h_own, OwnedRun)
+                assert h_own.name == "decoder"
+                assert h_own.run_id is rtl._run
+                assert app.state.claim_sdr("decoder", rtl.start) is None
+                resp_borrow = client.get("/api/decode")
+                assert resp_borrow.status_code == 200
+                assert "x-sigint-claim" not in resp_borrow.headers
+                assert app.state.owned_run_for_response(resp_borrow) is None
+                assert rtl.start_owned() is None
+                assert len(rtl_children) == 1
+                return h_own
+
+            _, err1 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 4, 900, launch=launch_decoder_with_borrows,
+            )
+            assert err1 is not None and "append failed" in err1
+            assert len(rtl_children) == 1
+            assert rtl_children[0].poll() is not None, "failed Start left owned rtl_433 running"
+            assert not rtl.running
+
+            # 2. Borrowed already-running decoder: GET /api/decode starts child 2 first; a Start
+            # hook borrowing it gets None and failing Start leaves child 2 running untouched.
+            resp_pre = client.get("/api/decode")
+            assert resp_pre.status_code == 200
+            assert "x-sigint-claim" in resp_pre.headers
+            assert len(rtl_children) == 2 and rtl_children[1].poll() is None
+
+            borrowed: list = []
+
+            def launch_borrow_existing():
+                h = app.state.claim_sdr("decoder", rtl.start)
+                borrowed.append(h)
+                return h
+
+            _, err2 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 4, 900, launch=launch_borrow_existing,
+            )
+            assert err2 is not None and "append failed" in err2
+            assert borrowed == [None]
+            assert rtl_children[1].poll() is None, "failed Start stopped borrowed rtl_433"
+            assert rtl.running
+            rtl.stop()
+            assert rtl_children[1].poll() is not None
+
+            # 3. Genuine replacement: Start owns child 3, then another caller stops child 3 and
+            # starts child 4 before journal append fails -> cleanup spares child 4.
+            def launch_owned_before_replacement():
+                h = app.state.claim_sdr("decoder", rtl.start)
+                assert isinstance(h, OwnedRun)
+                return h
+
+            def replace_on_log(path, kind, payload, **kw):
+                if kind == "challenge_start":
+                    rtl.stop()
+                    h_rep = app.state.claim_sdr("decoder", rtl.start)
+                    assert isinstance(h_rep, OwnedRun)
+                    raise OSError("append failed after rtl_433 replacement")
+                return real_log(path, kind, payload, **kw)
+
+            monkeypatch.setattr(app_mod, "log_event", replace_on_log)
+            _, err3 = app.state.start_attempt(
+                challenges.CHALLENGE_KIND, 4, 900, launch=launch_owned_before_replacement,
+            )
+            assert err3 is not None and "append failed after rtl_433 replacement" in err3
+            assert len(rtl_children) == 4
+            assert rtl_children[2].poll() is not None
+            assert rtl_children[3].poll() is None, "cleanup stopped genuine rtl_433 replacement"
+            assert rtl.running
+    finally:
+        rtl.shutdown()

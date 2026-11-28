@@ -384,6 +384,8 @@ def format_evidence(payload: dict) -> str:
         return str(payload["error"])
     latest = payload.get("latest_pass")
     state = payload.get("state")
+    if state == "unreadable":
+        return "Progress store is unreadable."
     if state == "passed" and latest:
         return f"Found: {_pass_parts(latest)}"
     if payload.get("reason") == "clock_moved":

@@ -1,0 +1,14 @@
+# ABOUTME: systemd user unit for the learner-session low-battery desktop notice.
+# ABOUTME: Reads /run/sigint101-power/notice.json as the learner so desktop/Terminal users are warned.
+[Unit]
+Description=SIGINT 101 low-battery desktop notice
+After=graphical-session-pre.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/sigint101-power-notice
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

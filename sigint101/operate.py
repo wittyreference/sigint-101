@@ -77,6 +77,7 @@ INSTRUMENTS = (
                steps=(12_500, 6_250, 25_000, 100_000, 1_000_000, 10_000_000)),
     Instrument("apt", "APT", "satdump", "apt", "apt", "rtl-sdr"),
     Instrument("sstv", "SSTV", "sstv", "sstv", "sstv", "rtl-sdr"),
+    Instrument("meteor", "Meteor", "satdump", "meteor", "meteor", "rtl-sdr"),
     Instrument("lora", "LoRa", "meshtasticd", "lora", "lora", "lora"),
     # The default source's tool. The rack, the panel and each logged reception name the tool of
     # the detector the site configured instead (flock.py: tcpdump, or Marauder).
@@ -200,6 +201,10 @@ def _image(item: dict) -> str:
     return _join(item.get("mode"), meta.get("filename") or item.get("path"))
 
 
+def _meteor_image(item: dict) -> str:
+    return _join(item.get("satellite"), item.get("product")) or _image(item)
+
+
 _SUMMARIES = {
     "ism": lambda d: _join(d.get("model"), *_readings(d.get("readings"))),
     "aprs": _aprs,
@@ -221,6 +226,7 @@ _SUMMARIES = {
     "rayhunter": lambda d: _join(d.get("name"), d.get("severity")),
     "apt": _image,
     "sstv": _image,
+    "meteor": _meteor_image,
 }
 
 
