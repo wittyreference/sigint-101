@@ -1391,6 +1391,17 @@ body {
 .radar__count b { color: var(--accent); font-size: 18px; }
 .decoder__read { grid-area: read; color: var(--fg); min-width: 0; overflow-wrap: anywhere; }
 .decoder__tone { grid-area: tone; font-family: var(--font-mono); font-size: 13px; color: var(--fg-mute); }
+/* The Wi-Fi census (M39) gives each channel one line, so the fixed 124 px panel shows two whole
+   rows and half of a third at 800x480 instead of one: observe asks the learner to compare
+   channels, and the cut row says the list scrolls. Fixed label and count columns keep the rows
+   aligned; a summary too long for its column wraps rather than hiding a count. */
+.decoder__list--census > .decoder__item {
+  grid-template-columns: 11ch minmax(0, 1fr) 7ch 5ch;
+  grid-template-areas: "model read mod tone";
+  align-items: baseline;
+  padding: 4px 10px;
+}
+.decoder__list--census > .decoder__item > :is(.decoder__mod, .decoder__tone) { text-align: right; }
 .decoder__empty {
   flex: none;
   padding: 10px;
