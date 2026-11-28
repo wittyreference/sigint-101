@@ -5,7 +5,7 @@ import json
 import sys
 import time
 
-from render_scroll import connect
+from render_scroll import connect, fence, leave_page
 
 THEMES = ("dark", "sunlight", "red-night")
 STATES = ("idle", "active", "passed", "expired")
@@ -249,7 +249,8 @@ function measureFindRack(expectedTheme) {
 
 
 def load_page(browser, url):
-    nav = browser.call("Page.navigate", {"url": url})
+    # Through the render proxy, never the console itself (render_scroll.fence).
+    nav = browser.call("Page.navigate", {"url": fence(url)})
     if nav.get("errorText"):
         raise RuntimeError(nav["errorText"])
     for _ in range(25):
@@ -270,9 +271,9 @@ def verdict(ok, label, measures):
 def main(console):
     browser = connect()
     try:
+        # connect() has already blocked the whole of /api/* (render_scroll.block_console_api),
+        # /api/challenges/*/start with the rest; the fetch shim answers the challenge reads.
         browser.call("Page.enable")
-        browser.call("Network.enable")
-        browser.call("Network.setBlockedURLs", {"urls": ["*/api/challenges/*/start"]})
         browser.call("Page.addScriptToEvaluateOnNewDocument", {"source": fetch_shim()})
         browser.call("Emulation.setDeviceMetricsOverride",
                      {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False})
@@ -325,7 +326,7 @@ def main(console):
             failed |= verdict(rack_ok, f"live-find rack {theme}", rack)
         return int(failed)
     finally:
-        browser.s.close()
+        leave_page(browser)
 
 
 if __name__ == "__main__":

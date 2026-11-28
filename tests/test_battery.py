@@ -269,3 +269,62 @@ def test_unavailable_ina219_reports_unknown_on_page_and_api(tmp_path):
         assert body["present"] is False
         assert "I2C bus is unavailable" in body["reason"]
         assert _batt_value(client.get("/").text) == "&mdash;"
+
+
+def test_read_battery_once_reads_config_register_and_supports_smbus_fallback(monkeypatch):
+    # Read-only config register 0x00 alongside uncached INA219 reading; falls back to
+    # python3-smbus wrapped in contextlib.closing when smbus2 is unavailable.
+    registers = INA219_CHARGING | {0x00: b"\x39\x9f"}
+    closed = []
+
+    class _LegacySmbus:
+        """Minimal python3-smbus stand-in: has close() and read_i2c_block_data, no __enter__."""
+
+        def __init__(self, number):
+            assert number == 1
+            self.reads = []
+
+        def read_i2c_block_data(self, address, register, length):
+            assert (address, length) == (0x41, 2)
+            self.reads.append(register)
+            return list(registers[register])
+
+        def close(self):
+            closed.append(True)
+
+    buses = []
+
+    def make_legacy(number):
+        b = _LegacySmbus(number)
+        buses.append(b)
+        return b
+
+    monkeypatch.setitem(sys.modules, "smbus2", None)
+    monkeypatch.setitem(sys.modules, "smbus", SimpleNamespace(SMBus=make_legacy))
+
+    cfg, reading = battery.read_battery_once()
+    assert cfg.raw == 0x399F
+    assert cfg.mode == 0x07 and cfg.continuous_shunt_and_bus is True
+    assert cfg.sadc == 0x03 and cfg.badc == 0x03
+    assert reading is not None
+    assert reading.voltage == pytest.approx(12.328)
+    assert reading.charging is True
+    assert closed == [True]
+    assert 0x00 in buses[0].reads
+
+    # Uncached: a second call reads the bus again immediately and sees updated registers.
+    registers[0x00] = b"\x39\x9b"  # triggered mode (MODE=0b011)
+    cfg2, reading2 = battery.read_battery_once()
+    assert cfg2.raw == 0x399B
+    assert cfg2.continuous_shunt_and_bus is False
+    assert reading2 is None
+    assert len(buses) == 2 and closed == [True, True]
+
+    # CNVR unset in continuous mode raises ConversionNotReadyError carrying the read config.
+    registers[0x00] = b"\x3f\xff"
+    registers[0x02] = b"\x60\x50"  # CNVR bit 1 clear
+    with pytest.raises(battery.ConversionNotReadyError) as exc_info:
+        battery.read_battery_once()
+    assert exc_info.value.config.raw == 0x3FFF
+    assert exc_info.value.config.sadc == 0x0F and exc_info.value.config.badc == 0x0F
+    assert len(buses) == 3 and closed == [True, True, True]

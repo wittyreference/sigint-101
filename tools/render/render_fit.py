@@ -9,6 +9,15 @@ import sys
 import time
 import urllib.request
 
+# The real folder of this script, so a linked copy still imports the DevTools helpers beside it.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from render_scroll import (  # noqa: E402
+    block_console_api,
+    check_navigation,
+    check_reply,
+    fence,
+)
+
 HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "9222"))
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8008/lesson/29"
 SHOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/flipper_m29_predict.png"
@@ -41,6 +50,11 @@ class CDP:
             buf += self._recv(4096)
         self._buf = buf.split(b"\r\n\r\n", 1)[1]
         self._id = 0
+        # What the shared block and teardown (render_scroll) need: the endpoint, this page's
+        # target (the last part of its DevTools path), and whether its block is confirmed.
+        self.port = PORT
+        self.target_id = path.rsplit("/", 1)[-1]
+        self.blocked = False
 
     def _recv(self, size):
         chunk = self.sock.recv(size)
@@ -90,12 +104,13 @@ class CDP:
         return data
 
     def call(self, method, params=None, timeout=15):
+        check_navigation(self, method, params)
         want = self._send(method, params)
         end = time.time() + timeout
         while time.time() < end:
             msg = json.loads(self._frame().decode("utf-8", "replace"))
             if msg.get("id") == want:
-                return msg.get("result", {})
+                return check_reply(method, msg)
         raise TimeoutError(method)
 
     def evaluate(self, expr):
@@ -175,12 +190,13 @@ def fit_failures(stage, measurement):
 
 def main():
     cdp = CDP(page_ws())
+    block_console_api(cdp)
     cdp.call("Page.enable")
     cdp.call(
         "Emulation.setDeviceMetricsOverride",
         {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False},
     )
-    cdp.call("Page.navigate", {"url": URL})
+    cdp.call("Page.navigate", {"url": fence(URL)})
     time.sleep(2.5)
     for _ in range(20):
         if cdp.evaluate("document.readyState") == "complete":

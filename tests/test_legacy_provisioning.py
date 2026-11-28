@@ -73,6 +73,57 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "etc/systemd/journald.conf.d/50-sigint101.conf",
         "4b84424a5d9faeb46ad0b2335a962a1d8bac736f2a85d3872dcedfac9ed1ca02",
     ),
+    # Safe shutdown slice 2a: package marker copied into /usr/local/lib/sigint101-power/.
+    (
+        "sigint101/__init__.py",
+        "sysroot",
+        "usr/local/lib/sigint101-power/sigint101/__init__.py",
+        "74cd6c6befc26db56d888f8b0ff22eabc0a522fbbe9692e2e30b91d9a7d21b0c",
+    ),
+    # Safe shutdown slice 2a: read-only INA219 helper (later battery.py edits re-freeze this).
+    (
+        "sigint101/battery.py",
+        "sysroot",
+        "usr/local/lib/sigint101-power/sigint101/battery.py",
+        "33e91635e86833a459f812bcadb51a90337734779c7d5e7d221fec0b08562451",
+    ),
+    # Safe shutdown slice 2a (round 2 N2): low-battery watcher, disarmed until 2b; logs notice
+    # write errors instead of blocking power-off.
+    (
+        "sigint101/power.py",
+        "sysroot",
+        "usr/local/lib/sigint101-power/sigint101/power.py",
+        "10757067da00987274006c864f2ee91decfb4006aa42e54111c86677e648d8d4",
+    ),
+    # Safe shutdown slice 2a (round 2 F2): hardened non-root unit installed under
+    # /usr/local/lib/systemd/system so owner masks in /etc/systemd/system work and win.
+    (
+        "deploy/system/sigint101-power.service",
+        "sysroot",
+        "usr/local/lib/systemd/system/sigint101-power.service",
+        "b63f4ea7d457355c1c082c2075c27b8b6f60e5ba6718f9b562607d240df71d2a",
+    ),
+    # Safe shutdown slice 2a: self-locating python3 -I launcher for the power watcher.
+    (
+        "deploy/system/sigint101-power",
+        "sysroot",
+        "usr/local/bin/sigint101-power",
+        "6dfb10dcd1309d5a0c6771b750cc034c0bccd59e15fe94c04a8c2ae53e92b68e",
+    ),
+    # Safe shutdown slice 2a: polkit rule granting only logind power-off actions to sigint101-power.
+    (
+        "deploy/system/50-sigint101-power.rules",
+        "sysroot",
+        "etc/polkit-1/rules.d/50-sigint101-power.rules",
+        "c6c78b2564172c020efee5abf4282ad757e76e027e6f87de7966b2aa225b2535",
+    ),
+    # Safe shutdown slice 2a: sysusers.d entry defining static system user sigint101-power.
+    (
+        "deploy/system/sigint101-power.sysusers.conf",
+        "sysroot",
+        "usr/local/lib/sysusers.d/sigint101-power.conf",
+        "3b0456bd4ffe286d045dbb9d0a0fc9d5eadf4727d5d53f82cecf5a6c5afec03e",
+    ),
 )
 
 
@@ -118,6 +169,8 @@ class StatefulLegacyBox:
         (self.course / "requirements.txt").write_text("pytest\n", encoding="utf-8")
         shutil.copytree(REPO / "deploy", self.course / "deploy")
         (self.course / "sigint101" / "static").mkdir(parents=True)
+        for py_name in ("__init__.py", "battery.py", "power.py"):
+            shutil.copyfile(REPO / "sigint101" / py_name, self.course / "sigint101" / py_name)
         (self.course / "sigint101" / "static" / "fonts").symlink_to(
             REPO / "sigint101" / "static" / "fonts"
         )
@@ -238,6 +291,15 @@ class StatefulLegacyBox:
         _stub(self.bin / "node", 'echo "v22.0.0"')
         _stub(self.bin / "pgrep", "exit 1")
         _stub(self.bin / "touch", 'exec /usr/bin/touch "$@"')
+        _stub(
+            self.bin / "stat",
+            'if [ "$*" = "-c %G /dev/i2c-1" ]; then echo i2c; exit 0; fi\nexit 1',
+        )
+        _stub(
+            self.bin / "getent",
+            'if [ "$1" = "group" ] && [ "$2" = "i2c" ]; then echo "i2c:x:998:"; exit 0; fi\n'
+            'exit 2',
+        )
 
         self.env = {
             "PATH": str(self.bin),
@@ -323,6 +385,32 @@ class StatefulLegacyBox:
         assert "deploy/managed" not in launched, launched
         return proc, launched
 
+    def run_installed_power_launcher(self) -> subprocess.CompletedProcess:
+        """Run the installed /usr/local/bin/sigint101-power --startup-only under real python3 -I."""
+        launcher = self.sysroot / "usr" / "local" / "bin" / "sigint101-power"
+        assert launcher.is_file(), f"missing installed power launcher: {launcher}"
+        # Run with minimal system PATH and no PYTHONPATH so real /usr/bin/python3 -I proves the
+        # self-locating launcher resolves ../lib/sigint101-power cleanly inside the sysroot.
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "SIGINT101_POWER_THRESHOLD_V": "9.50",
+        }
+        notice_path = self.sysroot / "run" / "sigint101-power" / "notice.json"
+        proc = subprocess.run(
+            [str(launcher), "--startup-only", "--notice-path", str(notice_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        combined = proc.stdout + proc.stderr
+        assert "power.py sha256=" in combined, combined
+        assert "battery.py sha256=" in combined, combined
+        assert "arming waits on the notice slice (2b)" in combined, combined
+        return proc
+
 
 def test_the_frozen_launcher_digest_is_on_install_shs_reviewed_launcher_list():
     """install.sh's helper may SIGKILL a watchdog only on a launcher listed in
@@ -352,6 +440,7 @@ def test_interim_pr_legacy_provisioning_still_boots_checkout(tmp_path):
     _, launched = box.run_installed_launcher()
     assert "--app=http://127.0.0.1:8008" in launched
     assert "systemctl --user start sigint101.service" in box.log.read_text(encoding="utf-8")
+    box.run_installed_power_launcher()
 
     # 2) Stale-unit reinstall: corrupt the installed unit so step_kiosk triggers deploy/install.sh,
     # then confirm the reinstalled unit and desktop launcher still boot the checkout cleanly.
