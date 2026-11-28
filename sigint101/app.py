@@ -720,9 +720,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def power_notice_context(_request: Request) -> dict:
         """Read-only low-battery notice for base.html; writes nothing and never touches I2C."""
-        return {"power_notice": format_power_notice(
-            read_power_notice(power_notice_path, clock=power_clock)
-        )}
+        notice = read_power_notice(power_notice_path, clock=power_clock)
+        return {
+            "power_notice": format_power_notice(notice),
+            "power_notice_state": notice,
+        }
 
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
                                 context_processors=[status_bar, flock_tool, power_notice_context])

@@ -866,6 +866,7 @@ step_power() {
   fi
 
   local notice_needs_enable=0
+  local notice_needs_start=0
   local notice_state=""
   if [ "$notice_existed" = 0 ]; then
     notice_needs_enable=1
@@ -873,8 +874,12 @@ step_power() {
     notice_state="$(systemctl --user is-enabled sigint101-power-notice.service 2>/dev/null || true)"
     if [ -f "$notice_pending" ]; then
       if [ "$notice_state" = "enabled" ]; then
-        if [ "$CHECK" = 0 ]; then
-          rm -f "$notice_pending"
+        if systemctl --user is-active --quiet sigint101-power-notice.service 2>/dev/null; then
+          if [ "$CHECK" = 0 ]; then
+            rm -f "$notice_pending"
+          fi
+        else
+          notice_needs_start=1
         fi
       else
         notice_needs_enable=1
@@ -886,14 +891,39 @@ step_power() {
     if [ "$CHECK" = 1 ]; then
       would "enable and start sigint101-power-notice.service"
     else
-      systemctl --user daemon-reload || true
+      if systemctl --user daemon-reload; then
+        did "reload user systemd units"
+      else
+        warn "could not reload user systemd units (systemctl --user daemon-reload failed)"
+      fi
       if systemctl --user enable --now sigint101-power-notice.service; then
         rm -f "$notice_pending"
         did "enable and start sigint101-power-notice.service"
       else
         mkdir -p "$(dirname "$notice_pending")"
         touch "$notice_pending"
-        warn "sigint101-power-notice.service did not start; will retry enable on the next run (see systemctl --user status sigint101-power-notice)"
+        warn "sigint101-power-notice.service did not start; will retry on the next run (see systemctl --user status sigint101-power-notice)"
+      fi
+    fi
+  elif [ "$notice_needs_start" = 1 ]; then
+    if [ "$CHECK" = 1 ]; then
+      if [ "$notice_unit_changed" = 1 ]; then
+        would "reload user systemd units"
+      fi
+      would "start sigint101-power-notice.service"
+    else
+      if [ "$notice_unit_changed" = 1 ]; then
+        if systemctl --user daemon-reload; then
+          did "reload user systemd units"
+        else
+          warn "could not reload user systemd units (systemctl --user daemon-reload failed)"
+        fi
+      fi
+      if systemctl --user start sigint101-power-notice.service; then
+        rm -f "$notice_pending"
+        did "start sigint101-power-notice.service"
+      else
+        warn "sigint101-power-notice.service did not start; will retry on the next run (see systemctl --user status sigint101-power-notice)"
       fi
     fi
   else
@@ -910,13 +940,22 @@ step_power() {
       skip "sigint101-power-notice.service turned off by the owner (${notice_state:-unknown})"
     elif [ "$notice_changed" = 1 ]; then
       if [ "$CHECK" = 1 ]; then
-        would "reload and restart sigint101-power-notice.service"
+        if [ "$notice_unit_changed" = 1 ]; then
+          would "reload user systemd units"
+        fi
+        would "restart sigint101-power-notice.service"
       else
-        systemctl --user daemon-reload || true
+        if [ "$notice_unit_changed" = 1 ]; then
+          if systemctl --user daemon-reload; then
+            did "reload user systemd units"
+          else
+            warn "could not reload user systemd units (systemctl --user daemon-reload failed)"
+          fi
+        fi
         if systemctl --user restart sigint101-power-notice.service; then
-          did "reload and restart sigint101-power-notice.service"
+          did "restart sigint101-power-notice.service"
         else
-          warn "sigint101-power-notice.service did not start; see systemctl --user status sigint101-power-notice"
+          warn "sigint101-power-notice.service did not restart; see systemctl --user status sigint101-power-notice"
         fi
       fi
     else

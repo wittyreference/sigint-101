@@ -1266,3 +1266,119 @@ def test_f6_refused_user_daemon_reload_on_disabled_update_warns_and_continues(bo
     assert "Meshtastic LoRa defaults" in res.stdout
     assert "Stock Recon pieces" in res.stdout
     assert "Hand-over hygiene" in res.stdout
+
+
+def test_r4_f5_partially_enabled_notice_keeps_pending_marker_and_retries_start(box, tmp_path):
+    """F5: if enable --now created links before starting failed, is-enabled returns enabled while
+    the service is stopped; provision must keep the pending marker and retry start until start
+    succeeds or active state is confirmed."""
+    def _configure_notice_state(
+        *, enabled: bool, active: bool, fail_actions: tuple[str, ...] = ()
+    ):
+        _setup_power_box(
+            box,
+            tmp_path,
+            notice_unit_state="enabled" if enabled else "disabled",
+            user_exists=True,
+            fail_systemctl_actions=fail_actions,
+        )
+        # Override systemctl stub to model is-active --quiet independently of is-enabled.
+        fail_cases = "\n".join(f'  "{act}") exit 1 ;;' for act in fail_actions)
+        is_active_rc = 0 if active else 3
+        _stub(
+            box.bin / "systemctl",
+            f'echo "systemctl $*" >> "{box.log}"\n'
+            'case "$*" in\n'
+            '  "get-default") echo graphical.target; exit 0 ;;\n'
+            '  "is-enabled sigint101-power.service") echo "enabled"; exit 0 ;;\n'
+            '  "--user is-enabled sigint101-power-notice.service")\n'
+            f'    echo "{"enabled" if enabled else "disabled"}"\n'
+            f'    exit {0 if enabled else 1} ;;\n'
+            '  "--user is-active --quiet sigint101-power-notice.service")\n'
+            f'    exit {is_active_rc} ;;\n'
+            f'{fail_cases}\n'
+            '  *) exit 0 ;;\n'
+            'esac\n',
+        )
+
+    pending = box.home / ".config/systemd/user/.sigint101-power-notice.enable-pending"
+
+    # Run 1: initial enable --now fails (links created, start failed) -> leaves pending marker.
+    _configure_notice_state(
+        enabled=False,
+        active=False,
+        fail_actions=("--user enable --now sigint101-power-notice.service",),
+    )
+    r1 = box.run()
+    assert r1.returncode == 0, r1.stdout + r1.stderr
+    assert pending.is_file()
+
+    # Run 2: is-enabled is now 'enabled', service still stopped, and start fails too -> marker
+    # stays in place, warns, and does NOT claim "enabled and up to date".
+    box.log.write_text("", encoding="utf-8")
+    _configure_notice_state(
+        enabled=True,
+        active=False,
+        fail_actions=("--user start sigint101-power-notice.service",),
+    )
+    r2 = box.run()
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    sec2 = _power_section(r2.stdout)
+    assert "--user start sigint101-power-notice.service" in box.calls(), box.calls()
+    assert pending.is_file(), "pending marker was removed even though start failed"
+    assert "sigint101-power-notice.service enabled and up to date" not in sec2, sec2
+    assert "  WARN   " in sec2, sec2
+
+    # Run 3: start succeeds -> clears pending marker and reports start.
+    box.log.write_text("", encoding="utf-8")
+    _configure_notice_state(enabled=True, active=False, fail_actions=())
+    r3 = box.run()
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    sec3 = _power_section(r3.stdout)
+    assert "--user start sigint101-power-notice.service" in box.calls(), box.calls()
+    assert not pending.exists(), "pending marker should clear once start succeeds"
+    assert "start sigint101-power-notice.service" in sec3, sec3
+
+    # Run 4: after completed install, owner disables unit -> respected (never re-enabled/started).
+    box.log.write_text("", encoding="utf-8")
+    _configure_notice_state(enabled=False, active=False, fail_actions=())
+    r4 = box.run()
+    assert r4.returncode == 0, r4.stdout + r4.stderr
+    sec4 = _power_section(r4.stdout)
+    assert "turned off by the owner" in sec4, sec4
+    assert "--user start sigint101-power-notice.service" not in box.calls()
+    assert "--user enable --now sigint101-power-notice.service" not in box.calls()
+
+
+def test_r4_f6_refused_user_reload_warns_on_both_enabled_and_disabled_updates(box, tmp_path):
+    """F6: refused --user daemon-reload warns on BOTH enabled and disabled unit updates, reports
+    reload and restart outcomes separately, and lets the rest of provision.sh succeed."""
+    for state in ("enabled", "disabled"):
+        d = tmp_path / f"f6-{state}"
+        d.mkdir()
+        b = ProvisionBox(d)
+        _setup_power_box(
+            b,
+            d,
+            notice_unit_state=state,
+            user_exists=True,
+            fail_systemctl_actions=("--user daemon-reload",),
+        )
+        user_unit = b.home / ".config/systemd/user/sigint101-power-notice.service"
+        user_unit.parent.mkdir(parents=True, exist_ok=True)
+        user_unit.write_text("# older unit copy\n", encoding="utf-8")
+
+        res = b.run()
+        assert res.returncode == 0, res.stdout + res.stderr
+        sec = _power_section(res.stdout)
+        assert "  WARN   " in sec and "daemon-reload" in sec, (state, sec)
+        assert "reload and restart" not in sec, (
+            f"{state}: must report reload and restart separately when reload failed:\n{sec}"
+        )
+        if state == "enabled":
+            assert "restart sigint101-power-notice.service" in sec, sec
+        else:
+            assert "--user restart sigint101-power-notice.service" not in b.calls()
+        assert "Meshtastic LoRa defaults" in res.stdout
+        assert "Stock Recon pieces" in res.stdout
+        assert "Hand-over hygiene" in res.stdout

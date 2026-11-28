@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -95,8 +96,13 @@ def _validate_threshold_v(value: float) -> float:
     return val
 
 
+_THRESHOLD_LINE_RE = re.compile(r"^SIGINT101_POWER_THRESHOLD_V=([0-9]+(?:\.[0-9]+)?)$")
+_RECOVER_LINE_RE = re.compile(r"^SIGINT101_POWER_RECOVER_V=([0-9]+(?:\.[0-9]+)?)$")
+_SLICE_2B_LOCK_REASON = "locked disarmed in slice 2b (arming unlocks in slice 2c)"
+
+
 def parse_threshold(raw: str | None) -> tuple[float | None, str]:
-    """Parse SIGINT101_POWER_THRESHOLD_V; unset, invalid, or out-of-range stays disarmed."""
+    """Validate SIGINT101_POWER_THRESHOLD_V; slice 2b keeps the hard-disarm lock engaged."""
     if raw is None or not raw.strip():
         return None, "unset"
     text = raw.strip()
@@ -109,7 +115,8 @@ def parse_threshold(raw: str | None) -> tuple[float | None, str]:
             None,
             f"{ENV_THRESHOLD_V}={text} outside ({THRESHOLD_MIN_V}, {THRESHOLD_MAX_V}) V",
         )
-    return value, ""
+    # Slice 2b hard-disarm lock (restored from 2a): never arm until slice 2c lifts this at bench.
+    return None, _SLICE_2B_LOCK_REASON
 
 
 def parse_recover_v(raw: str | None) -> tuple[float, str]:
@@ -125,17 +132,14 @@ def parse_recover_v(raw: str | None) -> tuple[float, str]:
     return value, ""
 
 
-def _strip_matching_quotes(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-        return value[1:-1]
-    return value
-
-
 def load_power_config(
     path: Path = DEFAULT_CONFIG_PATH,
 ) -> tuple[float | None, str, float, list[str]]:
-    """Read /etc/sigint101/power.conf directly; never arm on absent, malformed, or duplicate keys.
+    """Read /etc/sigint101/power.conf under a strict allowlisted grammar (F1b).
 
+    Allowed lines: blank, `#` comment, `SIGINT101_POWER_THRESHOLD_V=<decimal>`, or
+    `SIGINT101_POWER_RECOVER_V=<decimal>`. No BOM, key whitespace, quotes, `export`, or other
+    keys; any violation or duplicate refuses the whole file with a diagnostic.
     Returns (threshold_v, disarmed_reason, recover_v, diagnostics).
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -172,54 +176,65 @@ def load_power_config(
     finally:
         os.close(fd)
 
+    raw_bytes = b"".join(chunks)
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        msg = f"config {path} starts with a UTF-8 BOM; refusing file"
+        return None, msg, 0.0, [msg]
+
     try:
-        text = b"".join(chunks).decode("utf-8")
+        text = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         msg = f"config {path} is not valid UTF-8: {exc}"
         return None, msg, 0.0, [msg]
 
+    if "\ufeff" in text:
+        msg = f"config {path} contains a UTF-8 BOM character; refusing file"
+        return None, msg, 0.0, [msg]
+
     threshold_values: list[str] = []
     recover_values: list[str] = []
-    diagnostics: list[str] = []
 
     for lineno, raw_line in enumerate(text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith(";"):
+        if raw_line.strip() == "":
             continue
-        if "=" not in line:
-            diagnostics.append(f"{path}:{lineno}: ignoring malformed line (missing '=')")
+        if raw_line.lstrip(" \t").startswith("#"):
             continue
-        raw_key, raw_val = line.split("=", 1)
-        key = raw_key.strip()
-        if key.startswith("export "):
-            key = key[len("export "):].strip()
-        val = _strip_matching_quotes(raw_val.strip())
-        if key == ENV_THRESHOLD_V:
-            threshold_values.append(val)
-        elif key == ENV_RECOVER_V:
-            recover_values.append(val)
+        m_thresh = _THRESHOLD_LINE_RE.match(raw_line)
+        if m_thresh:
+            threshold_values.append(m_thresh.group(1))
+            continue
+        m_rec = _RECOVER_LINE_RE.match(raw_line)
+        if m_rec:
+            recover_values.append(m_rec.group(1))
+            continue
+        msg = f"{path}:{lineno}: invalid line in power.conf; refusing file"
+        return None, msg, 0.0, [msg]
+
+    if len(recover_values) > 1:
+        msg = (
+            f"duplicate {ENV_RECOVER_V} assignments ({len(recover_values)}) in {path}; "
+            "refusing file"
+        )
+        return None, msg, 0.0, [msg]
 
     recover_v = 0.0
-    if len(recover_values) > 1:
-        diagnostics.append(
-            f"duplicate {ENV_RECOVER_V} assignments ({len(recover_values)}) in {path}; using 0.0 V"
-        )
-    elif len(recover_values) == 1:
+    if len(recover_values) == 1:
         recover_v, recover_warn = parse_recover_v(recover_values[0])
         if recover_warn:
-            diagnostics.append(recover_warn)
+            return None, recover_warn, 0.0, [recover_warn]
 
-    if len(threshold_values) == 0:
-        return None, "unset", recover_v, diagnostics
     if len(threshold_values) > 1:
         msg = (
             f"duplicate {ENV_THRESHOLD_V} assignments ({len(threshold_values)}) in {path}; "
-            "refusing to arm"
+            "refusing file"
         )
-        diagnostics.append(msg)
-        return None, msg, recover_v, diagnostics
+        return None, msg, 0.0, [msg]
+
+    if len(threshold_values) == 0:
+        return None, "unset", recover_v, []
 
     threshold_v, reason = parse_threshold(threshold_values[0])
+    diagnostics: list[str] = []
     if threshold_v is None and reason != "unset":
         diagnostics.append(reason)
     return threshold_v, reason, recover_v, diagnostics
@@ -324,7 +339,8 @@ def read_power_notice(
         return inactive
     if started_mono < 0.0 or updated_mono < started_mono or deadline_mono <= started_mono:
         return inactive
-    if deadline_mono > started_mono + NOTICE_S + NOTICE_FUTURE_TOLERANCE_S:
+    span = deadline_mono - started_mono
+    if not (NOTICE_S - NOTICE_FUTURE_TOLERANCE_S <= span <= NOTICE_S + NOTICE_FUTURE_TOLERANCE_S):
         return inactive
 
     now = float(clock())
@@ -333,6 +349,8 @@ def read_power_notice(
         return inactive
 
     if failed:
+        if updated_mono < deadline_mono:
+            return inactive
         retry_deadline = _to_finite_float(data.get("retry_deadline_mono"))
         if retry_deadline is None:
             return inactive
@@ -790,12 +808,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Run startup checks (log digests and armed/disarmed status) and exit 0.",
     )
     parser.add_argument(
-        "--config-path",
-        type=Path,
-        default=DEFAULT_CONFIG_PATH,
-        help="Path to the operator power.conf file (sole arming input).",
-    )
-    parser.add_argument(
         "--notice-path",
         type=Path,
         default=DEFAULT_NOTICE_PATH,
@@ -807,11 +819,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if ENV_THRESHOLD_V in os.environ or ENV_RECOVER_V in os.environ:
         LOGGER.warning(
-            "ignoring environment power settings; only %s can arm the watcher",
-            args.config_path,
+            "ignoring environment power settings; only %s can configure the watcher",
+            DEFAULT_CONFIG_PATH,
         )
 
-    threshold_v, disarmed_reason, recover_v, diagnostics = load_power_config(args.config_path)
+    threshold_v, disarmed_reason, recover_v, diagnostics = load_power_config(DEFAULT_CONFIG_PATH)
     for diag in diagnostics:
         LOGGER.warning("%s", diag)
 

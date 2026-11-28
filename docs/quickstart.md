@@ -144,15 +144,17 @@ Three decoders are not installed by default: digital voice (M27), NOAA APT (M24)
 
 ## Low-battery safe shutdown
 `deploy/provision.sh` installs the non-root low-battery power watcher (`sigint101-power.service`)
-and the learner-session desktop notice (`sigint101-power-notice.service`). **It ships disarmed**:
-no cut-off voltage is set or guessed in code or config, so the box will not power itself off until
-you measure your pack's cut-off voltage at the bench and configure a threshold.
+and the learner-session desktop notice (`sigint101-power-notice.service`). **It ships hard-disarmed
+in slice 2b**: no cut-off voltage is set or guessed in code or config, and arming stays locked off
+until slice 2c lifts the lock at the bench after measuring the pack's cut-off voltage.
 
-### Arming the watcher (after bench measurement)
+### Arming the watcher (once slice 2c unlocks arming after bench measurement)
 1. Measure your Recon's real pack cut-off voltage under load and choose a threshold strictly between
    `8.0` and `12.6` V with enough margin for the 60 s hold, 60 s notice, and clean OS shutdown.
 2. Create `/etc/sigint101/power.conf` as root (`deploy/provision.sh` never creates or overwrites
-   this file):
+   this file). Each line must be blank, a `#` comment, `SIGINT101_POWER_THRESHOLD_V=<decimal>`, or
+   `SIGINT101_POWER_RECOVER_V=<decimal>` (no UTF-8 BOM, quotes, `export`, key whitespace, unknown
+   keys, or duplicate assignments):
 
    ```
    sudo install -d -m 0755 /etc/sigint101

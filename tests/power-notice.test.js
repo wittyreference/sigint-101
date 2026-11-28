@@ -3,7 +3,15 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
+const { readFileSync } = require("node:fs");
+const { runInNewContext } = require("node:vm");
 const p = require("../sigint101/static/power-notice.js");
+
+const POWER_NOTICE_SRC = readFileSync(
+  require.resolve("../sigint101/static/power-notice.js"),
+  "utf8",
+);
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 test("inactive, null, or malformed /api/power answers stay hidden", () => {
   const hidden = { visible: false, failed: false, headline: "", detail: "" };
@@ -156,4 +164,151 @@ test("F2: monotonic countdown advances during unanswered polls and drops past li
   const s2 = ctrl2.startPoll();
   const cleared = ctrl2.applyReply(s2, { active: false }, 21000);
   assert.equal(cleared.visible, false);
+});
+
+test("F2 (r4): seeded banner survives first-poll timeout as unreadable and ignores malformed replies", async () => {
+  // Run the real installed DOM script against a server-rendered active warning.
+  function runDomFixture(initialState, { fetchImpl }) {
+    let now = 0;
+    let seq = 0;
+    const timeouts = [];
+    const intervals = [];
+    const classes = new Set(initialState && initialState.failed ? ["power-notice--failed"] : []);
+    const headline = { textContent: "LOW BATTERY · POWERING OFF IN 42 s" };
+    const detail = { textContent: "Pack 9.21 V (limit 9.50 V) · Plug in charger now to cancel" };
+    const banner = {
+      hidden: !(initialState && initialState.active === true),
+      classList: {
+        contains: (c) => classes.has(c),
+        toggle(c, force) {
+          const next = force === undefined ? !classes.has(c) : Boolean(force);
+          if (next) classes.add(c);
+          else classes.delete(c);
+          return next;
+        },
+      },
+      getAttribute(name) {
+        if (name === "data-power-initial") return JSON.stringify(initialState);
+        return null;
+      },
+      querySelector(sel) {
+        if (sel === "[data-power-headline]") return headline;
+        if (sel === "[data-power-detail]") return detail;
+        return null;
+      },
+    };
+    const listeners = {};
+    const context = {
+      document: {
+        querySelector: (sel) => (sel === "[data-power-notice]" ? banner : null),
+        addEventListener: (type, fn) => { listeners[type] = fn; },
+      },
+      performance: { now: () => now },
+      AbortController: class {
+        constructor() { this.signal = { aborted: false }; }
+        abort() { this.signal.aborted = true; }
+      },
+      fetch: fetchImpl,
+      setTimeout(fn, ms) {
+        const id = ++seq;
+        timeouts.push({ id, at: now + ms, fn });
+        return id;
+      },
+      clearTimeout(id) {
+        const i = timeouts.findIndex((t) => t.id === id);
+        if (i >= 0) timeouts.splice(i, 1);
+      },
+      setInterval(fn, ms) {
+        const id = ++seq;
+        intervals.push({ id, next: now + ms, every: ms, fn });
+        return id;
+      },
+      console,
+    };
+    context.window = context;
+    runInNewContext(POWER_NOTICE_SRC, context);
+
+    async function advance(ms) {
+      const until = now + ms;
+      for (;;) {
+        let nextTime = Infinity;
+        let pick = null;
+        for (const t of timeouts) {
+          if (t.at < nextTime) { nextTime = t.at; pick = { kind: "timeout", item: t }; }
+        }
+        for (const iv of intervals) {
+          if (iv.next < nextTime) { nextTime = iv.next; pick = { kind: "interval", item: iv }; }
+        }
+        if (!pick || nextTime > until) break;
+        now = nextTime;
+        if (pick.kind === "timeout") {
+          const idx = timeouts.indexOf(pick.item);
+          if (idx >= 0) timeouts.splice(idx, 1);
+          pick.item.fn();
+        } else {
+          pick.item.next += pick.item.every;
+          pick.item.fn();
+        }
+        await settle();
+        await settle();
+      }
+      now = until;
+      await settle();
+    }
+
+    return { banner, headline, detail, advance, triggerPoll: () => listeners["sigint101:power-poll"]() };
+  }
+
+  // Case 1: first poll hangs and times out at 5.5 s -> warning stays visible as UNREADABLE.
+  let nextReply = "hang";
+  const dom = runDomFixture(
+    { active: true, failed: false, remaining_s: 42, voltage: 9.21, threshold_v: 9.5 },
+    {
+      fetchImpl: () => {
+        if (nextReply === "hang") return new Promise(() => {});
+        const body = nextReply;
+        return Promise.resolve({ ok: true, status: 200, json: async () => body });
+      },
+    },
+  );
+  await dom.advance(6000);
+  assert.equal(dom.banner.hidden, false, "first-poll timeout must not hide seeded warning");
+  assert.match(dom.headline.textContent, /LOW BATTERY.*UNREADABLE/i);
+  assert.match(dom.detail.textContent, /cannot read/i);
+
+  // Malformed parseable replies MUST NOT clear the warning.
+  for (const bad of [{}, null, { active: true }, { active: "false" }, { active: true, failed: false }]) {
+    nextReply = bad;
+    dom.triggerPoll();
+    await settle();
+    await settle();
+    assert.equal(dom.banner.hidden, false, `malformed reply ${JSON.stringify(bad)} cleared banner`);
+  }
+
+  // Explicit valid inactive reply clears the warning.
+  nextReply = { active: false };
+  dom.triggerPoll();
+  await settle();
+  await settle();
+  assert.equal(dom.banner.hidden, true);
+  assert.equal(dom.headline.textContent, "");
+
+  // Case 2: already-polled active warning ignores malformed replies and clears only on {active: false}.
+  const ctrl = p.createPowerNoticeController({ lifetimeMs: 15000 });
+  const s1 = ctrl.startPoll();
+  const v1 = ctrl.applyReply(
+    s1,
+    { active: true, failed: false, remaining_s: 40, voltage: 9.21, threshold_v: 9.5 },
+    1000,
+  );
+  assert.equal(v1.visible, true);
+
+  for (const bad of [{}, null, { active: true }, { active: "false" }, { active: true, failed: true, remaining_s: 10 }]) {
+    const sBad = ctrl.startPoll();
+    const vBad = ctrl.applyReply(sBad, bad, 3000);
+    assert.equal(vBad.visible, true, `malformed reply ${JSON.stringify(bad)} must act as read failure`);
+    assert.match(vBad.headline, /POWERING OFF IN 38 s/);
+  }
+  const sClear = ctrl.startPoll();
+  assert.equal(ctrl.applyReply(sClear, { active: false }, 4000).visible, false);
 });

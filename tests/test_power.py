@@ -152,15 +152,11 @@ def test_unset_or_invalid_threshold_stays_disarmed_logs_once_and_makes_zero_bus_
     assert expected_fragment in disarmed_logs[0]
 
 
-@pytest.mark.parametrize("raw,expected_v", [
-    ("9.50", 9.50),
-    (" 8.01 ", 8.01),
-    ("12.59", 12.59),
-])
-def test_valid_threshold_arms_watcher_in_slice_2b(raw, expected_v):
+@pytest.mark.parametrize("raw", ["9.50", " 8.01 ", "12.59"])
+def test_valid_threshold_stays_hard_disarmed_in_slice_2b(raw):
     threshold_v, reason = parse_threshold(raw)
-    assert threshold_v == pytest.approx(expected_v)
-    assert reason == ""
+    assert threshold_v is None
+    assert "slice 2b" in reason and "2c" in reason
 
 
 @pytest.mark.parametrize("bad_threshold", [float("nan"), float("inf"), 8.0, 7.5, 12.6, 96.0])
@@ -835,15 +831,16 @@ def test_poweroff_command_hygiene_timeout_and_startup_can_power_off_check(
         bus_touched = True
         raise AssertionError("disarmed --startup-only must not read I2C")
 
+    import sigint101.power as power_mod
+
     monkeypatch.setattr(battery, "read_battery_once", boom)
     monkeypatch.delenv("SIGINT101_POWER_THRESHOLD_V", raising=False)
     missing_conf = tmp_path / "missing-power.conf"
+    monkeypatch.setattr(power_mod, "DEFAULT_CONFIG_PATH", missing_conf)
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="sigint101.power"):
         rc = main([
             "--startup-only",
-            "--config-path",
-            str(missing_conf),
             "--notice-path",
             str(tmp_path / "cli-notice.json"),
         ])
@@ -853,26 +850,23 @@ def test_poweroff_command_hygiene_timeout_and_startup_can_power_off_check(
     assert "power.py" in msgs and "battery.py" in msgs
     assert "disarmed (unset)" in msgs
 
-    # Armed --startup-only reads power.conf directly (never env vars), checks CanPowerOff
-    # (stubbed here; never calls host polkit/busctl), logs armed threshold, touches no I2C bus.
-    import sigint101.power as power_mod
-
+    # Even with a valid single assignment in power.conf, slice 2b's hard-disarm lock keeps the
+    # watcher disarmed with zero I2C reads and zero polkit calls.
     monkeypatch.setattr(power_mod, "check_can_power_off", lambda: (True, 's "yes"'))
     valid_conf = tmp_path / "armed-power.conf"
     valid_conf.write_text("SIGINT101_POWER_THRESHOLD_V=9.50\n", encoding="utf-8")
+    monkeypatch.setattr(power_mod, "DEFAULT_CONFIG_PATH", valid_conf)
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="sigint101.power"):
-        rc_armed = main([
+        rc_locked = main([
             "--startup-only",
-            "--config-path",
-            str(valid_conf),
             "--notice-path",
             str(tmp_path / "cli-notice.json"),
         ])
-    assert rc_armed == 0
+    assert rc_locked == 0
     assert bus_touched is False
-    armed_msgs = "\n".join(r.getMessage() for r in caplog.records)
-    assert "armed at 9.50 V" in armed_msgs
+    locked_msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "disarmed" in locked_msgs and "armed at" not in locked_msgs
 
 
 # --- Test 9: systemd unit file is non-root and hardened -------------------------
@@ -1263,15 +1257,24 @@ def test_f1_power_conf_is_sole_arming_input_and_rejects_duplicates_through_insta
     notice_path = tmp_path / "notice.json"
     base_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
+    lib_root = sysroot / "usr" / "local" / "lib" / "sigint101-power"
+    snippet = (
+        "import pathlib, sys; sys.path.insert(0, sys.argv[1]); "
+        "import sigint101.power as p; "
+        "p.DEFAULT_CONFIG_PATH = pathlib.Path(sys.argv[2]); "
+        "sys.exit(p.main(['--startup-only', '--notice-path', sys.argv[3]]))"
+    )
+
     def _run_installed(conf_path: Path, *, extra_env: dict[str, str] | None = None) -> str:
         env = {**base_env, **(extra_env or {})}
         proc = subprocess.run(
             [
-                str(launcher),
-                "--startup-only",
-                "--config-path",
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                snippet,
+                str(lib_root),
                 str(conf_path),
-                "--notice-path",
                 str(notice_path),
             ],
             env=env,
@@ -1293,21 +1296,23 @@ def test_f1_power_conf_is_sole_arming_input_and_rejects_duplicates_through_insta
     assert "disarmed" in out_nothresh and "armed at" not in out_nothresh
 
     # 3) Conflicting duplicate threshold assignments (bad+valid and two valid) refused + disarmed.
-    for name, body in (
+    for name, body, expect in (
         (
             "dup-bad-good.conf",
             "SIGINT101_POWER_THRESHOLD_V=abc\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            "invalid",
         ),
         (
             "dup-conflict.conf",
             "SIGINT101_POWER_THRESHOLD_V=9.20\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            "duplicate",
         ),
     ):
         p = tmp_path / name
         p.write_text(body, encoding="utf-8")
         out = _run_installed(p)
         assert "disarmed" in out and "armed at" not in out, out
-        assert "duplicate" in out.lower(), out
+        assert expect in out.lower(), out
 
     # 4) Identical duplicate threshold assignments also refused + disarmed.
     dup_same = tmp_path / "dup-same.conf"
@@ -1326,30 +1331,15 @@ def test_f1_power_conf_is_sole_arming_input_and_rejects_duplicates_through_insta
     )
     assert "disarmed" in out_env and "armed at" not in out_env, out_env
 
-    # 6) Exactly one valid assignment arms (check_can_power_off stubbed; never calls host polkit).
+    # 6) Under slice 2b's hard-disarm lock, a valid single assignment also stays disarmed.
     valid_conf = tmp_path / "valid.conf"
     valid_conf.write_text(
         "# bench calibrated\nSIGINT101_POWER_THRESHOLD_V=9.50\nSIGINT101_POWER_RECOVER_V=0.20\n",
         encoding="utf-8",
     )
-    lib_root = sysroot / "usr" / "local" / "lib" / "sigint101-power"
-    snippet = (
-        "import sys; sys.path.insert(0, sys.argv[1]); "
-        "import sigint101.power as p; "
-        "p.check_can_power_off = lambda: (True, 's \"yes\"'); "
-        "sys.exit(p.main(['--startup-only', '--config-path', sys.argv[2], "
-        "'--notice-path', sys.argv[3]]))"
-    )
-    proc_armed = subprocess.run(
-        ["/usr/bin/python3", "-I", "-c", snippet, str(lib_root), str(valid_conf), str(notice_path)],
-        env=base_env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert proc_armed.returncode == 0, (proc_armed.stdout, proc_armed.stderr)
-    out_armed = proc_armed.stdout + proc_armed.stderr
-    assert "armed at 9.50 V (recover_v=0.20 V)" in out_armed, out_armed
+    out_valid = _run_installed(valid_conf)
+    assert "disarmed" in out_valid and "armed at" not in out_valid, out_valid
+    assert "slice 2b" in out_valid, out_valid
 
 
 def test_f3_malformed_notices_never_crash_or_pass_as_active(tmp_path):
@@ -1552,3 +1542,404 @@ def test_f4_desktop_notice_closes_via_close_capable_transport_on_recovery_and_ex
         clk.advance(NOTICE_STALE_S + 1.0)
         assert mon.tick() == "INACTIVE"
         assert live_notifs == {}, f"{kind} left warning open after expiry: {live_notifs}"
+
+
+# --- Round 4 (LOCK, F1a, F1b, F2 server seed, F3 span/update, F4 close retry) ---
+
+
+def test_r4_lock_f1a_f1b_hard_disarm_canonical_path_and_strict_grammar(tmp_path):
+    """LOCK + F1a + F1b: 2b restores 2a's hard-disarm in parse_threshold; production launcher
+    binds strictly to /etc/sigint101/power.conf (refusing --config-path); power.conf enforces a
+    strict allowlisted grammar (rejecting BOM, unknown keys, quotes, export, key whitespace, and
+    duplicates). Every case stays disarmed through the installed entry point with zero shutdowns."""
+    # LOCK: parse_threshold never returns an armed threshold for any input in slice 2b.
+    for raw in ("9.50", "8.01", "12.59", "10.0"):
+        tv, reason = parse_threshold(raw)
+        assert tv is None, f"slice 2b lock must keep parse_threshold({raw!r}) disarmed"
+        assert reason, f"expected disarmed reason for {raw!r}"
+
+    # Stage the real installed layout in a temporary sysroot.
+    sysroot = tmp_path / "sysroot"
+    lib_root = sysroot / "usr" / "local" / "lib" / "sigint101-power"
+    lib_pkg = lib_root / "sigint101"
+    lib_pkg.mkdir(parents=True)
+    for py_name in ("__init__.py", "battery.py", "power.py"):
+        (lib_pkg / py_name).write_bytes((REPO / "sigint101" / py_name).read_bytes())
+    bin_dir = sysroot / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True)
+    launcher = bin_dir / "sigint101-power"
+    launcher.write_bytes((REPO / "deploy" / "system" / "sigint101-power").read_bytes())
+    launcher.chmod(0o755)
+    notice_path = tmp_path / "notice.json"
+    base_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+
+    # F1a: installed launcher refuses --config-path with a valid alternate file (canonical absent).
+    alt_conf = tmp_path / "alt-power.conf"
+    alt_conf.write_text("SIGINT101_POWER_THRESHOLD_V=9.50\n", encoding="utf-8")
+    proc_alt = subprocess.run(
+        [str(launcher), "--config-path", str(alt_conf), "--notice-path", str(notice_path)],
+        env=base_env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert proc_alt.returncode != 0, (
+        "installed launcher must refuse --config-path, got rc=0: "
+        f"{proc_alt.stdout}{proc_alt.stderr}"
+    )
+
+    # Full-loop probe through the installed lib/sigint101-power package (90 ticks at low 9.1 V,
+    # fake shutdown spy, fake gauge spy) with canonical DEFAULT_CONFIG_PATH substituted in test.
+    loop_snippet = r"""
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import sigint101.power as p
+from sigint101.battery import BatteryReading, INA219Config
+
+p.DEFAULT_CONFIG_PATH = pathlib.Path(sys.argv[2])
+notice_path = pathlib.Path(sys.argv[3])
+
+gauge_calls = 0
+auth_calls = 0
+shutdown_calls = 0
+t = [1000.0]
+
+def fake_reader():
+    global gauge_calls
+    gauge_calls += 1
+    return INA219Config(0x399F), BatteryReading(
+        voltage=9.10, current_a=-0.6, power_w=5.46, percent=5, charging=False
+    )
+
+def fake_auth():
+    global auth_calls
+    auth_calls += 1
+    return True, 's "yes"'
+
+def fake_poweroff():
+    global shutdown_calls
+    shutdown_calls += 1
+
+def fake_clock():
+    return t[0]
+
+def fake_sleep(dt):
+    t[0] += dt
+
+# Stub main's watcher loop to run 90 ticks deterministically without touching host hardware.
+p.battery.read_battery_once = fake_reader
+p.check_can_power_off = fake_auth
+p.run_poweroff = fake_poweroff
+p.time.monotonic = fake_clock
+ticks = [0]
+orig_sleep = fake_sleep
+def bounded_sleep(dt):
+    ticks[0] += 1
+    orig_sleep(dt)
+    if ticks[0] >= 90:
+        import os, signal
+        os.kill(os.getpid(), signal.SIGTERM)
+p.time.sleep = bounded_sleep
+
+rc = p.main(["--notice-path", str(notice_path)])
+print("RESULT:" + json.dumps({
+    "rc": rc,
+    "ticks": ticks[0],
+    "gauge_calls": gauge_calls,
+    "auth_calls": auth_calls,
+    "shutdown_calls": shutdown_calls,
+    "notice_exists": notice_path.exists(),
+}))
+"""
+
+    def _run_loop(conf_path: Path, *, extra_env: dict[str, str] | None = None) -> tuple[dict, str]:
+        env = {**base_env, **(extra_env or {})}
+        proc = subprocess.run(
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                loop_snippet,
+                str(lib_root),
+                str(conf_path),
+                str(notice_path),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        combined = proc.stdout + proc.stderr
+        line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT:"))
+        return json.loads(line[len("RESULT:"):]), combined
+
+    cases: list[tuple[str, bytes | None, dict[str, str] | None, str]] = [
+        ("absent_file", None, None, "disarmed"),
+        ("threshold_free", b"# comment\n\nSIGINT101_POWER_RECOVER_V=0.20\n", None, "disarmed"),
+        (
+            "plain_dup_conflict",
+            b"SIGINT101_POWER_THRESHOLD_V=9.20\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "duplicate",
+        ),
+        (
+            "plain_dup_identical",
+            b"SIGINT101_POWER_THRESHOLD_V=9.50\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "duplicate",
+        ),
+        (
+            "bom_dup_conflict",
+            b"\xef\xbb\xbfSIGINT101_POWER_THRESHOLD_V=9.20\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "bom",
+        ),
+        (
+            "bom_dup_identical",
+            b"\xef\xbb\xbfSIGINT101_POWER_THRESHOLD_V=9.50\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "bom",
+        ),
+        ("bom_single", b"\xef\xbb\xbfSIGINT101_POWER_THRESHOLD_V=9.50\n", None, "bom"),
+        (
+            "unknown_key",
+            b"FOO=bar\nSIGINT101_POWER_THRESHOLD_V=9.50\n",
+            None,
+            "invalid",
+        ),
+        ("quoted_double", b'SIGINT101_POWER_THRESHOLD_V="9.50"\n', None, "invalid"),
+        ("quoted_single", b"SIGINT101_POWER_THRESHOLD_V='9.50'\n", None, "invalid"),
+        ("export_prefix", b"export SIGINT101_POWER_THRESHOLD_V=9.50\n", None, "invalid"),
+        ("key_leading_space", b" SIGINT101_POWER_THRESHOLD_V=9.50\n", None, "invalid"),
+        ("key_trailing_space", b"SIGINT101_POWER_THRESHOLD_V =9.50\n", None, "invalid"),
+        ("semicolon_comment", b"; comment\nSIGINT101_POWER_THRESHOLD_V=9.50\n", None, "invalid"),
+        ("env_only", None, {"SIGINT101_POWER_THRESHOLD_V": "9.50"}, "disarmed"),
+        (
+            "valid_single_assignment_locked_in_2b",
+            (
+                b"# bench calibrated\n"
+                b"SIGINT101_POWER_THRESHOLD_V=9.50\n"
+                b"SIGINT101_POWER_RECOVER_V=0.20\n"
+            ),
+            None,
+            "disarmed",
+        ),
+    ]
+
+    for label, content, extra_env, expected_diag in cases:
+        conf = tmp_path / f"case-{label}.conf"
+        if content is not None:
+            conf.write_bytes(content)
+        res, output = _run_loop(conf, extra_env=extra_env)
+        assert res["rc"] == 0, (label, output)
+        assert res["gauge_calls"] == 0, f"{label}: disarmed watcher read I2C"
+        assert res["auth_calls"] == 0, f"{label}: disarmed watcher checked auth"
+        assert res["shutdown_calls"] == 0, f"{label}: disarmed watcher invoked shutdown"
+        assert res["notice_exists"] is False, f"{label}: disarmed watcher wrote notice.json"
+        assert "armed at" not in output, (label, output)
+        assert "disarmed" in output.lower(), (label, output)
+        assert expected_diag in output.lower(), f"{label}: missing {expected_diag!r} in:\n{output}"
+
+
+def test_r4_f2_base_html_seeds_structured_power_notice_state(tmp_path):
+    """F2: base.html embeds structured JSON initial notice state on [data-power-notice] so the
+    client controller can retain a server-rendered warning if the first /api/power poll fails."""
+    import html as html_mod
+    import re
+
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+
+    clk = _Clock(1000.0)
+    notice_path = tmp_path / "notice.json"
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=tmp_path / "data",
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+
+    def _extract_initial(body: str) -> dict:
+        m = re.search(r'data-power-initial="([^"]*)"', body)
+        assert m, "base.html must emit data-power-initial structured notice state"
+        return json.loads(html_mod.unescape(m.group(1)))
+
+    with TestClient(app) as client:
+        assert _extract_initial(client.get("/").text) == {"active": False}
+
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+            "started_mono": 982.0, "deadline_mono": 1042.0, "updated_mono": 999.0,
+        }), encoding="utf-8")
+        assert _extract_initial(client.get("/").text) == {
+            "active": True, "failed": False, "remaining_s": 42,
+            "voltage": 9.21, "threshold_v": 9.5,
+        }
+
+        notice_path.write_text(json.dumps({
+            "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+            "started_mono": 900.0, "deadline_mono": 960.0, "updated_mono": 999.5,
+            "retry_deadline_mono": 1047.0,
+        }), encoding="utf-8")
+        assert _extract_initial(client.get("/").text) == {
+            "active": True, "failed": True, "retry_in_s": 47,
+            "voltage": 9.18, "threshold_v": 9.5,
+        }
+
+
+def test_r4_f3_rejects_impossible_countdown_span_and_premature_failed_update(tmp_path):
+    """F3: read_power_notice rejects notices whose countdown span does not match NOTICE_S (~60 s)
+    and failed notices whose updated_mono precedes the original deadline_mono, across both API
+    and desktop monitor."""
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+    from sigint101.power_desktop import DesktopNoticeMonitor
+
+    clk = _Clock(1000.0)
+    notice_path = tmp_path / "notice.json"
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=tmp_path / "data",
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+
+    class _NoopNotifier:
+        def show(self, *_a, **_kw) -> bool:
+            raise AssertionError("invalid notice must never show a desktop alert")
+
+        def clear(self) -> bool:
+            return True
+
+    mon = DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=_NoopNotifier())
+
+    invalid_cases = [
+        (
+            "1ms_countdown_span",
+            {
+                "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+                "started_mono": 999.0, "deadline_mono": 999.001, "updated_mono": 999.0,
+            },
+        ),
+        (
+            "short_30s_countdown_span",
+            {
+                "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+                "started_mono": 980.0, "deadline_mono": 1010.0, "updated_mono": 999.0,
+            },
+        ),
+        (
+            "long_120s_countdown_span",
+            {
+                "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+                "started_mono": 900.0, "deadline_mono": 1020.0, "updated_mono": 999.0,
+            },
+        ),
+        (
+            "failed_updated_before_deadline",
+            {
+                "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+                "started_mono": 960.0, "deadline_mono": 1020.0, "updated_mono": 999.0,
+                "retry_deadline_mono": 1040.0,
+            },
+        ),
+    ]
+
+    with TestClient(app) as client:
+        for label, payload in invalid_cases:
+            notice_path.write_text(json.dumps(payload), encoding="utf-8")
+            assert read_power_notice(notice_path, clock=clk) == {"active": False}, label
+            resp = client.get("/api/power")
+            assert resp.status_code == 200 and resp.json() == {"active": False}, label
+            assert mon.tick() == "INACTIVE", label
+
+
+def test_r4_f4_retains_notification_id_and_retries_pending_close_for_each_transport(tmp_path):
+    """F4: a transient nonzero exit or timeout on CloseNotification retains the displayed ID and
+    retries on subsequent inactive ticks until close succeeds or the daemon confirms it gone."""
+    import sigint101.power_desktop as pd
+
+    for kind in ("gdbus", "busctl"):
+        for failure_mode in ("nonzero", "timeout"):
+            clk = _Clock(500.0)
+            notice_path = tmp_path / f"retry-{kind}-{failure_mode}.json"
+            live_notifs: dict[int, tuple[str, str]] = {}
+            close_attempts: list[int] = []
+            fail_first_close = {"armed": True}
+            next_id = 30
+
+            def _fake_daemon(cmd, **kw):
+                nonlocal next_id
+                assert kw["timeout"] > 0
+                is_close = (
+                    "org.freedesktop.Notifications.CloseNotification" in cmd
+                    if kind == "gdbus"
+                    else "CloseNotification" in cmd
+                )
+                if is_close:
+                    nid = int(cmd[-1])
+                    close_attempts.append(nid)
+                    if fail_first_close["armed"]:
+                        fail_first_close["armed"] = False
+                        if failure_mode == "timeout":
+                            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+                        return SimpleNamespace(
+                            returncode=1,
+                            stdout="",
+                            stderr="Error: org.freedesktop.DBus.Error.NoReply",
+                        )
+                    live_notifs.pop(nid, None)
+                    return SimpleNamespace(
+                        returncode=0, stdout="()\n" if kind == "gdbus" else "", stderr=""
+                    )
+                if kind == "gdbus":
+                    replaces = int(cmd[cmd.index(pd.APP_NAME) + 1])
+                    nid = replaces if replaces > 0 else next_id
+                    if replaces == 0:
+                        next_id += 1
+                    live_notifs[nid] = (cmd[cmd.index(pd.APP_NAME) + 3], "")
+                    return SimpleNamespace(returncode=0, stdout=f"(uint32 {nid},)\n", stderr="")
+                idx = cmd.index("susssasa{sv}i")
+                replaces = int(cmd[idx + 2])
+                nid = replaces if replaces > 0 else next_id
+                if replaces == 0:
+                    next_id += 1
+                live_notifs[nid] = (cmd[idx + 4], "")
+                return SimpleNamespace(returncode=0, stdout=f"u {nid}\n", stderr="")
+
+            notifier = (
+                pd.GdbusNotifier(gdbus_bin="/usr/bin/gdbus", runner=_fake_daemon)
+                if kind == "gdbus"
+                else pd.BusctlNotifier(busctl_bin="/usr/bin/busctl", runner=_fake_daemon)
+            )
+            mon = pd.DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=notifier)
+
+            # 1) Show active countdown -> ID 30 live in daemon.
+            notice_path.write_text(json.dumps({
+                "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+                "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.0,
+            }), encoding="utf-8")
+            assert mon.tick() == "ACTIVE"
+            assert list(live_notifs.keys()) == [30]
+
+            # 2) Notice clears; first close fails -> ID 30 still live on daemon and retained.
+            notice_path.unlink()
+            assert mon.tick() == "INACTIVE"
+            assert close_attempts == [30]
+            assert list(live_notifs.keys()) == [30]
+
+            # 3) Next inactive tick retries CloseNotification(30) and closes it cleanly!
+            assert mon.tick() == "INACTIVE"
+            assert close_attempts == [30, 30], (kind, failure_mode, close_attempts)
+            assert live_notifs == {}, f"{kind}/{failure_mode} failed to close on retry"
+
+            # 4) Further inactive ticks stop retrying once closed.
+            assert mon.tick() == "INACTIVE"
+            assert close_attempts == [30, 30]

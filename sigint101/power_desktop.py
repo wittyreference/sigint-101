@@ -24,6 +24,18 @@ NOTIFY_EXPIRE_MS = 6000  # Refreshed every 2 s; auto-expires cleanly if notifier
 
 _UINT32_RE = re.compile(r"\buint32\s+(\d+)\b")
 _BUSCTL_U_RE = re.compile(r"^\s*u\s+(\d+)\s*$")
+_DAEMON_GONE_HINTS = (
+    "unknownnotification",
+    "unknown notification",
+    "no such notification",
+    "notification not found",
+    "invalid notification",
+)
+
+
+def _daemon_confirms_gone(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(hint in lower for hint in _DAEMON_GONE_HINTS)
 
 
 def format_desktop_notice(notice: dict | None) -> tuple[str, str] | None:
@@ -135,11 +147,10 @@ class GdbusNotifier:
             self._notify_id = int(match.group(1))
         return True
 
-    def clear(self) -> None:
+    def clear(self) -> bool:
         if self._notify_id <= 0:
-            return
+            return True
         nid = self._notify_id
-        self._notify_id = 0
         cmd = [
             self._gdbus,
             "call",
@@ -153,7 +164,7 @@ class GdbusNotifier:
             str(nid),
         ]
         try:
-            self._runner(
+            res = self._runner(
                 cmd,
                 check=False,
                 timeout=NOTIFY_TIMEOUT_S,
@@ -164,7 +175,14 @@ class GdbusNotifier:
                 env=_session_env(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            LOGGER.warning("gdbus CloseNotification failed: %s", exc)
+            LOGGER.warning("gdbus CloseNotification(%d) failed: %s", nid, exc)
+            return False
+        detail = ((res.stderr or "") + "\n" + (res.stdout or "")).strip()
+        if res.returncode == 0 or _daemon_confirms_gone(detail):
+            self._notify_id = 0
+            return True
+        LOGGER.warning("gdbus CloseNotification(%d) exited %d: %s", nid, res.returncode, detail)
+        return False
 
 
 class BusctlNotifier:
@@ -223,11 +241,10 @@ class BusctlNotifier:
             self._notify_id = int(match.group(1))
         return True
 
-    def clear(self) -> None:
+    def clear(self) -> bool:
         if self._notify_id <= 0:
-            return
+            return True
         nid = self._notify_id
-        self._notify_id = 0
         cmd = [
             self._busctl,
             "--user",
@@ -240,7 +257,7 @@ class BusctlNotifier:
             str(nid),
         ]
         try:
-            self._runner(
+            res = self._runner(
                 cmd,
                 check=False,
                 timeout=NOTIFY_TIMEOUT_S,
@@ -251,7 +268,14 @@ class BusctlNotifier:
                 env=_session_env(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            LOGGER.warning("busctl CloseNotification failed: %s", exc)
+            LOGGER.warning("busctl CloseNotification(%d) failed: %s", nid, exc)
+            return False
+        detail = ((res.stderr or "") + "\n" + (res.stdout or "")).strip()
+        if res.returncode == 0 or _daemon_confirms_gone(detail):
+            self._notify_id = 0
+            return True
+        LOGGER.warning("busctl CloseNotification(%d) exited %d: %s", nid, res.returncode, detail)
+        return False
 
 
 class NullNotifier:
@@ -270,8 +294,9 @@ class NullNotifier:
             self._warned = True
         return False
 
-    def clear(self) -> None:
+    def clear(self) -> bool:
         self._warned = False
+        return True
 
 
 def build_notifier():
@@ -305,9 +330,10 @@ class DesktopNoticeMonitor:
         formatted = format_desktop_notice(notice)
         if formatted is None:
             if self._active:
-                self._notifier.clear()
-                self._active = False
-                LOGGER.info("low-battery desktop notice cleared")
+                closed = self._notifier.clear()
+                if closed is not False:
+                    self._active = False
+                    LOGGER.info("low-battery desktop notice cleared")
             return "INACTIVE"
         summary, body = formatted
         failed = bool(notice["failed"])
@@ -317,8 +343,9 @@ class DesktopNoticeMonitor:
 
     def shutdown(self) -> None:
         if self._active:
-            self._notifier.clear()
-            self._active = False
+            closed = self._notifier.clear()
+            if closed is not False:
+                self._active = False
 
 
 def main(argv: list[str] | None = None) -> int:

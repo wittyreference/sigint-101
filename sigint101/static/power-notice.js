@@ -65,8 +65,22 @@
     };
   }
 
-  // Sequenced snapshot controller: ignores superseded replies, advances countdown from a monotonic
-  // clock while fresh, and keeps the warning without a frozen countdown past lifetimeMs.
+  function classifyPowerReply(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return { kind: "malformed" };
+    }
+    if (data.active === false) {
+      return { kind: "inactive" };
+    }
+    if (data.active === true && powerNoticeView(data).visible) {
+      return { kind: "active", data: data };
+    }
+    return { kind: "malformed" };
+  }
+
+  // Sequenced snapshot controller: seeds from structured server state, ignores superseded replies,
+  // treats malformed replies as read failures, advances countdown from a monotonic clock while
+  // fresh, and keeps the warning marked unreadable when live status cannot be confirmed.
   function createPowerNoticeController(opts) {
     var lifetimeMs = (opts && isFiniteNumber(opts.lifetimeMs) && opts.lifetimeMs > 0)
       ? opts.lifetimeMs
@@ -75,10 +89,22 @@
     var appliedSeq = 0;
     var snapshot = null;
 
+    function buildSnapshot(data, nowMs, seeded) {
+      return {
+        failed: data.failed === true,
+        baseSec: Math.max(0, Math.ceil(data.failed ? data.retry_in_s : data.remaining_s)),
+        voltage: isFiniteNumber(data.voltage) ? data.voltage : null,
+        threshold_v: isFiniteNumber(data.threshold_v) ? data.threshold_v : null,
+        receivedAtMs: nowMs,
+        seeded: !!seeded,
+        unreadable: false,
+      };
+    }
+
     function renderAt(nowMs) {
       if (!snapshot) return HIDDEN;
       var elapsedMs = Math.max(0, nowMs - snapshot.receivedAtMs);
-      if (elapsedMs > lifetimeMs) {
+      if (snapshot.unreadable || elapsedMs > lifetimeMs) {
         return expiredView(snapshot);
       }
       var sec = Math.max(0, Math.ceil(snapshot.baseSec - elapsedMs / 1000));
@@ -92,31 +118,41 @@
       });
     }
 
+    function seed(data, nowMs) {
+      var cls = classifyPowerReply(data);
+      if (cls.kind === "active") {
+        snapshot = buildSnapshot(cls.data, nowMs, true);
+        return renderAt(nowMs);
+      }
+      snapshot = null;
+      return HIDDEN;
+    }
+
     function startPoll() {
       nextSeq += 1;
       return nextSeq;
     }
 
-    function applyReply(seq, data, nowMs) {
+    function applyError(seq, nowMs) {
       if (seq < appliedSeq) return null;
-      appliedSeq = seq;
-      var view = powerNoticeView(data);
-      if (!view.visible) {
-        snapshot = null;
-        return HIDDEN;
+      if (snapshot && snapshot.seeded) {
+        snapshot.unreadable = true;
       }
-      snapshot = {
-        failed: data.failed === true,
-        baseSec: Math.max(0, Math.ceil(data.failed ? data.retry_in_s : data.remaining_s)),
-        voltage: isFiniteNumber(data.voltage) ? data.voltage : null,
-        threshold_v: isFiniteNumber(data.threshold_v) ? data.threshold_v : null,
-        receivedAtMs: nowMs,
-      };
       return renderAt(nowMs);
     }
 
-    function applyError(seq, nowMs) {
+    function applyReply(seq, data, nowMs) {
       if (seq < appliedSeq) return null;
+      var cls = classifyPowerReply(data);
+      if (cls.kind === "malformed") {
+        return applyError(seq, nowMs);
+      }
+      appliedSeq = seq;
+      if (cls.kind === "inactive") {
+        snapshot = null;
+        return HIDDEN;
+      }
+      snapshot = buildSnapshot(cls.data, nowMs, false);
       return renderAt(nowMs);
     }
 
@@ -125,6 +161,7 @@
     }
 
     return {
+      seed: seed,
       startPoll: startPoll,
       applyReply: applyReply,
       applyError: applyError,
@@ -137,6 +174,7 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       powerNoticeView: powerNoticeView,
+      classifyPowerReply: classifyPowerReply,
       createPowerNoticeController: createPowerNoticeController,
       REQUEST_TIMEOUT_MS: REQUEST_TIMEOUT_MS,
       SNAPSHOT_LIFETIME_MS: SNAPSHOT_LIFETIME_MS,
@@ -155,6 +193,14 @@
   }
 
   var controller = createPowerNoticeController({ lifetimeMs: SNAPSHOT_LIFETIME_MS });
+  var initialRaw = banner.getAttribute ? banner.getAttribute("data-power-initial") : null;
+  if (initialRaw) {
+    try {
+      controller.seed(JSON.parse(initialRaw), monoNow());
+    } catch (_e) {
+      /* ignore malformed initial attribute; live poll will recover */
+    }
+  }
 
   function draw(view) {
     if (!view) return;

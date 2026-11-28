@@ -74,10 +74,12 @@
     </header>
 
     {% set pn = power_notice|default({'visible': false, 'failed': false, 'headline': '', 'detail': ''}) %}
+    {% set pn_state = power_notice_state|default({'active': false}) %}
     <div class="power-notice{% if pn.failed %} power-notice--failed{% endif %}"
          role="alert"
          aria-live="assertive"
          data-power-notice
+         data-power-initial="{{ pn_state|tojson|forceescape }}"
          {% if not pn.visible %}hidden{% endif %}>
       <svg class="power-notice__glyph" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M12 3L2 20h20L12 3z"/>

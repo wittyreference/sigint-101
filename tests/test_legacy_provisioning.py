@@ -88,20 +88,21 @@ LEGACY_INSTALLED_FILES: tuple[tuple[str, str, str, str], ...] = (
         "usr/local/lib/sigint101-power/sigint101/battery.py",
         "33e91635e86833a459f812bcadb51a90337734779c7d5e7d221fec0b08562451",
     ),
-    # Safe shutdown slice 2b (round 3 F1/F3): watcher reads /etc/sigint101/power.conf directly
-    # (rejecting duplicate threshold lines and ignoring env vars) and validates notice invariants.
+    # Safe shutdown slice 2b (round 4 LOCK/F1a/F1b/F3): hard-disarm lock restored in
+    # parse_threshold (lifted in 2c), canonical /etc/sigint101/power.conf only, strict grammar,
+    # and full notice span/deadline validation.
     (
         "sigint101/power.py",
         "sysroot",
         "usr/local/lib/sigint101-power/sigint101/power.py",
-        "f74b88bcc52704bf6a04a35bd5a2f1179b9ab6334b8325eab5e1c45d7cb3e66b",
+        "b4b558fa7aabe7804f9711213b65cb9dffdccb153af342a8be2611c29376fc25",
     ),
-    # Safe shutdown slice 2b (round 3 F4): desktop notice uses close-capable gdbus/busctl D-Bus.
+    # Safe shutdown slice 2b (round 4 F4): close-capable gdbus/busctl D-Bus with close retry.
     (
         "sigint101/power_desktop.py",
         "sysroot",
         "usr/local/lib/sigint101-power/sigint101/power_desktop.py",
-        "356014cea2e6e43eaaa7c0dc2599bb6bc93e1f35a3db7baa2e4442438ca215a6",
+        "8040e89cbba581949ea164e6602d0b866de3238f18c588e1e5fb0b9cb3b16eac",
     ),
     # Safe shutdown slice 2b (round 3 F1): hardened non-root unit under /usr/local/lib/systemd/
     # system without EnvironmentFile (watcher reads power.conf itself).
@@ -419,13 +420,10 @@ class StatefulLegacyBox:
             "LANG": "C.UTF-8",
         }
         notice_path = self.sysroot / "run" / "sigint101-power" / "notice.json"
-        missing_conf = self.sysroot / "etc" / "sigint101" / "power.conf"
         proc = subprocess.run(
             [
                 str(launcher),
                 "--startup-only",
-                "--config-path",
-                str(missing_conf),
                 "--notice-path",
                 str(notice_path),
             ],
@@ -438,16 +436,14 @@ class StatefulLegacyBox:
         combined = proc.stdout + proc.stderr
         assert "power.py sha256=" in combined, combined
         assert "battery.py sha256=" in combined, combined
-        assert "disarmed (unset)" in combined, combined
+        assert "disarmed" in combined and "armed at" not in combined, combined
 
-        # Environment variable with no power.conf NEVER arms (F1).
+        # Environment variable NEVER arms (F1 / LOCK).
         env_only = {**env, "SIGINT101_POWER_THRESHOLD_V": "9.50"}
         proc_env = subprocess.run(
             [
                 str(launcher),
                 "--startup-only",
-                "--config-path",
-                str(missing_conf),
                 "--notice-path",
                 str(notice_path),
             ],
@@ -458,17 +454,17 @@ class StatefulLegacyBox:
         )
         assert proc_env.returncode == 0, (proc_env.stdout, proc_env.stderr)
         combined_env = proc_env.stdout + proc_env.stderr
-        assert "disarmed (unset)" in combined_env and "armed at" not in combined_env, combined_env
+        assert "disarmed" in combined_env and "armed at" not in combined_env, combined_env
 
-        # Out-of-range threshold in power.conf also stays disarmed without touching I2C or polkit.
-        bad_conf = self.root / "bad-power.conf"
-        bad_conf.write_text("SIGINT101_POWER_THRESHOLD_V=96\n", encoding="utf-8")
-        proc_bad = subprocess.run(
+        # Passing an alternate --config-path to the installed launcher is refused (F1a).
+        alt_conf = self.root / "alt-power.conf"
+        alt_conf.write_text("SIGINT101_POWER_THRESHOLD_V=9.50\n", encoding="utf-8")
+        proc_alt = subprocess.run(
             [
                 str(launcher),
                 "--startup-only",
                 "--config-path",
-                str(bad_conf),
+                str(alt_conf),
                 "--notice-path",
                 str(notice_path),
             ],
@@ -477,9 +473,7 @@ class StatefulLegacyBox:
             text=True,
             timeout=15,
         )
-        assert proc_bad.returncode == 0, (proc_bad.stdout, proc_bad.stderr)
-        combined_bad = proc_bad.stdout + proc_bad.stderr
-        assert "disarmed" in combined_bad and "outside" in combined_bad, combined_bad
+        assert proc_alt.returncode != 0, (proc_alt.stdout, proc_alt.stderr)
 
         # Learner-session desktop notice launcher also self-locates cleanly under python3 -I.
         notice_launcher = self.sysroot / "usr" / "local" / "bin" / "sigint101-power-notice"
