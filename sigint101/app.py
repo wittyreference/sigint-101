@@ -1372,8 +1372,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if tool in {"dsd-fme", "satdump", "sstv"}:
                 command += " --with-optional"
             if tool == "nmcli":
-                # provision.sh installs no NetworkManager (Pi OS ships it), so name the package.
-                command = "Run sudo apt install network-manager"
+                # nmcli ships with NetworkManager, so it is missing only where something else runs
+                # the network (dhcpcd, ifupdown). Installing NetworkManager there takes over the
+                # interfaces and can drop a Wi-Fi SSH link, so no one-line command: say why.
+                command = ("NetworkManager doesn't run this box's network, so the survey can't "
+                           "read Wi-Fi here. Switching is a bench job for the box's owner.")
             return {"cause": "missing_tool", "message": f"{tool} is not installed.",
                     "next_step": command}
         return {"cause": "unavailable"}
