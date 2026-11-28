@@ -1,0 +1,49 @@
+<!-- ABOUTME: Command field card (/field): one row per rack instrument showing the real tool
+     ABOUTME: and exact command the console ran, or a plain sentence when no CLI drives it. -->
+{% extends "base.html" %}
+
+{% block content %}
+<section class="field" aria-label="Command field card">
+  <div class="scroll-frame field__frame">
+    <div class="field__entries" tabindex="0">
+      {% if field_error %}<p class="field__error" role="status">{{ field_error }}</p>{% endif %}
+      <ul class="field__list">
+        <li class="field__intro">
+          <p>
+            To run one yourself, exit the course and open Terminal, or SSH in.
+            Free the radio first with <code>systemctl --user stop sigint101</code>.
+            Bring the course back after with <code>systemctl --user start sigint101</code>.
+          </p>
+        </li>
+        {% for row in rows %}
+        <li class="field__entry" data-field-instrument="{{ row.key }}">
+          <div class="field__heading">
+            <span class="field__name">
+              <strong>{{ row.label }}</strong>{% if row.tool %} <span class="field__tool">{{ row.tool }}</span>{% endif %}
+            </span>
+            {% if row.state_label %}
+            <span class="field__state field__state--{{ row.state }}">{{ row.state_label }}</span>
+            {% endif %}
+          </div>
+          {% if row.kind == "sentence" %}
+          <p class="field__sentence">{{ row.sentence }}</p>
+          {% elif row.command %}
+          {% if row.when %}
+          <p class="field__when">
+            <time datetime="{{ row.when.isoformat() }}">{{ row.when.strftime("%Y-%m-%d %H:%M:%S UTC") }}</time>
+          </p>
+          {% endif %}
+          <p class="field__cmd"><code>{{ row.command }}</code></p>
+          {% else %}
+          <p class="field__prompt">{{ row.prompt }}</p>
+          {% endif %}
+          {% if row.note %}
+          <p class="field__note">{{ row.note }}</p>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</section>
+{% endblock %}
