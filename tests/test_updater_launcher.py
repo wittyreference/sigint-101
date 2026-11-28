@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from sigint101.bench_gate import require_bench_marker
 from sigint101.enrollment import enroll_legacy_fixture
 from sigint101.exam import ExamStore
 from sigint101.locks import (
@@ -61,6 +62,33 @@ def _free_loopback_port() -> int:
 def _make_stub_bin(path: Path, body: str) -> None:
     path.write_text(f"#!{BASH}\n{body}\n", encoding="utf-8")
     path.chmod(0o755)
+
+
+def _fixture_bench_checker(tmp_path: Path, updater_root: Path):
+    marker_dir = tmp_path / "_bench_marker_dir"
+    marker_dir.mkdir(mode=0o700, exist_ok=True)
+    marker = marker_dir / "bench-updater-allow.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "purpose": "sigint101-pr4-disposable-bench",
+                "hostname": socket.gethostname(),
+                "machine_id": "fixture-machine-0001",
+                "updater_root": str(updater_root.resolve()),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(marker, 0o600)
+    return lambda r: require_bench_marker(
+        r,
+        _marker_path=marker,
+        _expected_uid=os.geteuid(),
+        _machine_id="fixture-machine-0001",
+    )
 
 
 def _create_managed_root_fixture(
@@ -621,6 +649,8 @@ def test_enrollment_crash_keeps_a_bootable_legacy_pair_until_commit(tmp_path, st
         if stop_at is not None and stage == stop_at:
             raise _CrashAtBoundary(stage)
 
+    bench_check = _fixture_bench_checker(tmp_path, root)
+
     if stop_at is not None:
         with pytest.raises(_CrashAtBoundary, match=stop_at):
             enroll_legacy_fixture(
@@ -640,6 +670,7 @@ def test_enrollment_crash_keeps_a_bootable_legacy_pair_until_commit(tmp_path, st
                 reload_systemd=lambda: None,
                 drain_old_service=lambda: None,
                 on_boundary=boundary_hook,
+                bench_marker_checker=bench_check,
             )
     else:
         receipt = enroll_legacy_fixture(
@@ -658,6 +689,7 @@ def test_enrollment_crash_keeps_a_bootable_legacy_pair_until_commit(tmp_path, st
             kiosk_process_lister=lambda: [],
             reload_systemd=lambda: None,
             drain_old_service=lambda: None,
+            bench_marker_checker=bench_check,
         )
         assert receipt["mode"] == "legacy"
 
@@ -1517,6 +1549,7 @@ def test_f4_f13_enrollment_renders_unit_from_template_with_host_python(tmp_path)
         kiosk_process_lister=lambda: [],
         reload_systemd=lambda: None,
         drain_old_service=lambda: None,
+        bench_marker_checker=_fixture_bench_checker(tmp_path, root),
     )
     rendered = unit_path.read_text(encoding="utf-8")
     # Managed unit MUST run host_python (not checkout/.venv/bin/python)!
@@ -1633,5 +1666,75 @@ def test_f7_f8_f9_f10_f11_control_import_closure_and_nits(tmp_path):
     (cg_top / "cgroup.procs").write_text("10\n", encoding="utf-8")
     (cg_top / "child.scope" / "cgroup.procs").write_text("20\n30\n", encoding="utf-8")
     assert read_cgroup_pids(cg_top) == [10, 20, 30]
+
+
+# --- PR 4 carry-over must-fixes (2, 4-F12) ----------------------------------------------------
+
+
+def test_dispatcher_accepts_provision_shim_handoff_not_only_serve(tmp_path):
+    """Must-fix (2): real dispatcher.py accepts provision-shim.sh hand-off, not only 'serve'."""
+    fx = _create_managed_root_fixture(tmp_path, mode="managed")
+    root = fx["root"]
+
+    shim_env = os.environ.copy()
+    shim_env["SIGINT101_UPDATER_ROOT"] = str(root)
+
+    # Running provision-shim.sh --check through the REAL installed dispatcher.py must NOT fail
+    # with argparse "invalid choice" (the PR 3 bug where dispatcher only accepted 'serve').
+    res = subprocess.run(
+        [BASH, str(MANAGED_DIR / "provision-shim.sh"), "--check"],
+        env=shim_env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert "invalid choice" not in res.stderr.lower(), res.stderr
+    assert res.returncode in (0, 10, 11, 1), (res.returncode, res.stdout, res.stderr)
+
+    # On a non-bench host, provision-shim.sh --apply through REAL dispatcher.py MUST be refused
+    # by the PR 4 bench gate (not argparse invalid choice!).
+    res_mut = subprocess.run(
+        [BASH, str(MANAGED_DIR / "provision-shim.sh"), "--apply"],
+        env=shim_env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert res_mut.returncode != 0
+    assert "invalid choice" not in res_mut.stderr.lower(), res_mut.stderr
+    assert "bench" in res_mut.stderr.lower(), res_mut.stderr
+
+
+def test_f12_service_entry_rejects_unlocked_writer_fd_and_accepts_locked_fd(tmp_path):
+    """Must-fix (4): service_entry._seal_inherited_writer_fd re-asserts LOCK_EX on writer.lock."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_sigint101_service_entry_f12", MANAGED_DIR / "service_entry.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    root = tmp_path / "root_f12"
+    root.mkdir(mode=0o700)
+    _, writer_lock = ensure_lock_files(root)
+
+    # 1) Another holder owns LOCK_EX on writer.lock; passing an unlocked FD MUST be refused!
+    with acquire_writer_lock(root):
+        unheld_fd = os.open(os.fspath(writer_lock), os.O_RDWR)
+        try:
+            with pytest.raises(RuntimeError, match="does not hold exclusive writer.lock"):
+                mod._seal_inherited_writer_fd(writer_lock, cli_fd=unheld_fd)
+        finally:
+            os.close(unheld_fd)
+
+    # 2) Passing a genuinely locked FD succeeds idempotently and clears inheritable (O_CLOEXEC).
+    with acquire_writer_lock(root) as handle:
+        os.set_inheritable(handle.fd, True)
+        sealed = mod._seal_inherited_writer_fd(writer_lock, cli_fd=handle.fd)
+        assert sealed == handle.fd
+        assert os.get_inheritable(sealed) is False
+
 
 

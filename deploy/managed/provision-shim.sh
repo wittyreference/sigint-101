@@ -30,4 +30,4 @@ if [ ! -x "$DISPATCHER" ]; then
 fi
 
 # Delegate once to the enrolled dispatcher, retaining the exclusive mutation gate on fd 7.
-SIGINT101_MUTATION_GATE_FD=7 exec "$DISPATCHER" --root "$UPDATER_ROOT" "$@"
+SIGINT101_MUTATION_GATE_FD=7 exec "$DISPATCHER" --root "$UPDATER_ROOT" provision "$@"

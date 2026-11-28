@@ -1542,3 +1542,372 @@ def test_f7_trial_ro_connections_package_root_r21_post_marker_and_sigkill_reap(t
     proc.stderr.close()
 
 
+# --- PR 4 carry-over must-fixes (1, 3, 4, 5) --------------------------------------------------
+
+
+def test_saved_state_table_coverage_covers_every_reviewed_v1_table():
+    from sigint101.migrations import reviewed_signatures
+    from sigint101.validation import (
+        CHECKED_EXAM_TABLES,
+        CHECKED_PROGRESS_TABLES,
+        NO_REFERENCE_EXAM_TABLES,
+        NO_REFERENCE_PROGRESS_TABLES,
+        check_saved_state_table_coverage,
+    )
+
+    # Disjointness and complete coverage of every reviewed v1 table.
+    assert not (CHECKED_PROGRESS_TABLES & NO_REFERENCE_PROGRESS_TABLES)
+    assert not (CHECKED_EXAM_TABLES & NO_REFERENCE_EXAM_TABLES)
+    check_saved_state_table_coverage()
+
+    # Negative proof: an unreviewed table neither checked nor explicitly no-references MUST fail.
+    prog_v1_tables = set(reviewed_signatures("progress")["v1"]["tables"].keys()) | {"orphan_table"}
+    with pytest.raises(ValidationError, match="orphan_table"):
+        check_saved_state_table_coverage(progress_tables=prog_v1_tables)
+
+    exam_v1_tables = set(reviewed_signatures("exam")["v1"]["tables"].keys()) | {"mystery_exam"}
+    with pytest.raises(ValidationError, match="mystery_exam"):
+        check_saved_state_table_coverage(exam_tables=exam_v1_tables)
+
+
+def test_saved_state_validates_stamps_retrieval_challenges_and_challenge_passes(tmp_path):
+    from sigint101.exam import load_pool
+    from sigint101.lessons import load_lessons
+    from sigint101.migrations import migrate_store_copy
+    from sigint101.validation import validate_saved_state
+
+    lessons = load_lessons(REPO_ROOT / "lesson_packs")
+    pool = load_pool()
+    # Pick a lesson with a check block and one without a check block.
+    with_check = next(lid for lid, les in sorted(lessons.items()) if les.check)
+    without_check = next(lid for lid, les in sorted(lessons.items()) if not les.check)
+    valid_choice = lessons[with_check].check["choices"][0]["key"]
+
+    src = tmp_path / "src"
+    src.mkdir()
+    p = Progress(src / "progress.db")
+    p.close()
+    e = ExamStore(src / "exam.db")
+    e.close()
+
+    gen = tmp_path / "gen"
+    gen.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    migrate_store_copy(
+        src / "progress.db",
+        gen / "progress.db",
+        store="progress",
+        scratch_dir=scratch / "p",
+    )
+    migrate_store_copy(
+        src / "exam.db",
+        gen / "exam.db",
+        store="exam",
+        scratch_dir=scratch / "e",
+    )
+
+    # Add retrieval, challenges, and challenge_passes tables directly to exercise PR 4's validator
+    # across both current and post-merge v1 schemas.
+    conn = sqlite3.connect(gen / "progress.db")
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS retrieval ("
+            "lesson_id INTEGER PRIMARY KEY, box INTEGER NOT NULL DEFAULT 1, "
+            "last_seen REAL NOT NULL, seen INTEGER NOT NULL DEFAULT 0, "
+            "correct INTEGER NOT NULL DEFAULT 0, last_choice TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS challenges ("
+            "unit_id INTEGER PRIMARY KEY, started_at REAL NOT NULL, "
+            "window_s INTEGER NOT NULL, instrument TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS challenge_passes ("
+            "unit_id INTEGER NOT NULL, passed_at REAL NOT NULL, "
+            "instrument TEXT NOT NULL, window_s INTEGER NOT NULL DEFAULT 600)"
+        )
+        # Seed valid rows first.
+        conn.execute(
+            "INSERT INTO stamps(instrument, first_ts, count, provenance, digest) "
+            "VALUES('ism', 1700000000.0, 1, '{}', 'aa')"
+        )
+        conn.execute(
+            "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
+            "VALUES(?, 2, 1700000000.0, 1, 1, ?)",
+            (with_check, valid_choice),
+        )
+        conn.execute(
+            "INSERT INTO challenges(unit_id, started_at, window_s, instrument) "
+            "VALUES(4, 1700000000.0, 600, 'ism')"
+        )
+        conn.execute(
+            "INSERT INTO challenge_passes(unit_id, passed_at, instrument, window_s) "
+            "VALUES(4, 1700000100.0, 'ism', 600)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def fake_challenge_for(uid: int):
+        return object() if uid in (4, 5) else None
+
+    prog_ro = Progress(gen / "progress.db", managed=False)
+    exam_ro = ExamStore(gen / "exam.db", managed=True, read_only=True)
+    try:
+        assert (
+            validate_saved_state(
+                lessons=lessons,
+                exam_pool=pool,
+                progress=prog_ro,
+                exam_store=exam_ro,
+                challenge_for_fn=fake_challenge_for,
+            )
+            == []
+        )
+    finally:
+        prog_ro.close()
+        exam_ro.close()
+
+    # Now inject bad rows into stamps, retrieval, challenges, and challenge_passes.
+    conn = sqlite3.connect(gen / "progress.db")
+    try:
+        conn.execute(
+            "INSERT INTO stamps(instrument, first_ts, count, provenance, digest) "
+            "VALUES('not_a_stamp_inst', 1700000000.0, 1, '{}', 'bb')"
+        )
+        conn.execute(
+            "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
+            "VALUES(?, 99, 1700000000.0, 1, 0, 'bogus_choice')",
+            (without_check,),
+        )
+        conn.execute(
+            "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
+            "VALUES(9999, 1, 1700000000.0, 0, 0, '')"
+        )
+        conn.execute(
+            "INSERT INTO challenges(unit_id, started_at, window_s, instrument) "
+            "VALUES(1, 1700000000.0, 0, 'bogus_inst')"
+        )
+        conn.execute(
+            "INSERT INTO challenge_passes(unit_id, passed_at, instrument, window_s) "
+            "VALUES(2, 1700000100.0, 'bogus_inst', -5)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    prog_ro2 = Progress(gen / "progress.db", managed=False)
+    exam_ro2 = ExamStore(gen / "exam.db", managed=True, read_only=True)
+    try:
+        errs = validate_saved_state(
+            lessons=lessons,
+            exam_pool=pool,
+            progress=prog_ro2,
+            exam_store=exam_ro2,
+            challenge_for_fn=fake_challenge_for,
+        )
+    finally:
+        prog_ro2.close()
+        exam_ro2.close()
+
+    joined = "\n".join(errs)
+    assert "not_a_stamp_inst" in joined
+    assert f"lesson {without_check}" in joined
+    assert "9999" in joined
+    assert "box" in joined
+    assert "challenges" in joined
+    assert "window_s" in joined
+    assert "challenge_passes" in joined
+    assert "bogus_inst" in joined
+
+
+def test_trial_socket_peer_pid_check_rejects_mismatched_pid_and_accepts_match(tmp_path):
+    from sigint101.trial import http_get_unix
+
+    sock_path = tmp_path / "peer.sock"
+    server_code = (
+        "import os, socket\n"
+        f"p = {str(sock_path)!r}\n"
+        "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        "s.bind(p)\n"
+        "s.listen(5)\n"
+        "print(os.getpid(), flush=True)\n"
+        "while True:\n"
+        "    c, _ = s.accept()\n"
+        "    try:\n"
+        "        req = c.recv(4096)\n"
+        "        if req:\n"
+        "            c.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nOK')\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    finally:\n"
+        "        c.close()\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-B", "-c", server_code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        real_pid = int(proc.stdout.readline().strip())
+        assert real_pid == proc.pid
+        # Mismatched expected_pid MUST be rejected via SO_PEERCRED.
+        with pytest.raises(PermissionError, match="peer PID"):
+            http_get_unix(sock_path, "/_trial/ready", expected_pid=real_pid + 1)
+        # Matching expected_pid MUST succeed.
+        status, body = http_get_unix(sock_path, "/_trial/ready", expected_pid=real_pid)
+        assert status == 200
+        assert body == b"OK"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+def test_trial_uses_no_user_site_s_flag_and_filters_child_environment(tmp_path, monkeypatch):
+    from sigint101.validation import UnitSettings
+
+    # Plant a poisoned sigint101 package in a temporary PYTHONUSERBASE user site-packages dir,
+    # plus forbidden env vars in both os.environ and UnitSettings.manager_env.
+    ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    user_base = tmp_path / "userbase"
+    user_site = user_base / "lib" / ver / "site-packages"
+    poisoned_pkg = user_site / "sigint101"
+    poisoned_pkg.mkdir(parents=True)
+    (poisoned_pkg / "__init__.py").write_text(
+        "raise RuntimeError('POISONED_USER_SITE_IMPORTED')\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PYTHONUSERBASE", str(user_base))
+    monkeypatch.setenv("PYTHONSTARTUP", str(tmp_path / "evil_startup.py"))
+    monkeypatch.setenv("LD_PRELOAD", "/nonexistent/evil.so")
+    monkeypatch.setenv("SIGINT101_PACK_DIR", str(tmp_path / "outside_packs"))
+
+    rel = tmp_path / "rel_env"
+    shutil.copytree(
+        REPO_ROOT / "sigint101",
+        rel / "sigint101",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    shutil.copytree(REPO_ROOT / "lesson_packs", rel / "lesson_packs")
+    write_release_manifest(rel, release_id="rel-env", commit="abc1234")
+    gen = _make_managed_generation(tmp_path / "gen_env", generation_id="gen-env")
+
+    unit_settings = UnitSettings(
+        manager_env={
+            "PYTHONSTARTUP": str(tmp_path / "evil2.py"),
+            "LD_LIBRARY_PATH": "/evil/lib",
+            "SIGINT101_DATA_DIR": str(tmp_path / "wrong_data"),
+            "SIGINT101_FLOCK_SOURCE": "marauder",
+        },
+        unit_env={"SIGINT101_RX_LAT": "37.77"},
+    )
+
+    observed: dict = {}
+
+    def inspect_child(_sock_path: Path, pid: int) -> None:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\x00")
+        observed["argv"] = [a.decode("utf-8", errors="replace") for a in cmdline if a]
+        raw_env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\x00")
+        env_map: dict[str, str] = {}
+        for item in raw_env:
+            if b"=" in item:
+                k, v = item.split(b"=", 1)
+                env_map[k.decode("utf-8", errors="replace")] = v.decode("utf-8", errors="replace")
+        observed["env"] = env_map
+
+    result = run_private_trial(
+        python_executable=sys.executable,
+        release_root=rel,
+        data_dir=gen,
+        unit_settings=unit_settings,
+        expected_release_id="rel-env",
+        expected_commit="abc1234",
+        expected_generation_id="gen-env",
+        on_ready=inspect_child,
+    )
+    assert result.ready is True, result.errors
+    assert "-B" in observed["argv"]
+    assert "-s" in observed["argv"]
+    for forbidden in (
+        "PYTHONUSERBASE",
+        "PYTHONSTARTUP",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "SIGINT101_PACK_DIR",
+        "SIGINT101_DATA_DIR",
+        "SIGINT101_POOL_PATH",
+    ):
+        assert forbidden not in observed["env"], f"forbidden var leaked into trial: {forbidden}"
+    assert observed["env"].get("SIGINT101_FLOCK_SOURCE") == "marauder"
+    assert observed["env"].get("SIGINT101_RX_LAT") == "37.77"
+
+
+def test_exam_pool_filename_is_not_hardcoded_in_validation(tmp_path):
+    from sigint101.exam import POOL_PATH
+    from sigint101.validation import attest_open_pair, resolve_release_pool_path
+
+    # Validation source must not hard-code the 2026-2030 pool filename.
+    val_src = (REPO_ROOT / "sigint101" / "validation.py").read_text(encoding="utf-8")
+    assert "technician-2026-2030.json" not in val_src
+
+    rel = tmp_path / "rel_future_pool"
+    (rel / "lesson_packs").mkdir(parents=True)
+    exam_dir = rel / "sigint101" / "exam_data"
+    exam_dir.mkdir(parents=True)
+    future_pool = exam_dir / "technician-2030-2034.json"
+    shutil.copy2(POOL_PATH, future_pool)
+    write_release_manifest(rel, release_id="rel-2030", commit="def5678")
+
+    assert resolve_release_pool_path(rel) == future_pool.resolve()
+
+    gen = _make_managed_generation(tmp_path / "gen_2030", generation_id="gen-2030")
+    prog = Progress(gen / "progress.db", managed=True, read_only=True)
+    exam = ExamStore(gen / "exam.db", managed=True, read_only=True)
+    try:
+        att = attest_open_pair(
+            progress=prog,
+            exam_store=exam,
+            data_dir=gen,
+            pack_dir=rel / "lesson_packs",
+            pool_path=future_pool,
+            package_root=rel,
+            require_release_manifest=True,
+        )
+        verify_pair_attestation(
+            att,
+            expected_release_id="rel-2030",
+            expected_commit="def5678",
+            expected_package_root=rel,
+            expected_generation_id="gen-2030",
+            expected_data_dir=gen,
+        )
+    finally:
+        prog.close()
+        exam.close()
+
+
+def test_trial_and_service_uvicorn_configs_force_lifespan_on():
+    import ast
+
+    for rel_path in ("sigint101/trial.py", "deploy/managed/service_entry.py"):
+        tree = ast.parse((REPO_ROOT / rel_path).read_text(encoding="utf-8"))
+        configs = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Config"
+        ]
+        assert configs, f"no uvicorn.Config call found in {rel_path}"
+        for call in configs:
+            kw = {k.arg: k.value for k in call.keywords if k.arg is not None}
+            assert "lifespan" in kw, f"{rel_path}: uvicorn.Config missing lifespan='on'"
+            assert isinstance(kw["lifespan"], ast.Constant) and kw["lifespan"].value == "on", (
+                f"{rel_path}: uvicorn.Config must pass lifespan='on'"
+            )
+
+
+

@@ -142,6 +142,23 @@ def main(argv: list[str] | None = None) -> int:
             current_abi = probe_python_abi(python_exe)
             verify_runtime_compatibility(runtime_dir, current_abi=current_abi, verify_files=True)
 
+            # §5: if an existing serving marker is visible, verify it matches and re-fsync both
+            # the marker and its directory before authorizing listening or writers.
+            marker_path = ops_dir / "served.json"
+            if marker_path.exists() or marker_path.is_symlink():
+                if marker_path.is_symlink() or not marker_path.is_file():
+                    raise RuntimeError("existing serving marker is not a regular file")
+                existing = json.loads(marker_path.read_text(encoding="utf-8"))
+                if (
+                    not isinstance(existing, dict)
+                    or existing.get("operation_id") != op_id
+                    or existing.get("release_id") != release_id
+                    or existing.get("generation_id") != generation_id
+                ):
+                    raise RuntimeError("existing serving marker does not match current.json")
+                fsync_file(marker_path)
+                fsync_dir(ops_dir)
+
             # F3: -I -S strips interpreter and user site-packages so only sealed runtime imports.
             exec_argv = [
                 python_exe,

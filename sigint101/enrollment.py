@@ -10,6 +10,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+from .bench_gate import require_bench_marker
 from .kiosk import exit_flag
 from .locks import acquire_mutation_gate, ensure_lock_files
 from .process_checks import require_kiosk_page_closed
@@ -98,14 +99,19 @@ def enroll_legacy_fixture(
     reload_systemd: Callable[[], None] | None = None,
     drain_old_service: Callable[[], None] | None = None,
     on_boundary: Callable[[str], None] | None = None,
+    bench_marker_checker: Callable[[Path], None] = require_bench_marker,
 ) -> dict:
     """Run the ordered enrollment prerequisites in a fixture without touching live host paths.
 
     Ordering guarantees that every interruption leaves either the untouched legacy unit+checkout
     or a fully installed dispatcher + synced `legacy` selector booting the exact original pair.
     """
-    repo = Path(repo_root).resolve()
     root = validate_updater_root(updater_root, home=home)
+    # PR 4 §9.4: refuse on non-bench hosts BEFORE creating directories or locks, editing files,
+    # invoking service commands, or running candidate code.
+    bench_marker_checker(root)
+
+    repo = Path(repo_root).resolve()
     checkout = Path(legacy_checkout).resolve()
     data_dir = Path(legacy_data_dir).resolve()
     unit_file = Path(unit_path)

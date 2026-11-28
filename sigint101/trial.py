@@ -451,6 +451,7 @@ def _main(argv: list[str] | None = None) -> int:
         uvicorn.Config(
             app,
             uds=args.socket,
+            lifespan="on",
             log_level="warning",
             access_log=False,
         )

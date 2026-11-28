@@ -236,7 +236,13 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
             server = uvicorn.Server(
-                uvicorn.Config(fenced_app, host=args.host, port=args.port, log_level="warning")
+                uvicorn.Config(
+                    fenced_app,
+                    host=args.host,
+                    port=args.port,
+                    lifespan="on",
+                    log_level="warning",
+                )
             )
             server.run(sockets=[sock])
         else:
@@ -259,7 +265,11 @@ def main(argv: list[str] | None = None) -> int:
             sock = _bind_reserved_socket(args.host, args.port)
             server = uvicorn.Server(
                 uvicorn.Config(
-                    legacy_app_mod.app, host=args.host, port=args.port, log_level="warning"
+                    legacy_app_mod.app,
+                    host=args.host,
+                    port=args.port,
+                    lifespan="on",
+                    log_level="warning",
                 )
             )
             server.run(sockets=[sock])

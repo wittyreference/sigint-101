@@ -25,15 +25,19 @@ CONTROL_ALLOWLIST: tuple[str, ...] = (
     "deploy/managed/sigint101-course-managed.sh",
     "deploy/managed/provision-shim.sh",
     "deploy/managed/install-shim.sh",
+    "sigint101/bench_gate.py",
     "sigint101/enrollment.py",
     "sigint101/kiosk.py",
     "sigint101/locks.py",
     "sigint101/migrations.py",
     "sigint101/process_checks.py",
+    "sigint101/release_prep.py",
     "sigint101/runtime.py",
     "sigint101/schema_fixtures.json",
     "sigint101/snapshot.py",
     "sigint101/storage.py",
+    "sigint101/updater.py",
+    "sigint101/updater_cli.py",
 )
 
 

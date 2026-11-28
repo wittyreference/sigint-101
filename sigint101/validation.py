@@ -17,15 +17,35 @@ from jinja2 import Environment, FileSystemLoader, TemplateSyntaxError
 
 import sigint101
 
-from .exam import LEITNER_BOXES, ExamStore, Pool
+from .exam import LEITNER_BOXES, POOL_PATH, ExamStore, Pool
 from .lessons import CHECK_STAGE, SORT_ANSWERS, Lesson
-from .migrations import EXAM_SCHEMA_VERSION, PROGRESS_SCHEMA_VERSION
+from .migrations import EXAM_SCHEMA_VERSION, PROGRESS_SCHEMA_VERSION, reviewed_signatures
 from .operate import INSTRUMENTS
 from .progress import CHECK, PREDICTION, Progress
 from .snapshot import GENERATION_MARKER_FILENAME
+from .stamps import STAMP_INSTRUMENTS
 from .units import unit_for_lesson
 
 RELEASE_MANIFEST_FILENAME = "release.json"
+
+# Explicit saved-state reference coverage registries (PR 4 must-fix 1): every reviewed v1 table
+# must appear in either CHECKED_*_TABLES or NO_REFERENCE_*_TABLES (never silently unvalidated).
+CHECKED_PROGRESS_TABLES: frozenset[str] = frozenset(
+    {
+        "progress",
+        "stages",
+        "responses",
+        "sort_answers",
+        "places",
+        "stamps",
+        "retrieval",
+        "challenges",
+        "challenge_passes",
+    }
+)
+NO_REFERENCE_PROGRESS_TABLES: frozenset[str] = frozenset({"stamp_events"})
+CHECKED_EXAM_TABLES: frozenset[str] = frozenset({"srs", "sim"})
+NO_REFERENCE_EXAM_TABLES: frozenset[str] = frozenset()
 
 # Shipped lesson IDs required by default when validating a full course pack directory.
 SHIPPED_REQUIRED_LESSONS: frozenset[int] = frozenset(range(1, 30)) | {39}
@@ -589,6 +609,72 @@ def _path_identity(path: Path) -> dict:
     return {"path": str(resolved), "st_dev": st.st_dev, "st_ino": st.st_ino}
 
 
+def resolve_release_pool_path(
+    release_root: str | Path,
+    pool_path: str | Path | None = None,
+) -> Path:
+    """Resolve the exam pool file inside `release_root` without hard-coding a pool filename."""
+    if pool_path is not None:
+        return Path(pool_path).resolve()
+    root = Path(release_root).resolve()
+    current_root = Path(sigint101.__file__).resolve().parent.parent
+    if root == current_root and POOL_PATH.is_file():
+        return POOL_PATH.resolve()
+    exam_dir = root / "sigint101" / "exam_data"
+    if exam_dir.is_dir():
+        candidates = sorted(
+            p for p in exam_dir.glob("*.json") if p.is_file() and not p.is_symlink()
+        )
+        if len(candidates) == 1:
+            return candidates[0].resolve()
+        if len(candidates) > 1:
+            for cand in candidates:
+                if cand.name == POOL_PATH.name:
+                    return cand.resolve()
+            raise ValidationError(
+                f"ambiguous exam pool files in {exam_dir.name}: "
+                + ", ".join(c.name for c in candidates)
+            )
+    return (exam_dir / POOL_PATH.name).resolve()
+
+
+def check_saved_state_table_coverage(
+    *,
+    progress_tables: set[str] | frozenset[str] | None = None,
+    exam_tables: set[str] | frozenset[str] | None = None,
+) -> None:
+    """Fail if any reviewed v1 table is neither checked nor explicitly on a no-references list."""
+    if CHECKED_PROGRESS_TABLES & NO_REFERENCE_PROGRESS_TABLES:
+        overlap = sorted(CHECKED_PROGRESS_TABLES & NO_REFERENCE_PROGRESS_TABLES)
+        raise ValidationError(f"progress tables listed as both checked and no-ref: {overlap}")
+    if CHECKED_EXAM_TABLES & NO_REFERENCE_EXAM_TABLES:
+        overlap = sorted(CHECKED_EXAM_TABLES & NO_REFERENCE_EXAM_TABLES)
+        raise ValidationError(f"exam tables listed as both checked and no-ref: {overlap}")
+
+    prog_v1 = (
+        set(reviewed_signatures("progress")["v1"]["tables"].keys())
+        if progress_tables is None
+        else set(progress_tables)
+    )
+    exam_v1 = (
+        set(reviewed_signatures("exam")["v1"]["tables"].keys())
+        if exam_tables is None
+        else set(exam_tables)
+    )
+
+    uncovered_prog = sorted(prog_v1 - (CHECKED_PROGRESS_TABLES | NO_REFERENCE_PROGRESS_TABLES))
+    if uncovered_prog:
+        raise ValidationError(
+            "progress.db v1 tables missing from saved-state validator: "
+            + ", ".join(uncovered_prog)
+        )
+    uncovered_exam = sorted(exam_v1 - (CHECKED_EXAM_TABLES | NO_REFERENCE_EXAM_TABLES))
+    if uncovered_exam:
+        raise ValidationError(
+            "exam.db v1 tables missing from saved-state validator: " + ", ".join(uncovered_exam)
+        )
+
+
 def attest_open_pair(
     *,
     progress: Progress,
@@ -623,11 +709,7 @@ def attest_open_pair(
         if pack_dir is not None
         else (actual_pkg_root / "lesson_packs").resolve()
     )
-    resolved_pool = (
-        Path(pool_path).resolve()
-        if pool_path is not None
-        else (actual_pkg_root / "sigint101" / "exam_data" / "technician-2026-2030.json").resolve()
-    )
+    resolved_pool = resolve_release_pool_path(actual_pkg_root, pool_path=pool_path)
     if require_release_manifest and not resolved_pack.is_relative_to(actual_pkg_root):
         raise ValidationError("loaded lesson pack directory lies outside the release root")
     if require_release_manifest and not resolved_pool.is_relative_to(actual_pkg_root):
@@ -718,11 +800,7 @@ def verify_pair_attestation(
         ):
             raise ValidationError("lesson pack identity mismatch in attestation")
 
-        exp_pool = (
-            Path(expected_pool_path).resolve()
-            if expected_pool_path is not None
-            else (exp_root / "sigint101" / "exam_data" / "technician-2026-2030.json").resolve()
-        )
+        exp_pool = resolve_release_pool_path(exp_root, pool_path=expected_pool_path)
         exp_pool_st = os.stat(exp_pool)
         pool_att = attestation.get("pool") or {}
         if (
@@ -826,19 +904,41 @@ def validate_course_content(
     return errors
 
 
+def _default_challenge_for(unit_id: int):
+    """Look up a unit's live-find challenge if sigint101.challenges is present in this release."""
+    try:
+        from . import challenges as _challenges_mod  # noqa: PLC0415
+    except ImportError:
+        return None
+    return _challenges_mod.challenge_for(unit_id)
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()}
+
+
 def validate_saved_state(
     *,
     lessons: dict[int, Lesson],
     exam_pool: Pool | None,
     progress: Progress,
     exam_store: ExamStore,
+    challenge_for_fn: Callable[[int], object] | None = None,
 ) -> list[str]:
     """Verify every persisted reference in progress.db and exam.db against the loaded course."""
     errors: list[str] = []
     known_instruments = {inst.key for inst in INSTRUMENTS}
+    stamp_instruments = frozenset(STAMP_INSTRUMENTS)
+    lookup_challenge = challenge_for_fn or _default_challenge_for
 
     with progress._lock:
         p_conn = progress._conn
+        existing_prog_tables = {
+            row[0]
+            for row in p_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
         for row in p_conn.execute("SELECT lesson_id FROM progress ORDER BY lesson_id"):
             lid = row["lesson_id"]
             if lid not in lessons:
@@ -914,6 +1014,97 @@ def validate_saved_state(
             name, value = row["name"], row["value"]
             if name == "rack" and value not in known_instruments:
                 errors.append(f"places rack references unknown instrument {value!r}")
+
+        if "stamps" in existing_prog_tables:
+            for row in p_conn.execute("SELECT instrument FROM stamps ORDER BY instrument"):
+                inst_key = row["instrument"]
+                if inst_key not in stamp_instruments:
+                    errors.append(f"stamps references unknown instrument {inst_key!r}")
+
+        if "retrieval" in existing_prog_tables:
+            for row in p_conn.execute(
+                "SELECT lesson_id, box, last_choice FROM retrieval ORDER BY lesson_id"
+            ):
+                lid, box, last_choice = row["lesson_id"], row["box"], row["last_choice"]
+                lesson = lessons.get(lid)
+                if lesson is None:
+                    errors.append(f"retrieval references unknown lesson_id {lid}")
+                    continue
+                if not lesson.check:
+                    errors.append(f"retrieval for lesson {lid}, but lesson has no check")
+                if (
+                    not isinstance(box, int)
+                    or isinstance(box, bool)
+                    or box < 1
+                    or box > LEITNER_BOXES
+                ):
+                    errors.append(f"retrieval for lesson {lid} has out-of-range box {box!r}")
+                if last_choice not in (None, ""):
+                    if not lesson.check:
+                        errors.append(
+                            f"retrieval for lesson {lid} has last_choice {last_choice!r} "
+                            "with no check"
+                        )
+                    else:
+                        valid_keys = {c["key"] for c in lesson.check["choices"]}
+                        if last_choice not in valid_keys:
+                            errors.append(
+                                f"retrieval for lesson {lid} has unknown last_choice "
+                                f"{last_choice!r}"
+                            )
+
+        if "challenges" in existing_prog_tables:
+            cols = _table_columns(p_conn, "challenges")
+            select_cols = ["unit_id", "window_s"]
+            if "instrument" in cols:
+                select_cols.append("instrument")
+            for row in p_conn.execute(
+                f"SELECT {', '.join(select_cols)} FROM challenges ORDER BY unit_id"
+            ):
+                uid = row["unit_id"]
+                window_s = row["window_s"]
+                if lookup_challenge(uid) is None:
+                    errors.append(f"challenges references unit {uid} with no challenge")
+                if (
+                    not isinstance(window_s, (int, float))
+                    or isinstance(window_s, bool)
+                    or window_s <= 0
+                ):
+                    errors.append(f"challenges for unit {uid} has invalid window_s {window_s!r}")
+                if "instrument" in cols and row["instrument"] not in (None, ""):
+                    if row["instrument"] not in stamp_instruments:
+                        errors.append(
+                            f"challenges for unit {uid} references unknown instrument "
+                            f"{row['instrument']!r}"
+                        )
+
+        if "challenge_passes" in existing_prog_tables:
+            cols = _table_columns(p_conn, "challenge_passes")
+            select_cols = ["unit_id", "instrument"]
+            if "window_s" in cols:
+                select_cols.append("window_s")
+            for row in p_conn.execute(
+                f"SELECT {', '.join(select_cols)} FROM challenge_passes ORDER BY unit_id"
+            ):
+                uid = row["unit_id"]
+                inst_key = row["instrument"]
+                if lookup_challenge(uid) is None:
+                    errors.append(f"challenge_passes references unit {uid} with no challenge")
+                if inst_key not in stamp_instruments:
+                    errors.append(
+                        f"challenge_passes for unit {uid} references unknown instrument "
+                        f"{inst_key!r}"
+                    )
+                if "window_s" in cols:
+                    window_s = row["window_s"]
+                    if (
+                        not isinstance(window_s, (int, float))
+                        or isinstance(window_s, bool)
+                        or window_s <= 0
+                    ):
+                        errors.append(
+                            f"challenge_passes for unit {uid} has invalid window_s {window_s!r}"
+                        )
 
     with exam_store._lock:
         e_conn = exam_store._conn
