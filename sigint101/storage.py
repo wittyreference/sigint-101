@@ -61,14 +61,10 @@ def fsync_dir(path: str | Path) -> None:
         os.close(fd)
 
 
-def sync_media_asset(png_path: str | Path, *, sidecar_path: str | Path | None = None) -> None:
-    """Fsync a published media PNG, its optional metadata sidecar, and their directory."""
+def sync_media_asset(png_path: str | Path) -> None:
+    """Fsync a published media PNG and its parent directory."""
     png = Path(png_path)
     fsync_file(png)
-    if sidecar_path is not None:
-        sidecar = Path(sidecar_path)
-        if sidecar.exists():
-            fsync_file(sidecar)
     fsync_dir(png.parent)
 
 
@@ -251,6 +247,19 @@ def open_managed_sqlite(
     path = Path(db_path)
     if not path.is_file():
         raise SchemaError(f"managed store file is missing: {path.name}")
+    # Refuse stray WAL/SHM sidecars before connecting (R2-b) so SQLite cannot checkpoint or
+    # mutate them, while still allowing a crash rollback -journal on rw open. In read-only trial
+    # mode, a hot rollback journal cannot be rolled back and must be refused cleanly (F14).
+    for ext in ("-wal", "-shm"):
+        if Path(f"{path}{ext}").exists():
+            raise SchemaError(
+                f"managed store requires journal_mode=delete; stray {ext} sidecar present for "
+                f"{path.name}"
+            )
+    if read_only and Path(f"{path}-journal").exists():
+        raise SchemaError(
+            f"cannot open managed store {path.name} read-only with active rollback journal"
+        )
     # Inspect the 100-byte SQLite header before connecting so a WAL-mode store (version bytes 2)
     # is refused without sqlite3.connect checkpointing the WAL or rewriting its -shm file.
     try:
@@ -281,6 +290,14 @@ def open_managed_sqlite(
             expected_signature=expected_signature,
             read_only=read_only,
         )
+    except sqlite3.Error as exc:
+        conn.close()
+        if read_only and Path(f"{path}-journal").exists():
+            raise SchemaError(
+                f"cannot open managed store {path.name} read-only with active rollback journal: "
+                f"{exc}"
+            ) from exc
+        raise SchemaError(f"cannot verify managed store {path.name}: {exc}") from exc
     except BaseException:
         conn.close()
         raise
