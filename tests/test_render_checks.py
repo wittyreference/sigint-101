@@ -14,6 +14,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -93,7 +94,8 @@ class FakeDevTools:
     """Chrome's DevTools endpoint on 127.0.0.1, as far as the render checks use it.
 
     `answers` maps a piece of an evaluated expression to the value the page gives back, or to
-    THROWS. document.readyState is always "complete"; any other expression gives no value.
+    THROWS, or to a function of the loaded page's URL that gives one. document.readyState is
+    always "complete"; any other expression gives no value.
     `disconnect_at` can end the connection during the handshake or the first reply frame.
     """
 
@@ -285,6 +287,8 @@ class FakeDevTools:
             return {"result": {"type": "string", "value": self.url}}
         for piece, value in self.answers.items():
             if piece in expression:
+                if callable(value):     # an answer that depends on the page loaded
+                    value = value(self.url or "")
                 if value is THROWS:
                     return {"result": {"type": "object", "subtype": "error"},
                             "exceptionDetails": {"text": "Uncaught"}}
@@ -631,10 +635,56 @@ def render_make(tmp_path, console_url, devtools, strays):
 
 
 def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
+    # Both fit runs measure a predict stage (/lesson/29, then /lesson/39), and both see it.
     proc = render_make(fit_answers={DEMO_FIT: DEMO_FITS, PREDICT_FIT: PREDICT_KEY_BELOW})
     assert proc.returncode != 0, proc.stdout
     assert "render_fit.py exited with status 1" in proc.stderr
-    assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
+    assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]] * 2
+
+
+# --- C69: /lesson/39 (the Wi-Fi survey's predict) is one of the fit runs --------------------------
+
+
+def _fails_on_lesson_39(fits, defect):
+    """A page answer that measures `defect` on /lesson/39 and `fits` on every other page."""
+    return lambda url: defect if urlsplit(url).path == "/lesson/39" else fits
+
+
+def test_a_fit_failure_on_lesson_39_fails_the_run(render_make):
+    # M39's predict fits 800x480 by 3 px. A chip or prompt that adds a line must fail the run,
+    # while /lesson/29 still fits.
+    proc = render_make(fit_answers={
+        DEMO_FIT: DEMO_FITS, PREDICT_FIT: _fails_on_lesson_39(PREDICT_FITS, PREDICT_KEY_BELOW)})
+    assert proc.returncode != 0, (proc.stdout, proc.stderr)
+    assert "render_fit.py exited with status 1" in proc.stderr
+    assert _verdicts(proc) == ["VERDICT: PASS", FIT_CASES["choice-below-screen"][-1]]
+    proxy, _ = _proxy_url(proc)
+    loaded = [params["url"] for method, params in render_make.calls()
+              if method == "Page.navigate" and params.get("url") != "about:blank"]
+    assert f"{proxy}/lesson/39" in loaded, loaded
+
+
+def test_the_lesson_39_fit_run_measures_its_predict_stage_only():
+    # L39 has no demo stage, and its stages past predict are sealed on a fresh console: its fit
+    # run measures predict, the one interactive stage the page shows before a commit.
+    entries = [entry for entry in _load_render_check().check_list("http://127.0.0.1:9",
+                                                                   Path("/out"))
+               if entry[0] == FIT.name]
+    assert [entry[1] for entry in entries] == ["http://127.0.0.1:9/lesson/29",
+                                               "http://127.0.0.1:9/lesson/39"]
+    assert entries[0][3:] == ()
+    assert entries[1][3:] == ("predict",)
+
+
+def test_render_fit_measures_the_stages_it_is_given(devtools, tmp_path):
+    port = devtools({DEMO_FIT: THROWS, PREDICT_FIT: PREDICT_FITS})
+    proc = run(FIT, "http://127.0.0.1:1/lesson/39", str(tmp_path / "predict.png"), "predict",
+               port=port)
+    assert_ends(proc, 0, "VERDICT: PASS")
+    assert "800x480  predict Commit bottom = 480px  (max 480)" in proc.stdout
+    evaluated = [params["expression"] for method, params in devtools.made[-1].settled()
+                 if method == "Runtime.evaluate"]
+    assert not any(DEMO_FIT in expression for expression in evaluated)
 
 
 def _proxy_url(proc):
@@ -665,6 +715,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
     assert proc.stdout.splitlines() == [
         f"Fenced the console behind a render proxy at {proxy} (process {pid}).",
         f"ran {FIT.name} {proxy}/lesson/29",
+        f"ran {FIT.name} {proxy}/lesson/39",
         f"ran {SCROLL.name} {proxy}/",
         f"ran {FIGURE.name} {proxy}/exam/review/T6C02",
         f"ran {LOGBOOK.name} {proxy}",
@@ -718,7 +769,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 12, proc.stdout
+    assert len(urls) == len(_runner_check_names()), proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -847,7 +898,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 12, methods
+    assert len(marks) == len(_runner_check_names()), methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -1718,6 +1769,9 @@ CARD_SORT_FITS = {
     "cardScrolls": False,
     "worstDelta": 0,
     "introFontPx": 18,
+    "deckSize": 12,
+    "cardsChecked": 12,
+    "missesChecked": 12,
 }
 LAW_FITS = {
     "doc": [800, 480],
@@ -1830,6 +1884,10 @@ const choices = [0, 1, 2].map(() => {{
   return el;
 }});
 const footBtns = [prevBtn, nextBtn];
+const deck = {{
+  textContent: JSON.stringify([{{ key: "one", text: "One card", answer: "legal" }}]),
+}};
+const text = {{ textContent: "One card" }};
 const panel = {{
   hidden: false,
   querySelectorAll(sel) {{
@@ -1843,6 +1901,8 @@ const panel = {{
     if (sel === "[data-sort-prev]") return prevBtn;
     if (sel === "[data-sort-next]") return nextBtn;
     if (sel === "[data-sort-intro]") return makeEl(22);
+    if (sel === "[data-sort-deck]") return deck;
+    if (sel === "[data-sort-text]") return text;
     return null;
   }},
 }};
@@ -1874,6 +1934,283 @@ assert.equal(globalThis.window.fetch, origFetch, "window.fetch should be restore
 """
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# --- C60: the card-sort check walks the whole deck and measures every card's miss --------------
+
+
+def _page_snippet(script, name):
+    """A tool's in-page JavaScript, the string constant `name` of `script`, as the page runs it."""
+    import ast
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    return next(node_.value.value for node_ in tree.body
+                if isinstance(node_, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == name for t in node_.targets))
+
+
+def _run_page_snippet(harness):
+    """Run a page snippet in node over a fake DOM; the JSON the harness prints last."""
+    node = shutil.which("node")
+    assert node, "node is required to run the render checks' page snippets"
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+# A page with M5's card sort, as far as measureCardSort sees it: a deck of `size` cards, card
+# steps that may break, and one card whose miss feedback may push the card past its box.
+CARD_SORT_PAGE = """
+const SIZE = {size}, BREAKS_AFTER = {breaks}, DISABLES_AFTER = {disables}, MISS_ON = {miss_on};
+const deck = Array.from({{ length: SIZE }}, (_, i) => ({{
+  key: "card-" + i, text: "Situation number " + i,
+  answer: ["legal", "illegal", "depends"][i % 3],
+}}));
+let current = 0;
+let picked = null;
+const rect = (h, top = 10) => ({{
+  width: 100, height: h, left: 10, top, right: 110, bottom: top + h,
+}});
+const box = (h, top) => ({{
+  hidden: false, disabled: false, scrollWidth: 100, clientWidth: 100,
+  scrollHeight: h, clientHeight: h, getBoundingClientRect: () => rect(h, top),
+}});
+// Object.assign would copy a getter's value once; the page's state changes as the check taps.
+const extend = (base, more) => Object.defineProperties(base,
+                                                       Object.getOwnPropertyDescriptors(more));
+const missed = () => picked !== null && picked !== deck[current].answer;
+const classes = new Set();
+const fb = extend(box(40, 200), {{
+  hidden: true, classList: {{ contains: name => classes.has(name) }},
+}});
+const tag = {{
+  get textContent() {{ return picked === null ? "" : (missed() ? "Missed" : "Right"); }},
+}};
+const text = {{ get textContent() {{ return deck[current].text; }} }};
+const card = extend(box(140, 60), {{
+  get scrollHeight() {{ return MISS_ON === current && missed() ? 152 : 140; }},
+}});
+function show(choice) {{
+  picked = choice;
+  fb.hidden = false;
+  classes.clear();
+  classes.add(missed() ? "verdict--miss" : "verdict--hit");
+}}
+const choices = ["legal", "illegal", "depends"].map(key => extend(box(80, 300), {{
+  getAttribute: name => (name === "data-sort-choice" ? key : null),
+  click() {{ show(key); }},
+}}));
+const prevBtn = extend(box(76, 400), {{
+  get disabled() {{ return current <= 0; }},
+  click() {{ if (current > 0) {{ current -= 1; picked = null; fb.hidden = true; }} }},
+}});
+const nextBtn = extend(box(76, 400), {{
+  get disabled() {{
+    return current >= SIZE - 1 || (DISABLES_AFTER !== null && current >= DISABLES_AFTER);
+  }},
+  click() {{
+    if (BREAKS_AFTER !== null && current >= BREAKS_AFTER) return;
+    if (current < SIZE - 1) {{ current += 1; picked = null; fb.hidden = true; }}
+  }},
+}});
+const panel = {{
+  hidden: false,
+  querySelectorAll(sel) {{
+    if (sel === "[data-sort-choice]") return choices;
+    if (sel.includes(".stage-foot")) return [prevBtn, nextBtn];
+    return [];
+  }},
+  querySelector(sel) {{
+    if (sel === ".sort-card") return card;
+    if (sel === "[data-sort-feedback]") return fb;
+    if (sel === "[data-sort-tag]") return tag;
+    if (sel === "[data-sort-text]") return text;
+    if (sel === "[data-sort-deck]") return {{ textContent: JSON.stringify(deck) }};
+    if (sel === "[data-sort-prev]") return prevBtn;
+    if (sel === "[data-sort-next]") return nextBtn;
+    if (sel === "[data-sort-intro]") return box(22, 50);
+    return null;
+  }},
+}};
+globalThis.window = {{ fetch: () => Promise.resolve({{ ok: true }}) }};
+globalThis.innerWidth = 800;
+globalThis.innerHeight = 480;
+globalThis.getComputedStyle = () => ({{
+  overflowX: "visible", overflowY: "visible", fontSize: "18px",
+}});
+globalThis.document = {{
+  documentElement: {{ scrollWidth: 800, scrollHeight: 480 }},
+  querySelector(sel) {{
+    if (sel === ".app") return {{ dataset: {{ theme: "dark" }} }};
+    if (sel === ".btn-back") return box(76, 0);
+    if (sel.includes("data-sort-panel")) return panel;
+    return null;
+  }},
+  querySelectorAll(sel) {{ return sel === ".stage-panel" ? [panel] : []; }},
+}};
+{snippet}
+console.log(JSON.stringify(measureCardSort("dark")));
+"""
+
+
+def _card_sort_measure(size=12, *, breaks=None, disables=None, miss_on=None):
+    js = lambda value: "null" if value is None else json.dumps(value)  # noqa: E731
+    harness = CARD_SORT_PAGE.format(size=size, breaks=js(breaks), disables=js(disables),
+                                    miss_on=js(miss_on),
+                                    snippet=_page_snippet(CARD_SORT, "CARD_SORT"))
+    return _run_page_snippet(harness)
+
+
+def _card_sort_verdicts(devtools, measured):
+    pages = _card_sort_pages()
+    for theme in THEMES:
+        pages[f"measureCardSort({json.dumps(theme)})"] = {**measured, "theme": theme}
+    proc = run(CARD_SORT, "http://127.0.0.1:9", port=devtools(pages))
+    return proc, [line for line in _verdicts(proc) if "card-sort" in line]
+
+
+def test_card_sort_render_walks_every_card_and_sees_each_ones_miss(devtools):
+    measured = _card_sort_measure()
+    assert (measured["deckSize"], measured["cardsChecked"], measured["missesChecked"]) == \
+        (12, 12, 12), measured
+    proc, verdicts = _card_sort_verdicts(devtools, measured)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert verdicts == [f"VERDICT: PASS - card-sort {theme}" for theme in THEMES]
+
+
+@pytest.mark.parametrize("page", [{"breaks": 0}, {"disables": 0}, {"breaks": 5}],
+                         ids=["next-card-does-nothing", "next-card-disabled", "stops-at-card-6"])
+def test_card_sort_render_fails_when_stepping_through_the_deck_breaks(devtools, page):
+    # "Next card" that stops working leaves the check on the cards it reached: it must fail, not
+    # pass on what it measured there.
+    measured = _card_sort_measure(**page)
+    assert measured["cardsChecked"] < measured["deckSize"] == 12, measured
+    proc, verdicts = _card_sort_verdicts(devtools, measured)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert verdicts == [f"VERDICT: FAIL - card-sort {theme}" for theme in THEMES]
+
+
+def test_card_sort_render_fails_when_one_cards_miss_feedback_overflows(devtools):
+    # The "Missed" feedback is the longest text a card shows. On card 7 it overflows the card;
+    # its "Right" feedback fits.
+    measured = _card_sort_measure(miss_on=6)
+    assert measured["worstDelta"] == 12 and measured["cardScrolls"] is True, measured
+    proc, verdicts = _card_sort_verdicts(devtools, measured)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert verdicts == [f"VERDICT: FAIL - card-sort {theme}" for theme in THEMES]
+
+
+@pytest.mark.parametrize("defect", [
+    {"cardsChecked": 1},
+    {"cardsChecked": 11},
+    {"missesChecked": 11},
+    {"deckSize": 0, "cardsChecked": 0, "missesChecked": 0},
+    {"deckSize": None},
+    {"cardsChecked": None},
+    {"missesChecked": None},
+], ids=["one-card", "eleven-cards", "a-miss-unseen", "empty-deck", "no-deck-size",
+        "no-card-count", "no-miss-count"])
+def test_card_sort_verdict_requires_the_whole_deck_and_every_miss(devtools, defect):
+    pages = _card_sort_pages(sort_defect={k: v for k, v in defect.items() if v is not None})
+    for key in [k for k, v in defect.items() if v is None]:
+        pages['measureCardSort("red-night")'].pop(key)
+    proc = run(CARD_SORT, "http://127.0.0.1:9", port=devtools(pages))
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-2:] == [
+        "VERDICT: FAIL - card-sort red-night",
+        "VERDICT: PASS - law red-night",
+    ]
+
+
+# --- C69: a fit run measures a predict stage with each chip chosen, too ---------------------------
+
+
+# A predict stage as far as render_fit's MEASURE sees it: three chips, a Lock it in button whose
+# bottom sits at 477 px, or at 481 px while chip `OVERFLOW_WITH` is chosen.
+PREDICT_PAGE = """
+const OVERFLOW_WITH = {overflow_with};
+let chosen = null;
+const rect = (left, top, right, bottom) => ({{
+  left, top, right, bottom, width: right - left, height: bottom - top,
+}});
+const plain = props => Object.assign({{
+  parentElement: null, scrollWidth: 0, clientWidth: 0, scrollHeight: 0, clientHeight: 0,
+  clientLeft: 0, clientTop: 0, textContent: "", getClientRects: () => [1],
+  getAttribute: () => null, matches: () => false,
+}}, props);
+const commit = plain({{
+  textContent: "Lock it in", matches: sel => sel === ".btn--primary",
+  getBoundingClientRect: () => rect(560, 404, 800,
+                                    OVERFLOW_WITH !== null && chosen === OVERFLOW_WITH ? 481 : 477),
+}});
+const chips = ["A", "B", "C"].map((key, i) => {{
+  const label = plain({{ textContent: key + " Choice " + key,
+                         getBoundingClientRect: () => rect(i * 260, 310, i * 260 + 250, 400) }});
+  return Object.assign(label, {{
+    key, querySelector: sel => (sel === ".predict-chip__key" ? {{ textContent: key }} : null),
+  }});
+}});
+const radios = chips.map(chip => ({{
+  checked: false, disabled: false,
+  closest: sel => (sel === ".predict-chip" ? chip : null),
+  dispatchEvent(event) {{
+    if (event.type !== "change" || !event.bubbles) throw new Error("not a bubbling change");
+    const on = radios.find(radio => radio.checked);
+    chosen = on ? on.chip.key : null;
+    return true;
+  }},
+  chip,
+}}));
+const panel = plain({{
+  hidden: false,
+  querySelectorAll(sel) {{
+    if (sel === "button") return [commit];
+    if (sel.includes(".predict-chip")) return chips;
+    if (sel.includes('input[type="radio"]')) return radios;
+    return [];
+  }},
+}});
+globalThis.window = {{ innerWidth: 800, innerHeight: 480 }};
+globalThis.getComputedStyle = () => ({{
+  visibility: "visible", overflowX: "visible", overflowY: "visible",
+}});
+globalThis.document = {{
+  querySelectorAll: sel => (sel === ".stage-panel" ? [panel] : []),
+  querySelector: sel => (sel.includes('data-stage="predict"') ? panel : null),
+}};
+const result = {measure};
+if (chosen !== null || radios.some(radio => radio.checked)) throw new Error("chips left chosen");
+console.log(JSON.stringify(result));
+"""
+
+
+def _predict_measure(overflow_with=None):
+    harness = PREDICT_PAGE.format(
+        overflow_with="null" if overflow_with is None else json.dumps(overflow_with),
+        measure=_page_snippet(FIT, "MEASURE") % "predict")
+    return _run_page_snippet(harness)
+
+
+def test_render_fit_measures_the_predict_stage_with_each_chip_chosen(devtools, tmp_path):
+    measured = _predict_measure()
+    names = [control["name"] for control in measured["controls"]]
+    for key in "ABC":
+        assert f"Lock it in with {key} chosen" in names, names
+    port = devtools({PREDICT_FIT: measured})
+    proc = run(FIT, "http://127.0.0.1:1/lesson/39", str(tmp_path / "predict.png"), "predict",
+               port=port)
+    assert_ends(proc, 0, "VERDICT: PASS")
+
+
+def test_render_fit_fails_when_a_chosen_chip_pushes_the_commit_off_the_screen(devtools, tmp_path):
+    # Choosing a chip swaps in the longer status line. If that pushes Lock it in past 480 px the
+    # run must fail, though the stage fits before a choice.
+    measured = _predict_measure(overflow_with="B")
+    port = devtools({PREDICT_FIT: measured})
+    proc = run(FIT, "http://127.0.0.1:1/lesson/39", str(tmp_path / "predict.png"), "predict",
+               port=port)
+    assert_ends(proc, 1, "VERDICT: FAIL - predict: Lock it in with B chosen is outside 800x480 "
+                         "(560, 404, 800, 481)")
+    assert "predict Commit bottom = 481px" in proc.stdout
 
 
 SURVEY_FITS = {

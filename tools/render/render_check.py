@@ -322,8 +322,11 @@ def check_list(console, output):
     route coverage test also starts and measures.
     """
     # Home scroll can be checked on a fresh console. The exam review URL always has a diagram.
+    # M39 (the Wi-Fi survey) opens on its predict, which fits 800x480 by 3 px; its later stages
+    # are sealed on a fresh console, and render_survey.py measures them.
     return (
         ("render_fit.py", f"{console}/lesson/29", str(output / "predict.png")),
+        ("render_fit.py", f"{console}/lesson/39", str(output / "survey-predict.png"), "predict"),
         ("render_scroll.py", f"{console}/", "home"),
         ("render_figure.py", f"{console}/exam/review/T6C02", "dark", str(output / "figure")),
         ("render_logbook.py", console),
