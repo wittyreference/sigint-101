@@ -5,7 +5,7 @@
   "use strict";
 
   // The page's <meta name="sigint101-clock" content="<epoch> <ms>">: the console's clock epoch
-  // and its time, in ms, when it rendered the page. Reading it on the GET writes nothing.
+  // (its boot) and its monotonic time, in ms, when it rendered the page. Reading it writes nothing.
   function parseAnchor(content) {
     var parts = typeof content === "string" ? content.trim().split(/\s+/) : [];
     if (parts.length !== 2 || !parts[0]) return null;
@@ -13,13 +13,29 @@
     return isFinite(ms) ? { epoch: parts[0], ms: ms } : null;
   }
 
-  // An action's stamp: the console's time at render plus the time the page has run since, on
-  // the page's own monotonic clock. Every page and tab is anchored to the same console clock, so
-  // their stamps compare; a reload takes a fresh anchor. The stamp runs a little behind the
-  // console's own time (by the page's load time), which only ever makes an action look older.
+  // The browser's shared timeline: performance.timeOrigin + performance.now(), the same for
+  // every tab and reload in this browser, whatever each page's script was doing.
+  function browserNow(perf) {
+    return perf.timeOrigin + perf.now();
+  }
+
+  // When this page's response began to arrive, on that same timeline: the navigation's
+  // responseStart, which the browser records as the bytes land, not when the script runs.
+  // Null when the browser does not say.
+  function receivedAt(perf) {
+    var entries = perf.getEntriesByType ? perf.getEntriesByType("navigation") : [];
+    var nav = entries && entries[0];
+    return nav && nav.responseStart > 0 ? perf.timeOrigin + nav.responseStart : null;
+  }
+
+  // An action's stamp, on the console's clock: its time at render, plus the browser time since
+  // the response arrived. The console rendered the page just before it arrived, so every tab maps
+  // the shared timeline onto the console's clock the same way, off only by the network's delivery
+  // time (well under a millisecond on the kiosk), never by a slow script. That only ever makes an
+  // action look a little older. Without a receive time, the script's own start is used instead.
   // No anchor, no stamp: the console then orders the request by its arrival.
-  function makeClock(anchor, now) {
-    var start = now();
+  function makeClock(anchor, now, received) {
+    var start = typeof received === "number" && isFinite(received) ? received : now();
     return {
       stamp: function () {
         if (!anchor) return null;
@@ -38,13 +54,14 @@
   }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { parseAnchor: parseAnchor, makeClock: makeClock, stamped: stamped };
+    module.exports = { parseAnchor: parseAnchor, browserNow: browserNow, receivedAt: receivedAt,
+                       makeClock: makeClock, stamped: stamped };
     return;
   }
 
   var meta = document.querySelector('meta[name="sigint101-clock"]');
   var clock = makeClock(parseAnchor(meta && meta.getAttribute("content")),
-                        function () { return performance.now(); });
+                        function () { return browserNow(performance); }, receivedAt(performance));
   root.ActionClock = { stamp: clock.stamp,
                        stamped: function (body) { return stamped(body, clock); } };
 })(this);

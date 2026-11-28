@@ -40,6 +40,9 @@
     var steps = 0;
     var timer = null;
     var busy = false;
+    // The stamp of the newest tap still to go out (opts.stamp, the action clock): the learner
+    // acted then, however long the debounce or a request in flight holds it back.
+    var tapped = null;
 
     function target() {
       return opts.current() + steps * opts.stepHz();
@@ -56,9 +59,11 @@
       if (busy) return;               // sent once the request in flight settles
       if (!steps) { opts.onPending(null); return; }
       var hz = target();
+      var stamp = tapped;
       steps = 0;
+      tapped = null;
       busy = true;
-      opts.send(hz).then(function (res) {
+      opts.send(hz, stamp).then(function (res) {
         busy = false;
         opts.onResult(res);
         if (steps) arm();
@@ -66,7 +71,9 @@
       });
     }
 
-    return { step: function (n) { steps += n; arm(); } };
+    return {
+      step: function (n) { steps += n; tapped = opts.stamp ? opts.stamp() : null; arm(); },
+    };
   }
 
   function pad2(n) {
@@ -101,12 +108,11 @@
     return newest ? receptionLine(newest) : "no receptions logged yet";
   }
 
-  // The post that retunes a decoder. A tune is a learner action, so it carries the action clock's
-  // stamp (action-clock.js): the console refuses one sent before the newest lesson opened, and a
-  // lesson's restore skips a decoder the learner tuned after it.
-  function decoderTuneRequest(api, hz, clock) {
+  // The post that retunes a decoder. A tune is a learner action, so it carries the stamp of the
+  // tap (action-clock.js, taken at the tap): the console refuses one tapped before the newest
+  // lesson opened, and a lesson's restore skips a decoder the learner tuned after it.
+  function decoderTuneRequest(api, hz, stamp) {
     var body = { freq_hz: hz };
-    var stamp = clock && clock.stamp();
     if (stamp) { body.epoch = stamp.epoch; body.at = stamp.at; }
     return {
       url: "/api/" + api + "/tune",
@@ -202,8 +208,9 @@
       delayMs: TUNE_DELAY_MS,
       current: function () { return confirmed; },
       stepHz: function () { return parseInt(tuneStrip.getAttribute("data-step-hz"), 10) || 0; },
-      send: function (hz) {
-        var request = decoderTuneRequest(api, hz, window.ActionClock);
+      stamp: function () { return window.ActionClock ? window.ActionClock.stamp() : null; },
+      send: function (hz, stamp) {
+        var request = decoderTuneRequest(api, hz, stamp);
         return fetch(request.url, request.init).then(function (res) { return res.json(); })
           .catch(function (err) {
             return { tuned: false, reason: "lost contact with the console: " + err.message };

@@ -60,6 +60,9 @@
        lesson's frequencies; hidden otherwise. #}
     <span class="rail__tuning" role="status" data-lesson-tuning hidden><span class="rail__tuning-head" data-lesson-tuning-head></span><span class="rail__tuning-why" data-lesson-tuning-why></span></span>
   </div>
+  {# A reason too long for the rail's line, whole, under the rail. A tap closes it; a tap on the
+     rail's note opens it again. #}
+  <button class="tuning-full" type="button" data-lesson-tuning-full hidden><span class="tuning-full__text" role="status" data-lesson-tuning-full-text></span><span class="tuning-full__close" aria-hidden="true">Tap to close</span></button>
 
   {# ---- One stage at a time. Sealed stages are not rendered at all until a
          prediction is committed: commit-before-reveal is enforced server-side,

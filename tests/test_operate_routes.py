@@ -3,6 +3,8 @@
 
 import json
 import re
+import shutil
+import subprocess
 import threading
 import time
 from contextlib import contextmanager
@@ -1126,6 +1128,186 @@ def test_every_page_carries_the_consoles_clock_for_its_action_stamps(tmp_path):
             assert meta, f"{url} carries no clock for its action stamps"
             assert meta.group(1) == _epoch(client)
             assert 0 < float(meta.group(2)) <= gate.now_ms()
+
+
+# --- round 5 (Codex D-132): one timeline, arrival before the probe, ppm's launch, the deadline ---
+
+ACTION_CLOCK = Path(__file__).resolve().parent.parent / "sigint101" / "static" / "action-clock.js"
+
+
+def _browser_stamps(anchors, script):
+    """Stamps the real action-clock.js makes, run under node.
+
+    `anchors` are the clock metas of the tabs (epoch, ms). `script` is a list of
+    [tab, received, script_at, act_at] on the browser's shared timeline: when the tab's response
+    arrived, when its script ran, and when the learner acted in it. Returns each action's stamp.
+    """
+    node = shutil.which("node")
+    assert node, "node is needed to run action-clock.js"
+    program = (
+        "const c = require(process.argv[1]);"
+        "const [anchors, script] = JSON.parse(process.argv[2]);"
+        "let now = 0;"
+        "const clocks = anchors.map(([epoch, ms], i) => {"
+        "  const [, received, scriptAt] = script.find(s => s[0] === i);"
+        "  now = scriptAt; return c.makeClock({epoch, ms}, () => now, received); });"
+        "console.log(JSON.stringify(script.map(([tab, , , actAt]) => {"
+        "  now = actAt; return clocks[tab].stamp(); })));"
+    )
+    out = subprocess.run([node, "-e", program, str(ACTION_CLOCK), json.dumps([anchors, script])],
+                         capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(out.stdout)
+
+
+def _clock_meta(client, url):
+    html = client.get(url).text
+    meta = re.search(r'<meta name="sigint101-clock" content="(\S+) ([0-9.]+)">', html)
+    assert meta, f"{url} carries no clock meta"
+    return meta.group(1), float(meta.group(2))
+
+
+def test_a_later_action_in_a_slow_tab_wins_over_an_earlier_one_in_a_fast_tab(tmp_path):
+    # Codex D-132 F1, through the endpoints with stamps the page's own clock makes. Tab A opened
+    # lesson 1 (no band) and its script ran at once; tab B opened lesson 2 (a band) a moment
+    # later, but its script ran 300 ms late. The learner acted in A first, then in B. A's restore
+    # reaches the console last and must not put B's band back to FM.
+    packs = _two_lesson_packs(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        epoch, render_a = _clock_meta(client, "/lesson/1")
+        _, render_b = _clock_meta(client, "/lesson/2")
+        browser = 10_000.0                       # the browser timeline when A's response arrived
+        gap = render_b - render_a                # B's response arrived that much later
+        script = [[0, browser + 1, browser + 1, browser + 6],
+                  [1, browser + gap + 1, browser + gap + 301, browser + gap + 46]]
+        stamp_a, stamp_b = _browser_stamps([[epoch, render_a], [epoch, render_b]], script)
+        assert stamp_b["at"] > stamp_a["at"]
+        newer = client.post("/api/tuning?lesson_id=2"
+                            f"&epoch={stamp_b['epoch']}&at={stamp_b['at']}")
+        assert newer.json() == {"tuned": True, "lesson_id": 2}
+        late = client.post(f"/api/tuning?lesson_id=1&epoch={stamp_a['epoch']}&at={stamp_a['at']}")
+        assert late.status_code == 409 and late.json()["stale"] is True
+        assert _on_the_band(client.app.state.sweeper)
+
+
+def test_an_unstamped_tune_is_ordered_by_its_arrival_not_by_when_its_probe_ended(tmp_path):
+    # Codex D-132 F3: the first tune arrived first but was held in its hardware probe; the second
+    # arrived after it and landed. When the first comes out of its probe it is the older of the
+    # two, by arrival, and must not overwrite the second.
+    entered, release = threading.Event(), threading.Event()
+    hold = {"armed": False}
+
+    def probe():
+        if hold["armed"]:
+            hold["armed"] = False
+            entered.set()
+            assert release.wait(JOIN_S), "the held probe was never released"
+        return _present()
+
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=probe, sweeper_factory=_sweeper, pack_dir=packs) as client:
+        hold["armed"] = True
+        first = _Request(lambda: client.post("/api/tune", json={"low": 100_000_000,
+                                                                "high": 102_000_000}))
+        first.start()
+        assert entered.wait(JOIN_S)
+        try:
+            second = client.post("/api/tune", json={"low": 110_000_000, "high": 112_000_000})
+            assert second.status_code == 200
+        finally:
+            release.set()
+        assert first.finish().status_code == 409
+        sweeper = client.app.state.sweeper
+        assert (sweeper.low, sweeper.high) == (110_000_000, 112_000_000)
+
+
+def test_a_calibration_queued_at_the_arbiter_never_launches_inside_a_restore(tmp_path):
+    # Codex D-132 F4: a ppm measurement queued behind another claim reached its rtl_fm launch with
+    # a restore under way. It now waits out the restore under the same permit as a receiver.
+    launched = []
+
+    def measure(**_):
+        launched.append(client.app.state.tuning_gate._restoring)
+        return {"ppm": 1.0, "reason": None}
+
+    packs = _radio_pack(tmp_path / "packs")
+    client = _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs,
+                     ppm_measure=measure)
+    with client:
+        arbiter = client.app.state.radio_arbiter
+        holding, let_go = threading.Event(), threading.Event()
+
+        def hold_the_radio():
+            with arbiter.reserve("sweeper", RuntimeError, time.monotonic() + JOIN_S):
+                holding.set()
+                let_go.wait(JOIN_S)
+
+        holder = threading.Thread(target=hold_the_radio, daemon=True)
+        holder.start()
+        assert holding.wait(JOIN_S)
+        try:
+            ppm = _Request(lambda: client.post("/api/ppm/measure"))
+            ppm.start()
+            time.sleep(0.2)                  # queued at the arbiter
+            with _slow_restore(client) as (held, restore):
+                let_go.set()
+                time.sleep(0.3)
+                assert launched == [], "the calibration launched inside a restore"
+                held.release.set()
+                assert restore.finish().status_code == 200
+            assert ppm.finish().status_code == 200
+        finally:
+            let_go.set()
+            holder.join(JOIN_S)
+        assert launched == [0]
+
+
+def test_a_queued_claim_is_refused_at_its_deadline_even_if_the_restore_has_just_ended(
+        tmp_path, monkeypatch):
+    # Codex D-132 F5: a claim sent back by a restore past its tuning deadline started anyway once
+    # the restore had cleared. It must be refused: its time to wait on restores is spent.
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.25)
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
+        gate = client.app.state.tuning_gate
+        arbiter = client.app.state.radio_arbiter
+        holding, let_go = threading.Event(), threading.Event()
+
+        def hold_the_radio():
+            with arbiter.reserve("ppm", RuntimeError, time.monotonic() + JOIN_S):
+                holding.set()
+                let_go.wait(JOIN_S)
+
+        holder = threading.Thread(target=hold_the_radio, daemon=True)
+        holder.start()
+        assert holding.wait(JOIN_S)
+        try:
+            poll = _Request(lambda: client.get("/api/aprs"))
+            poll.start()
+            time.sleep(0.1)                  # past the idle gate, queued at the arbiter
+            with _slow_restore(client) as (held, restore):
+                real_admit = gate.admit_claim
+
+                def admit():
+                    # Sent back by the restore, which then ends before the claim tries again.
+                    if real_admit():
+                        return True
+                    held.release.set()
+                    restore.join(JOIN_S)
+                    return False
+
+                gate.admit_claim = admit
+                time.sleep(0.3)              # past the claim's 0.25 s deadline, still queued
+                let_go.set()
+                answer = poll.finish()
+        finally:
+            let_go.set()
+            holder.join(JOIN_S)
+        assert answer.status_code == 503
+        assert answer.json()["reason"] == "tuning the radios for this lesson"
+        assert spawned == []
 
 
 # --- the reception log --------------------------------------------------------------------------

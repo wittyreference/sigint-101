@@ -190,10 +190,41 @@ test("with nothing logged the line says so plainly", () => {
 
 // C81 round 4: a decoder tune is a learner action, so it carries the action clock's stamp.
 test("a decoder tune carries the learner's action stamp beside the frequency", () => {
-  const clock = { stamp: () => ({ epoch: "5eed", at: 4321 }) };
-  const request = rack.decoderTuneRequest("aprs", 144390000, clock);
+  const request = rack.decoderTuneRequest("aprs", 144390000, { epoch: "5eed", at: 4321 });
   assert.equal(request.url, "/api/aprs/tune");
   assert.equal(request.init.method, "POST");
   assert.deepEqual(JSON.parse(request.init.body), { freq_hz: 144390000, epoch: "5eed", at: 4321 });
   assert.deepEqual(JSON.parse(rack.decoderTuneRequest("aprs", 1, null).init.body), { freq_hz: 1 });
+});
+
+// C81 round 5 (Codex D-132 F2): a step is stamped when the learner taps, and the stamp rides
+// through the debounce and any request in flight, so a tap made before a newer lesson opened is
+// still seen as older by the console however late it goes out.
+test("a decoder step carries the stamp of its tap through the debounce and a request in flight",
+     async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clockAt = 2000;
+  const sent = [];
+  let resolveSend = null;
+  const stepper = rack.makeStepper({
+    delayMs: 400,
+    current: () => 144390000,
+    stepHz: () => 25000,
+    stamp: () => ({ epoch: "5eed", at: clockAt }),
+    send: (hz, stamp) => { sent.push([hz, stamp]); return new Promise((r) => { resolveSend = r; }); },
+    onPending: () => {},
+    onResult: () => {},
+  });
+  stepper.step(1);                     // tapped at 2,000
+  t.mock.timers.tick(400);
+  clockAt = 2005;
+  stepper.step(1);                     // tapped at 2,005, while the first is in flight
+  clockAt = 2255;                      // a newer lesson's restore (2,105) ran meanwhile
+  t.mock.timers.tick(400);
+  resolveSend({ tuned: true, freq_hz: 144415000 });
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(400);
+  assert.deepEqual(sent.map(([, stamp]) => stamp.at), [2000, 2005]);
+  const body = JSON.parse(rack.decoderTuneRequest("aprs", sent[1][0], sent[1][1]).init.body);
+  assert.equal(body.at, 2005, "the request went out with its send time, not its tap time");
 });

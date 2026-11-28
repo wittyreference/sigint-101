@@ -13,12 +13,46 @@ test("the clock meta names the console's epoch and its time at render", () => {
   assert.equal(clock.parseAnchor("5eed soon"), null);
 });
 
-test("a stamp is the console's time at render plus the time since, on the page's own clock", () => {
+test("a stamp is the console's time at render plus the time since the page received it", () => {
+  // `received` is when the response's first byte reached the browser, on the browser's shared
+  // timeline (performance.timeOrigin + responseStart): when the script ran does not enter.
   let now = 50;
-  const c = clock.makeClock({ epoch: "5eed", ms: 1000 }, () => now);
+  const c = clock.makeClock({ epoch: "5eed", ms: 1000 }, () => now, 50);
   assert.deepEqual(c.stamp(), { epoch: "5eed", at: 1000 });
   now = 50 + 2500.25;
   assert.deepEqual(c.stamp(), { epoch: "5eed", at: 3500.25 });
+});
+
+test("two tabs stamp in the order the learner acted, however long each took to run its script", () => {
+  // Codex D-132 F1: the browser's timeline is shared by every tab. Tab A's response arrived at
+  // 1,001 and its script ran at once; tab B's arrived at 1,040 (rendered at 1,039) and its script
+  // ran 300 ms late. The learner acted in A at 1,260 and in B at 1,300.
+  let now = 0;
+  const run = (renderMs, received, scriptAt) => {
+    now = scriptAt;
+    return clock.makeClock({ epoch: "5eed", ms: renderMs }, () => now, received);
+  };
+  const a = run(1000, 1001, 1001);
+  const b = run(1039, 1040, 1340);
+  now = 1260;
+  const atA = a.stamp().at;
+  now = 1300;
+  const atB = b.stamp().at;
+  assert.ok(atB > atA, `the later action stamped ${atB}, before the earlier one's ${atA}`);
+  assert.equal(atA, 1259);
+  assert.equal(atB, 1299);
+});
+
+test("the browser's own timeline and receive time are what the page reads", () => {
+  const perf = {
+    timeOrigin: 1_700_000_000_000,
+    now: () => 1500,
+    getEntriesByType: kind => (kind === "navigation" ? [{ responseStart: 120.5 }] : []),
+  };
+  assert.equal(clock.browserNow(perf), 1_700_000_001_500);
+  assert.equal(clock.receivedAt(perf), 1_700_000_000_120.5);
+  assert.equal(clock.receivedAt({ ...perf, getEntriesByType: () => [] }), null);
+  assert.equal(clock.receivedAt({ ...perf, getEntriesByType: () => [{ responseStart: 0 }] }), null);
 });
 
 test("a later action always stamps later, so the console can order a page's actions", () => {

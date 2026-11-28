@@ -102,6 +102,7 @@ from .provenance import (
 from .radio_control import (
     CLAIM_QUEUE_WAIT_S,
     TUNED,
+    TUNING_REASON,
     RadioArbiter,
     ReceptionSink,
     Superseded,
@@ -563,6 +564,29 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
     return state.shutdown_errors
 
 
+class _Arrival:
+    """Notes when each request reached the console, on the gate's monotonic clock (C81).
+
+    It runs on the event loop as the request arrives, before any worker thread or hardware
+    probe, so a learner's tune or lesson restore that carries no usable stamp is ordered by when
+    it arrived, and a stamp is clamped to it: a request held in a probe cannot overtake one that
+    arrived after it.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            scope.setdefault("state", {})["arrived_ms"] = TuningGate.now_ms()
+        await self.app(scope, receive, send)
+
+
+def arrival_ms(request) -> float | None:
+    """When the request reached the console (_Arrival), or None if nothing noted it."""
+    return getattr(request.state, "arrived_ms", None)
+
+
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
@@ -687,6 +711,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             await shutdown_console_state(app.state, trial=False)
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
+    app.add_middleware(_Arrival)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.exception_handler(StarletteHTTPException)
@@ -1241,7 +1266,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         )
 
     @app.post("/api/tuning")
-    def lesson_tuning(lesson_id: int, epoch: str | None = None, at: str | None = None):
+    def lesson_tuning(request: Request, lesson_id: int, epoch: str | None = None,
+                      at: str | None = None):
         """Put the radios where this lesson expects them, whatever the rack left them on.
 
         The lesson page posts this as it loads, ahead of its panel scripts (lesson-tuning.js), so
@@ -1260,7 +1286,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         gate = app.state.tuning_gate
         try:
             outcomes, refusal = _restore_lesson_tuning(app.state.lessons[lesson_id],
-                                                       gate.stamp(epoch, at))
+                                                       gate.stamp(epoch, at, arrival_ms(request)))
         except Superseded as exc:
             return JSONResponse(status_code=409, content={
                 "tuned": False, "lesson_id": lesson_id, "stale": True, "reason": str(exc)})
@@ -1721,9 +1747,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # A lesson's tuning restore must not run while a receiver launches, or the tool opens on
         # the frequency the rack left (C81). The claim's waits on restores share one budget.
         budget = gate.claim_budget()
+        sent_back = False
         while True:
             intent = None
             try:
+                # A claim a restore sent back tries again only while its deadline lasts, even if
+                # the restore has ended meanwhile: its time to wait on restores is spent.
+                if sent_back and gate.past(budget):
+                    raise refusal(TUNING_REASON)
                 if reason := calibration.release_failure():
                     raise refusal(reason)
                 for consumer in consumers.values():
@@ -1747,11 +1778,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                         raise refusal(reason)
                     if not reclaim and getattr(receiver, "released", False):
                         raise refusal("the radio was released to another program")
-                    # The last admission: a receiver launches under the gate's permit, which no
-                    # restore begins under. A restore that began while this claim queued sends it
-                    # back, letting the radio go, to wait for the restore and try again. ppm
-                    # starts no receiver, so it needs no permit.
-                    permitted = receiver is None or gate.admit_claim()
+                    # The last admission: a launch (a receiver, or the ppm calibration's rtl_fm)
+                    # happens under the gate's permit, which no restore begins under. A restore
+                    # that began while this claim queued sends it back, letting the radio go, to
+                    # wait for the restore and try again. ppm holds the permit for its whole
+                    # capture, as it holds the radio, so a restore waits for it to finish.
+                    permitted = gate.admit_claim()
+                    sent_back = not permitted
                     if permitted:
                         try:
                             if prepare is not None:
@@ -1768,8 +1801,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                 receiver.resume()
                             return start() if start is not None else None
                         finally:
-                            if receiver is not None:
-                                gate.end_claim()
+                            gate.end_claim()
             finally:
                 if intent is not None:
                     receiver.discard_start(intent)
@@ -2373,7 +2405,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return reading.as_dict()
 
     @app.post("/api/tune")
-    def tune(payload: dict = Body(default={})):
+    def tune(request: Request, payload: dict = Body(default={})):
         """Point the sweep at a learner-chosen span, failing closed with the reason.
 
         The span meets validate_span first, so a span this radio cannot reach is refused (400)
@@ -2415,7 +2447,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
         gate = app.state.tuning_gate
         try:
-            gate.tune("sweeper", gate.stamp(payload.get("epoch"), payload.get("at")), retune)
+            gate.tune("sweeper", gate.stamp(payload.get("epoch"), payload.get("at"),
+                                            arrival_ms(request)), retune)
         except (TuningBusy, Superseded) as exc:
             log_event(app.state.events_path, "tune_blocked", {"reason": str(exc)})
             return JSONResponse(status_code=409, content={"tuned": False, "reason": str(exc)})
@@ -2881,7 +2914,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         )
 
     @app.post("/api/{api}/tune")
-    def decoder_tune(api: str, payload: dict = Body(default={})):
+    def decoder_tune(request: Request, api: str, payload: dict = Body(default={})):
         """Point a single-channel decoder at another frequency inside its band.
 
         Refused (400) with the reason outside the decoder's band, and (503) with no radio to
@@ -2906,7 +2939,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             return JSONResponse(status_code=503, content={"tuned": False, "reason": reason})
         gate = app.state.tuning_gate
         try:
-            gate.tune(inst.receiver, gate.stamp(payload.get("epoch"), payload.get("at")),
+            gate.tune(inst.receiver, gate.stamp(payload.get("epoch"), payload.get("at"),
+                                                arrival_ms(request)),
                       lambda: getattr(app.state, inst.receiver).retune(hz))
         except (TuningBusy, Superseded) as exc:
             log_event(app.state.events_path, "decoder_tune_blocked",

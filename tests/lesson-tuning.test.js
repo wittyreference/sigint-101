@@ -63,8 +63,13 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
   // The note's two lines, the verdict and why, as the lesson page's rail carries them.
   const head = { textContent: "" };
   const why = { textContent: "" };
+  // The full reason, shown under the rail when it is too long for the rail's line; a tap on it
+  // closes it, and a tap on the rail's note opens it again.
+  const full = { hidden: true, listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } };
+  const fullText = { textContent: "" };
   const note = {
-    hidden: true, title: "",
+    hidden: true, title: "", listeners: {},
+    addEventListener(type, fn) { this.listeners[type] = fn; },
     querySelector: sel => ({ "[data-lesson-tuning-head]": head,
                              "[data-lesson-tuning-why]": why })[sel] || null,
     get lines() { return [head.textContent, why.textContent]; },
@@ -93,7 +98,8 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
   const context = {
     document: {
       currentScript: null,
-      querySelector: sel => (sel === "[data-lesson-tuning]" ? note : null),
+      querySelector: sel => ({ "[data-lesson-tuning]": note, "[data-lesson-tuning-full]": full,
+                               "[data-lesson-tuning-full-text]": fullText })[sel] || null,
       querySelectorAll: sel => {
         if (!wanted.has(sel)) return [];
         if (sel === ".waterfall-wrap") {
@@ -131,7 +137,7 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
   panels.forEach(name => run(name));
 
   return {
-    note, requests, errors, server,
+    note, full, fullText, requests, errors, server,
     polls: poll => requests.filter(r => r.url.startsWith(poll)),
     answer: async (status, body = {}) => { answer(status, body); await settle(); },
     // Move the fake clock on, firing every timer that falls due, in order.
@@ -290,6 +296,31 @@ test("a band the console refuses says so with the validator's own reason", async
   await page.answer(422, { tuned: false, lesson_id: 7, reason });
   assert.equal(page.note.hidden, false);
   assert.deepEqual(page.note.lines, ["Not retuned", reason]);
+});
+
+test("a reason too long for the rail is shown whole under it, closed and reopened by a tap", async () => {
+  // Codex D-132 F6: the rail gave the validator's reason 195 of the 410 px it needs, and the
+  // ellipsis hid its useful end. A long reason opens whole under the rail, where it wraps.
+  const page = lessonPage({ panels: ["decode"] });
+  const reason = "span 100000 Hz is narrower than one 125000 Hz bin";
+  await page.answer(422, { tuned: false, lesson_id: 7, reason });
+  assert.equal(page.full.hidden, false);
+  assert.equal(page.fullText.textContent, reason);
+  page.full.listeners.click();
+  assert.equal(page.full.hidden, true, "a tap on the reason closes it");
+  assert.equal(page.note.hidden, false, "the rail still says it was not retuned");
+  page.note.listeners.click();
+  assert.equal(page.full.hidden, false, "a tap on the rail's note opens it again");
+});
+
+test("a reason that fits the rail opens nothing under it", async () => {
+  for (const [status, body] of [[503, { reason: "no console" }], [405, TEXT],
+                                [200, { tuned: false, skipped: { sweeper: "you retuned" } }]]) {
+    const page = lessonPage({ panels: ["decode"] });
+    await page.answer(status, body);
+    assert.equal(page.note.hidden, false);
+    assert.equal(page.full.hidden, true, `${status} opened the reason under the rail`);
+  }
 });
 
 test("a restore that skipped a receiver for the learner's own tune says so, not done", async () => {

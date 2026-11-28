@@ -3,10 +3,12 @@
 
 import asyncio
 import math
+import re
 import secrets
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 from .receiver_lifecycle import daemon
 
@@ -68,6 +70,22 @@ NEWER_LESSON = "a newer lesson"       # a lesson opened after this one is restor
 STALE_REASON = "a newer lesson was opened"
 
 
+def boot_epoch() -> str:
+    """The clock epoch stamps are read against: this boot's id.
+
+    time.monotonic() is the system's monotonic clock (Linux CLOCK_MONOTONIC), the same for every
+    process until the next boot, so a page rendered before the console restarted still stamps on
+    the clock the console reads. Without a boot id, a fresh token: such pages fall back to their
+    arrival time.
+    """
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except OSError:
+        boot_id = ""
+    token = boot_id.replace("-", "").lower()
+    return token if re.fullmatch(r"[0-9a-f]{8,64}", token) else secrets.token_hex(8)
+
+
 class TuningBusy(Exception):
     """A claim or a tune waited TUNING_WAIT_S on a lesson's tuning restore and gave up."""
 
@@ -84,11 +102,13 @@ class TuningGate:
     learner sent later. These rules keep what the learner sees true:
 
     - Order is the learner's, not the network's. Each restore and tune carries the time of the
-      learner's action on the console's own clock (`stamp`; the page reads the clock's epoch and
-      time from its render and adds its own elapsed time). A restore older than the newest one
-      is refused before it starts (Superseded), as is a tune older than the newest restore or
-      the newest tune of its receiver. A request without a stamp, or from another epoch (a page
-      rendered before the console restarted), is stamped on arrival.
+      learner's action on the console's own monotonic clock (`stamp`). The page maps the
+      browser's shared timeline onto it: the console's time at render, plus the browser time
+      since the response arrived (action-clock.js), so every tab and reload maps the same way.
+      A restore older than the newest one is refused before it starts (Superseded), as is a
+      tune older than the newest restore or the newest tune of its receiver. A request without
+      a stamp, or from another boot, is stamped with its arrival, taken before any worker or
+      hardware probe runs; a stamp is never later than that arrival.
     - A restore never undoes a newer action: each receiver it resets is a step under the step
       lock, skipped when the learner tuned that receiver after the restore's action
       (YOU_RETUNED) or a newer lesson's restore has begun (NEWER_LESSON). The restore reports
@@ -109,7 +129,7 @@ class TuningGate:
         self._claims = 0
         self._newest_restore = float("-inf")
         self._tuned_at = {}
-        self.epoch = secrets.token_hex(8)
+        self.epoch = boot_epoch()
 
     @staticmethod
     def now_ms() -> float:
@@ -119,18 +139,19 @@ class TuningGate:
         """The clock a page stamps its actions on: (epoch, the console's time in ms). Read-only."""
         return self.epoch, round(self.now_ms(), 3)
 
-    def stamp(self, epoch, at) -> float:
-        """The time of a learner's action as the page stamped it, or its arrival when it cannot
-        be trusted: no stamp, another epoch, not a number. Never later than now, so a page cannot
-        stamp an action ahead of what it has seen."""
-        now = self.now_ms()
+    def stamp(self, epoch, at, arrived: float | None = None) -> float:
+        """The time of a learner's action as the page stamped it, or the request's arrival when
+        it cannot be trusted: no stamp, another epoch, not a number. Never later than the
+        arrival, so a page cannot stamp an action ahead of what it has seen. `arrived` is taken
+        as the request reached the console (arrival_ms), before any worker or probe ran."""
+        arrived = self.now_ms() if arrived is None else arrived
         if at is None or epoch != self.epoch:
-            return now
+            return arrived
         try:
             at = float(at)
         except (TypeError, ValueError):
-            return now
-        return min(at, now) if math.isfinite(at) else now
+            return arrived
+        return min(at, arrived) if math.isfinite(at) else arrived
 
     def begin_restore(self, at: float) -> float:
         """Register a restore of the learner's action at `at`, or raise Superseded if a newer
@@ -174,6 +195,10 @@ class TuningGate:
             return action()
         finally:
             self._step.release()
+
+    @staticmethod
+    def past(deadline: float) -> bool:
+        return time.monotonic() >= deadline
 
     @staticmethod
     def claim_budget() -> float:

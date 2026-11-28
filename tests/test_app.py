@@ -1134,6 +1134,12 @@ def test_the_lesson_page_has_a_note_that_says_when_its_tuning_is_late_or_refused
     rest = html[note.end():]
     assert re.match(r'\s*<span[^>]*data-lesson-tuning-head[^>]*></span>'
                     r'\s*<span[^>]*data-lesson-tuning-why[^>]*></span>\s*</span>', rest)
+    # A reason too long for the rail opens whole under it: a hidden band that is its own button
+    # (a tap closes it), with the reason in a status line.
+    full = re.search(r"<button[^>]*\bdata-lesson-tuning-full\b[^>]*>(.*?)</button>", html, re.S)
+    assert full, "the lesson page has no band for a reason too long for the rail"
+    assert re.search(r"\shidden\b", full.group(0).split(">")[0])
+    assert re.search(r'<span[^>]*role="status"[^>]*data-lesson-tuning-full-text', full.group(1))
 
 
 def test_the_rack_never_restores_a_lessons_tuning(tmp_path):

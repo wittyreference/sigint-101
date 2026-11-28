@@ -21,12 +21,33 @@
   var head = note && note.querySelector("[data-lesson-tuning-head]");
   var why = note && note.querySelector("[data-lesson-tuning-why]");
 
+  // A reason longer than the rail's line (the console's own words for a band it cannot take)
+  // opens whole under the rail, where it wraps; a tap on it closes it, and a tap on the rail's
+  // note opens it again. A reason that fits the rail opens nothing.
+  var RAIL_CHARS = 14;
+  var full = document.querySelector("[data-lesson-tuning-full]");
+  var fullText = document.querySelector("[data-lesson-tuning-full-text]");
+  var longReason = null;
+
+  function showFull(open) {
+    if (!full || !fullText) return;
+    fullText.textContent = open ? longReason : "";
+    full.hidden = !open;
+  }
+
+  if (full) full.addEventListener("click", function () { showFull(false); });
+  if (note && note.addEventListener) {
+    note.addEventListener("click", function () { if (longReason) showFull(true); });
+  }
+
   function say(verdict, reason) {
     if (!head || !why) return;
     head.textContent = verdict;
     why.textContent = reason || "";
     note.title = reason ? verdict + " · " + reason : verdict;
     note.hidden = false;
+    longReason = reason && reason.length > RAIL_CHARS ? reason : null;
+    showFull(!!longReason);
   }
 
   function clear() {
@@ -35,6 +56,8 @@
     why.textContent = "";
     note.title = "";
     note.hidden = true;
+    longReason = null;
+    showFull(false);
   }
 
   // What the console's answer means for the rail, as [verdict, why], or null when every

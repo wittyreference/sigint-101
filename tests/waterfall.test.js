@@ -598,10 +598,38 @@ test("the status SNR comes from the newest live sweep, including a measured zero
 // refuses one sent before the newest lesson opened, and a lesson's restore skips a receiver the
 // learner tuned after it.
 test("a sweep tune carries the learner's action stamp beside the span", () => {
-  const clock = { stamp: () => ({ epoch: "5eed", at: 4321 }) };
-  const init = panel.tuneRequest({ center: 433920000, span: 2000000 }, clock);
+  const init = panel.tuneRequest({ center: 433920000, span: 2000000 }, { epoch: "5eed", at: 4321 });
   assert.equal(init.method, "POST");
   assert.deepEqual(JSON.parse(init.body),
                    { center: 433920000, span: 2000000, epoch: "5eed", at: 4321 });
   assert.deepEqual(JSON.parse(panel.tuneRequest({ low: 1, high: 2 }, null).body), { low: 1, high: 2 });
+});
+
+// C81 round 5 (Codex D-132 F2): the same for the sweep's tune strip and a tap on the waterfall.
+test("a sweep tap carries the stamp of its tap through the debounce and a request in flight",
+     async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clockAt = 2000;
+  const sent = [];
+  let resolveSend = null;
+  const tuner = panel.makeTuner({
+    stepHz: 100000,
+    delayMs: 400,
+    confirmed: () => FM,
+    stamp: () => ({ epoch: "5eed", at: clockAt }),
+    send: (req, stamp) => { sent.push([req, stamp]); return new Promise((r) => { resolveSend = r; }); },
+    onPending: () => {},
+    onResult: () => {},
+  });
+  tuner.step(1);
+  t.mock.timers.tick(400);
+  clockAt = 2005;
+  tuner.tapTo(433920000);              // tapped at 2,005, while the first is in flight
+  clockAt = 2255;                      // a newer lesson's restore (2,105) ran meanwhile
+  t.mock.timers.tick(400);
+  resolveSend({ ok: false, reason: "x" });
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(400);
+  assert.deepEqual(sent.map(([, stamp]) => stamp.at), [2000, 2005]);
+  assert.equal(JSON.parse(panel.tuneRequest(sent[1][0], sent[1][1]).body).at, 2005);
 });

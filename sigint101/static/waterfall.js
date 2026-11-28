@@ -45,13 +45,12 @@
   // A lesson's band as an /api/tune request: its centre and width (and bin, if it names one). The
   // console builds the span around the centre itself, offset so the target is not lost in a hop's
   // unmeasured centre bin, and answers with the span it chose and the centre the dial reads.
-  // The /api/tune post for a span. A tune is a learner action, so it carries the action clock's
-  // stamp (action-clock.js): the console refuses one sent before the newest lesson opened, and a
-  // lesson's restore skips a sweep the learner tuned after it.
-  function tuneRequest(request, clock) {
+  // The /api/tune post for a span. A tune is a learner action, so it carries the stamp of the tap
+  // (action-clock.js, taken at the tap): the console refuses one tapped before the newest lesson
+  // opened, and a lesson's restore skips a sweep the learner tuned after it.
+  function tuneRequest(request, stamp) {
     var body = {};
     Object.keys(request).forEach(function (key) { body[key] = request[key]; });
-    var stamp = clock && clock.stamp();
     if (stamp) { body.epoch = stamp.epoch; body.at = stamp.at; }
     return { method: "POST", cache: "no-store", headers: { "content-type": "application/json" },
              body: JSON.stringify(body) };
@@ -88,6 +87,11 @@
     var absolute = null;
     var timer = null;
     var busy = false;
+    // The stamp of the newest tap still to go out (opts.stamp, the action clock): the learner
+    // acted then, however long the debounce or a request in flight holds it back.
+    var tapped = null;
+
+    function tap() { tapped = opts.stamp ? opts.stamp() : null; }
 
     function arm() {
       if (timer !== null) clearTimeout(timer);
@@ -99,11 +103,13 @@
       timer = null;
       if (busy) return;               // sent again once the request in flight settles
       var next = opts.plan(steps, absolute);
+      var stamp = tapped;
       steps = 0;
       absolute = null;
+      tapped = null;
       if (!next) { opts.onPending(null); return; }
       busy = true;
-      opts.send(next.value).then(function (res) {
+      opts.send(next.value, stamp).then(function (res) {
         busy = false;
         opts.onResult(res);
         if (steps !== 0 || absolute !== null) arm();
@@ -112,8 +118,8 @@
     }
 
     return {
-      step: function (n) { steps += n; arm(); },
-      set: function (value) { absolute = { value: value }; steps = 0; arm(); },
+      step: function (n) { steps += n; tap(); arm(); },
+      set: function (value) { absolute = { value: value }; steps = 0; tap(); arm(); },
     };
   }
 
@@ -132,17 +138,18 @@
     }
     var coalescer = makeCoalescer({
       delayMs: opts.delayMs,
+      stamp: opts.stamp,
       plan: function (steps, absolute) {
         var span = opts.confirmed();
         if (!span) return null;
         var base = absolute ? absolute.value : dialHz(span);
         return { value: Math.round(base + steps * stepHz()) };
       },
-      send: function (hz) {
+      send: function (hz, stamp) {
         var span = opts.confirmed();
         var request = { center: hz, span: span.high - span.low };
         if (span.binSize) request.bin_size = span.binSize;
-        return opts.send(request);
+        return opts.send(request, stamp);
       },
       onPending: function (plan) { opts.onPending(plan ? plan.value : null); },
       onResult: opts.onResult,
@@ -623,8 +630,14 @@
     });
   }
 
-  function postTune(request) {
-    return fetch("/api/tune", tuneRequest(request, window.ActionClock)).then(function (res) {
+  // The stamp of a learner action now, on the console's clock (action-clock.js), or none.
+  function stampNow() {
+    return window.ActionClock ? window.ActionClock.stamp() : null;
+  }
+
+  function postTune(request, stamp) {
+    if (stamp === undefined) stamp = stampNow();
+    return fetch("/api/tune", tuneRequest(request, stamp)).then(function (res) {
       return res.json().then(function (body) {
         body.ok = res.ok;
         body.status = res.status;
@@ -639,6 +652,7 @@
     stepHz: stepHz,
     delayMs: TUNE_DELAY_MS,
     confirmed: function () { return live; },
+    stamp: stampNow,
     send: postTune,
     onPending: function (hz) {
       pendingNote = hz === null ? null : "tuning to " + formatTuneMHz(hz) + " MHz…";
