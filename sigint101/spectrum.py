@@ -450,6 +450,15 @@ def _popen(cmd):
     return proc
 
 
+# The refusal for an rtl_power that a stop could not end. It is the radio's state, not the run's:
+# every start and every handoff is refused with it until the old rtl_power's exit is confirmed.
+SURVIVED_KILL = f"{RTL_POWER} survived kill; the dongle may still be held"
+
+
+def _unconfirmed(exc) -> str:
+    return f"{RTL_POWER} could not be confirmed stopped ({exc}); the dongle may still be held"
+
+
 class Sweeper:
     """Owns one long-lived rtl_power process and a bounded buffer of recent rows.
 
@@ -503,6 +512,12 @@ class Sweeper:
         self._life = threading.RLock()
         self._proc = None
         self._thread = None
+        # The rtl_power a stop is retiring, kept from the moment the stop takes it until its exit
+        # is confirmed: while the stop waits, and after a stop that could not confirm it. Until
+        # then it may still hold the dongle, so every start and every handoff is refused
+        # (release_failure). _retire_failure says why once the stop has given up.
+        self._retiring = None
+        self._retire_failure = None
         self._released = False
         self._interrupted = False
         # A restart was asked (restart()) and no run since has published a row: newest() reads
@@ -607,6 +622,28 @@ class Sweeper:
         with self._life:
             self._start_locked()
 
+    def release_failure(self, *, pending=False) -> str | None:
+        """Why the radio cannot be handed on: a retiring rtl_power's exit is not confirmed yet.
+
+        The console asks every receiver this before a handoff, and the hardware status asks it
+        with `pending`. A stop that gave up says why. A stop still waiting on the reap says so only
+        when `pending` is asked; a plain check would wait for that stop anyway, as it holds the
+        sweeper. No lock is taken, so the status bar never waits on a stop.
+        """
+        proc = self._retiring
+        if proc is None:
+            return None
+        try:
+            alive = proc.poll() is None
+        except Exception:
+            alive = True                        # an exit that cannot be read is not confirmed
+        if not alive:
+            return None
+        failure = self._retire_failure
+        if failure is not None:
+            return failure
+        return f"{RTL_POWER} is still releasing the radio" if pending else None
+
     def _start_locked(self) -> None:
         """Start the sweep. Callers must already hold `_life`.
 
@@ -616,6 +653,12 @@ class Sweeper:
         """
         if self.running:
             return
+        # Every start refuses while the old rtl_power is alive, not just the first: the process and
+        # its refusal are kept until its exit is confirmed. Once it is, the refusal goes with it.
+        if self._retiring is not None:
+            if reason := self.release_failure(pending=True):
+                raise SpectrumUnavailable(reason)
+            self._settle_retirement(None)
         if self._released:
             raise SpectrumUnavailable(
                 "the radio was released to another program; resume the sweep to take it back")
@@ -1049,32 +1092,81 @@ class Sweeper:
         with self._lock:
             self._interrupted = True
             self._restarting = False
-        # Clear the handle first, in one step, so the sweeper reads as "not running" for
-        # the whole of the slow shutdown below and nothing tries to kill it twice.
-        proc, self._proc = self._proc, None
+        # The process moves from the handle to the retiring slot, so the sweeper reads as "not
+        # running" for the whole of the slow shutdown below, while release_failure(pending=True)
+        # still reports the radio held until the reap is confirmed. Kept first, then cleared, so
+        # no reader ever finds it in neither.
+        proc = self._proc
         if proc is not None:
-            try:
-                # terminate() only asks; wait() is what confirms the OS has reaped it and
-                # the USB device is genuinely free for the next program.
-                proc.terminate()
-                proc.wait(timeout=self.STOP_WAIT_S)
-            except subprocess.TimeoutExpired:
-                # The opposite of already-dead: rtl_power ignored the ask and still holds
-                # the dongle, so escalate to kill. If even that goes unreaped, say so —
-                # the next program will find the radio busy and deserves the reason.
-                proc.kill()
-                try:
-                    proc.wait(timeout=self.STOP_WAIT_S)
-                except subprocess.TimeoutExpired:
-                    self.error = "rtl_power survived kill; the dongle may still be held"
-            except (OSError, subprocess.SubprocessError):
-                # The process was already gone, which is the outcome we wanted. Unlike
-                # the silent-failure anti-pattern this repo calls out elsewhere, there is
-                # nothing here to report: success and this error mean the same thing.
-                pass
+            self._retire_failure = None
+            self._retiring = proc
+        self._proc = None
+        if proc is not None:
+            self._settle_retirement(self._stop_child(proc))
+        elif self._retiring is not None:
+            # An rtl_power an earlier stop could not confirm: signal it again and retry its reap.
+            self._settle_retirement(self._kill_and_confirm(self._retiring))
         if self._thread is not None:
             # The reader owns the pipe and ends as the process does. One that outlives this
             # wait (an rtl_power not reaped keeps the pipe open) appends nothing: its start is
             # marked stopped above, so no row of the old sweep lands after a retune's clear.
             self._thread.join(timeout=self.STOP_WAIT_S)
             self._thread = None
+
+    def _stop_child(self, proc) -> str | None:
+        """Ask rtl_power to stop, insist if it must, and wait for the reap; None once confirmed.
+
+        terminate() only asks; the wait is what confirms the OS has reaped it and the USB device
+        is free for the next program. An rtl_power that ignores the ask, and a wait that errs
+        (which confirms nothing), are both escalated to SIGKILL at once.
+        """
+        try:
+            try:
+                proc.terminate()
+            except OSError:
+                pass                            # gone already; the wait says
+            proc.wait(timeout=self.STOP_WAIT_S)
+        except Exception:
+            return self._kill_and_confirm(proc)
+        return None
+
+    def _kill_and_confirm(self, proc) -> str | None:
+        """SIGKILL a retiring rtl_power that is still ours, then wait for its reap.
+
+        Returns None once its exit is confirmed, else why not. The signal goes to the kept process
+        object only after poll() shows it still unreaped, so a reaped process's PID, which may be
+        another process's by now, is never signalled. An error in the poll, the signal or the wait
+        confirms nothing.
+        """
+        try:
+            if proc.poll() is not None:
+                return None
+        except Exception as exc:
+            return _unconfirmed(exc)            # cannot tell it is still ours: no signal
+        try:
+            proc.kill()
+        except OSError:
+            pass                                # gone already; the wait says
+        except Exception as exc:
+            return _unconfirmed(exc)
+        try:
+            proc.wait(timeout=self.STOP_WAIT_S)
+        except subprocess.TimeoutExpired:
+            return SURVIVED_KILL
+        except Exception as exc:
+            return _unconfirmed(exc)
+        return None
+
+    def _settle_retirement(self, failure: str | None) -> None:
+        """Drop the retiring rtl_power once its exit is confirmed; otherwise keep it, and say why.
+
+        The failure is also the sweeper's error, so a restart press reports it (restart()). Once
+        the exit is confirmed it is cleared, unless a later failure has replaced it.
+        """
+        if failure is None:
+            prior, self._retiring, self._retire_failure = self._retire_failure, None, None
+            if prior is not None and self.error == prior:
+                self.error = None
+        else:
+            self._retire_failure = failure
+            self.error = failure
