@@ -259,12 +259,54 @@ class _CaptureStream:
 
     def close(self):
         """Stop rtl_fm and release the dongle, whatever the measurement decided."""
-        if self._proc.poll() is None:
-            # stop_process is False only when even SIGKILL left rtl_fm running (uninterruptible
-            # sleep). It then still holds the dongle, and the answer must not say otherwise.
-            self.stop_failed = not stop_process(self._proc)
-        if self._proc.stdout:
-            self._proc.stdout.close()
+        reaped = False
+        try:
+            reaped = self._proc.poll() is not None or stop_process(self._proc)
+        except (OSError, ValueError):
+            # A failed wait or status check leaves ownership unresolved just like a timeout.
+            pass
+        finally:
+            self.stop_failed = not reaped
+            if self._proc.stdout:
+                self._proc.stdout.close()
+
+    def reaped(self) -> bool:
+        try:
+            return self._proc.poll() is not None
+        except (OSError, ValueError):
+            return False
+
+
+class PpmCalibration:
+    """Retain an unconfirmed capture after its request's SDR reservation ends.
+
+    Only the reservation holder can replace the retained stream. Other requests inspect it
+    without changing it, so confirming an old exit cannot clear a newer capture's failure.
+    """
+
+    def __init__(self):
+        self._unreaped = None
+
+    def measure(self, **kwargs):
+        stream = None
+
+        def capture(**options):
+            nonlocal stream
+            stream = _default_capture(**options)
+            return stream
+
+        try:
+            return measure_pilot_ppm(capture=capture, **kwargs)
+        finally:
+            # The caller still holds the SDR reservation. Publish the failure before it wakes
+            # any waiter, even if processing the measurement itself raised.
+            self._unreaped = stream if stream is not None and stream.stop_failed else None
+
+    def release_failure(self) -> str | None:
+        stream = self._unreaped
+        if stream is not None and not stream.reaped():
+            return "the calibration rtl_fm may still hold the radio because its exit is unconfirmed"
+        return None
 
 
 def measure_pilot_ppm(*, hz, seconds=DEFAULT_SECONDS, gain=DEFAULT_GAIN, device=None,
@@ -288,15 +330,18 @@ def measure_pilot_ppm(*, hz, seconds=DEFAULT_SECONDS, gain=DEFAULT_GAIN, device=
         if close:
             close()
     base = {"hz": hz, "gain": gain, "soc_temp_c": temp() if temp else None}
-    if getattr(stream, "stalled", False):
+    stalled = getattr(stream, "stalled", False)
+    stop_failed = getattr(stream, "stop_failed", False)
+    if stalled or stop_failed:
         got = len(phasors) * BLOCK / DEMOD_RATE
-        if getattr(stream, "stop_failed", False):
-            end = "would not stop: it may still hold the radio"
+        prefix = "rtl_fm"
+        if stalled:
+            prefix += f" stalled after {got:.1f} s of the {seconds:g} s capture and"
+        if stop_failed:
+            end = "would not stop cleanly and may still hold the radio"
         else:
             end = "was stopped — a stall is not a measurement"
-        return {**base, "ppm": None, "seconds": got,
-                "reason": f"rtl_fm stalled after {got:.1f} s of the {seconds:g} s capture "
-                          f"and {end}"}
+        return {**base, "ppm": None, "seconds": got, "reason": f"{prefix} {end}"}
     if probe is None or len(phasors) < wanted // 2:
         return {**base, "ppm": None, "seconds": len(phasors) * BLOCK / DEMOD_RATE,
                 "reason": "the capture ended before enough audio arrived to measure"}

@@ -8,14 +8,16 @@ import signal
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 
-from sigint101 import app, aprs, childproc, radio_control, receiver_lifecycle
+from sigint101 import app, aprs, childproc, ppm, radio_control, receiver_lifecycle
 from sigint101.events import read_events
+from sigint101.spectrum import Sweeper
 from tests.child_fakes import Child, LateProc
-from tests.test_app import _client, _present, _StubSweeper
+from tests.test_app import _client, _present, _rows, _StubSweeper
 from tests.test_apt_retirement import _decoder as apt_decoder
 from tests.test_stale_readers import APRS_1
 
@@ -94,6 +96,126 @@ def test_failed_reap_retries_with_kill_and_allows_handoff_after_recovery(tmp_pat
         assert len(proc.sent) >= 4 and set(proc.sent[1:]) == {"KILL"}
         assert client.get("/api/spectrum").status_code == 200
         assert launches == [-signal.SIGKILL]
+
+
+@pytest.mark.parametrize("method,url,queued", [
+    ("GET", "/api/spectrum", True),
+    ("GET", "/api/spectrum", False),
+    ("GET", "/api/provenance", False),
+    ("POST", "/api/provenance/baseline", False),
+], ids=["queued-spectrum", "later-spectrum", "provenance", "baseline"])
+def test_unreaped_ppm_capture_holds_the_radio_until_exit_is_confirmed(
+        tmp_path, monkeypatch, method, url, queued):
+    proc = Child(["rtl_fm"], unkillable=True)
+    measuring, finish, waiting = (threading.Event() for _ in range(3))
+    launches = []
+
+    def capture_blocks(stream, **_):
+        measuring.set()
+        assert finish.wait(5)
+        stream.stalled = True
+        return [], None
+
+    class Sweep(_StubSweeper):
+        def start(self):
+            launches.append(proc.poll())
+            super().start()
+
+    monkeypatch.setattr(ppm, "spawn", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ppm, "block_phasors", capture_blocks)
+    with (_client(tmp_path, probe=_present, sweeper_factory=lambda: Sweep(_rows())) as client,
+          ThreadPoolExecutor(max_workers=2) as requests):
+        condition = client.app.state.radio_arbiter._lock
+        real_wait = condition.wait
+
+        def visible_wait(timeout):
+            waiting.set()
+            return real_wait(timeout)
+
+        monkeypatch.setattr(condition, "wait", visible_wait)
+        calibration = requests.submit(client.post, "/api/ppm/measure")
+        try:
+            assert measuring.wait(5)
+            if queued:
+                waiter = requests.submit(client.request, method, url)
+                assert waiting.wait(5)
+        finally:
+            finish.set()
+
+        measured = calibration.result(timeout=5)
+        if queued:
+            refused = waiter.result(timeout=5)
+        else:
+            refused = client.request(method, url)
+        assert measured.status_code == 200 and measured.json()["ppm"] is None
+        assert "may still hold the radio" in measured.json()["reason"]
+        assert proc.sent == ["TERM", "KILL"] and proc.poll() is None
+        if url == "/api/spectrum":
+            assert refused.status_code == 503
+            assert "calibration" in refused.json()["reason"]
+            assert "may still hold the radio" in refused.json()["reason"]
+        elif method == "GET":
+            assert refused.status_code == 200 and refused.json()["provenance"]["ref_db"] is None
+        else:
+            assert refused.status_code == 400 and refused.json()["recorded"] is False
+        assert not launches
+        assert client.get("/api/hardware").json()["state"] == "busy"
+        assert client.post("/api/ppm/measure").status_code == 503
+        assert proc.sent == ["TERM", "KILL"]
+
+        proc.code = -signal.SIGKILL
+        assert client.get("/api/hardware").json()["state"] == "present"
+        assert client.request(method, url).status_code == 200
+        assert launches == [-signal.SIGKILL]
+
+
+def test_ppm_wait_error_keeps_the_radio_claimed_even_without_a_stall(tmp_path, monkeypatch):
+    class WaitError(Child):
+        def wait(self, timeout=None):
+            raise OSError("cannot read the exit status")
+
+    proc = WaitError(["rtl_fm"], unkillable=True)
+    monkeypatch.setattr(ppm, "spawn", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ppm, "block_phasors", lambda *_args, **_kwargs: ([], None))
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: _StubSweeper([])) as client:
+        measured = client.post("/api/ppm/measure")
+        assert measured.status_code == 200 and measured.json()["ppm"] is None
+        assert "may still hold the radio" in measured.json()["reason"]
+        assert client.get("/api/spectrum").status_code == 503
+        assert not client.app.state.sweeper.running
+        proc.code = -signal.SIGTERM
+        assert client.get("/api/spectrum").status_code == 200
+
+
+def test_provenance_poll_leaves_a_released_sweeper_passive(tmp_path):
+    proc = Child(["rtl_fm"])
+    receiver = _aprs(proc)
+    sweeper = Sweeper(radio_present=lambda: True,
+                      spawn=lambda *_: pytest.fail("provenance took the radio from APRS"))
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: receiver,
+                 sweeper_factory=lambda: sweeper) as client:
+        assert client.get("/api/aprs").status_code == 200
+        assert sweeper.released
+        provenance = client.get("/api/provenance")
+        assert provenance.status_code == 200 and provenance.json()["provenance"]["ref_db"] is None
+        assert receiver.running and not proc.sent
+
+
+def test_provenance_lazy_start_checks_other_receivers_for_failed_reap(tmp_path):
+    proc = Child(["rtl_fm"], unkillable=True)
+    receiver = _aprs(proc)
+    with _client(tmp_path, probe=_present, aprs_factory=lambda: receiver,
+                 sweeper_factory=lambda: _StubSweeper(_rows())) as client:
+        receiver.start()
+        receiver.release()
+        try:
+            assert receiver.release_failure() and proc.poll() is None
+            response = client.get("/api/provenance")
+            assert response.status_code == 200
+            assert response.json()["provenance"]["ref_db"] is None
+            assert not client.app.state.sweeper.running
+        finally:
+            proc.code = -signal.SIGKILL
 
 
 def test_late_diagnostic_failure_cannot_hold_or_clear_a_new_claim(tmp_path, monkeypatch):

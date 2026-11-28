@@ -4,6 +4,13 @@ The running ledger of surprising discoveries. Capture inline the moment you lear
 non-obvious (doc-flywheel skill: Capture → Promote → Clear). Dated section headers, newest
 first; bold the finding, then the context.
 
+## 2026-11-28: keep a failed calibration reap visible after the request
+**Finding.** A queued spectrum request can pass the release checks while ppm is still capturing.
+When the request wakes, the calibration may have returned with its child still alive.
+**How to apply.** Store an unconfirmed calibration child before releasing the reservation.
+Check it before joining the queue and again after acquiring the reservation. Confirm the
+child's exit before starting the next receiver.
+
 ## 2026-11-27: xdist workers still share loopback ports
 **Finding.** Worker processes isolate module patches and pytest gives each worker a temporary
 directory. Closing a socket after selecting a port leaves the port available to other workers.
