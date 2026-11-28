@@ -315,9 +315,14 @@ def headless_chromium(chromium, profile, alive=None, held=None):
             _hold_until_gone(browser, entry, alive)
 
 
-def run_checks(console, port, output):
+def check_list(console, output):
+    """The checks make render-check runs, in order: (script, *its arguments).
+
+    The one list: run_checks runs it, and the tests read it, so a check added here is one the
+    route coverage test also starts and measures.
+    """
     # Home scroll can be checked on a fresh console. The exam review URL always has a diagram.
-    checks = (
+    return (
         ("render_fit.py", f"{console}/lesson/29", str(output / "predict.png")),
         ("render_scroll.py", f"{console}/", "home"),
         ("render_figure.py", f"{console}/exam/review/T6C02", "dark", str(output / "figure")),
@@ -330,6 +335,10 @@ def run_checks(console, port, output):
         ("render_field.py", console),
         ("render_bandmap.py", console),
     )
+
+
+def run_checks(console, port, output):
+    checks = check_list(console, output)
     no_proxy = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))
     no_proxy = f"{no_proxy},127.0.0.1" if no_proxy else "127.0.0.1"
     env = dict(os.environ, CDP_PORT=port, no_proxy=no_proxy, NO_PROXY=no_proxy)
