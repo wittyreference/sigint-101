@@ -19,6 +19,7 @@ from sigint101.spectrum import Sweeper
 from tests.child_fakes import Child, LateProc
 from tests.test_app import _client, _present, _rows, _StubSweeper
 from tests.test_apt_retirement import _decoder as apt_decoder
+from tests.test_spectrum import FedProc, SignalledProc, SlowStopProc
 from tests.test_stale_readers import APRS_1
 
 
@@ -184,6 +185,85 @@ def test_hardware_reads_busy_while_a_legacy_stop_waits_on_its_reap(tmp_path):
             during = client.get("/api/hardware").json()["state"]
         finally:
             rtl_433.gate.set()
+            retune.join(5)
+        after = client.get("/api/hardware").json()["state"]
+    assert during == "busy"
+    assert after == "present"
+
+
+def _sweep(first):
+    """A real Sweeper whose first rtl_power is `first()`; every later start gets a FedProc."""
+    procs = []
+
+    def spawn(_cmd):
+        procs.append(first() if not procs else FedProc())
+        return procs[-1]
+
+    sweeper = Sweeper(spawn=spawn, radio_present=lambda: True)
+    sweeper.STOP_WAIT_S = 0.05
+    return sweeper, procs
+
+
+@pytest.mark.parametrize("held,reason", [
+    (lambda: SignalledProc(unkillable=True),
+     "rtl_power survived kill; the dongle may still be held"),
+    (lambda: SignalledProc(unkillable=True, wait_error="cannot read the exit status"),
+     "rtl_power could not be confirmed stopped (cannot read the exit status); "
+     "the dongle may still be held"),
+], ids=["survived-kill", "wait-error"])
+def test_an_rtl_power_the_stop_cannot_confirm_holds_the_radio_until_it_is_reaped(
+        tmp_path, held, reason):
+    # C77 (C73 build review F1): the sweeper never answered the handoff check, so ppm and the
+    # decoders opened the radio beside an rtl_power that outlived its stop, and the status bar read
+    # present. Its next start reported the failure once, and the one after spawned a second sweep.
+    sweeper, sweeps = _sweep(held)
+    measured, aprs_children = [], []
+
+    def measure(**kwargs):
+        measured.append(kwargs)
+        return {"hz": kwargs["hz"], "ppm": None, "reason": "no pilot to measure against"}
+
+    def spawn_aprs(*_):
+        aprs_children.append(Child(["rtl_fm"]))
+        return aprs_children[-1]
+
+    receiver = aprs.AprsDecoder(spawn=spawn_aprs, radio_present=lambda: True, which=lambda t: t)
+    with _client(tmp_path, probe=_present, ppm_measure=measure, sweeper_factory=lambda: sweeper,
+                 aprs_factory=lambda: receiver) as client:
+        assert client.get("/api/spectrum").status_code == 200
+        refused = [client.post("/api/ppm/measure"), client.get("/api/aprs"),
+                   client.post("/api/ppm/measure"), client.get("/api/aprs"),
+                   client.get("/api/spectrum"), client.get("/api/spectrum")]
+        hardware = client.get("/api/hardware").json()["state"]
+        assert not measured and not aprs_children        # nothing opened the radio beside it
+        assert len(sweeps) == 1 and not sweeper.running
+        assert sweeps[0].sent == ["TERM", "KILL"]
+        sweeps[0].die(-signal.SIGKILL)                    # its exit is confirmed at last
+        after = client.get("/api/hardware").json()["state"]
+        back = [client.post("/api/ppm/measure"), client.get("/api/aprs")]
+        client.app.state.aprs.stop()
+    for resp in refused:
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == reason
+    assert hardware == "busy"
+    assert after == "present"
+    assert [resp.status_code for resp in back] == [200, 200]
+    assert len(measured) == 1 and len(aprs_children) == 1
+
+
+def test_hardware_reads_busy_while_a_sweep_stop_waits_on_its_reap(tmp_path):
+    # C77: in flight, the stopping rtl_power was in no ownership field, so the bar read present.
+    sweeper, sweeps = _sweep(SlowStopProc)
+    with _client(tmp_path, probe=_present, sweeper_factory=lambda: sweeper) as client:
+        assert client.get("/api/spectrum").status_code == 200
+        retune = threading.Thread(target=sweeper.retune, args=(88_000_000, 93_000_000, 78_125),
+                                  daemon=True)
+        retune.start()
+        try:
+            assert sweeps[0].waiting.wait(5)
+            during = client.get("/api/hardware").json()["state"]
+        finally:
+            sweeps[0].gate.set()
             retune.join(5)
         after = client.get("/api/hardware").json()["state"]
     assert during == "busy"
