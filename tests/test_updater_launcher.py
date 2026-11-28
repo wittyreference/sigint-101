@@ -70,6 +70,8 @@ def _create_managed_root_fixture(
     operation_id: str = "op-0001",
     host: str = "127.0.0.1",
     port: int | None = None,
+    sealed_runtime_dir: Path | None = None,
+    python_executable: str | None = None,
 ) -> dict:
     """Create an enrolled ROOT fixture with permanent locks, control generation, and selector."""
     sys.path.insert(0, str(MANAGED_DIR))
@@ -129,13 +131,16 @@ def _create_managed_root_fixture(
             encoding="utf-8",
         )
 
-        # Point runtime at a minimal manifest matching current interpreter ABI.
+        # Use provided real sealed runtime (for full -I -S boot) or minimal marker-only runtime.
         runtime_dir = root / "runtimes" / "rt-0001"
-        sp_src = tmp_path / "empty_sp"
-        sp_src.mkdir()
-        (sp_src / "_sigint_rt_marker.py").write_text("MARKER = 'sealed'\n", encoding="utf-8")
-        abi = probe_python_abi(sys.executable)
-        stage_sealed_runtime(sp_src, runtime_dir, runtime_id="rt-0001", python_abi=abi)
+        if sealed_runtime_dir is not None:
+            shutil.copytree(sealed_runtime_dir, runtime_dir)
+        else:
+            sp_src = tmp_path / "empty_sp"
+            sp_src.mkdir()
+            (sp_src / "_sigint_rt_marker.py").write_text("MARKER = 'sealed'\n", encoding="utf-8")
+            abi = probe_python_abi(python_executable or sys.executable)
+            stage_sealed_runtime(sp_src, runtime_dir, runtime_id="rt-0001", python_abi=abi)
 
         selector = {
             "format_version": 1,
@@ -144,7 +149,7 @@ def _create_managed_root_fixture(
             "release_id": "rel-0001",
             "generation_id": "gen-0001",
             "runtime_id": "rt-0001",
-            "python_executable": sys.executable,
+            "python_executable": python_executable or sys.executable,
             "host": host,
             "port": listen_port,
         }
@@ -297,8 +302,9 @@ def test_locks_gate_writer_transfer_and_cloexec(tmp_path):
 # --- 2. Installed unit & desktop wrapper block every start during copy (§8) --------------------
 
 
-def test_installed_unit_blocks_every_start_during_the_copy(tmp_path):
+def test_installed_unit_blocks_every_start_during_the_copy(tmp_path, sealed_host_runtime):
     assert BASH, "bash is required"
+    rt_dir, host_py = sealed_host_runtime
 
     # Main-side comparison: deploy/kiosk/start-kiosk.sh open has no mutation gate and calls
     # `systemctl --user start sigint101.service` immediately even while an update lock is held.
@@ -331,7 +337,13 @@ def test_installed_unit_blocks_every_start_during_the_copy(tmp_path):
     assert "systemctl --user start sigint101.service" in legacy_log.read_text(encoding="utf-8")
 
     # PR 3 contract: hold exclusive mutation gate and test ALL four launch paths.
-    fx = _create_managed_root_fixture(tmp_path, mode="managed", operation_id="op-gate-1")
+    fx = _create_managed_root_fixture(
+        tmp_path,
+        mode="managed",
+        operation_id="op-gate-1",
+        sealed_runtime_dir=rt_dir,
+        python_executable=host_py,
+    )
     root = fx["root"]
     gen_dir = root / "data" / "gen-0001"
     before_prog = (gen_dir / "progress.db").read_bytes()
@@ -1119,4 +1131,507 @@ def test_locks_process_and_runtime_edge_paths(tmp_path):
     (pth_dir / "evil.pth").write_text("import os\n", encoding="utf-8")
     with pytest.raises(RuntimeCompatibilityError, match="executable .pth"):
         stage_sealed_runtime(pth_dir, tmp_path / "rt_pth", runtime_id="rt-pth", python_abi=abi)
+
+
+# --- Round 2 PR 3 build-review regression tests (F1-F13) ---------------------------------------
+
+
+_RUNTIME_TOP_ENTRIES = (
+    "_yaml",
+    "annotated_doc",
+    "annotated_types",
+    "anyio",
+    "click",
+    "fastapi",
+    "h11",
+    "idna",
+    "jinja2",
+    "markupsafe",
+    "opentelemetry",
+    "pydantic",
+    "pydantic_core",
+    "sniffio",
+    "starlette",
+    "typing_extensions.py",
+    "typing_inspection",
+    "uvicorn",
+    "watchfiles",
+    "yaml",
+)
+
+
+@pytest.fixture(scope="module")
+def sealed_host_runtime(tmp_path_factory):
+    """Stage a real sealed runtime from .venv site-packages for /usr/bin/python3 -I -S."""
+    base = tmp_path_factory.mktemp("sealed_rt_mod")
+    src_sp = base / "sp_src"
+    src_sp.mkdir()
+    venv_sp = Path(sys.prefix) / "lib" / (
+        f"python{sys.version_info.major}.{sys.version_info.minor}"
+    ) / "site-packages"
+    for entry in _RUNTIME_TOP_ENTRIES:
+        src = venv_sp / entry
+        if not src.exists():
+            continue
+        dst = src_sp / entry
+        if src.is_dir():
+            shutil.copytree(
+                src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
+            )
+        else:
+            shutil.copy2(src, dst)
+    host_py = Path("/usr/bin/python3")
+    abi = probe_python_abi(host_py if host_py.exists() else sys.executable)
+    rt_dir = base / "rt-real"
+    stage_sealed_runtime(src_sp, rt_dir, runtime_id="rt-real", python_abi=abi)
+    return rt_dir, (str(host_py) if host_py.exists() else sys.executable)
+
+
+def test_f1_f5_f7_serving_fence_order_env_hygiene_cloexec_and_shared_admission(
+    tmp_path, sealed_host_runtime
+):
+    rt_dir, host_py = sealed_host_runtime
+    sys.path.insert(0, str(MANAGED_DIR))
+    from control_manifest import stage_control_generation
+
+    # 1) F1: failed public startup (missing exam.db) MUST NOT write served.json!
+    root_fail = tmp_path / "root_fail"
+    root_fail.mkdir(mode=0o700)
+    ensure_lock_files(root_fail)
+    (root_fail / "bin").mkdir(mode=0o700)
+    shutil.copy2(MANAGED_DIR / "dispatcher.py", root_fail / "bin" / "dispatcher.py")
+    (root_fail / "bin" / "dispatcher.py").chmod(0o700)
+    stage_control_generation(REPO_ROOT, root_fail / "control" / "c1", control_id="c1")
+    (root_fail / "control.json").write_text(
+        json.dumps({"format_version": 1, "control_id": "c1"}) + "\n", encoding="utf-8"
+    )
+    rel_dir = root_fail / "releases" / "rel-1"
+    shutil.copytree(
+        REPO_ROOT / "sigint101",
+        rel_dir / "sigint101",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+    shutil.copytree(REPO_ROOT / "lesson_packs", rel_dir / "lesson_packs")
+    write_release_manifest(rel_dir, release_id="rel-1", commit="aaaa111")
+
+    gen_bad = root_fail / "data" / "gen-bad"
+    gen_bad.mkdir(parents=True, mode=0o700)
+    migrate_store_copy(
+        tmp_path / "np_fail.db",
+        gen_bad / "progress.db",
+        store="progress",
+        allow_missing_source=True,
+        scratch_dir=tmp_path / "sc_p_fail",
+    )
+    # Intentionally omit exam.db so managed public startup fails inside lifespan!
+    shutil.copytree(rt_dir, root_fail / "runtimes" / "rt-real")
+    os.chmod(root_fail / "runtimes" / "rt-real", 0o555)
+    ops_fail = root_fail / "operations" / "op-fail"
+    ops_fail.mkdir(parents=True, mode=0o700)
+    port_fail = _free_loopback_port()
+    (root_fail / "current.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "mode": "managed",
+                "operation_id": "op-fail",
+                "release_id": "rel-1",
+                "generation_id": "gen-bad",
+                "runtime_id": "rt-real",
+                "python_executable": host_py,
+                "host": "127.0.0.1",
+                "port": port_fail,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fail_res = subprocess.run(
+        [
+            host_py,
+            "-B",
+            str(root_fail / "bin" / "dispatcher.py"),
+            "--root",
+            str(root_fail),
+            "serve",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert fail_res.returncode != 0
+    assert not (ops_fail / "served.json").exists(), (
+        "failed public startup must never write served.json"
+    )
+
+    # 2) Healthy managed start WHILE holding shared gate (M5 shared admission!),
+    # verifying F5 (no PYTHONPATH/FD env leak), F7 (writer FD has O_CLOEXEC in fdinfo),
+    # and F1 (served.json written AFTER startup and BEFORE listen)!
+    gen_ok = root_fail / "data" / "gen-ok"
+    gen_ok.mkdir(parents=True, mode=0o700)
+    migrate_store_copy(
+        tmp_path / "np_ok.db",
+        gen_ok / "progress.db",
+        store="progress",
+        allow_missing_source=True,
+        scratch_dir=tmp_path / "sc_p_ok",
+    )
+    migrate_store_copy(
+        tmp_path / "ne_ok.db",
+        gen_ok / "exam.db",
+        store="exam",
+        allow_missing_source=True,
+        scratch_dir=tmp_path / "sc_e_ok",
+    )
+    (gen_ok / GENERATION_MARKER_FILENAME).write_text(
+        json.dumps({"generation_id": "gen-ok"}) + "\n", encoding="utf-8"
+    )
+    ops_ok = root_fail / "operations" / "op-ok"
+    ops_ok.mkdir(parents=True, mode=0o700)
+    port_ok = _free_loopback_port()
+    (root_fail / "current.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "mode": "managed",
+                "operation_id": "op-ok",
+                "release_id": "rel-1",
+                "generation_id": "gen-ok",
+                "runtime_id": "rt-real",
+                "python_executable": host_py,
+                "host": "127.0.0.1",
+                "port": port_ok,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # Hold shared gate (like desktop wrapper during wait_for_server) — serve MUST succeed (M5)!
+    with acquire_shared_gate(root_fail):
+        proc = subprocess.Popen(
+            [
+                host_py,
+                "-B",
+                str(root_fail / "bin" / "dispatcher.py"),
+                "--root",
+                str(root_fail),
+                "serve",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            import urllib.request
+
+            url = f"http://127.0.0.1:{port_ok}/api/hardware"
+            deadline = time.monotonic() + 15.0
+            ok = False
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise AssertionError(
+                        f"managed serve failed ({proc.returncode}): "
+                        f"{proc.stderr.read().decode('utf-8', 'replace')}"
+                    )
+                try:
+                    with urllib.request.urlopen(url, timeout=1.0) as resp:
+                        if resp.status == 200:
+                            ok = True
+                            break
+                except OSError:
+                    time.sleep(0.1)
+            assert ok, "managed serve did not become ready while shared gate was held"
+            assert (ops_ok / "served.json").is_file()
+
+            # F5: inspect live process /proc/<pid>/environ — no PYTHONPATH or internal FD/ROOT vars!
+            raw_env = Path(f"/proc/{proc.pid}/environ").read_bytes().split(b"\0")
+            env_keys = {
+                item.decode("utf-8", "replace").split("=", 1)[0]
+                for item in raw_env
+                if b"=" in item
+            }
+            assert "PYTHONPATH" not in env_keys, f"PYTHONPATH leaked into live service: {env_keys}"
+            assert "SIGINT101_WRITER_LOCK_FD" not in env_keys
+            assert "SIGINT101_SHARED_GATE_FD" not in env_keys
+
+            # F7 (M2): inspect /proc/<pid>/fd + fdinfo — writer.lock is held with O_CLOEXEC set!
+            writer_lock_str = str((root_fail / "locks" / "writer.lock").resolve())
+            writer_fd_num = None
+            for fd_entry in Path(f"/proc/{proc.pid}/fd").iterdir():
+                try:
+                    if os.readlink(fd_entry) == writer_lock_str:
+                        writer_fd_num = fd_entry.name
+                        break
+                except OSError:
+                    continue
+            assert writer_fd_num is not None, "live service does not hold writer.lock"
+            fdinfo_text = Path(f"/proc/{proc.pid}/fdinfo/{writer_fd_num}").read_text(
+                encoding="utf-8"
+            )
+            flags_line = next(
+                line for line in fdinfo_text.splitlines() if line.startswith("flags:")
+            )
+            fd_flags = int(flags_line.split(":", 1)[1].strip(), 8)
+            assert fd_flags & os.O_CLOEXEC, f"writer.lock fd lacks O_CLOEXEC: {oct(fd_flags)}"
+        finally:
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=10)
+
+
+def test_f2_legacy_selector_boots_pre_pr1_checkout_without_managed_kwarg(tmp_path):
+    # Pre-PR-1 checkout whose create_app() does NOT accept managed=False, only module-level `app`.
+    sys.path.insert(0, str(MANAGED_DIR))
+    from control_manifest import stage_control_generation
+
+    checkout = tmp_path / "old_checkout"
+    (checkout / "sigint101").mkdir(parents=True)
+    (checkout / "data").mkdir()
+    (checkout / "sigint101" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "sigint101" / "app.py").write_text(
+        "from fastapi import FastAPI\n"
+        "def create_app():\n"
+        "    a = FastAPI()\n"
+        "    @a.get('/api/hardware')\n"
+        "    def hw():\n"
+        "        return {'legacy_pre_pr1': True}\n"
+        "    return a\n"
+        "app = create_app()\n",
+        encoding="utf-8",
+    )
+
+    root = tmp_path / "root_legacy"
+    root.mkdir(mode=0o700)
+    ensure_lock_files(root)
+    (root / "bin").mkdir(mode=0o700)
+    shutil.copy2(MANAGED_DIR / "dispatcher.py", root / "bin" / "dispatcher.py")
+    (root / "bin" / "dispatcher.py").chmod(0o700)
+    stage_control_generation(REPO_ROOT, root / "control" / "c1", control_id="c1")
+    (root / "control.json").write_text(
+        json.dumps({"format_version": 1, "control_id": "c1"}) + "\n", encoding="utf-8"
+    )
+    port = _free_loopback_port()
+    (root / "current.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "mode": "legacy",
+                "operation_id": "enroll-pre-pr1",
+                "checkout_dir": str(checkout),
+                "data_dir": str(checkout / "data"),
+                "python_executable": sys.executable,
+                "host": "127.0.0.1",
+                "port": port,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.Popen(
+        [sys.executable, "-B", str(root / "bin" / "dispatcher.py"), "--root", str(root), "serve"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        import urllib.request
+
+        deadline = time.monotonic() + 10.0
+        payload = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"pre-PR-1 legacy checkout failed to boot ({proc.returncode}): "
+                    f"{proc.stderr.read().decode('utf-8', 'replace')}"
+                )
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/hardware", timeout=1.0
+                ) as r:
+                    if r.status == 200:
+                        payload = json.loads(r.read().decode("utf-8"))
+                        break
+            except OSError:
+                time.sleep(0.1)
+        assert payload == {"legacy_pre_pr1": True}
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+
+
+def test_f3_managed_service_refuses_to_boot_when_sealed_runtime_lacks_fastapi(tmp_path):
+    # A sealed runtime containing only a marker file (no FastAPI/uvicorn) MUST fail to start
+    # under -I -S even if sys.executable is the dev venv that has FastAPI installed!
+    fx = _create_managed_root_fixture(tmp_path, mode="managed", operation_id="op-no-fastapi")
+    res = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            str(fx["dispatcher"]),
+            "--root",
+            str(fx["root"]),
+            "serve",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert res.returncode != 0, "managed service must not fall back to interpreter site-packages"
+    err_lo = res.stderr.lower()
+    assert "no module named" in err_lo or "fastapi" in err_lo or "uvicorn" in err_lo
+
+
+def test_f4_f13_enrollment_renders_unit_from_template_with_host_python(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    checkout = tmp_path / "sigint-101"
+    (checkout / "deploy").mkdir(parents=True)
+    (checkout / "data").mkdir()
+    shutil.copy2(REPO_ROOT / "deploy" / "install.sh", checkout / "deploy" / "install.sh")
+    shutil.copy2(REPO_ROOT / "deploy" / "provision.sh", checkout / "deploy" / "provision.sh")
+
+    sp_src = tmp_path / "sp"
+    sp_src.mkdir()
+    (sp_src / "_m.py").write_text("X = 1\n", encoding="utf-8")
+    rt_dir = tmp_path / "xdg_rt"
+    rt_dir.mkdir()
+    (rt_dir / "sigint101-kiosk-exited").write_text("1\n", encoding="utf-8")
+
+    unit_path = home / ".config" / "systemd" / "user" / "sigint101.service"
+    wrapper_path = tmp_path / "bin" / "sigint101-course"
+    root = tmp_path / "updater_root"
+    host_py = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+    fake_legacy_venv_py = str(checkout / ".venv" / "bin" / "python")
+
+    enroll_legacy_fixture(
+        repo_root=REPO_ROOT,
+        updater_root=root,
+        legacy_checkout=checkout,
+        legacy_data_dir=checkout / "data",
+        legacy_python=fake_legacy_venv_py,
+        host_python=host_py,
+        source_site_packages=sp_src,
+        unit_path=unit_path,
+        desktop_wrapper_path=wrapper_path,
+        home=home,
+        runtime_dir=rt_dir,
+        kiosk_process_lister=lambda: [],
+        reload_systemd=lambda: None,
+        drain_old_service=lambda: None,
+    )
+    rendered = unit_path.read_text(encoding="utf-8")
+    # Managed unit MUST run host_python (not checkout/.venv/bin/python)!
+    assert f"ExecStart={host_py} -B " in rendered
+    assert fake_legacy_venv_py not in rendered
+    # Legacy selector retains legacy_python for legacy boot!
+    sel = json.loads((root / "current.json").read_text(encoding="utf-8"))
+    assert sel["python_executable"] == fake_legacy_venv_py
+
+
+def test_f6_managed_desktop_wrapper_keeps_start_kiosk_fixes_outside_gate_blocks():
+    legacy_text = (REPO_ROOT / "deploy" / "kiosk" / "start-kiosk.sh").read_text(encoding="utf-8")
+    managed_text = (MANAGED_DIR / "sigint101-course-managed.sh").read_text(encoding="utf-8")
+
+    # Must retain output_size(), forget_window_placement(), dynamic --window-size, and initial wait.
+    assert "output_size()" in managed_text
+    assert "forget_window_placement()" in managed_text
+    assert '--window-size="${size%x*},${size#*x}"' in managed_text
+
+    # Stripping marked managed-gate blocks (and fd 8 closes + header) must match start-kiosk.sh!
+    def strip_managed(text: str) -> list[str]:
+        out: list[str] = []
+        skip = False
+        for line in text.splitlines():
+            if line.strip() == "# >>> managed-gate >>>":
+                skip = True
+                continue
+            if line.strip() == "# <<< managed-gate <<<":
+                skip = False
+                continue
+            if skip or line.startswith("# ABOUTME:"):
+                continue
+            out.append(line.replace(" 8>&- 9>&-", " 9>&-"))
+        return out
+
+    legacy_body = [
+        line for line in legacy_text.splitlines() if not line.startswith("# ABOUTME:")
+    ]
+    assert strip_managed(managed_text) == legacy_body
+
+
+def test_f7_f8_f9_f10_f11_control_import_closure_and_nits(tmp_path):
+    sys.path.insert(0, str(MANAGED_DIR))
+    from control_manifest import CONTROL_ALLOWLIST, stage_control_generation
+
+    # F7: every allowlisted sigint101/*.py module imports cleanly under -B -I -S from control_dir!
+    ctrl_dir = tmp_path / "ctrl_isolated"
+    stage_control_generation(REPO_ROOT, ctrl_dir, control_id="ctrl-iso")
+    py_mods = [
+        rel[:-3].replace("/", ".")
+        for rel in CONTROL_ALLOWLIST
+        if rel.startswith("sigint101/") and rel.endswith(".py")
+    ]
+    assert py_mods
+    host_py = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+    snippet = (
+        f"import importlib, sys\n"
+        f"sys.path.insert(0, {str(ctrl_dir)!r})\n"
+        f"for m in {py_mods!r}:\n"
+        f"    importlib.import_module(m)\n"
+        f"print('ALL_IMPORTED')\n"
+    )
+    res = subprocess.run(
+        [host_py, "-B", "-I", "-S", "-c", snippet],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "ALL_IMPORTED" in res.stdout
+
+    # F8: adopt_inherited_shared_gate refuses when another holder holds exclusive mutation.lock!
+    from sigint101.locks import LockBusyError, adopt_inherited_shared_gate
+
+    r_f8 = tmp_path / "root_f8"
+    r_f8.mkdir(mode=0o700)
+    mut_path, _ = ensure_lock_files(r_f8)
+    with acquire_mutation_gate(r_f8):
+        unheld_fd = os.open(os.fspath(mut_path), os.O_RDWR)
+        try:
+            with pytest.raises(LockBusyError):
+                adopt_inherited_shared_gate(r_f8, unheld_fd)
+        finally:
+            os.close(unheld_fd)
+
+    # F9: kiosk predicate matches trailing slash on --user-data-dir=<profile>/!
+    prof = tmp_path / "kiosk_prof"
+    procs_slash = [(99, ["chromium", f"--user-data-dir={prof}/", "--app=http://127.0.0.1:8008"])]
+    assert is_kiosk_page_open(prof, process_lister=lambda: procs_slash) is True
+
+    # F10: mismatched .so ABI tag inside sealed runtime is refused!
+    bad_so_sp = tmp_path / "bad_so_sp"
+    bad_so_sp.mkdir()
+    (bad_so_sp / "mod.cpython-312-x86_64-linux-gnu.so").write_bytes(b"\x7fELF")
+    abi_314 = {
+        "major": 3,
+        "minor": 14,
+        "patch": 0,
+        "major_minor": "3.14",
+        "soabi": "cpython-314-x86_64-linux-gnu",
+        "implementation": "cpython",
+        "platform_machine": "x86_64",
+    }
+    with pytest.raises(RuntimeCompatibilityError, match="SOABI|extension|.so"):
+        stage_sealed_runtime(
+            bad_so_sp, tmp_path / "rt_bad_so", runtime_id="rt-bad-so", python_abi=abi_314
+        )
+
+    # F11: read_cgroup_pids walks child cgroups recursively!
+    from sigint101.process_checks import read_cgroup_pids
+
+    cg_top = tmp_path / "cg_tree"
+    (cg_top / "child.scope").mkdir(parents=True)
+    (cg_top / "cgroup.procs").write_text("10\n", encoding="utf-8")
+    (cg_top / "child.scope" / "cgroup.procs").write_text("20\n30\n", encoding="utf-8")
+    assert read_cgroup_pids(cg_top) == [10, 20, 30]
+
 

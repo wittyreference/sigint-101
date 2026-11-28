@@ -95,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
             exp = os.lstat(root / "locks" / "mutation.lock")
             if (st.st_dev, st.st_ino) != (exp.st_dev, exp.st_ino):
                 raise RuntimeError("inherited mutation gate FD does not match mutation.lock")
+            # F8: idempotently re-assert LOCK_EX|LOCK_NB to confirm the lock is actually held.
+            fcntl.flock(gate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         else:
             gate_fd = _acquire_gate_fd(root, exclusive=exclusive)
     except OSError as exc:

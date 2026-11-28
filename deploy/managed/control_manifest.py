@@ -14,7 +14,7 @@ SELECTOR_FORMAT_VERSION = 1
 DISPATCHER_PROTOCOL_VERSION = 1
 LOCK_PROTOCOL_VERSION = 1
 
-# Explicit allowlist of executed/installed managed control files and their support modules.
+# Explicit allowlist of executed/installed managed control files and their stdlib support modules.
 # Changes elsewhere under deploy/ (e.g. desktop theme CSS or docs) are NOT control drift.
 CONTROL_ALLOWLIST: tuple[str, ...] = (
     "deploy/managed/control_manifest.py",
@@ -25,14 +25,15 @@ CONTROL_ALLOWLIST: tuple[str, ...] = (
     "deploy/managed/sigint101-course-managed.sh",
     "deploy/managed/provision-shim.sh",
     "deploy/managed/install-shim.sh",
+    "sigint101/enrollment.py",
+    "sigint101/kiosk.py",
     "sigint101/locks.py",
     "sigint101/migrations.py",
     "sigint101/process_checks.py",
     "sigint101/runtime.py",
+    "sigint101/schema_fixtures.json",
     "sigint101/snapshot.py",
     "sigint101/storage.py",
-    "sigint101/trial.py",
-    "sigint101/validation.py",
 )
 
 

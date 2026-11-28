@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         port = int(selector.get("port", 8008))
         python_exe = str(selector.get("python_executable") or sys.executable)
 
+        writer_lock_path = root / "locks" / "writer.lock"
         exec_argv: list[str]
         if mode == "legacy":
             checkout_dir = Path(selector["checkout_dir"]).resolve()
@@ -106,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
                 str(service_entry),
                 "--mode",
                 "legacy",
+                "--writer-lock-path",
+                str(writer_lock_path),
                 "--checkout-dir",
                 str(checkout_dir),
                 "--data-dir",
@@ -139,12 +142,17 @@ def main(argv: list[str] | None = None) -> int:
             current_abi = probe_python_abi(python_exe)
             verify_runtime_compatibility(runtime_dir, current_abi=current_abi, verify_files=True)
 
+            # F3: -I -S strips interpreter and user site-packages so only sealed runtime imports.
             exec_argv = [
                 python_exe,
                 "-B",
+                "-I",
+                "-S",
                 str(service_entry),
                 "--mode",
                 "managed",
+                "--writer-lock-path",
+                str(writer_lock_path),
                 "--release-root",
                 str(release_dir),
                 "--data-dir",
@@ -166,11 +174,21 @@ def main(argv: list[str] | None = None) -> int:
             ]
 
         # Drop shared gate BEFORE serving; transfer ONLY the writer lock FD across service exec.
+        # F5: strip PYTHONPATH and control-dispatch env vars; pass writer FD via CLI arg so zero
+        # internal env vars appear in /proc/<pid>/environ of the live service or its children.
         session.drop_shared_gate()
         writer_fd = session.prepare_writer_fd_for_exec()
+        exec_argv.extend(["--writer-lock-fd", str(writer_fd)])
         env = os.environ.copy()
+        for leak_key in (
+            "PYTHONPATH",
+            WRITER_LOCK_FD_ENV,
+            "SIGINT101_SHARED_GATE_FD",
+            "SIGINT101_MUTATION_GATE_FD",
+            "SIGINT101_UPDATER_ROOT",
+        ):
+            env.pop(leak_key, None)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env[WRITER_LOCK_FD_ENV] = str(writer_fd)
         os.execve(python_exe, exec_argv, env)
     except (RuntimeError, RuntimeCompatibilityError, KeyError, ValueError, OSError) as exc:
         session.close()

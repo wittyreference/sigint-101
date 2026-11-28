@@ -54,10 +54,10 @@ def is_kiosk_page_open(
     home: str | Path | None = None,
     process_lister: Callable[[], list] = proc_cmdlines,
 ) -> bool:
-    """Check whether any running process matches the kiosk profile (start-kiosk.sh:30-32)."""
-    profile = kiosk_profile_path(profile_dir, home=home)
+    """Check whether any running process matches the kiosk profile (start-kiosk.sh:30-32, F9)."""
+    profile = str(kiosk_profile_path(profile_dir, home=home)).rstrip("/")
     marker = f"user-data-dir={profile}"
-    pattern = re.compile(rf"(?:^|\s|--){re.escape(marker)}(?:\s|$)")
+    pattern = re.compile(rf"(?:^|\s|--){re.escape(marker)}/?(?:\s|$)")
     for _pid, argv in process_lister():
         if pattern.search(" ".join(argv)):
             return True
@@ -92,17 +92,25 @@ def is_tcp_port_listening(
 
 
 def read_cgroup_pids(cgroup_path: str | Path) -> list[int]:
-    """Read live PIDs from a Linux cgroup's cgroup.procs file."""
+    """Read live PIDs recursively from a Linux cgroup subtree's cgroup.procs files (F11)."""
     path = Path(cgroup_path)
-    procs_file = path if path.name == "cgroup.procs" else (path / "cgroup.procs")
-    if not procs_file.is_file():
-        return []
-    pids: list[int] = []
-    for line in procs_file.read_text(encoding="utf-8").splitlines():
-        token = line.strip()
-        if token.isdigit():
-            pids.append(int(token))
-    return pids
+    if path.name == "cgroup.procs":
+        procs_files = [path] if path.is_file() else []
+    elif path.is_dir():
+        procs_files = sorted(path.rglob("cgroup.procs"))
+    else:
+        procs_files = []
+    pids: set[int] = set()
+    for procs_file in procs_files:
+        try:
+            text = procs_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            token = line.strip()
+            if token.isdigit():
+                pids.add(int(token))
+    return sorted(pids)
 
 
 def wait_service_drained(

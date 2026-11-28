@@ -242,7 +242,7 @@ def adopt_inherited_shared_gate(
     *,
     home: str | Path | None = None,
 ) -> LockHandle:
-    """Adopt a shared mutation-gate FD passed from the stable dispatcher and re-mark CLOEXEC."""
+    """Adopt a shared mutation-gate FD from the stable dispatcher and re-assert LOCK_SH (F8)."""
     resolved_root = validate_updater_root(root, home=home)
     os.set_inheritable(fd, False)
     st = _verify_lock_fd(fd, label="inherited shared gate")
@@ -250,6 +250,12 @@ def adopt_inherited_shared_gate(
     exp_st = os.lstat(expected_path)
     if (st.st_dev, st.st_ino) != (exp_st.st_dev, exp_st.st_ino):
         raise LockError("inherited shared gate FD does not match ROOT/locks/mutation.lock")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            raise LockBusyError("inherited shared gate FD does not hold mutation.lock") from exc
+        raise LockError(f"flock failed on inherited shared gate: {exc}") from exc
     return LockHandle(fd=fd, path=expected_path, st_dev=st.st_dev, st_ino=st.st_ino)
 
 

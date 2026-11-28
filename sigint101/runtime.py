@@ -68,6 +68,23 @@ def probe_python_abi(python_executable: str | Path = sys.executable) -> dict:
         raise RuntimeCompatibilityError(f"invalid ABI probe output: {exc}") from exc
 
 
+def _check_so_abi_tag(rel_path: str, expected_soabi: str) -> None:
+    """Refuse CPython extension .so files whose embedded SOABI tag mismatches the runtime (F10)."""
+    name = rel_path.rsplit("/", 1)[-1]
+    if not name.endswith(".so"):
+        return
+    if name.endswith(".abi3.so"):
+        return
+    parts = name[:-3].split(".")
+    if len(parts) >= 2 and parts[-1].startswith("cpython-"):
+        actual_tag = parts[-1]
+        if expected_soabi and actual_tag != expected_soabi:
+            raise RuntimeCompatibilityError(
+                f"extension .so SOABI mismatch at {rel_path}: "
+                f"found {actual_tag!r}, expected {expected_soabi!r}"
+            )
+
+
 def _check_not_editable(
     rel_path: str,
     payload: bytes,
@@ -212,6 +229,7 @@ def stage_sealed_runtime(
                     finally:
                         os.close(in_fd)
 
+                    _check_so_abi_tag(rel, str(abi["soabi"]))
                     _check_not_editable(rel, payload, forbidden_checkout_root=forbidden)
                     out_path = dst_dir / name
                     out_flags = (
@@ -357,6 +375,7 @@ def verify_runtime_compatibility(
                         payload = b"".join(chunks)
                     finally:
                         os.close(f_fd)
+                    _check_so_abi_tag(rel, str(exp_soabi or ""))
                     _check_not_editable(rel, payload, forbidden_checkout_root=forbidden)
                     actual_files[rel] = {
                         "sha256": hashlib.sha256(payload).hexdigest(),

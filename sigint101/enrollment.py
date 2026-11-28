@@ -57,26 +57,23 @@ def _load_control_manifest_module(repo_root: Path):
 
 def _render_managed_unit(
     *,
-    python_executable: str | Path,
+    template_path: Path,
+    host_python: str | Path,
     dispatcher_path: Path,
     updater_root: Path,
 ) -> str:
-    return (
-        "# ABOUTME: Managed SIGINT 101 systemd user unit invoking the stable updater dispatcher.\n"
-        "# ABOUTME: Uses KillMode=control-group and bounded stop; no fallback direct uvicorn.\n"
-        "[Unit]\n"
-        "Description=SIGINT 101 lesson server (managed)\n"
-        "After=network.target\n\n"
-        "[Service]\n"
-        f"WorkingDirectory={updater_root}\n"
-        f"ExecStart={python_executable} -B {dispatcher_path} --root {updater_root} serve\n"
-        "KillMode=control-group\n"
-        "TimeoutStopSec=15\n"
-        "Restart=on-failure\n"
-        "RestartSec=3\n\n"
-        "[Install]\n"
-        "WantedBy=default.target\n"
+    """Render the installed managed unit directly from deploy/managed/sigint101.service (F4/F13)."""
+    template = template_path.read_text(encoding="utf-8")
+    rendered = template.replace(
+        "WorkingDirectory=%h/.local/state/sigint101-updater",
+        f"WorkingDirectory={updater_root}",
+    ).replace(
+        "ExecStart=/usr/bin/python3 -B %h/.local/state/sigint101-updater/bin/dispatcher.py serve",
+        f"ExecStart={host_python} -B {dispatcher_path} --root {updater_root} serve",
     )
+    if str(dispatcher_path) not in rendered:
+        raise EnrollmentError("managed unit template did not match expected ExecStart line")
+    return rendered
 
 
 def enroll_legacy_fixture(
@@ -91,6 +88,7 @@ def enroll_legacy_fixture(
     desktop_wrapper_path: str | Path,
     home: str | Path,
     runtime_dir: str | Path,
+    host_python: str | Path = "/usr/bin/python3",
     host: str = "127.0.0.1",
     port: int = 8008,
     operation_id: str = "enroll-0001",
@@ -123,10 +121,10 @@ def enroll_legacy_fixture(
     # 2) Create permanent lock inodes and hold exclusive mutation gate.
     ensure_lock_files(root, home=home)
     with acquire_mutation_gate(root, blocking=False, home=home):
-        # 3) Stage sealed dependency snapshot (no bytecode, no editable checkout leaks).
+        # 3) Stage sealed dependency snapshot probed against host_python ABI (F4, U3).
         runtime_dir_path = root / "runtimes" / runtime_id
         if not runtime_dir_path.exists():
-            abi = probe_python_abi(legacy_python)
+            abi = probe_python_abi(host_python)
             stage_sealed_runtime(
                 source_site_packages,
                 runtime_dir_path,
@@ -224,9 +222,10 @@ def enroll_legacy_fixture(
         if on_boundary is not None:
             on_boundary("before_unit_install")
 
-        # 8) Atomically install the managed unit file and sync its parent directory.
+        # 8) Atomically install the managed unit rendered from deploy/managed/sigint101.service.
         unit_text = _render_managed_unit(
-            python_executable=legacy_python,
+            template_path=managed_dir / "sigint101.service",
+            host_python=host_python,
             dispatcher_path=dispatcher_dest,
             updater_root=root,
         )
