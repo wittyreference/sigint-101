@@ -5,7 +5,14 @@ import json
 import sys
 import time
 
-from render_scroll import connect
+from render_scroll import connect, fence, leave_page
+
+RENDER_CHECK = {
+    "name": "field",
+    "pages": ("/operate/ism", "/operate/waterfall", "/field"),
+    "scratch": False,
+    "order": 100,
+}
 
 THEMES = ("dark", "sunlight", "red-night")
 
@@ -111,7 +118,8 @@ function measureFieldPage(expectedTheme, longCmd) {
 
 
 def load_page(browser, url):
-    nav = browser.call("Page.navigate", {"url": url})
+    # Through the render proxy, never the console itself (render_scroll.fence).
+    nav = browser.call("Page.navigate", {"url": fence(url)})
     if nav.get("errorText"):
         raise RuntimeError(nav["errorText"])
     for _ in range(25):
@@ -160,7 +168,7 @@ def main(console):
             failed |= verdict(page_ok, f"field {theme}", measures)
         return int(failed)
     finally:
-        browser.s.close()
+        leave_page(browser)
 
 
 if __name__ == "__main__":

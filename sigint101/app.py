@@ -106,6 +106,16 @@ from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, fini
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
 from .receiver_socket import PortOccupied
+from .replay import (
+    RECORDINGS_DIR,
+    Recording,
+    RecordingNotFound,
+    RecordingRefused,
+    ReplayDecoder,
+    ReplayUnavailable,
+    list_recordings,
+    load_recording,
+)
 from .retrieval import MAX_CARDS
 from .retrieval import due as recall_due
 from .safety import notice_for, rack_lora_send
@@ -130,6 +140,31 @@ BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
 PACK_DIR = REPO_DIR / "lesson_packs"
 DATA_DIR = REPO_DIR / "data"
+REPLAY_RUNNING = "a replay is running"
+
+
+class ReplayBusy(ReplayUnavailable):
+    """Another replay is running or acquiring the arbiter."""
+
+
+def start_replay(state, recording: Recording) -> None:
+    """Start a validated recording under the same reservation as the live decoder."""
+    replay = state.replay
+    if not state.replay_start_lock.acquire(blocking=False):
+        raise ReplayBusy(REPLAY_RUNNING)
+    try:
+        if replay.running:
+            raise ReplayBusy(REPLAY_RUNNING)
+        if reason := replay.release_failure(pending=True):
+            raise ReplayUnavailable(reason)
+        deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
+        with state.radio_arbiter.reserve("replay", ReplayUnavailable, deadline):
+            state.decoder.release()
+            if reason := state.decoder.release_failure(pending=True):
+                raise ReplayUnavailable(reason)
+            replay.start_replay(recording)
+    finally:
+        state.replay_start_lock.release()
 
 # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
 SDR_CONSUMERS = (
@@ -436,6 +471,7 @@ def initialize_console_state(
     ppm_measure=None,
     backfill_stamps=None,
     attach_reception_hooks=None,
+    replay_factory=None,
 ) -> None:
     """Shared console initialization used by both public startup and read-only updater trials.
 
@@ -495,6 +531,9 @@ def initialize_console_state(
         if trial:
             state.ppm_measure = ppm_measure or measure_pilot_ppm
         else:
+            state.replay = (replay_factory or ReplayDecoder)(
+                events_path=state.events_path, progress=state.progress, sync=managed)
+            state.replay_start_lock = threading.Lock()
             state.ppm_calibration = PpmCalibration()
             state.ppm_measure = ppm_measure or state.ppm_calibration.measure
         state.receptions = None
@@ -549,7 +588,7 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
         return errors
 
     state.radio_arbiter.close()
-    names = (*SDR_CONSUMERS, "lora", "flock", "rayhunter")
+    names = (*SDR_CONSUMERS, "replay", "lora", "flock", "rayhunter")
     receivers = [
         (name, getattr(receiver, "shutdown", receiver.stop))
         for name in names
@@ -574,6 +613,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                apt_factory=None, sstv_factory=None, meteor_factory=None,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
+               recordings_dir=RECORDINGS_DIR, replay_factory=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None,
                clock=time.time, managed: bool = False) -> FastAPI:
@@ -640,10 +680,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             logging.getLogger(__name__).warning("could not log LoRa %s: %s", kind, exc)
 
     def _run_startup_backfill(state) -> None:
+        """The public console's startup writes; the read-only trial never runs this hook."""
         try:
             _backfill_stamps(state.progress, _stamp_window())
         except (OSError, sqlite3.Error) as exc:
             _stamp_failed(exc)
+        # Check lessons completed before enrolment moved to the completion post have no recall
+        # row yet: enrol them once here, at startup, so no page load ever has to write one.
+        try:
+            sources = [lid for lid, item in state.lessons.items()
+                       if item.check and (state.progress.get(lid) or {}).get("completed")]
+            state.progress.enroll_recall(sources, now=clock())
+        except (OSError, sqlite3.Error) as exc:
+            logging.getLogger(__name__).error("recall enrolment backfill: %s", exc)
 
     def _attach_hooks(state) -> None:
         for attr, inst in RECEIVERS.items():
@@ -675,6 +724,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             ppm_measure=ppm_measure,
             backfill_stamps=_run_startup_backfill,
             attach_reception_hooks=_attach_hooks,
+            replay_factory=replay_factory,
         )
         try:
             yield
@@ -946,20 +996,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         is what the template uses to decide which stages it emits, so the sealed bodies are never
         put into the HTML before the commit. Lesson.reveal() is asked for the sealed material only
         once committed — it refuses otherwise — as the code-level backstop behind the template.
-        Opening a lesson counts as progress but never as completion. It opens on the stage the
-        learner last reached (a reload or a power cut resumes in place), and Back leads to the
-        lesson's unit rather than skipping it.
+        Opening a lesson counts as progress but never as completion; the page records it once
+        shown (POST /api/opened), so this GET writes no learner state. Nor does it touch a
+        receiver: the page puts the radios on the lesson's frequencies itself (POST /api/tuning)
+        before its panels start polling. It opens on the stage the learner last reached (a reload
+        or a power cut resumes in place), and Back leads to the lesson's unit rather than skipping
+        it.
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
-        _restore_lesson_tuning(lesson)
-        app.state.progress.mark_opened(lesson_id)
         saved_stage = app.state.progress.get_stage(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
         unit = unit_for_lesson(lesson_id)
+        # Read-only: a completed check lesson is enrolled for recall when it is completed (POST
+        # /api/complete) or, for older completions, when the console starts; never by a GET.
         sources = _recall_sources()
         now = clock()
-        app.state.progress.enroll_recall(sources, now=now)
         if saved_stage is None and prediction is None:
             recall_page = _recall_response(request, lesson, unit, sources, now)
             if recall_page is not None:
@@ -1199,6 +1251,30 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "caution": LAW_CAUTION, "sections": LAW_SECTIONS},
         )
 
+    @app.post("/api/tuning")
+    def lesson_tuning(lesson_id: int):
+        """Put the radios where this lesson expects them, whatever the rack left them on.
+
+        The lesson page posts this as it loads, ahead of its panel scripts (lesson-tuning.js), so
+        the panels' first polls find their receivers on the lesson's frequencies. Loading the page
+        retunes nothing, so a render check or a prefetch cannot move a running receiver. An
+        unknown lesson is refused (404) like every lesson route.
+        """
+        _require_lesson(lesson_id)
+        _restore_lesson_tuning(app.state.lessons[lesson_id])
+        return {"tuned": True, "lesson_id": lesson_id}
+
+    @app.post("/api/opened")
+    def opened(lesson_id: int):
+        """Mark a lesson opened: the lesson page posts this once it is shown (lesson-nav.js).
+
+        Loading the page records nothing, so a render check, a prefetch or a crawler cannot mark
+        a lesson opened. An unknown lesson is refused (404) like every lesson route.
+        """
+        _require_lesson(lesson_id)
+        app.state.progress.mark_opened(lesson_id)
+        return {"opened": True, "lesson_id": lesson_id}
+
     @app.post("/api/stage")
     async def stage(lesson_id: int, request: Request):
         """Remember the stage the learner is on, so a reload or a power cut resumes there.
@@ -1234,6 +1310,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"lesson": lesson_id, "reason": reason})
             return JSONResponse(status_code=400, content={"completed": False, "reason": reason})
         app.state.progress.mark_completed(lesson_id)
+        # A completed lesson with a check becomes a pre-lesson recall source from now (box 1).
+        if app.state.lessons[lesson_id].check:
+            app.state.progress.enroll_recall([lesson_id], now=clock())
         try:
             log_event(app.state.events_path, "completed", {"lesson": lesson_id}, sync=managed)
         except OSError as exc:
@@ -1643,6 +1722,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 # PPM may have failed to reap since this request joined the queue.
                 if reason := calibration.release_failure():
                     raise refusal(reason)
+                if target == "decoder" and app.state.replay.running:
+                    raise refusal(REPLAY_RUNNING)
                 if not reclaim and getattr(receiver, "released", False):
                     raise refusal("the radio was released to another program")
                 if prepare is not None:
@@ -1669,6 +1750,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
 
     def _receiver_cause(kind, exc, reason):
         """Classify the refusal that actually fired, without polling hardware again."""
+        if reason == REPLAY_RUNNING:
+            return {"cause": "replaying"}
         if reason.startswith("no RTL-SDR on the USB bus"):
             return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
                     "next_step": "Plug in the RTL-SDR."}
@@ -1821,6 +1904,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         the decoder by that reclaim, so flipping between the two keeps working.
         """
         decoder = app.state.decoder
+        if app.state.replay.running:
+            return _refused("decode", DecodeUnavailable(REPLAY_RUNNING), {"decodes": []})
         if not decoder.running:
             try:
                 _claim_sdr("decoder", decoder.start)
@@ -1834,6 +1919,58 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": decoder.freq_hz,
             "decodes": [d.as_dict() for d in decoder.recent(limit)],
         }
+
+    @app.get("/api/replay/recordings")
+    def replay_recordings():
+        recordings, refused = list_recordings(recordings_dir)
+        fields = ("stem", "instrument", "frequency_hz", "sample_rate", "datetime",
+                  "hw", "license", "source", "bytes")
+        return {
+            "recordings": [{key: getattr(recording, key) for key in fields}
+                           for recording in recordings],
+            "refused": [{"stem": stem, "reason": reason} for stem, reason in refused],
+        }
+
+    def _replay_refusal(status, reason):
+        return JSONResponse(status_code=status, content={
+            **app.state.replay.snapshot(), "reason": str(reason),
+        })
+
+    @app.post("/api/replay/{instrument}/start")
+    def replay_start(instrument: str, payload: dict = Body(default={})):
+        if instrument != "ism":
+            return _replay_refusal(404, "this instrument has no replay")
+        try:
+            recording = load_recording(recordings_dir, payload.get("recording"))
+            start_replay(app.state, recording)
+        except RecordingNotFound as exc:
+            return _replay_refusal(404, exc)
+        except RecordingRefused as exc:
+            return _replay_refusal(400, exc)
+        except ReplayBusy as exc:
+            return _replay_refusal(409, exc)
+        except ReplayUnavailable as exc:
+            return _refused("replay", exc, {**app.state.replay.snapshot(), "reason": str(exc)})
+        return app.state.replay.snapshot()
+
+    @app.post("/api/replay/{instrument}/stop")
+    def replay_stop(instrument: str):
+        if instrument != "ism":
+            return _replay_refusal(404, "this instrument has no replay")
+        replay = app.state.replay
+        try:
+            replay.stop()
+            if reason := replay.release_failure(pending=True):
+                raise ReplayUnavailable(reason)
+        except ReplayUnavailable as exc:
+            return _refused("replay", exc, {**replay.snapshot(), "reason": str(exc)})
+        return replay.snapshot()
+
+    @app.get("/api/replay/{instrument}")
+    def replay_state(instrument: str):
+        if instrument != "ism":
+            return _replay_refusal(404, "this instrument has no replay")
+        return app.state.replay.snapshot()
 
     @app.get("/api/lora")
     def lora(limit: int | None = None):
@@ -2802,10 +2939,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         error = app.state.stamp_error
         try:
             earned = {stamp["instrument"]: stamp for stamp in app.state.progress.stamps()}
+            replayed = app.state.progress.replays_seen()
         except (OSError, sqlite3.Error) as exc:
             return [], error or f"the logbook could not be read: {exc}"
         empty = {"first_ts": None, "count": 0, "provenance": None, "digest": None}
-        rows = [{"instrument": inst.key, "label": inst.label, **earned.get(inst.key, empty)}
+        rows = [{"instrument": inst.key, "label": inst.label, **earned.get(inst.key, empty),
+                 "replayed": replayed.get(inst.key)}
                 for inst in INSTRUMENTS if inst.key in STAMP_INSTRUMENTS]
         return rows, error
 
@@ -2822,6 +2961,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         for row in rows:
             if row["count"]:
                 row["first_heard"] = datetime.fromtimestamp(row["first_ts"], tz=timezone.utc)
+            if row["replayed"]:
+                row["first_seen"] = datetime.fromtimestamp(row["replayed"]["first_ts"],
+                                                           tz=timezone.utc)
         return templates.TemplateResponse(
             request=request, name="logbook.html",
             context={"title": "Logbook", "back_href": "/operate", "back_label": "Rack",
@@ -2908,9 +3050,24 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         key = last if rack_instrument(last or "") else DEFAULT_INSTRUMENT
         return RedirectResponse(f"/operate/{key}", status_code=303)
 
+    @app.post("/api/rack/place")
+    def rack_place(payload: dict = Body(default={})):
+        """Remember the instrument the learner picked, so /operate reopens on it.
+
+        The picker posts this when tapped (operate.js). Showing a rack page records nothing, so a
+        render check, a prefetch or a crawler cannot move the learner's place. A key the rack
+        does not have is refused (404) and changes nothing.
+        """
+        key = payload.get("instrument")
+        inst = rack_instrument(key) if isinstance(key, str) else None
+        if inst is None:
+            raise HTTPException(status_code=404, detail=f"the rack has no instrument {key!r}")
+        app.state.progress.record_place(RACK_PLACE, inst.key)
+        return {"place": inst.key}
+
     @app.get("/operate/{key}", response_class=HTMLResponse)
     def operate_view(request: Request, key: str, back: str | None = None):
-        """One instrument in the rack, remembered so /operate reopens on it.
+        """One instrument in the rack. Showing it writes nothing; the picker records the place.
 
         The panel's own poll claims the dongle through _claim_sdr exactly as a lesson's does, so
         switching instruments hands the radio over the same way. The page renders the receiver's
@@ -2919,7 +3076,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         inst = rack_instrument(key)
         if inst is None:
             raise HTTPException(status_code=404, detail=f"the rack has no instrument '{key}'")
-        app.state.progress.record_place(RACK_PLACE, inst.key)
         receiver = getattr(app.state, inst.receiver) if inst.receiver else None
         freq_hz = None
         if inst.api == "spectrum":
