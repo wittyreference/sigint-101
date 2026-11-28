@@ -7,17 +7,21 @@ import copy
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 import threading
 import time
+import zlib
 from collections import deque
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -65,11 +69,32 @@ _CREATE_WAIT_S = 1.5
 _CREATE_RETRY_S = 0.05
 _DIR_FLAGS = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _PNG = b"\x89PNG\r\n\x1a\n"
+_GALLERY_INDEX = "gallery.json"
 _MAX_LINE = 1024
 _MAX_ENTRIES = 4096
 _MAX_DEPTH = 8
 _MAX_MANIFEST_BYTES = 65536
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_MAX_DECODED_PNG_BYTES = 96 * 1024 * 1024
+_MAX_PNG_DIM = 16384
+_MAX_PNG_PIXELS = 64_000_000
+_MAX_TIMESTAMP_S = 4_102_444_800.0
+_PNG_COLOR_SPECS = {
+    0: (1, (1, 2, 4, 8, 16)),
+    2: (3, (8, 16)),
+    3: (1, (1, 2, 4, 8)),
+    4: (2, (8, 16)),
+    6: (4, (8, 16)),
+}
+_ADAM7_PASSES = (
+    (0, 0, 8, 8),
+    (4, 0, 8, 8),
+    (0, 4, 4, 8),
+    (2, 0, 4, 4),
+    (0, 2, 2, 4),
+    (1, 0, 2, 2),
+    (0, 1, 1, 2),
+)
 _log = logging.getLogger(__name__)
 
 
@@ -238,6 +263,133 @@ def _clear_run(fd, device, depth, budget):
                 os.unlink(entry.name, dir_fd=fd)
 
 
+def _is_valid_png(data: bytes) -> bool:
+    """Fully decode and validate a PNG byte stream without external imaging dependencies."""
+    if (not isinstance(data, (bytes, bytearray))
+            or len(data) < 33 or len(data) > _MAX_IMAGE_BYTES or not data.startswith(_PNG)):
+        return False
+    pos = len(_PNG)
+    n = len(data)
+    saw_ihdr = False
+    saw_iend = False
+    saw_plte = False
+    plte_entries: int | None = None
+    in_idat = False
+    after_idat = False
+    idat_parts: list[bytes] = []
+    width = height = bit_depth = color_type = interlace = channels = 0
+    while pos < n:
+        if pos + 12 > n:
+            return False
+        length = struct.unpack_from(">I", data, pos)[0]
+        ctype = bytes(data[pos + 4 : pos + 8])
+        if not all(65 <= b <= 90 or 97 <= b <= 122 for b in ctype):
+            return False
+        data_start = pos + 8
+        data_end = data_start + length
+        if data_end + 4 > n:
+            return False
+        expected_crc = struct.unpack_from(">I", data, data_end)[0]
+        if (zlib.crc32(data[pos + 4 : data_end]) & 0xFFFFFFFF) != expected_crc:
+            return False
+        chunk = data[data_start:data_end]
+        pos = data_end + 4
+        if not saw_ihdr:
+            if ctype != b"IHDR" or length != 13:
+                return False
+            width, height, bit_depth, color_type, comp, filt, interlace = struct.unpack(
+                ">IIBBBBB", chunk
+            )
+            if (width < 1 or height < 1 or width > _MAX_PNG_DIM or height > _MAX_PNG_DIM
+                    or width * height > _MAX_PNG_PIXELS
+                    or comp != 0 or filt != 0 or interlace not in (0, 1)):
+                return False
+            spec = _PNG_COLOR_SPECS.get(color_type)
+            if spec is None or bit_depth not in spec[1]:
+                return False
+            channels = spec[0]
+            saw_ihdr = True
+            continue
+        if ctype == b"IHDR":
+            return False
+        if ctype == b"PLTE":
+            if (saw_plte or in_idat or after_idat or color_type in (0, 4)
+                    or length == 0 or length % 3 != 0):
+                return False
+            entries = length // 3
+            max_entries = 1 << min(bit_depth, 8)
+            if entries > max_entries:
+                return False
+            saw_plte = True
+            plte_entries = entries
+            continue
+        if ctype == b"IDAT":
+            if after_idat:
+                return False
+            in_idat = True
+            idat_parts.append(bytes(chunk))
+            continue
+        if in_idat:
+            in_idat = False
+            after_idat = True
+        if ctype == b"IEND":
+            if length != 0 or pos != n:
+                return False
+            saw_iend = True
+            break
+        if (ctype[0] & 0x20) == 0:
+            return False
+    if not saw_ihdr or not saw_iend or not idat_parts:
+        return False
+    if color_type == 3 and plte_entries is None:
+        return False
+
+    bpp = channels * bit_depth
+    if interlace == 0:
+        passes = [(height, (width * bpp + 7) // 8)]
+    else:
+        passes = []
+        for x0, y0, dx, dy in _ADAM7_PASSES:
+            pw = (width - x0 + dx - 1) // dx if width > x0 else 0
+            ph = (height - y0 + dy - 1) // dy if height > y0 else 0
+            if pw > 0 and ph > 0:
+                passes.append((ph, (pw * bpp + 7) // 8))
+    expected_len = sum(ph * (1 + row_bytes) for ph, row_bytes in passes)
+    if expected_len <= 0 or expected_len > _MAX_DECODED_PNG_BYTES:
+        return False
+    decomp = zlib.decompressobj()
+    try:
+        raw = decomp.decompress(b"".join(idat_parts), expected_len + 1)
+        if decomp.unconsumed_tail:
+            return False
+        raw += decomp.flush()
+    except zlib.error:
+        return False
+    if not decomp.eof or decomp.unused_data or len(raw) != expected_len:
+        return False
+    offset = 0
+    for ph, row_bytes in passes:
+        stride = 1 + row_bytes
+        for _ in range(ph):
+            if raw[offset] > 4:
+                return False
+            offset += stride
+    return True
+
+
+def _is_valid_timestamp(value: object) -> bool:
+    """Accept only finite POSIX timestamps that render cleanly as UTC datetimes."""
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return False
+    if value < 0 or value > _MAX_TIMESTAMP_S:
+        return False
+    try:
+        datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return False
+    return True
+
+
 def _pictures(fd, device, prefix=(), budget=None):
     """Inspect only bounded, same-owner, same-device contents beneath the owned pass."""
     if budget is None:
@@ -262,9 +414,11 @@ def _pictures(fd, device, prefix=(), budget=None):
                     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
                     with os.fdopen(os.open(entry.name, flags, dir_fd=fd), "rb") as image:
                         current = os.fstat(image.fileno())
-                        if (os.path.samestat(current, info) and current.st_size > len(_PNG)
-                                and image.read(len(_PNG)) == _PNG):
-                            yield {"path": "/".join(parts), "product": product[1]}
+                        if (os.path.samestat(current, info)
+                                and 0 < current.st_size <= _MAX_IMAGE_BYTES):
+                            raw = image.read(_MAX_IMAGE_BYTES + 1)
+                            if len(raw) <= _MAX_IMAGE_BYTES and _is_valid_png(raw):
+                                yield {"path": "/".join(parts), "product": product[1]}
             except OSError:
                 continue
 
@@ -360,30 +514,79 @@ def _remove_dir_descriptor(parent_fd: int, name: str) -> None:
         os.rmdir(name, dir_fd=parent_fd)
 
 
+def _read_gallery_index(root_fd: int) -> tuple[int, list[str]] | None:
+    """Read committed gallery order from data/meteor/gallery.json without following links."""
+    raw = _read_regular_bytes(root_fd, (_GALLERY_INDEX,), max_bytes=_MAX_MANIFEST_BYTES)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return None
+    seq = data.get("seq")
+    if type(seq) is not int or seq < 0:
+        return None
+    raw_passes = data.get("passes")
+    if not isinstance(raw_passes, list):
+        return None
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in raw_passes:
+        if isinstance(item, str) and _PASS_ID.fullmatch(item) and item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return seq, ordered
+
+
+def _write_gallery_index(root_fd: int, root_path: Path, *, seq: int, pass_ids: list[str],
+                         tmp_name: str, sync: bool) -> None:
+    """Atomically write and optionally fsync the committed gallery index."""
+    payload = {"version": 1, "seq": seq, "passes": pass_ids}
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(tmp_name, flags, 0o644, dir_fd=root_fd)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+    if sync:
+        fsync_file(root_path / tmp_name)
+    os.rename(tmp_name, _GALLERY_INDEX, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+
+
 def _validate_manifest(pass_id: str, data: object) -> dict | None:
     """Validate a saved pass manifest.json and its image entries."""
     if not isinstance(data, dict) or data.get("id") != pass_id:
         return None
-    if data.get("mode") not in PIPELINES or type(data.get("freq_hz")) is not int:
+    mode = data.get("mode")
+    if not isinstance(mode, str) or mode not in PIPELINES:
         return None
-    if not isinstance(data.get("command"), str) or not data["command"].strip():
+    freq_hz = data.get("freq_hz")
+    if type(freq_hz) is not int or str(freq_hz) not in CHANNELS:
         return None
-    if not isinstance(data.get("radio"), dict):
+    command = data.get("command")
+    if not isinstance(command, str) or not command.strip():
         return None
-    if not isinstance(data.get("satellite"), str) or not data["satellite"].strip():
+    radio = data.get("radio")
+    if not isinstance(radio, dict):
         return None
-    if type(data.get("started_at")) not in (int, float):
+    satellite = data.get("satellite")
+    if not isinstance(satellite, str) or not satellite.strip():
         return None
-    if type(data.get("ended_at")) not in (int, float):
+    started_at = data.get("started_at")
+    ended_at = data.get("ended_at")
+    if not _is_valid_timestamp(started_at) or not _is_valid_timestamp(ended_at):
         return None
-    if data.get("result") != "done" or not isinstance(data.get("lock_ever"), bool):
+    lock_ever = data.get("lock_ever")
+    if data.get("result") != "done" or type(lock_ever) is not bool:
         return None
-    if not isinstance(data.get("ended_by"), str) or not data["ended_by"].strip():
+    ended_by = data.get("ended_by")
+    if not isinstance(ended_by, str) or not ended_by.strip():
         return None
     images = data.get("images")
     if not isinstance(images, list) or not images:
         return None
     clean_images = []
+    seen_paths: set[str] = set()
     for img in images:
         if not isinstance(img, dict):
             return None
@@ -393,21 +596,23 @@ def _validate_manifest(pass_id: str, data: object) -> dict | None:
             return None
         parts = PurePosixPath(path).parts
         if (len(parts) != 3 or parts[0] != "meteor" or parts[1] != pass_id
-                or parts[2] in ("", ".", "..") or not parts[2].endswith(".png")):
+                or parts[2] in ("", ".", "..") or not parts[2].endswith(".png")
+                or path in seen_paths):
             return None
+        seen_paths.add(path)
         clean_images.append({"path": path, "product": product})
     return {
         "id": pass_id,
-        "started_at": float(data["started_at"]),
-        "ended_at": float(data["ended_at"]),
-        "freq_hz": data["freq_hz"],
-        "mode": data["mode"],
-        "command": data["command"],
-        "radio": dict(data["radio"]),
-        "satellite": data["satellite"],
+        "started_at": float(started_at),
+        "ended_at": float(ended_at),
+        "freq_hz": freq_hz,
+        "mode": mode,
+        "command": command,
+        "radio": dict(radio),
+        "satellite": satellite,
         "result": "done",
-        "lock_ever": data["lock_ever"],
-        "ended_by": data["ended_by"],
+        "lock_ever": lock_ever,
+        "ended_by": ended_by,
         "images": clean_images,
     }
 
@@ -438,6 +643,7 @@ class _Capture:
     tail: deque = field(default_factory=lambda: deque(maxlen=3))
     result: tuple | None = None
     pictures: tuple = ()
+    publish_error: str | None = None
 
     @property
     def output(self):
@@ -483,6 +689,9 @@ class MeteorDecoder(SupervisedReceiver):
         self._runs = childproc.RunGuard()
         self._gallery_lock = threading.Lock()
         self._passes: list[dict] = []
+        self._seq: int = 0
+        self._has_index: bool = False
+        self._root_parent_synced: bool = False
         self._media_index: dict[str, tuple[str, str]] = {}
         self.watch = childproc.ChildWatch(SATDUMP, finite=True, clock=monotonic)
         self._init_lifecycle()
@@ -538,57 +747,61 @@ class MeteorDecoder(SupervisedReceiver):
         self._media_index = index
 
     def _load_passes(self) -> None:
-        """Read existing verified passes on startup without creating dirs or emitting events."""
+        """Read committed verified passes on startup without creating dirs or emitting events."""
         root = self.data_dir / "meteor"
         if not root.is_dir():
             return
         loaded: list[dict] = []
+        seq = 0
+        has_index = False
         try:
             with _directory(self.data_dir, private=False) as data_fd:
                 with _directory("meteor", data_fd, private=False) as root_fd:
+                    index = _read_gallery_index(root_fd)
+                    if index is None:
+                        return
+                    seq, ordered_ids = index
+                    has_index = True
                     root_dev = os.fstat(root_fd).st_dev
-                    with os.scandir(root_fd) as entries:
-                        for entry in entries:
-                            if not _PASS_ID.fullmatch(entry.name):
+                    for pass_id in ordered_ids:
+                        try:
+                            info = os.stat(pass_id, dir_fd=root_fd, follow_symlinks=False)
+                            if (not stat.S_ISDIR(info.st_mode)
+                                    or info.st_dev != root_dev
+                                    or info.st_uid != os.geteuid()):
                                 continue
-                            try:
-                                info = entry.stat(follow_symlinks=False)
-                                if (not stat.S_ISDIR(info.st_mode)
-                                        or info.st_dev != root_dev
-                                        or info.st_uid != os.geteuid()):
+                            with _directory(pass_id, root_fd, private=False) as pfd:
+                                if not os.path.samestat(os.fstat(pfd), info):
                                     continue
-                                with _directory(entry.name, root_fd, private=False) as pfd:
-                                    if not os.path.samestat(os.fstat(pfd), info):
-                                        continue
-                                    raw = _read_regular_bytes(
-                                        pfd, ("manifest.json",), max_bytes=_MAX_MANIFEST_BYTES
+                                raw = _read_regular_bytes(
+                                    pfd, ("manifest.json",), max_bytes=_MAX_MANIFEST_BYTES
+                                )
+                                if not raw:
+                                    continue
+                                manifest = _validate_manifest(
+                                    pass_id, json.loads(raw.decode("utf-8"))
+                                )
+                                if manifest is None:
+                                    continue
+                                valid = True
+                                for img in manifest["images"]:
+                                    fname = PurePosixPath(img["path"]).parts[2]
+                                    png_bytes = _read_regular_bytes(
+                                        pfd, (fname,), max_bytes=_MAX_IMAGE_BYTES
                                     )
-                                    if not raw:
-                                        continue
-                                    manifest = _validate_manifest(
-                                        entry.name, json.loads(raw.decode("utf-8"))
-                                    )
-                                    if manifest is None:
-                                        continue
-                                    # Confirm every listed image is a real regular PNG in this pass.
-                                    valid = True
-                                    for img in manifest["images"]:
-                                        fname = PurePosixPath(img["path"]).parts[2]
-                                        png_bytes = _read_regular_bytes(
-                                            pfd, (fname,), max_bytes=_MAX_IMAGE_BYTES
-                                        )
-                                        if not png_bytes or not png_bytes.startswith(_PNG):
-                                            valid = False
-                                            break
-                                    if valid:
-                                        loaded.append(manifest)
-                            except (OSError, UnicodeDecodeError, ValueError):
-                                continue
+                                    if not png_bytes or not _is_valid_png(png_bytes):
+                                        valid = False
+                                        break
+                                if valid:
+                                    loaded.append(manifest)
+                        except (OSError, UnicodeDecodeError, ValueError, TypeError):
+                            continue
         except OSError:
             return
-        loaded.sort(key=lambda row: (row["started_at"], row["id"]), reverse=True)
         with self._gallery_lock:
-            self._passes = loaded[:MAX_PUBLISHED_PASSES]
+            self._passes = loaded[:max(0, int(MAX_PUBLISHED_PASSES))]
+            self._seq = max(seq, len(loaded))
+            self._has_index = has_index
             self._rebuild_media_index_unlocked()
 
     def read_media(self, rel_path: str) -> bytes | None:
@@ -606,7 +819,7 @@ class MeteorDecoder(SupervisedReceiver):
                     )
         except OSError:
             return None
-        if not data or not data.startswith(_PNG):
+        if not data or not _is_valid_png(data):
             return None
         return data
 
@@ -774,7 +987,10 @@ class MeteorDecoder(SupervisedReceiver):
             return True
 
     def _commit_gallery_pass(self, capture: _Capture) -> dict | None:
-        """Write verified PNGs + manifest, fsync in F6 order, atomic rename, prune to 20."""
+        """Decode and stage PNGs + manifest, sync durably, commit gallery.json, reconcile cap."""
+        if (not _is_valid_timestamp(capture.started_at)
+                or not _is_valid_timestamp(capture.ended_at)):
+            return None
         stage_fd = capture.stage.fd
         satellite = _read_satellite_name(stage_fd)
         verified_files: list[tuple[str, str, bytes]] = []
@@ -782,7 +998,7 @@ class MeteorDecoder(SupervisedReceiver):
         for pic in capture.pictures:
             rel_parts = tuple(PurePosixPath(pic["path"]).parts)
             data = _read_regular_bytes(stage_fd, rel_parts, max_bytes=_MAX_IMAGE_BYTES)
-            if not data or not data.startswith(_PNG):
+            if not data or not _is_valid_png(data):
                 continue
             base = rel_parts[-1]
             fname = base
@@ -797,10 +1013,20 @@ class MeteorDecoder(SupervisedReceiver):
             return None
 
         candidate_name = f".publish-{capture.id}"
+        index_tmp_name = f".gallery-{capture.id}.tmp"
         root_path = self.data_dir / "meteor"
         candidate_path = root_path / candidate_name
-        renamed = False
+        renamed_pass = False
+        renamed_index = False
         with self._gallery_lock:
+            cap = max(0, int(MAX_PUBLISHED_PASSES))
+            prev_pass_ids = [row["id"] for row in self._passes]
+            next_pass_ids = ([capture.id] + prev_pass_ids)[:cap]
+            if capture.id not in next_pass_ids:
+                return None
+            prev_seq = self._seq
+            next_seq = prev_seq + 1
+            had_index = self._has_index
             try:
                 with _directory(self.data_dir, private=False) as data_fd:
                     with _directory("meteor", data_fd, create=True) as root_fd:
@@ -823,8 +1049,8 @@ class MeteorDecoder(SupervisedReceiver):
 
                                 pass_row = {
                                     "id": capture.id,
-                                    "started_at": capture.started_at,
-                                    "ended_at": capture.ended_at,
+                                    "started_at": float(capture.started_at),
+                                    "ended_at": float(capture.ended_at),
                                     "freq_hz": capture.hz,
                                     "mode": capture.mode,
                                     "command": shlex.join(capture.argv),
@@ -847,41 +1073,86 @@ class MeteorDecoder(SupervisedReceiver):
                                     sync_media_asset(png_path)
                                 fsync_file(manifest_path)
                                 fsync_dir(candidate_path)
+                                if not self._root_parent_synced:
+                                    fsync_dir(self.data_dir)
+                                    self._root_parent_synced = True
 
                             os.rename(
                                 candidate_name, capture.id,
                                 src_dir_fd=root_fd, dst_dir_fd=root_fd,
                             )
-                            renamed = True
+                            renamed_pass = True
+
+                            if self._sync_assets:
+                                fsync_dir(root_path)
+
+                            _write_gallery_index(
+                                root_fd, root_path,
+                                seq=next_seq, pass_ids=next_pass_ids,
+                                tmp_name=index_tmp_name, sync=self._sync_assets,
+                            )
+                            renamed_index = True
 
                             if self._sync_assets:
                                 fsync_dir(root_path)
                         except OSError as exc:
-                            self.error = f"could not publish Meteor pass: {exc}"[:160]
-                            cleanup_target = capture.id if renamed else candidate_name
+                            capture.publish_error = f"could not publish Meteor pass: {exc}"[:160]
+                            if renamed_index:
+                                rb_name = f".gallery-rb-{capture.id}.tmp"
+                                try:
+                                    if had_index:
+                                        _write_gallery_index(
+                                            root_fd, root_path,
+                                            seq=prev_seq, pass_ids=prev_pass_ids,
+                                            tmp_name=rb_name, sync=False,
+                                        )
+                                    else:
+                                        os.unlink(_GALLERY_INDEX, dir_fd=root_fd)
+                                except OSError:
+                                    try:
+                                        os.unlink(rb_name, dir_fd=root_fd)
+                                    except OSError:
+                                        pass
+                            try:
+                                os.unlink(index_tmp_name, dir_fd=root_fd)
+                            except OSError:
+                                pass
+                            cleanup_target = capture.id if renamed_pass else candidate_name
                             try:
                                 _remove_dir_descriptor(root_fd, cleanup_target)
                             except OSError:
                                 pass
                             return None
 
-                        self._passes.insert(0, pass_row)
-                        self._passes.sort(
-                            key=lambda r: (r["started_at"], r["id"]), reverse=True
-                        )
-                        evicted = self._passes[MAX_PUBLISHED_PASSES:]
-                        self._passes = self._passes[:MAX_PUBLISHED_PASSES]
+                        self._passes = ([pass_row] + self._passes)[:cap]
+                        self._seq = next_seq
+                        self._has_index = True
                         self._rebuild_media_index_unlocked()
-                        for old in evicted:
-                            try:
-                                _remove_dir_descriptor(root_fd, old["id"])
-                            except OSError as exc:
-                                _log.warning("Meteor could not prune old pass %s: %s",
-                                             old["id"], exc)
+                        self._reconcile_gallery_overflow(root_fd, {r["id"] for r in self._passes})
                         return copy.deepcopy(pass_row)
             except OSError as exc:
-                self.error = f"could not publish Meteor pass: {exc}"[:160]
+                capture.publish_error = f"could not publish Meteor pass: {exc}"[:160]
                 return None
+
+    @staticmethod
+    def _reconcile_gallery_overflow(root_fd: int, keep_ids: set[str]) -> None:
+        """Prune evicted or unconfirmed pass directories under data/meteor safely by descriptor."""
+        try:
+            with os.scandir(root_fd) as entries:
+                stale = [
+                    entry.name for entry in entries
+                    if _PASS_ID.fullmatch(entry.name) and entry.name not in keep_ids
+                ]
+        except OSError as exc:
+            _log.warning("Meteor could not scan gallery for overflow: %s", exc)
+            return
+        for stale_id in stale:
+            try:
+                _remove_dir_descriptor(root_fd, stale_id)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                _log.warning("Meteor could not prune old pass %s: %s", stale_id, exc)
 
     @contextmanager
     def _work(self):
@@ -1155,7 +1426,7 @@ class MeteorDecoder(SupervisedReceiver):
             published = self._publish_pass(run, capture)
             if not published:
                 phase = "no_picture"
-                reason = self.error or "Meteor pass could not be published."
+                reason = capture.publish_error or "Meteor pass could not be published."
         with capture.control:
             capture.result = phase, reason
         if phase != "done":

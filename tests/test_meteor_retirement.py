@@ -241,7 +241,8 @@ def test_meteor_clean_exit_classifies_the_gallery(rig, kind):
         proc.picture()
     proc.picture("intermediate.png")
     outside = run.args[0].output.parent / "unrelated.png"
-    outside.write_bytes(b"\x89PNG\r\n\x1a\n" + b"outside")
+    from tests.test_meteor import VALID_PNG
+    outside.write_bytes(VALID_PNG)
     (run.args[0].output / "MSU-MR" / "MSU-MR-2.png").symlink_to(outside)
     proc.die(0)
     proc.close_pipe()

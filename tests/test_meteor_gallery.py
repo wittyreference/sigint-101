@@ -6,7 +6,9 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import struct
 import threading
+import zlib
 from pathlib import Path
 
 import pytest
@@ -14,11 +16,11 @@ import pytest
 from sigint101 import meteor, storage
 from sigint101.events import read_events
 from sigint101.hardware import RtlSdrDevice
-from tests.test_meteor import MARKER, eventually, progress_line
+from tests.test_meteor import MARKER, VALID_PNG, eventually, progress_line
 from tests.test_meteor import meteor_rig as meteor_rig
 from tests.test_meteor_routes import LISTEN, STATUS, meteor_client
 
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"synthetic-meteor-lrpt-fixture"
+PNG_BYTES = VALID_PNG
 
 
 def _write_dataset(proc, satellite: str | None = "METEOR-M2 3") -> None:
@@ -287,7 +289,10 @@ def test_meteor_prune_skips_live_owners_and_never_follows_links(rig, tmp_path):
         os.close(live_lock_fd)
 
 
-@pytest.mark.parametrize("fail_at", ["success", "png", "manifest", "pass_dir", "gallery_dir"])
+@pytest.mark.parametrize(
+    "fail_at",
+    ["success", "png", "manifest", "pass_dir", "gallery_dir", "gallery_index", "gallery_commit"],
+)
 def test_meteor_managed_publication_syncs_before_reception(
         tmp_path, monkeypatch, fail_at):
     for name in ("SIGINT101_METEOR_MODE", "SIGINT101_METEOR_HZ", "SIGINT101_RTLSDR_SERIAL"):
@@ -308,6 +313,7 @@ def test_meteor_managed_publication_syncs_before_reception(
     real_fsync_file = storage.fsync_file
     real_fsync_dir = storage.fsync_dir
     fail_active = [False]
+    meteor_dir_syncs = [0]
 
     def spy_sync_media(path):
         order.append("png")
@@ -316,10 +322,15 @@ def test_meteor_managed_publication_syncs_before_reception(
         return real_sync_media(path)
 
     def spy_fsync_file(path):
-        if Path(path).name == "manifest.json":
+        name = Path(path).name
+        if name == "manifest.json":
             order.append("manifest")
             if fail_active[0] and fail_at == "manifest":
                 raise OSError("injected manifest sync failure")
+        elif name.startswith(".gallery-"):
+            order.append("gallery_index")
+            if fail_active[0] and fail_at == "gallery_index":
+                raise OSError("injected gallery_index sync failure")
         return real_fsync_file(path)
 
     def spy_fsync_dir(path):
@@ -329,9 +340,11 @@ def test_meteor_managed_publication_syncs_before_reception(
             if fail_active[0] and fail_at == "pass_dir":
                 raise OSError("injected pass_dir sync failure")
         elif p.name == "meteor":
-            order.append("gallery_dir")
-            if fail_active[0] and fail_at == "gallery_dir":
-                raise OSError("injected gallery_dir sync failure")
+            meteor_dir_syncs[0] += 1
+            step = "gallery_dir" if meteor_dir_syncs[0] == 1 else "gallery_commit"
+            order.append(step)
+            if fail_active[0] and fail_at == step:
+                raise OSError(f"injected {step} sync failure")
         return real_fsync_dir(path)
 
     monkeypatch.setattr(meteor, "sync_media_asset", spy_sync_media)
@@ -375,6 +388,7 @@ def test_meteor_managed_publication_syncs_before_reception(
 
             decoder.on_reception = spy_hook
             order.clear()
+            meteor_dir_syncs[0] = 0
             fail_active[0] = True
             utc[0] += 100.0
 
@@ -387,7 +401,10 @@ def test_meteor_managed_publication_syncs_before_reception(
                 if e["kind"] == "reception" and e["payload"].get("instrument") == "meteor"
             ]
             if fail_at == "success":
-                assert order == ["png", "manifest", "pass_dir", "gallery_dir", "reception"]
+                assert order == [
+                    "png", "manifest", "pass_dir",
+                    "gallery_dir", "gallery_index", "gallery_commit", "reception",
+                ]
                 assert len(passes) == 2
                 assert len(receptions) == 2
                 assert client.get(f"/media/{passes[0]['images'][0]['path']}").status_code == 200
@@ -395,10 +412,493 @@ def test_meteor_managed_publication_syncs_before_reception(
                 assert "reception" not in order
                 assert [p["id"] for p in passes] == [first_pass["id"]]
                 assert len(receptions) == 1
-                # No leftover .publish-* candidate directories after failure cleanup.
-                leftovers = list((gen_dir / "meteor").glob(".publish-*"))
+                # No leftover .publish-* or .gallery-* temp entries after failure cleanup.
+                leftovers = (
+                    list((gen_dir / "meteor").glob(".publish-*"))
+                    + list((gen_dir / "meteor").glob(".gallery-*"))
+                )
                 assert leftovers == []
     finally:
         for p in made:
             p.close_pipe()
         decoder.shutdown()
+
+
+def _valid_png(width: int = 2, height: int = 2, rgb: tuple[int, int, int] = (12, 180, 90)) -> bytes:
+    """Build a minimal spec-valid RGB PNG with valid CRCs and zlib scanlines."""
+    def _chunk(ctype: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = (b"\x00" + bytes(rgb) * width) * height
+    idat = zlib.compress(raw)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", idat)
+        + _chunk(b"IEND", b"")
+    )
+
+
+def _new_managed_gen(tmp_path):
+    from sigint101.migrations import migrate_store_copy
+
+    gen_dir = tmp_path / "gen"
+    gen_dir.mkdir(exist_ok=True)
+    migrate_store_copy(tmp_path / "m_p.db", gen_dir / "progress.db",
+                       store="progress", allow_missing_source=True,
+                       scratch_dir=tmp_path / "scratch_p")
+    migrate_store_copy(tmp_path / "m_e.db", gen_dir / "exam.db",
+                       store="exam", allow_missing_source=True,
+                       scratch_dir=tmp_path / "scratch_e")
+    return gen_dir
+
+
+def test_f1_truncated_png_rejected_at_publish_startup_and_serve_while_valid_png_passes(
+    rig, tmp_path
+):
+    """F1: only a complete decodable PNG publishes, loads on startup, or serves over /media."""
+    decoder, made, settings = rig
+    settings["utc"] = 1_732_810_000.0
+    valid_bytes = _valid_png()
+    truncated_bytes = b"\x89PNG\r\n\x1a\n\x00"  # 9-byte truncated file with valid signature
+
+    with meteor_client(tmp_path, decoder) as client:
+        # 1. Truncated 9-byte file under expected product name must NOT publish, log, or stamp.
+        assert client.post(LISTEN).status_code == 200
+        proc = made[-1][0]
+        proc.feed(progress_line())
+        proc.feed(MARKER)
+        assert decoder._run.physical.wait(2)
+        out = Path(proc.args[3])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "MSU-MR-1.png").write_bytes(truncated_bytes)
+        proc.die(0)
+        proc.close_pipe()
+        assert decoder._run.complete.wait(3)
+
+        st = client.get(STATUS).json()
+        assert st["state"] == "no_picture"
+        assert st["passes"] == []
+        receptions = [
+            e for e in read_events(tmp_path / "events.jsonl")
+            if e["kind"] == "reception" and e["payload"].get("instrument") == "meteor"
+        ]
+        assert receptions == []
+        stamps = client.get("/api/stamps").json()["stamps"]
+        m_stamp = next(s for s in stamps if s["instrument"] == "meteor")
+        assert m_stamp["count"] == 0
+
+        # 2. Small valid PNG publishes, serves, and earns one stamp.
+        settings["utc"] += 100.0
+        assert client.post(LISTEN).status_code == 200
+        proc2 = made[-1][0]
+        proc2.feed(progress_line())
+        proc2.feed(MARKER)
+        assert decoder._run.physical.wait(2)
+        out2 = Path(proc2.args[3])
+        out2.mkdir(parents=True, exist_ok=True)
+        (out2 / "MSU-MR-valid.png").write_bytes(valid_bytes)
+        proc2.die(0)
+        proc2.close_pipe()
+        assert decoder._run.complete.wait(3)
+
+        st2 = client.get(STATUS).json()
+        assert st2["state"] == "done"
+        assert len(st2["passes"]) == 1
+        img_path = st2["passes"][0]["images"][0]["path"]
+        ok_resp = client.get(f"/media/{img_path}")
+        assert ok_resp.status_code == 200 and ok_resp.content == valid_bytes
+        stamps2 = client.get("/api/stamps").json()["stamps"]
+        assert next(s for s in stamps2 if s["instrument"] == "meteor")["count"] == 1
+
+        # 3. Corrupting saved PNG on disk -> refused at serve time AND skipped at startup!
+        saved_png = tmp_path / img_path
+        saved_png.write_bytes(valid_bytes[:20])
+        assert client.get(f"/media/{img_path}").status_code == 404
+
+    reopened = meteor.MeteorDecoder(
+        data_dir=tmp_path,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+    )
+    try:
+        assert reopened.passes() == []
+        assert reopened.read_media(img_path) is None
+    finally:
+        reopened.shutdown()
+
+
+def test_f2_first_managed_publication_syncs_gallery_parent_with_existing_event_log(
+    tmp_path, monkeypatch
+):
+    """F2: first managed publication syncs data_dir before reception even if events.jsonl exists."""
+    from sigint101.events import log_event
+    from tests.test_meteor import MeteorChild
+
+    gen_dir = _new_managed_gen(tmp_path)
+    # Pre-create a durable events.jsonl so appending a reception does NOT sync gen_dir itself.
+    log_event(gen_dir / "events.jsonl", "boot", {"ok": True}, sync=True)
+
+    synced_dirs: list[Path] = []
+    fail_parent = [True]
+    real_fsync_dir = storage.fsync_dir
+
+    def spy_fsync_dir(path):
+        p = Path(path).resolve()
+        synced_dirs.append(p)
+        if fail_parent[0] and p == gen_dir.resolve():
+            raise OSError("injected gallery parent sync failure")
+        return real_fsync_dir(path)
+
+    monkeypatch.setattr(meteor, "fsync_dir", spy_fsync_dir)
+
+    made = []
+
+    def spawn(argv, **kwargs):
+        proc = MeteorChild(argv)
+        made.append(proc)
+        return proc
+
+    utc = [1_732_820_000.0]
+    decoder = meteor.MeteorDecoder(
+        data_dir=gen_dir,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+        spawn=spawn,
+        clock=lambda: utc[0],
+        sync_assets=True,
+    )
+    try:
+        with meteor_client(gen_dir, decoder, managed=True) as client:
+            # First attempt: parent dir sync fails -> no pass published, no reception logged.
+            assert client.post(LISTEN).status_code == 200
+            proc1 = made[-1]
+            proc1.feed(progress_line())
+            proc1.feed(MARKER)
+            assert decoder._run.physical.wait(2)
+            out1 = Path(proc1.args[3])
+            out1.mkdir(parents=True, exist_ok=True)
+            (out1 / "MSU-MR-1.png").write_bytes(_valid_png())
+            proc1.die(0)
+            proc1.close_pipe()
+            assert decoder._run.complete.wait(3)
+
+            assert gen_dir.resolve() in synced_dirs
+            assert client.get(STATUS).json()["passes"] == []
+            receptions = [
+                e for e in read_events(gen_dir / "events.jsonl")
+                if e["kind"] == "reception" and e["payload"].get("instrument") == "meteor"
+            ]
+            assert receptions == []
+
+            # Second attempt with parent sync succeeding -> syncs gen_dir and publishes cleanly.
+            synced_dirs.clear()
+            fail_parent[0] = False
+            utc[0] += 100.0
+            assert client.post(LISTEN).status_code == 200
+            proc2 = made[-1]
+            proc2.feed(progress_line())
+            proc2.feed(MARKER)
+            assert decoder._run.physical.wait(2)
+            out2 = Path(proc2.args[3])
+            out2.mkdir(parents=True, exist_ok=True)
+            (out2 / "MSU-MR-2.png").write_bytes(_valid_png())
+            proc2.die(0)
+            proc2.close_pipe()
+            assert decoder._run.complete.wait(3)
+
+            assert gen_dir.resolve() in synced_dirs
+            assert len(client.get(STATUS).json()["passes"]) == 1
+    finally:
+        for p in made:
+            p.close_pipe()
+        decoder.shutdown()
+
+
+@pytest.mark.parametrize("fail_on_sync", [1, 2])
+def test_f3_failed_final_sync_and_failed_rollback_keeps_media_hidden_after_reopen(
+    tmp_path, monkeypatch, fail_on_sync
+):
+    """F3: if final gallery sync and rollback both fail, a fresh decoder still hides the pass."""
+    from tests.test_meteor import MeteorChild
+
+    gen_dir = _new_managed_gen(tmp_path)
+    real_fsync_dir = storage.fsync_dir
+    sync_hits = [0]
+
+    def fail_gallery_dir_sync(path):
+        if Path(path).name == "meteor":
+            sync_hits[0] += 1
+            if sync_hits[0] == fail_on_sync:
+                raise OSError("injected final gallery sync failure")
+        return real_fsync_dir(path)
+
+    def fail_rollback(_parent_fd, _name):
+        raise OSError("injected rollback cleanup failure")
+
+    monkeypatch.setattr(meteor, "fsync_dir", fail_gallery_dir_sync)
+    monkeypatch.setattr(meteor, "_remove_dir_descriptor", fail_rollback)
+
+    made = []
+
+    def spawn(argv, **kwargs):
+        proc = MeteorChild(argv)
+        made.append(proc)
+        return proc
+
+    decoder = meteor.MeteorDecoder(
+        data_dir=gen_dir,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+        spawn=spawn,
+        clock=lambda: 1_732_830_000.0,
+        sync_assets=True,
+    )
+    try:
+        with meteor_client(gen_dir, decoder, managed=True) as client:
+            assert client.post(LISTEN).status_code == 200
+            proc = made[-1]
+            proc.feed(progress_line())
+            proc.feed(MARKER)
+            assert decoder._run.physical.wait(2)
+            out = Path(proc.args[3])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "MSU-MR-ghost.png").write_bytes(_valid_png())
+            proc.die(0)
+            proc.close_pipe()
+            assert decoder._run.complete.wait(3)
+
+            assert client.get(STATUS).json()["passes"] == []
+            receptions = [
+                e for e in read_events(gen_dir / "events.jsonl")
+                if e["kind"] == "reception" and e["payload"].get("instrument") == "meteor"
+            ]
+            assert receptions == []
+    finally:
+        for p in made:
+            p.close_pipe()
+        decoder.shutdown()
+
+    # Reopen a brand-new decoder on the same data_dir: unconfirmed media must stay hidden!
+    reopened = meteor.MeteorDecoder(
+        data_dir=gen_dir,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+        sync_assets=True,
+    )
+    try:
+        assert reopened.passes() == []
+        # Even if a caller guesses the leftover directory's path, read_media refuses it.
+        for child in (gen_dir / "meteor").iterdir():
+            if child.is_dir() and meteor._PASS_ID.fullmatch(child.name):
+                assert reopened.read_media(f"meteor/{child.name}/MSU-MR-ghost.png") is None
+    finally:
+        reopened.shutdown()
+
+
+def test_f4_retention_survives_backward_utc_step_and_reconciles_interrupted_eviction(
+    rig, tmp_path, monkeypatch
+):
+    """F4: retention orders independently of UTC and reconciles on-disk overflow on next publish."""
+    decoder, made, settings = rig
+    monkeypatch.setattr(meteor, "MAX_PUBLISHED_PASSES", 2)
+
+    def _run_valid_pass(client, fname: str) -> dict:
+        assert client.post(LISTEN).status_code == 200
+        proc = made[-1][0]
+        proc.feed(progress_line())
+        proc.feed(MARKER)
+        assert decoder._run.physical.wait(2)
+        out = Path(proc.args[3])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / fname).write_bytes(_valid_png())
+        proc.die(0)
+        proc.close_pipe()
+        assert decoder._run.complete.wait(3)
+        return client.get(STATUS).json()
+
+    with meteor_client(tmp_path, decoder) as client:
+        # 1. Publish pass 1 and pass 2, then step UTC BACKWARDS before pass 3!
+        settings["utc"] = 1_732_840_100.0
+        st1 = _run_valid_pass(client, "MSU-MR-p1.png")
+        p1_id = st1["passes"][0]["id"]
+
+        settings["utc"] = 1_732_840_200.0
+        st2 = _run_valid_pass(client, "MSU-MR-p2.png")
+        p2_id = st2["passes"][0]["id"]
+
+        # Step UTC backward by 10 hours: pass 3 MUST still be admitted and serve 200 (never 404)!
+        settings["utc"] = 1_732_800_000.0
+        st3 = _run_valid_pass(client, "MSU-MR-p3.png")
+        assert st3["state"] == "done"
+        p3_ids = [p["id"] for p in st3["passes"]]
+        assert len(p3_ids) == 2
+        assert p1_id not in p3_ids and p2_id in p3_ids
+        p3_row = st3["passes"][0]
+        assert p3_row["images"][0]["path"].endswith("MSU-MR-p3.png")
+        assert client.get(f"/media/{p3_row['images'][0]['path']}").status_code == 200
+
+        # 2. Simulate an interrupted eviction on pass 4 leaving 3 complete pass dirs on disk!
+        real_remove = meteor._remove_dir_descriptor
+
+        def fail_remove(*_args, **_kwargs):
+            raise OSError("io")
+
+        monkeypatch.setattr(meteor, "_remove_dir_descriptor", fail_remove)
+        settings["utc"] = 1_732_840_300.0
+        _run_valid_pass(client, "MSU-MR-p4.png")
+        monkeypatch.setattr(meteor, "_remove_dir_descriptor", real_remove)
+
+        on_disk_before = [
+            d.name for d in (tmp_path / "meteor").iterdir()
+            if d.is_dir() and meteor._PASS_ID.fullmatch(d.name)
+        ]
+        assert len(on_disk_before) == 3
+
+    # Reopen decoder and publish pass 5: descriptor-safe reconciliation must prune overflow to 2!
+    from tests.test_meteor import MeteorChild
+
+    made2 = []
+    decoder2 = meteor.MeteorDecoder(
+        data_dir=tmp_path,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+        spawn=lambda argv, **kw: (made2.append(MeteorChild(argv)), made2[-1])[1],
+        clock=lambda: 1_732_840_400.0,
+    )
+    try:
+        with meteor_client(tmp_path, decoder2) as client2:
+            assert len(client2.get(STATUS).json()["passes"]) == 2
+            assert client2.post(LISTEN).status_code == 200
+            proc5 = made2[-1]
+            proc5.feed(progress_line())
+            proc5.feed(MARKER)
+            assert decoder2._run.physical.wait(2)
+            out5 = Path(proc5.args[3])
+            out5.mkdir(parents=True, exist_ok=True)
+            (out5 / "MSU-MR-p5.png").write_bytes(_valid_png())
+            proc5.die(0)
+            proc5.close_pipe()
+            assert decoder2._run.complete.wait(3)
+
+            passes_final = client2.get(STATUS).json()["passes"]
+            assert len(passes_final) == 2
+            on_disk_after = [
+                d.name for d in (tmp_path / "meteor").iterdir()
+                if d.is_dir() and meteor._PASS_ID.fullmatch(d.name)
+            ]
+            assert sorted(on_disk_after) == sorted(p["id"] for p in passes_final)
+    finally:
+        for p in made2:
+            p.close_pipe()
+        decoder2.shutdown()
+
+
+def test_f5_bad_manifest_field_types_and_unrenderable_timestamps_are_skipped(rig, tmp_path):
+    """F5: damaged manifest (e.g. list mode or unrenderable timestamp) is skipped; others load."""
+    decoder, made, settings = rig
+    settings["utc"] = 1_732_850_000.0
+
+    with meteor_client(tmp_path, decoder) as client:
+        ids = []
+        for idx in range(3):
+            settings["utc"] += 100.0
+            assert client.post(LISTEN).status_code == 200
+            proc = made[-1][0]
+            proc.feed(progress_line())
+            proc.feed(MARKER)
+            assert decoder._run.physical.wait(2)
+            out = Path(proc.args[3])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"MSU-MR-{idx}.png").write_bytes(_valid_png())
+            proc.die(0)
+            proc.close_pipe()
+            assert decoder._run.complete.wait(3)
+            ids.append(client.get(STATUS).json()["passes"][0]["id"])
+
+    good_id, bad_mode_id, bad_ts_id = ids
+    # Corrupt manifest 1: mode is a JSON array (unhashable!)
+    m1_path = tmp_path / "meteor" / bad_mode_id / "manifest.json"
+    m1 = json.loads(m1_path.read_text(encoding="utf-8"))
+    m1["mode"] = ["72k"]
+    m1_path.write_text(json.dumps(m1), encoding="utf-8")
+
+    # Corrupt manifest 2: started_at is an unrenderable huge timestamp
+    m2_path = tmp_path / "meteor" / bad_ts_id / "manifest.json"
+    m2 = json.loads(m2_path.read_text(encoding="utf-8"))
+    m2["started_at"] = 1e20
+    m2_path.write_text(json.dumps(m2), encoding="utf-8")
+
+    reopened = meteor.MeteorDecoder(
+        data_dir=tmp_path,
+        which=lambda name: name,
+        radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")],
+    )
+    try:
+        assert [p["id"] for p in reopened.passes()] == [good_id]
+    finally:
+        reopened.shutdown()
+
+
+def test_png_validator_rejects_corrupt_streams_and_accepts_interlaced_and_indexed():
+    """Unit checks for pure-stdlib PNG validation edge cases."""
+    def chunk(ctype: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+    good = _valid_png(3, 2)
+    assert meteor._is_valid_png(good)
+    assert not meteor._is_valid_png(b"")
+    assert not meteor._is_valid_png(b"\x89PNG\r\n\x1a\n\x00")
+    # Corrupted CRC
+    bad_crc = bytearray(good)
+    bad_crc[-1] ^= 0xFF
+    assert not meteor._is_valid_png(bytes(bad_crc))
+    # Trailing garbage after IEND
+    assert not meteor._is_valid_png(good + b"\x00")
+    # Invalid scanline filter byte (9 > 4)
+    ihdr = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)
+    bad_filter_raw = (b"\x09" + b"\x00" * 6) * 2
+    bad_filter = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bad_filter_raw))
+        + chunk(b"IEND", b"")
+    )
+    assert not meteor._is_valid_png(bad_filter)
+    # Valid indexed PNG (color_type=3 with PLTE) vs missing PLTE
+    ihdr_idx = struct.pack(">IIBBBBB", 2, 2, 8, 3, 0, 0, 0)
+    idat_idx = zlib.compress((b"\x00\x00\x01") * 2)
+    valid_idx = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr_idx)
+        + chunk(b"PLTE", b"\x00\x00\x00\xff\xff\xff")
+        + chunk(b"IDAT", idat_idx)
+        + chunk(b"IEND", b"")
+    )
+    no_plte_idx = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr_idx)
+        + chunk(b"IDAT", idat_idx)
+        + chunk(b"IEND", b"")
+    )
+    assert meteor._is_valid_png(valid_idx)
+    assert not meteor._is_valid_png(no_plte_idx)
+    # Valid Adam7 interlaced 2x2 RGB PNG (passes: 1x1, 1x1, 2x1 -> 3 scanlines: 4, 4, 7 bytes)
+    ihdr_adam7 = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 1)
+    adam7_raw = (b"\x00\x01\x02\x03") + (b"\x00\x04\x05\x06") + (b"\x00\x01\x02\x03\x04\x05\x06")
+    valid_adam7 = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr_adam7)
+        + chunk(b"IDAT", zlib.compress(adam7_raw))
+        + chunk(b"IEND", b"")
+    )
+    assert meteor._is_valid_png(valid_adam7)
