@@ -44,6 +44,46 @@ test("summary formats SSIDs, hidden count, and open count from metadata alone", 
   assert.equal(panel.summary({}), "(no SSID)");
 });
 
+// Invented names at realistic lengths: a 23-character venue guest SSID, a 16-character router
+// default, and one at the 32-octet SSID maximum.
+const LONG_SSIDS = ["MapleStreetCoffee_Guest", "HOMENET-5G-Guest", "AbcdefghijKlmnopqrstUvwxyz012345"];
+
+test("summaryParts splits SSID names from the +N and counts, which never truncate", () => {
+  const rows = [
+    { ssids: [...LONG_SSIDS, "x", "y"], hidden: 1, open: 1 },
+    { ssids: LONG_SSIDS.slice(0, 2), hidden: 0, open: 2 },
+    { ssids: [LONG_SSIDS[2]], hidden: 3, open: 0 },
+    { ssids: ["CafeNet", "Lab:5G"], hidden: 1, open: 1 },
+    { ssids: [], hidden: 2, open: 0 },
+    { ssids: ["A", "B", "C", "D"], hidden: 0, open: 0 },
+    {},
+  ];
+  for (const row of rows) {
+    const parts = panel.summaryParts(row);
+    assert.equal(parts.names + parts.tail, panel.summary(row));
+    assert.ok(!/\+\d|hidden|open/.test(parts.names), parts.names);
+  }
+  const busy = panel.summaryParts(rows[0]);
+  assert.equal(busy.names, "MapleStreetCoffee_Guest, HOMENET-5G-Guest");
+  assert.equal(busy.tail, ", +3 · 1 hidden · 1 open");
+  assert.equal(panel.summaryParts(rows[2]).tail, " · 3 hidden");
+  assert.equal(panel.summaryParts(rows[4]).names, "");
+  assert.equal(panel.summaryParts(rows[4]).tail, "2 hidden");
+});
+
+test("rowHtml puts SSID names in the truncating span and the counts in the fixed one", () => {
+  const html = panel.rowHtml({
+    band: "2.4 GHz", channel: 6, count: 5, hidden: 1, open: 1, strongest: 71,
+    ssids: ["<b>Evil&Co</b>", ...LONG_SSIDS],
+  });
+  assert.match(html, /<span class="census__names">&lt;b&gt;Evil&amp;Co&lt;\/b&gt;, MapleStreetCoffee_Guest<\/span>/);
+  assert.match(html, /<span class="census__tail">, \+2 · 1 hidden · 1 open<\/span>/);
+  assert.match(html, /<span class="decoder__model">2\.4G CH 6<\/span>/);
+  assert.match(html, /<span class="decoder__mod">5 APs<\/span>/);
+  assert.match(html, /<span class="decoder__tone">71%<\/span>/);
+  assert.ok(!html.includes("<b>"));
+});
+
 test("envelopeRow drops any field outside the envelope allowlist", () => {
   const dirty = {
     band: "2.4 GHz",

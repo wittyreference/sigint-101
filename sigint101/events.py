@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
+
+from .storage import fsync_dir, fsync_handle
 
 # The live log is rotated once it reaches this size: it becomes events.jsonl.1, the older
 # generations shift up one, and anything beyond KEEP_ROTATED is dropped. Rotation moves whole
@@ -18,6 +21,11 @@ KEEP_ROTATED = 3
 # Request threads log concurrently; rotating and appending happen as one step so no line lands
 # in a file that is mid-rename.
 _WRITE_LOCK = threading.Lock()
+
+# Tracks the (st_dev, st_ino) of each resolved log path whose parent directory entry has been
+# fsynced. If an unfenced writer created or rotated events.jsonl, the next fenced write sees a
+# different (or absent) identity and syncs the directory before acknowledging.
+_SYNCED_LOG_IDENTITY: dict[Path, tuple[int, int]] = {}
 
 
 def _generation(path: Path, n: int) -> Path:
@@ -34,22 +42,25 @@ def _rotated(path: Path) -> list:
     return list(reversed(found))
 
 
-def _rotate_if_full(path: Path, max_bytes: int, keep: int) -> None:
+def _rotate_if_full(path: Path, max_bytes: int, keep: int, *, sync: bool = False) -> bool:
     try:
         size = path.stat().st_size
     except FileNotFoundError:
-        return
+        return False
     if size < max_bytes:
-        return
+        return False
     for n in range(keep - 1, 0, -1):
         older = _generation(path, n)
         if older.exists():
             older.replace(_generation(path, n + 1))
     path.replace(_generation(path, 1))
+    if sync:
+        fsync_dir(path.parent)
+    return True
 
 
 def log_event(path, kind: str, payload: dict, *, clock=time.time,
-              max_bytes=None, keep=None, event_id=None) -> dict:
+              max_bytes=None, keep=None, event_id=None, sync: bool = False) -> dict:
     """Append one event and return it in the same form a JSONL reader sees."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,11 +68,27 @@ def log_event(path, kind: str, payload: dict, *, clock=time.time,
     if event_id is not None:
         event["event_id"] = event_id
     line = json.dumps(event, sort_keys=True) + "\n"
+    resolved = path.resolve() if sync else None
     with _WRITE_LOCK:
-        _rotate_if_full(path, MAX_LOG_BYTES if max_bytes is None else max_bytes,
-                        KEEP_ROTATED if keep is None else keep)
+        rotated = _rotate_if_full(
+            path,
+            MAX_LOG_BYTES if max_bytes is None else max_bytes,
+            KEEP_ROTATED if keep is None else keep,
+            sync=sync,
+        )
+        if rotated:
+            _SYNCED_LOG_IDENTITY.pop(path.resolve() if resolved is None else resolved, None)
+        file_id: tuple[int, int] | None = None
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(line)
+            if sync:
+                fsync_handle(handle)
+                st = os.fstat(handle.fileno())
+                file_id = (st.st_dev, st.st_ino)
+        if sync and (rotated or _SYNCED_LOG_IDENTITY.get(resolved) != file_id):
+            fsync_dir(path.parent)
+            assert resolved is not None and file_id is not None
+            _SYNCED_LOG_IDENTITY[resolved] = file_id
     return json.loads(line)
 
 

@@ -10,10 +10,9 @@ import re
 import sqlite3
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from itertools import chain
 from pathlib import Path
 from secrets import token_hex, token_urlsafe
 from time import monotonic
@@ -32,11 +31,23 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .acars import AcarsDecoder, AcarsUnavailable
-from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbPortOccupied, AdsbUnavailable
+from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .battery import BatteryGauge
+from .challenges import (
+    challenge_for,
+    format_evidence,
+    format_pass_summary,
+    rack_label,
+)
+from .challenges import (
+    qualifies as challenge_qualifies,
+)
+from .challenges import (
+    status as challenge_status,
+)
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event, read_events
@@ -77,7 +88,7 @@ from .operate import (
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
 from .ppm import PpmUnavailable, measure_pilot_ppm
-from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress
+from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress, RecallNotDue
 from .provenance import (
     BaselineLog,
     compare_to_baseline,
@@ -87,6 +98,9 @@ from .provenance import (
 from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, finish_console
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
+from .receiver_socket import PortOccupied
+from .retrieval import MAX_CARDS
+from .retrieval import due as recall_due
 from .safety import notice_for, rack_lora_send
 from .spectrum import (
     DEFAULT_BIN,
@@ -101,7 +115,7 @@ from .spectrum import (
     validate_target_span,
 )
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
-from .stamps import STAMP_INSTRUMENTS, mint, stamps_from_log
+from .stamps import STAMP_INSTRUMENTS, mint
 from .survey import SurveyUnavailable, WifiSurvey
 from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
@@ -306,7 +320,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
-               kiosk_exit=request_exit, battery_gauge=None) -> FastAPI:
+               kiosk_exit=request_exit, battery_gauge=None,
+               clock=time.time, managed: bool = False) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -485,6 +500,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
                 list_devices=enumerate_radios,
+                sync_assets=managed,
             )
     else:
         build_apt = apt_factory
@@ -499,6 +515,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 radio_present=lambda: probe().present,
                 serial=os.environ.get(RTLSDR_SERIAL_ENV),
                 list_devices=enumerate_radios,
+                sync_assets=managed,
             )
     else:
         build_sstv = sstv_factory
@@ -542,7 +559,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         and the next start would find the radio busy with nothing visibly running.
         """
         app.state.lessons = load_lessons(pack_dir)
-        app.state.progress = Progress(Path(data_dir) / "progress.db")
+        app.state.progress = Progress(Path(data_dir) / "progress.db", managed=managed)
         app.state.events_path = Path(data_dir) / "events.jsonl"
         # The provenance panel asks for the baseline every poll; this follows the log as it grows
         # rather than re-reading all of it each time.
@@ -582,7 +599,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "exam_disabled", {"reason": reason})
         else:
             app.state.exam_pool = pool
-        app.state.exam_store = ExamStore(Path(data_dir) / "exam.db")
+        app.state.exam_store = ExamStore(Path(data_dir) / "exam.db", managed=managed)
         # Injected so a test drives the ppm route without 8 s of real IQ capture; the default is
         # the real pilot measurement, which holds the dongle exclusively (the route stands the
         # sweeper down first, below).
@@ -593,6 +610,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.receptions = None
         app.state.reception_error = None
         app.state.stamp_error = None
+        app.state.challenge_error = None
+        app.state.challenge_start_errors = {}
         app.state.stamp_window = None
         app.state.stamp_retry_at = 0.0
         try:
@@ -606,6 +625,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             receiver = getattr(app.state, attr)
             receiver.on_reception = _heard(inst, receiver)
             receiver.reception_sink = app.state.reception_sink
+        if isinstance(app.state.ais, AisDecoder):
+            app.state.ais.on_foreign_datagrams = _log_foreign_ais
         try:
             yield
         finally:
@@ -700,6 +721,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if unit is None:
             raise HTTPException(status_code=404, detail=f"unit {unit_id} not found")
         tiles = _lesson_tiles(unit, app.state.lessons, app.state.progress)
+        if tiles and challenge_for(unit.id) is not None:
+            find = _challenge_payload(unit.id)
+            tiles.append({
+                "kind": "find",
+                "unit_id": unit.id,
+                "code": "FIND",
+                "name": "Live find",
+                "glyph": unit.glyph,
+                "status": "",
+                "href": f"/unit/{unit.id}/challenge",
+                "find_state": find["state"],
+                "remaining_s": find["remaining_s"],
+            })
         return templates.TemplateResponse(
             request=request,
             name="unit.html",
@@ -728,6 +762,123 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 or getattr(sweeper, "target", None) is not None):
             sweeper.retune(DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_BIN)
 
+    def _recall_sources() -> list[int]:
+        """Loaded lessons that carry a check block and have been completed."""
+        sources = []
+        for lid, item in app.state.lessons.items():
+            if not item.check:
+                continue
+            row = app.state.progress.get(lid)
+            if row and row["completed"]:
+                sources.append(lid)
+        return sources
+
+    def _parse_int_param(value: str | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _recall_response(request: Request, lesson, unit, sources: list[int], now: float):
+        """Render a pre-lesson recall card or feedback when applicable, else None."""
+        recall_mode = request.query_params.get("recall")
+        if recall_mode in ("skip", "done"):
+            return None
+
+        back_href = f"/unit/{unit.id}" if unit else "/"
+        back_label = f"Unit {unit.id}" if unit else "Home"
+        skip_url = f"/lesson/{lesson.id}?recall=skip"
+        rows = app.state.progress.get_retrieval(sources)
+
+        if recall_mode is None:
+            due_ids = recall_due(rows, now=now, exclude=lesson.id)
+            if not due_ids:
+                return None
+            source = app.state.lessons[due_ids[0]]
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": source,
+                    "card_num": 1,
+                    "card_total": min(MAX_CARDS, len(due_ids)),
+                    "commit_url": f"/api/recall?lesson_id={lesson.id}&source={source.id}&card=1",
+                    "skip_url": skip_url,
+                    "recall_choice": None,
+                    "recall_feedback": None,
+                },
+            )
+
+        if recall_mode == "answered":
+            src_id = _parse_int_param(request.query_params.get("source"))
+            card = _parse_int_param(request.query_params.get("card"))
+            if card not in (1, 2) or src_id not in sources or src_id == lesson.id:
+                return None
+            ret_row = rows.get(src_id)
+            src_lesson = app.state.lessons[src_id]
+            choice = ret_row["last_choice"] if ret_row else None
+            valid_choices = [c["key"] for c in src_lesson.check["choices"]]
+            if choice not in valid_choices:
+                return None
+            remaining = recall_due(rows, now=now, exclude=lesson.id)
+            if card == 1 and remaining:
+                card_total = MAX_CARDS
+                next_label = "Next card"
+                next_url = f"/lesson/{lesson.id}?recall=card&card=2"
+            else:
+                card_total = card
+                next_label = "Start lesson"
+                next_url = f"/lesson/{lesson.id}?recall=done"
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": src_lesson,
+                    "card_num": card,
+                    "card_total": card_total,
+                    "skip_url": skip_url,
+                    "recall_choice": choice,
+                    "recall_feedback": src_lesson.check_feedback(choice),
+                    "next_label": next_label,
+                    "next_url": next_url,
+                },
+            )
+
+        if recall_mode == "card":
+            card = _parse_int_param(request.query_params.get("card"))
+            if card != 2:
+                return None
+            due_ids = recall_due(rows, now=now, exclude=lesson.id)
+            if not due_ids:
+                return None
+            source = app.state.lessons[due_ids[0]]
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": source,
+                    "card_num": 2,
+                    "card_total": MAX_CARDS,
+                    "commit_url": f"/api/recall?lesson_id={lesson.id}&source={source.id}&card=2",
+                    "skip_url": skip_url,
+                    "recall_choice": None,
+                    "recall_feedback": None,
+                },
+            )
+
+        return None
+
     @app.get("/lesson/{lesson_id}", response_class=HTMLResponse)
     def lesson_view(request: Request, lesson_id: int):
         """Render one lesson, sealing every post-predict stage until a prediction exists.
@@ -745,12 +896,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         lesson = app.state.lessons[lesson_id]
         _restore_lesson_tuning(lesson)
         app.state.progress.mark_opened(lesson_id)
+        saved_stage = app.state.progress.get_stage(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
+        unit = unit_for_lesson(lesson_id)
+        sources = _recall_sources()
+        now = clock()
+        app.state.progress.enroll_recall(sources, now=now)
+        if saved_stage is None and prediction is None:
+            recall_page = _recall_response(request, lesson, unit, sources, now)
+            if recall_page is not None:
+                return recall_page
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
-        current, reached = _resume_stage(lesson, app.state.progress.get_stage(lesson_id),
-                                         committed)
-        unit = unit_for_lesson(lesson_id)
+        current, reached = _resume_stage(lesson, saved_stage, committed)
         context = {
             "title": lesson.title,
             "back_href": f"/unit/{unit.id}" if unit else "/",
@@ -810,7 +968,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "prediction_refused",
                       {"lesson": lesson_id, "reason": str(exc)})
             return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "prediction", {"lesson": lesson_id, "correct": correct})
+        try:
+            log_event(
+                app.state.events_path,
+                "prediction",
+                {"lesson": lesson_id, "correct": correct},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         # Committing walks the learner past the gate, so the lesson reopens on the first sealed
         # stage rather than resuming on the predict screen they just left.
         lesson = app.state.lessons[lesson_id]
@@ -845,10 +1014,58 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             app.state.progress.record_check(lesson_id, choice, correct=correct)
         except CheckAlreadyAnswered as exc:
             return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
-        log_event(app.state.events_path, "check", {"lesson": lesson_id, "correct": correct})
+        try:
+            log_event(app.state.events_path, "check", {"lesson": lesson_id, "correct": correct},
+                      sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         app.state.progress.record_stage(lesson_id, CHECK_STAGE,
                                         lesson.stage_order.index(CHECK_STAGE))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
+
+    @app.post("/api/recall")
+    async def recall_answer(lesson_id: int, source: int, card: int, request: Request):
+        """Record one pre-lesson retrieval-card answer into the retrieval table only."""
+        _require_lesson(lesson_id)
+        if card not in (1, 2):
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"recall card must be 1 or 2, got {card}"})
+        src_lesson = app.state.lessons.get(source)
+        src_progress = app.state.progress.get(source) if src_lesson is not None else None
+        if (src_lesson is None or not src_lesson.check or source == lesson_id
+                or not src_progress or not src_progress["completed"]):
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"lesson {source} is not a recall source"})
+        choice = (await _field(request, "choice")).strip()
+        if choice not in [c["key"] for c in src_lesson.check["choices"]]:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"'{choice}' is not one of the check's choices"})
+        correct = choice == src_lesson.check["answer"]
+        try:
+            new_box = app.state.progress.record_recall(
+                source, choice, correct=correct, now=clock()
+            )
+        except RecallNotDue as exc:
+            return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
+        try:
+            log_event(
+                app.state.events_path,
+                "recall",
+                {"lesson": lesson_id, "source": source, "correct": correct, "box": new_box},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
+        return RedirectResponse(
+            f"/lesson/{lesson_id}?recall=answered&source={source}&card={card}",
+            status_code=303,
+        )
 
     @app.post("/api/sort")
     async def sort_answer(lesson_id: int, request: Request):
@@ -873,8 +1090,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 "recorded": False, "reason": f"'{choice}' is not a valid sort answer"})
         fb = lesson.sort_feedback(card, choice)
         app.state.progress.record_sort_answer(lesson_id, card, choice, correct=fb["correct"])
-        log_event(app.state.events_path, "sort_answer",
-                  {"lesson": lesson_id, "card": card, "choice": choice, "correct": fb["correct"]})
+        try:
+            log_event(
+                app.state.events_path,
+                "sort_answer",
+                {"lesson": lesson_id, "card": card, "choice": choice, "correct": fb["correct"]},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         saved = app.state.progress.get_sort_answers(lesson_id)
         answered = sum(1 for c in lesson.sort if c["key"] in saved)
         score = sum(1 for c in lesson.sort if saved.get(c["key"], {}).get("correct"))
@@ -886,12 +1113,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
 
     def _safe_back(back: str | None) -> tuple[str, str]:
-        """Resolve an optional internal back path for /law, refusing any external URL."""
+        """Resolve an optional internal back path for /law and /operate, refusing external URLs."""
         if back and back.startswith("/") and not back.startswith("//"):
             if re.fullmatch(r"/lesson/\d+", back):
                 return back, f"Lesson {back.rsplit('/', 1)[-1]}"
             if re.fullmatch(r"/unit/\d+", back):
                 return back, f"Unit {back.rsplit('/', 1)[-1]}"
+            if re.fullmatch(r"/unit/\d+/challenge", back):
+                return back, "Live find"
         return "/", "Home"
 
     @app.get("/law", response_class=HTMLResponse)
@@ -940,7 +1169,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                       {"lesson": lesson_id, "reason": reason})
             return JSONResponse(status_code=400, content={"completed": False, "reason": reason})
         app.state.progress.mark_completed(lesson_id)
-        log_event(app.state.events_path, "completed", {"lesson": lesson_id})
+        try:
+            log_event(app.state.events_path, "completed", {"lesson": lesson_id}, sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "completed": False, "reason": f"event log sync failed: {exc}"})
         return {"completed": True, "lesson": lesson_id}
 
     def _require_trainer():
@@ -1003,8 +1238,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         choice = (await _field(request, "choice")).strip().upper()
         correct = choice == question.answer
         app.state.exam_store.record(question_id, correct)
-        log_event(app.state.events_path, "exam_answer",
-                  {"question": question_id, "choice": choice, "correct": correct})
+        try:
+            log_event(app.state.events_path, "exam_answer",
+                      {"question": question_id, "choice": choice, "correct": correct},
+                      sync=managed)
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(f"/exam/review/{question_id}?choice={choice}", status_code=303)
 
     @app.get("/exam/review/{question_id}", response_class=HTMLResponse)
@@ -1102,8 +1344,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if app.state.exam_store.record_sim_answer(question_id, choice):
             # Also credit the Leitner history so the sim feeds the study card's weak-first order.
             app.state.exam_store.record(question_id, correct)
-            log_event(app.state.events_path, "exam_sim_answer",
-                      {"question": question_id, "choice": choice, "correct": correct})
+            try:
+                log_event(app.state.events_path, "exam_sim_answer",
+                          {"question": question_id, "choice": choice, "correct": correct},
+                          sync=managed)
+            except OSError as exc:
+                if not managed:
+                    raise
+                return JSONResponse(status_code=500, content={
+                    "recorded": False, "reason": f"event log sync failed: {exc}"})
         return RedirectResponse(f"/exam/sim/review/{question_id}", status_code=303)
 
     @app.post("/api/exam/sim/skip")
@@ -1352,8 +1601,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reason.startswith("no RTL-SDR on the USB bus"):
             return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
                     "next_step": "Plug in the RTL-SDR."}
-        if isinstance(exc, AdsbPortOccupied):
-            return {"cause": "unavailable", "next_step": "Free the port, then retry ADS-B."}
+        if isinstance(exc, PortOccupied):
+            label = "ADS-B" if kind == "adsb" else "AIS"
+            return {"cause": "unavailable", "next_step": f"Free the port, then retry {label}."}
         if reason == "no Flipper on USB":
             return {"cause": "no_radio", "message": "No Flipper on USB.",
                     "next_step": "Connect the Flipper over USB."}
@@ -1374,6 +1624,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             command = "Run deploy/provision.sh"
             if tool in {"dsd-fme", "satdump", "sstv"}:
                 command += " --with-optional"
+            if tool == "nmcli":
+                # nmcli ships with NetworkManager, so it is missing only where something else runs
+                # the network (dhcpcd, ifupdown). Installing NetworkManager there takes over the
+                # interfaces and can drop a Wi-Fi SSH link, so no one-line command: say why.
+                command = ("NetworkManager doesn't run this box's network, so the survey can't "
+                           "read Wi-Fi here. Switching is a bench job for the box's owner.")
             return {"cause": "missing_tool", "message": f"{tool} is not installed.",
                     "next_step": command}
         return {"cause": "unavailable"}
@@ -1760,6 +2016,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "messages": decoder.messages(limit),
         }
 
+    def _log_foreign_ais(count, source_port):
+        try:
+            log_event(app.state.events_path, "ais_foreign_datagrams",
+                      {"count": count, "source_port": source_port})
+        except OSError as exc:
+            logging.getLogger(__name__).warning("could not log rejected AIS datagrams: %s", exc)
+
     @app.get("/api/ais")
     def ais(limit: int | None = None):
         """The vessels rtl_ais is decoding on the marine AIS channels, freshest contact first.
@@ -1989,13 +2252,125 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.stamp_error = f"a reception badge could not be saved: {exc}"
         app.state.stamp_retry_at = monotonic() + STAMP_RETRY_S
 
+    def _challenge_qualifies(attempt: dict, stamp: dict) -> bool:
+        ch = challenge_for(attempt["unit_id"])
+        return ch is not None and challenge_qualifies(ch, attempt, stamp)
+
+    def _credit_challenges(progress, stamps, *, qualifies_fn=None) -> None:
+        check = qualifies_fn or _challenge_qualifies
+        try:
+            credited = progress.credit_challenges(stamps, check)
+        except (OSError, sqlite3.Error) as exc:
+            app.state.challenge_error = f"a live find pass could not be saved: {exc}"
+            return
+        app.state.challenge_error = None
+        for passed in credited:
+            try:
+                log_event(
+                    app.state.events_path,
+                    "challenge_pass",
+                    {
+                        "unit": passed["unit_id"],
+                        "started_at": passed["started_at"],
+                        "instrument": passed["instrument"],
+                        "digest": passed["digest"],
+                        "event_id": passed.get("event_id"),
+                    },
+                    sync=managed,
+                )
+            except OSError as exc:
+                app.state.challenge_error = f"a live find pass could not be logged: {exc}"
+
+    def _challenge_payload(unit_id: int) -> dict:
+        ch = challenge_for(unit_id)
+        if ch is None or get_unit(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        read_error = None
+        try:
+            saved = app.state.progress.challenge(unit_id)
+        except (OSError, sqlite3.Error) as exc:
+            saved = {"attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0}
+            read_error = f"the live find state could not be read: {exc}"
+        now = round(clock(), 3)
+        st = challenge_status(
+            ch, saved["attempt"], saved["latest_pass"], now,
+            attempt_pass=saved["attempt_pass"],
+        )
+        shown_pass = (
+            saved["attempt_pass"]
+            if st["state"] == "passed" and saved["attempt_pass"] is not None
+            else saved["latest_pass"]
+        )
+        allowed = [
+            {"key": key, "label": rack_label(key),
+             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
+            for key in ch.allowed
+        ]
+        return {
+            "unit_id": unit_id,
+            "state": st["state"],
+            "prompt": ch.prompt,
+            "allowed": allowed,
+            "window_s": st["window_s"],
+            "started_at": st["started_at"],
+            "remaining_s": st["remaining_s"],
+            "reason": st["reason"],
+            "latest_pass": format_pass_summary(shown_pass),
+            "passes": saved["passes"],
+            "error": (
+                read_error
+                or app.state.challenge_start_errors.get(unit_id)
+                or app.state.challenge_error
+            ),
+        }
+
     def _backfill_stamps(progress, window, appended=()):
         # In append order, including rotations. Remembering each credited event tolerates a
         # clock reset. Compact the watermark when the log rolls without removing earned badges.
-        stamps = stamps_from_log(read_events(app.state.events_path))
+        events_list = read_events(app.state.events_path)
+        start_pos: dict[tuple[int, float], int] = {}
+        legacy: Counter[str] = Counter()
+        stamps_list = []
+        challenge_stamps = []
+        for idx, event in enumerate(events_list):
+            if isinstance(event, dict) and event.get("kind") == "challenge_start":
+                pl = event.get("payload")
+                if (isinstance(pl, dict)
+                        and type(pl.get("unit")) is int
+                        and type(pl.get("started_at")) in (int, float)):
+                    start_pos[(pl["unit"], float(pl["started_at"]))] = idx
+            if (stamp := mint(event)) is None:
+                continue
+            if "event_id" not in event:
+                digest = stamp["digest"]
+                legacy[digest] += 1
+                if legacy[digest] > 1:
+                    # Occurrence belongs in the watermark only; the evidence hash stays canonical.
+                    stamp["watermark"] = f"{digest}{legacy[digest]:016x}"
+            stamps_list.append(stamp)
+            challenge_stamps.append(
+                {**stamp, "event_id": event.get("event_id"), "_log_pos": idx}
+            )
+        tail_pos = len(events_list)
+        for s in appended:
+            stamps_list.append(s)
+            challenge_stamps.append({**s, "_log_pos": tail_pos})
+
+        def _backfill_qualifies(attempt: dict, stamp: dict) -> bool:
+            if not _challenge_qualifies(attempt, stamp):
+                return False
+            # Only receptions logged after the attempt's own challenge_start line can satisfy
+            # it during backfill, so a backward clock step cannot credit a pre-Start reception.
+            # If the start line has already rotated out of the retained log, every retained event
+            # arrived after it and stays eligible.
+            pos = start_pos.get((attempt["unit_id"], float(attempt["started_at"])))
+            log_pos = stamp.get("_log_pos")
+            return pos is None or log_pos is None or log_pos > pos
+
+        _credit_challenges(progress, challenge_stamps, qualifies_fn=_backfill_qualifies)
         # A different log writer may already have rotated out the event this hook just appended.
         # When it is still in the snapshot its event ID makes the second credit a no-op.
-        if progress.record_stamps(chain(stamps, appended), backfill=True):
+        if progress.record_stamps(stamps_list, backfill=True):
             app.state.stamp_window = window
             app.state.stamp_error = None
 
@@ -2048,17 +2423,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     return
                 try:
                     event = log_event(app.state.events_path, "reception", record,
-                                      event_id=uuid4().hex)
+                                      event_id=uuid4().hex, sync=managed)
                 except OSError as exc:
                     app.state.reception_error = f"a reception could not be logged: {exc}"
                     return
                 app.state.reception_error = None
                 if app.state.receptions is not None:
                     app.state.receptions.append(without_page_words(event))
+                stamp = mint(event)
+                if stamp is not None:
+                    _credit_challenges(
+                        progress, ({**stamp, "event_id": event.get("event_id")},)
+                    )
                 if monotonic() < app.state.stamp_retry_at:
                     # The log retains this reception for the next recovery pass in append order.
                     return
-                if (stamp := mint(event)) is None:
+                if stamp is None:
                     return
                 try:
                     window = _stamp_window()
@@ -2150,6 +2530,83 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "rows": rows, "field_error": error},
         )
 
+    @app.get("/api/challenges/{unit_id}")
+    def challenge_get(unit_id: int):
+        """Return one unit's live-find challenge state, countdown, rack links, and pass history."""
+        return _challenge_payload(unit_id)
+
+    @app.post("/api/challenges/{unit_id}/start")
+    def challenge_start(unit_id: int):
+        """Start or restart one unit's live-find attempt without altering earned passes (D16)."""
+        ch = challenge_for(unit_id)
+        if ch is None or get_unit(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        start_error = None
+        # Hold reception_lock across reading the clock, storing the attempt, and appending
+        # challenge_start so the log order matches what live receptions see, while preserving
+        # the console's lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
+        with reception_lock:
+            started_at = round(clock(), 3)
+            previous = None
+            try:
+                previous = app.state.progress.challenge(unit_id)["attempt"]
+                saved = app.state.progress.start_challenge(unit_id, started_at, ch.window_s)
+            except (OSError, sqlite3.Error) as exc:
+                saved = False
+                start_error = f"the live find could not be started: {exc}"
+            if saved:
+                try:
+                    log_event(
+                        app.state.events_path,
+                        "challenge_start",
+                        {
+                            "unit": unit_id,
+                            "started_at": started_at,
+                            "window_s": ch.window_s,
+                            "allowed": list(ch.allowed),
+                        },
+                        sync=managed,
+                    )
+                except OSError as exc:
+                    start_error = f"the live find start could not be logged: {exc}"
+                    # Undo the saved attempt so a restart after a clock step cannot credit
+                    # a pre-Start reception without a challenge_start line to order against.
+                    try:
+                        app.state.progress.restore_challenge(unit_id, previous)
+                    except (OSError, sqlite3.Error):
+                        pass
+            elif start_error is None:
+                start_error = "the live find store is closed"
+            if start_error is None:
+                app.state.challenge_start_errors.pop(unit_id, None)
+            else:
+                app.state.challenge_start_errors[unit_id] = start_error
+        payload = _challenge_payload(unit_id)
+        if start_error is not None:
+            payload["error"] = start_error
+            return JSONResponse(status_code=500, content=payload)
+        return payload
+
+    @app.get("/unit/{unit_id}/challenge", response_class=HTMLResponse)
+    def challenge_view(request: Request, unit_id: int):
+        """Interactive Tier B live-find screen for a receiving unit."""
+        unit = get_unit(unit_id)
+        if unit is None or challenge_for(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        payload = _challenge_payload(unit_id)
+        return templates.TemplateResponse(
+            request=request,
+            name="challenge.html",
+            context={
+                "title": f"Unit {unit.id} · Live find",
+                "back_href": f"/unit/{unit.id}",
+                "back_label": f"Unit {unit.id}",
+                "unit": unit,
+                "challenge": payload,
+                "evidence_text": format_evidence(payload),
+            },
+        )
+
     @app.get("/operate")
     def operate_home():
         """The rack opens on the instrument last used, or the waterfall the first time."""
@@ -2158,7 +2615,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return RedirectResponse(f"/operate/{key}", status_code=303)
 
     @app.get("/operate/{key}", response_class=HTMLResponse)
-    def operate_view(request: Request, key: str):
+    def operate_view(request: Request, key: str, back: str | None = None):
         """One instrument in the rack, remembered so /operate reopens on it.
 
         The panel's own poll claims the dongle through _claim_sdr exactly as a lesson's does, so
@@ -2178,10 +2635,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             freq_hz = getattr(receiver, "freq_hz", None)
         if freq_hz is None and len(inst.fixed_hz) == 1:
             freq_hz = inst.fixed_hz[0]
+        back_href, back_label = _safe_back(back)
         return templates.TemplateResponse(
             request=request,
             name="operate.html",
-            context={"title": "Operator mode", "back_href": "/", "back_label": "Home",
+            context={"title": "Operator mode", "back_href": back_href, "back_label": back_label,
                      "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
                      # The pager shows framing only wherever it is tuned; its dial says so.
                      "text_withheld": inst.key == "pager",

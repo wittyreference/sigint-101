@@ -580,7 +580,7 @@ def test_sstv_only_clean_reaped_exit_zero_publishes_and_never_overwrites(
         assert client.get(f"/media/{image['path']}").status_code == 200
 
 
-@pytest.mark.parametrize("failure", ["sidecar-write", "png-link", "source-unlink"])
+@pytest.mark.parametrize("failure", ["sidecar-write", "png-link", "sidecar-link", "source-unlink"])
 def test_sstv_publication_commits_at_exclusive_png_link(capture_files, monkeypatch, failure):
     dec, launches, heard = capture_files
     dec.start()
@@ -600,6 +600,9 @@ def test_sstv_publication_commits_at_exclusive_png_link(capture_files, monkeypat
         if failure == "png-link" and Path(dst) == published:
             attempted.append("png-link")
             raise OSError("PNG link failed")
+        if failure == "sidecar-link" and Path(dst) == published.with_suffix(".json"):
+            attempted.append("sidecar-link")
+            raise OSError("sidecar link failed")
         return real_link(src, dst, *args, **kwargs)
 
     def unlink(path, *args, **kwargs):
@@ -620,6 +623,16 @@ def test_sstv_publication_commits_at_exclusive_png_link(capture_files, monkeypat
         assert report[1] == childproc.command_line(child)
         assert report[0]["mode"] == "Robot 36"
         assert published.is_file() and staged.is_file()
+    elif failure == "sidecar-link":
+        # Legacy publication commits at the exclusive PNG link: a sidecar-link failure still
+        # announces the reception (with mode=None), matching main.
+        [report] = heard
+        assert report[1] == childproc.command_line(child)
+        assert report[0]["mode"] is None
+        assert published.is_file()
+        assert not published.with_suffix(".json").exists()
+        assert dec.error and "sidecar link failed" in dec.error
+        assert not staged.exists()
     else:
         assert dec.images() == []
         assert not published.with_suffix(".json").exists()
