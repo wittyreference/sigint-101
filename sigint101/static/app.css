@@ -3036,6 +3036,104 @@ body {
   margin: 5px 0 0;
 }
 
+/* Command field card (/field): reading page of real commands run by the console. */
+.field {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px var(--gutter);
+  font-size: 18px;
+}
+.field__frame {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.field__entries {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 18px;
+  overflow-wrap: anywhere;
+}
+.field__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.field__intro {
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 2px solid var(--accent);
+  background: var(--surface-2);
+}
+.field__intro p {
+  margin: 0;
+}
+.field__entry {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.field__heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.field__tool {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  color: var(--fg-dim);
+}
+.field__state {
+  display: inline-block;
+  padding: 2px 9px;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  border: 2px solid var(--accent);
+}
+.field__state--live {
+  border-radius: 1em;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.field__state--last {
+  border-radius: 0;
+  color: var(--fg);
+}
+.field__state--stamp {
+  border-radius: 1em;
+  border-style: double;
+  border-width: 4px;
+  color: var(--fg);
+}
+.field__state--prompt {
+  border-radius: 0;
+  border-style: dashed;
+  color: var(--fg-dim);
+}
+.field__entry p {
+  margin: 6px 0 0;
+}
+.field__when,
+.field__prompt,
+.field__note {
+  color: var(--fg-dim);
+}
+.field code {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.field__tok {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 /* ===== M5 legal card sort (try stage) ==================================== */
 /* Fits 800x480 with three 80 px choice buttons and a pinned 72 px footer (no page scroll). */
 .stage-panel--sort {

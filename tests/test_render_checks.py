@@ -26,6 +26,7 @@ CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
 SURVEY = REPO / "tools" / "render" / "render_survey.py"
 RECALL = REPO / "tools" / "render" / "render_recall.py"
 LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
+FIELD = REPO / "tools" / "render" / "render_field.py"
 BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
 
 # Runs a script as __main__ with time.sleep made instant: the checks wait seconds for a real page
@@ -437,7 +438,7 @@ def render_make(tmp_path, console_url, devtools):
     )
     chromium.chmod(0o755)
     for script in (
-        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, BANDMAP
+        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD, BANDMAP
     ):
         (screen / script.name).write_text(
             "import os, sys\n"
@@ -481,12 +482,12 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     "failing",
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name, BANDMAP.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails", "bandmap-fails",
+        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -501,6 +502,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {SURVEY.name} {console_url}",
         f"ran {RECALL.name} {console_url}",
         f"ran {LIVE_FIND.name} {console_url}",
+        f"ran {FIELD.name} {console_url}",
         f"ran {BANDMAP.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
@@ -1040,6 +1042,67 @@ def test_recall_render_console_uses_no_radio_probe(tmp_path, monkeypatch):
     assert callable(probe_fn), "render_recall._run_server must pass a no-radio probe"
     probe = probe_fn()
     assert probe.present is False
+
+
+RACK_FIELD_FITS = {
+    "doc": [800, 480],
+    "target": [76, 72],
+    "visible": True,
+    "titleUnclipped": True,
+}
+FIELD_PAGE_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "scrolls": True,
+    "lastVisible": True,
+    "noOverflow": True,
+    "noSplitHyphens": True,
+    "bodyPx": 18,
+    "codePx": 18,
+}
+
+
+def _field_pages(*, page_defect=None, rack_defect=None):
+    pages = {}
+    for theme in THEMES:
+        rack = {**RACK_FIELD_FITS, "theme": theme}
+        page = {**FIELD_PAGE_FITS, "theme": theme}
+        if theme == "red-night":
+            rack.update(rack_defect or {})
+            page.update(page_defect or {})
+        pages[f"measureRackField({json.dumps(theme)})"] = rack
+        pages[f"measureFieldPage({json.dumps(theme)},"] = page
+    return pages
+
+
+def test_field_render_checks_rack_and_page_including_no_split_hyphens(devtools):
+    port = devtools(_field_pages())
+    proc = run(FIELD, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - rack-field-ism dark",
+        "VERDICT: PASS - rack-field-waterfall dark",
+        "VERDICT: PASS - field dark",
+        "VERDICT: PASS - rack-field-ism sunlight",
+        "VERDICT: PASS - rack-field-waterfall sunlight",
+        "VERDICT: PASS - field sunlight",
+        "VERDICT: PASS - rack-field-ism red-night",
+        "VERDICT: PASS - rack-field-waterfall red-night",
+        "VERDICT: PASS - field red-night",
+    ]
+
+
+@pytest.mark.parametrize("defect", [
+    {"noSplitHyphens": False},
+    {"noOverflow": False},
+    {"bodyPx": 17},
+    {"codePx": 17},
+])
+def test_field_render_fails_on_split_hyphen_overflow_or_small_font(devtools, defect):
+    port = devtools(_field_pages(page_defect=defect))
+    proc = run(FIELD, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert _verdicts(proc)[-1] == "VERDICT: FAIL - field red-night"
 
 
 BANDMAP_HOME_FITS = {

@@ -37,6 +37,7 @@ def run_checks(console, port, output):
         ("render_survey.py", console),
         ("render_recall.py", console),
         ("render_live_find.py", console),
+        ("render_field.py", console),
         ("render_bandmap.py", console),
     )
     no_proxy = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))

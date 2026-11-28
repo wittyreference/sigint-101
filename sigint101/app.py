@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import sqlite3
 import threading
 import time
@@ -64,6 +63,7 @@ from .exam import (
     next_sim_question,
     score_exam,
 )
+from .fieldcard import build_field_rows
 from .flipper import FlipperError, FlipperSelectionError
 from .flipperconsole import FlipperConsole
 from .flock import FlockUnavailable, configured_flock_detector
@@ -125,6 +125,11 @@ BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
 PACK_DIR = REPO_DIR / "lesson_packs"
 DATA_DIR = REPO_DIR / "data"
+
+# The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
+SDR_CONSUMERS = (
+    "sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr", "apt", "sstv"
+)
 
 # The line glyph a home tile falls back to. The waterfall glyph is the one every lesson earns —
 # the spectrogram is the instrument the whole course is built on.
@@ -314,6 +319,220 @@ def _resume_stage(lesson, saved, committed: bool) -> tuple:
     return current, min(reached, len(open_now) - 1)
 
 
+def build_receiver_factories(
+    *,
+    data_dir: Path,
+    probe=probe_rtlsdr,
+    list_devices=list_rtlsdr_devices,
+    managed: bool = False,
+    sweeper_factory=None,
+    decoder_factory=None,
+    lora_factory=None,
+    rds_factory=None,
+    adsb_factory=None,
+    aprs_factory=None,
+    pocsag_factory=None,
+    acars_factory=None,
+    ais_factory=None,
+    dmr_factory=None,
+    apt_factory=None,
+    sstv_factory=None,
+    flock_factory=None,
+    rayhunter_factory=None,
+    flipper_factory=None,
+    survey_factory=None,
+) -> tuple[dict, list]:
+    """Construct the console's receiver factory table shared by public startup and private trial."""
+    radio_census: list = []
+
+    def enumerate_radios():
+        devices = list_devices()
+        radio_census[:] = list(devices)
+        return devices
+
+    def _sdr_kwargs():
+        return {
+            "radio_present": lambda: probe().present,
+            "serial": os.environ.get(RTLSDR_SERIAL_ENV),
+            "list_devices": enumerate_radios,
+        }
+
+    factories = {
+        "sweeper": sweeper_factory or (lambda: Sweeper(**_sdr_kwargs())),
+        "decoder": decoder_factory or (lambda: Decoder(**_sdr_kwargs())),
+        "lora": lora_factory or LoRaListener,
+        "rds": rds_factory or (lambda: RDSDecoder(**_sdr_kwargs())),
+        "adsb": adsb_factory or (
+            lambda: AdsbDecoder(
+                **_sdr_kwargs(),
+                receiver_lat=_env_float(RX_LAT_ENV),
+                receiver_lon=_env_float(RX_LON_ENV),
+            )
+        ),
+        "aprs": aprs_factory or (lambda: AprsDecoder(**_sdr_kwargs())),
+        "pocsag": pocsag_factory or (lambda: PocsagDecoder(**_sdr_kwargs())),
+        "acars": acars_factory or (lambda: AcarsDecoder(**_sdr_kwargs())),
+        "ais": ais_factory or (lambda: AisDecoder(**_sdr_kwargs())),
+        "dmr": dmr_factory or (lambda: DmrDecoder(**_sdr_kwargs())),
+        "apt": apt_factory or (
+            lambda: AptDecoder(
+                output_dir=Path(data_dir) / "apt",
+                data_dir=Path(data_dir),
+                **_sdr_kwargs(),
+                sync_assets=managed,
+            )
+        ),
+        "sstv": sstv_factory or (
+            lambda: SstvDecoder(
+                output_dir=Path(data_dir) / "sstv",
+                data_dir=Path(data_dir),
+                **_sdr_kwargs(),
+                sync_assets=managed,
+            )
+        ),
+        "flock": flock_factory or configured_flock_detector,
+        "rayhunter": rayhunter_factory or RayhunterMonitor,
+        "flipper": flipper_factory or FlipperConsole,
+        "survey": survey_factory or WifiSurvey,
+    }
+    return factories, radio_census
+
+
+def initialize_console_state(
+    state,
+    *,
+    pack_dir=PACK_DIR,
+    data_dir=DATA_DIR,
+    pool_path=None,
+    managed: bool = False,
+    read_only: bool = False,
+    trial: bool = False,
+    probe=probe_rtlsdr,
+    list_devices=list_rtlsdr_devices,
+    receiver_factories: dict | None = None,
+    record_transmission=None,
+    ppm_measure=None,
+    backfill_stamps=None,
+    attach_reception_hooks=None,
+) -> None:
+    """Shared console initialization used by both public startup and read-only updater trials.
+
+    When trial=True, stores open read-only, stamp backfill and exam_disabled log writes are
+    suppressed, and no receiver hooks are attached so the data generation stays untouched.
+    Legacy startup (managed=False, trial=False) matches main exactly: no env path overrides and
+    a missing pack directory loads zero lessons rather than raising.
+    """
+    from .exam import POOL_PATH as DEFAULT_POOL_PATH
+
+    resolved_pack = Path(pack_dir)
+    resolved_data = Path(data_dir)
+    resolved_pool = Path(pool_path) if pool_path is not None else None
+    if (managed or trial) and not resolved_pack.is_dir():
+        raise FileNotFoundError(f"lesson pack directory does not exist: {resolved_pack}")
+
+    if receiver_factories is None:
+        receiver_factories, _ = build_receiver_factories(
+            data_dir=resolved_data,
+            probe=probe,
+            list_devices=list_devices,
+            managed=managed,
+        )
+
+    state.pack_dir = resolved_pack
+    state.data_dir = resolved_data
+    state.pool_path = resolved_pool if resolved_pool is not None else DEFAULT_POOL_PATH
+    state.lessons = load_lessons(resolved_pack)
+    state.progress = Progress(
+        resolved_data / "progress.db", managed=managed, read_only=read_only
+    )
+    try:
+        state.events_path = resolved_data / "events.jsonl"
+        state.baseline = BaselineLog(state.events_path)
+        for attr, factory in receiver_factories.items():
+            setattr(state, attr, factory())
+        if not trial and record_transmission is not None:
+            state.lora.on_transmission = record_transmission
+
+        state.exam_pool = None
+        state.exam_disabled_reason = None
+        try:
+            pool = load_pool(resolved_pool)
+            pool.verify()
+        except (PoolError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            reason = _pool_refusal(exc)
+            state.exam_disabled_reason = reason
+            if not trial:
+                log_event(state.events_path, "exam_disabled", {"reason": reason})
+        else:
+            state.exam_pool = pool
+
+        state.exam_store = ExamStore(
+            resolved_data / "exam.db", managed=managed, read_only=read_only
+        )
+        state.ppm_measure = ppm_measure or measure_pilot_ppm
+        state.receptions = None
+        state.reception_error = None
+        state.stamp_error = None
+        state.challenge_error = None
+        state.challenge_start_errors = {}
+        state.stamp_window = None
+        state.stamp_retry_at = 0.0
+        if not trial and backfill_stamps is not None:
+            backfill_stamps(state)
+        state.last_ppm = None
+        state.radio_arbiter = RadioArbiter()
+        state.reception_sink = ReceptionSink()
+        if not trial and attach_reception_hooks is not None:
+            attach_reception_hooks(state)
+    except BaseException:
+        if getattr(state, "exam_store", None) is not None:
+            try:
+                state.exam_store.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if getattr(state, "progress", None) is not None:
+            try:
+                state.progress.close()
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+
+
+async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
+    """Close console receivers, arbiter, reception sink, and SQLite stores cleanly."""
+    if trial:
+        errors: list[str] = []
+        arbiter = getattr(state, "radio_arbiter", None)
+        if arbiter is not None:
+            arbiter.close()
+        for label, store in (
+            ("progress", getattr(state, "progress", None)),
+            ("exam", getattr(state, "exam_store", None)),
+        ):
+            if store is not None:
+                try:
+                    store.close()
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{label}: {exc}")
+        state.shutdown_errors = errors
+        return errors
+
+    state.radio_arbiter.close()
+    names = (*SDR_CONSUMERS, "lora", "flock", "rayhunter")
+    receivers = [
+        (name, getattr(receiver, "shutdown", receiver.stop))
+        for name in names
+        if (receiver := getattr(state, name))
+    ]
+    stores = [("progress", state.progress.close), ("exam", state.exam_store.close)]
+    state.shutdown_errors = await finish_console(
+        receivers, stores, state.reception_sink, SHUTDOWN_TOTAL_S
+    )
+    for reason in state.shutdown_errors:
+        logging.getLogger(__name__).error("console shutdown: %s", reason)
+    return state.shutdown_errors
+
+
 def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
@@ -355,48 +574,28 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"),
                                 context_processors=[status_bar, flock_tool])
 
-    # The RTL-SDR receivers send the radio they selected at launch. A hook invoked without
-    # that metadata can still look up the receiver's current index in the latest survey.
-    radio_census = []
-
-    def enumerate_radios():
-        devices = list_devices()
-        radio_census[:] = list(devices)
-        return devices
-
-    # The sweeper trusts the same probe the console does, so a radio-less probe in a test can
-    # never reach for the real dongle. The real enumerator is wired here and nowhere else: it is
-    # what makes the sweeper check which radio it is about to open, and refuse rather than open
-    # the wrong one when the bus holds several and none is pinned.
-    if sweeper_factory is None:
-        def build_sweeper():
-            return Sweeper(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-            )
-    else:
-        build_sweeper = sweeper_factory
-
-    # The decoder shares the sweeper's radio and its enumerator, so the two agree on which dongle
-    # they are taking turns on. Wired here and nowhere else, same as the sweeper.
-    if decoder_factory is None:
-        def build_decoder():
-            return Decoder(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-            )
-    else:
-        build_decoder = decoder_factory
-
-    # The LoRa listener reads the local meshtasticd over its TCP API — a separate radio from the
-    # RTL-SDR, so it needs no arbitration with the sweeper or decoder. The real default connects to
-    # localhost:4403; tests inject their own listener.
-    if lora_factory is None:
-        build_lora = LoRaListener
-    else:
-        build_lora = lora_factory
+    receiver_factories, radio_census = build_receiver_factories(
+        data_dir=data_dir,
+        probe=probe,
+        list_devices=list_devices,
+        managed=managed,
+        sweeper_factory=sweeper_factory,
+        decoder_factory=decoder_factory,
+        lora_factory=lora_factory,
+        rds_factory=rds_factory,
+        adsb_factory=adsb_factory,
+        aprs_factory=aprs_factory,
+        pocsag_factory=pocsag_factory,
+        acars_factory=acars_factory,
+        ais_factory=ais_factory,
+        dmr_factory=dmr_factory,
+        apt_factory=apt_factory,
+        sstv_factory=sstv_factory,
+        flock_factory=flock_factory,
+        rayhunter_factory=rayhunter_factory,
+        flipper_factory=flipper_factory,
+        survey_factory=survey_factory,
+    )
     lora_send_permit = token_urlsafe(24)
 
     def record_transmission(kind, payload):
@@ -405,153 +604,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         except OSError as exc:
             logging.getLogger(__name__).warning("could not log LoRa %s: %s", kind, exc)
 
-    # The RDS decoder runs rtl_fm|redsea, so it holds the one dongle the sweeper and rtl_433 decoder
-    # also want — it joins their release/resume turn-taking. Wired to the same probe and enumerator.
-    if rds_factory is None:
-        def build_rds():
-            return RDSDecoder(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-            )
-    else:
-        build_rds = rds_factory
+    def _run_startup_backfill(state) -> None:
+        try:
+            _backfill_stamps(state.progress, _stamp_window())
+        except (OSError, sqlite3.Error) as exc:
+            _stamp_failed(exc)
 
-    # The ADS-B decoder runs dump1090, which holds the same one dongle; it joins the sweeper /
-    # rtl_433 / rtl_fm release/resume turn-taking. Its receiver location comes from the environment
-    # so the scope can place aircraft; wired to the same probe and enumerator as the rest.
-    if adsb_factory is None:
-        def build_adsb():
-            return AdsbDecoder(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-                receiver_lat=_env_float(RX_LAT_ENV),
-                receiver_lon=_env_float(RX_LON_ENV),
-            )
-    else:
-        build_adsb = adsb_factory
-
-    # The APRS decoder runs rtl_fm|multimon-ng, so it holds the one dongle the sweeper and the other
-    # SDR tools also want — it joins their release/resume turn-taking, wired to the same enumerator.
-    if aprs_factory is None:
-        def build_aprs():
-            return AprsDecoder(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-            )
-    else:
-        build_aprs = aprs_factory
-
-    # The POCSAG decoder runs rtl_fm|multimon-ng on the pager band, so it holds the one dongle too —
-    # it joins the sweeper / rtl_433 / rds / adsb / aprs release/resume turn-taking.
-    if pocsag_factory is None:
-        def build_pocsag():
-            return PocsagDecoder(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-            )
-    else:
-        build_pocsag = pocsag_factory
-
-    # The ACARS decoder runs acarsdec, which opens the dongle directly on the VHF ACARS channel — it
-    # joins the sweeper / rtl_433 / rds / adsb / aprs / pocsag release/resume turn-taking.
-    if acars_factory is None:
-        def build_acars():
-            return AcarsDecoder(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-            )
-    else:
-        build_acars = acars_factory
-
-    # The AIS decoder runs rtl_ais, which opens the dongle directly on the marine AIS channels — it
-    # joins the sweeper / rtl_433 / rds / adsb / aprs / pocsag / acars release/resume turn-taking.
-    if ais_factory is None:
-        def build_ais():
-            return AisDecoder(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-            )
-    else:
-        build_ais = ais_factory
-
-    # The DMR/P25 decoder runs dsd-fme, which opens the dongle directly on the digital-voice
-    # channel — it joins the same release/resume turn-taking as the other SDR-exclusive decoders.
-    if dmr_factory is None:
-        def build_dmr():
-            return DmrDecoder(
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-            )
-    else:
-        build_dmr = dmr_factory
-
-    # The NOAA APT decoder runs satdump on a ~137 MHz pass, writing decoded weather images under
-    # data/apt — it opens the dongle directly and joins the SDR release/resume turn-taking.
-    if apt_factory is None:
-        def build_apt():
-            return AptDecoder(
-                output_dir=Path(data_dir) / "apt",
-                data_dir=Path(data_dir),
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-                sync_assets=managed,
-            )
-    else:
-        build_apt = apt_factory
-
-    # The SSTV decoder runs rtl_fm|sox|sstv on 2m, writing decoded pictures under data/sstv — it
-    # holds the one dongle (via rtl_fm) and joins the same release/resume turn-taking.
-    if sstv_factory is None:
-        def build_sstv():
-            return SstvDecoder(
-                output_dir=Path(data_dir) / "sstv",
-                data_dir=Path(data_dir),
-                radio_present=lambda: probe().present,
-                serial=os.environ.get(RTLSDR_SERIAL_ENV),
-                list_devices=enumerate_radios,
-                sync_assets=managed,
-            )
-    else:
-        build_sstv = sstv_factory
-
-    # The Flock detector runs tcpdump on wlan1 in monitor mode, or reads the Flipper's Marauder
-    # devboard over its USB-UART bridge when the site sets SIGINT101_FLOCK_SOURCE=marauder — a
-    # separate radio from the RTL-SDR either way, like the LoRa listener, so it needs no
-    # arbitration with the sweeper or the SDR decoders.
-    if flock_factory is None:
-        build_flock = configured_flock_detector
-    else:
-        build_flock = flock_factory
-
-    # The Rayhunter monitor polls an Orbic over WiFi, read-only — a separate device, like the
-    # Flock detector and the LoRa listener, so it never arbitrates with the SDR.
-    if rayhunter_factory is None:
-        build_rayhunter = RayhunterMonitor
-    else:
-        build_rayhunter = rayhunter_factory
-
-    # The Flipper is a USB CDC device the console reads over its serial CLI — its own device, like
-    # the Flock detector and the Rayhunter monitor, so it never arbitrates with the SDR. Each read
-    # opens and releases its own short session, so there is no long-lived handle to stop.
-    if flipper_factory is None:
-        build_flipper = FlipperConsole
-    else:
-        build_flipper = flipper_factory
-
-    # The Wi-Fi survey runs one bounded read-only nmcli scan on the host's Wi-Fi radio — separate
-    # from the SDR, with no long-lived daemon to tear down on shutdown.
-    if survey_factory is None:
-        build_survey = WifiSurvey
-    else:
-        build_survey = survey_factory
+    def _attach_hooks(state) -> None:
+        for attr, inst in RECEIVERS.items():
+            receiver = getattr(state, attr)
+            receiver.on_reception = _heard(inst, receiver)
+            receiver.reception_sink = state.reception_sink
+        if isinstance(state.ais, AisDecoder):
+            state.ais.on_foreign_datagrams = _log_foreign_ais
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -560,87 +625,26 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         The sweeper must not outlive the server: a leaked rtl_power would keep the dongle claimed,
         and the next start would find the radio busy with nothing visibly running.
         """
-        app.state.lessons = load_lessons(pack_dir)
-        app.state.progress = Progress(Path(data_dir) / "progress.db", managed=managed)
-        app.state.events_path = Path(data_dir) / "events.jsonl"
-        # The provenance panel asks for the baseline every poll; this follows the log as it grows
-        # rather than re-reading all of it each time.
-        app.state.baseline = BaselineLog(app.state.events_path)
-        app.state.sweeper = build_sweeper()
-        app.state.decoder = build_decoder()
-        app.state.lora = build_lora()
-        app.state.lora.on_transmission = record_transmission
-        app.state.rds = build_rds()
-        app.state.adsb = build_adsb()
-        app.state.aprs = build_aprs()
-        app.state.pocsag = build_pocsag()
-        app.state.acars = build_acars()
-        app.state.ais = build_ais()
-        app.state.dmr = build_dmr()
-        app.state.apt = build_apt()
-        app.state.sstv = build_sstv()
-        app.state.flock = build_flock()
-        app.state.rayhunter = build_rayhunter()
-        app.state.flipper = build_flipper()
-        app.state.survey = build_survey()
-        # The exam trainer: the verified NCVEC pool (reference data) plus a per-question
-        # spaced-retrieval store, persisted beside the lesson progress so study history
-        # survives a kiosk power-cut the same way. The pool must pass its correctness guard to be
-        # served: a short or stale pool teaches wrong answers. One that fails it, or a pool file
-        # that is missing, cannot be read, is not JSON or is not shaped like a pool, ships the
-        # trainer disabled with the reason, logged once here, and the rest of the console starts
-        # as usual.
-        app.state.exam_pool = None
-        app.state.exam_disabled_reason = None
-        try:
-            pool = load_pool(pool_path)
-            pool.verify()
-        except (PoolError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            reason = _pool_refusal(exc)
-            app.state.exam_disabled_reason = reason
-            log_event(app.state.events_path, "exam_disabled", {"reason": reason})
-        else:
-            app.state.exam_pool = pool
-        app.state.exam_store = ExamStore(Path(data_dir) / "exam.db", managed=managed)
-        # Injected so a test drives the ppm route without 8 s of real IQ capture; the default is
-        # the real pilot measurement, which holds the dongle exclusively (the route stands the
-        # sweeper down first, below).
-        app.state.ppm_measure = ppm_measure or measure_pilot_ppm
-        # Operator mode: every receiver logs each live reception with its provenance. The
-        # in-memory tail is read in from the log on first ask; the last ppm measured this run is
-        # part of each record's provenance.
-        app.state.receptions = None
-        app.state.reception_error = None
-        app.state.stamp_error = None
-        app.state.challenge_error = None
-        app.state.challenge_start_errors = {}
-        app.state.stamp_window = None
-        app.state.stamp_retry_at = 0.0
-        try:
-            _backfill_stamps(app.state.progress, _stamp_window())
-        except (OSError, sqlite3.Error) as exc:
-            _stamp_failed(exc)
-        app.state.last_ppm = None
-        app.state.radio_arbiter = RadioArbiter()
-        app.state.reception_sink = ReceptionSink()
-        for attr, inst in RECEIVERS.items():
-            receiver = getattr(app.state, attr)
-            receiver.on_reception = _heard(inst, receiver)
-            receiver.reception_sink = app.state.reception_sink
-        if isinstance(app.state.ais, AisDecoder):
-            app.state.ais.on_foreign_datagrams = _log_foreign_ais
+        initialize_console_state(
+            app.state,
+            pack_dir=pack_dir,
+            data_dir=data_dir,
+            pool_path=pool_path,
+            managed=managed,
+            read_only=False,
+            trial=False,
+            probe=probe,
+            list_devices=list_devices,
+            receiver_factories=receiver_factories,
+            record_transmission=record_transmission,
+            ppm_measure=ppm_measure,
+            backfill_stamps=_run_startup_backfill,
+            attach_reception_hooks=_attach_hooks,
+        )
         try:
             yield
         finally:
-            app.state.radio_arbiter.close()
-            names = (*sdr_consumers, "lora", "flock", "rayhunter")
-            receivers = [(name, getattr(receiver, "shutdown", receiver.stop))
-                         for name in names if (receiver := getattr(app.state, name))]
-            stores = [("progress", app.state.progress.close), ("exam", app.state.exam_store.close)]
-            app.state.shutdown_errors = await finish_console(
-                receivers, stores, app.state.reception_sink, SHUTDOWN_TOTAL_S)
-            for reason in app.state.shutdown_errors:
-                logging.getLogger(__name__).error("console shutdown: %s", reason)
+            await shutdown_console_state(app.state, trial=False)
 
     app = FastAPI(title="SIGINT 101", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -1459,6 +1463,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 sweeper.start()
             except SpectrumUnavailable:
                 pass
+            else:
+                _started("spectrum", {"command": sweeper.live_command(),
+                                      "command_from": "process"})
         return sweeper.reading()
 
     def _snapshot():
@@ -1698,7 +1705,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("sweeper", sweeper.start)
             except SpectrumUnavailable as exc:
                 return _refused("spectrum", exc, {"rows": []})
-            _started("spectrum", {"command": " ".join(sweeper.command())})
+            _started("spectrum", {"command": sweeper.live_command(), "command_from": "process"})
         # The span rides along with every response because the waterfall cannot label its axis
         # (or spot a retune) from bare rows of dB values. bin_size is the requested bin — a
         # maximum rtl_power may undercut — while each row's freq_step reports what the hardware
@@ -1718,7 +1725,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "bin_size": sweeper.bin_size,
             "gain": sweeper.gain,
             # The exact rtl_power line running now, for the panel's command strip.
-            "command": shlex.join(sweeper.command()) if sweeper.running else None,
+            "command": sweeper.live_command(),
             # Whether the newest row is still a reading, by the rule the baseline panel's reading
             # follows (Sweeper.newest): null while it is; "stalled" once rtl_power has gone too
             # long without a pass; "resuming" for the first two passes after, which carry levels
@@ -1769,7 +1776,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("decoder", decoder.start)
             except DecodeUnavailable as exc:
                 return _refused("decode", exc, {"decodes": []}, decoder.watch)
-            _started("decode", {"command": decoder.live_command()})
+            _started("decode", {"command": decoder.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1833,7 +1840,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 detector.start()
             except FlockUnavailable as exc:
                 return _refused("flock", exc, {"detections": []}, detector.watch)
-            _started("flock", {"interface": detector.interface})
+            tool = getattr(detector, "tool", None)
+            _started("flock", {"interface": detector.interface, "tool": tool,
+                                "command": detector.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": detector.live_command(),
@@ -1917,7 +1926,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("rds", decoder.start)
             except RDSUnavailable as exc:
                 return _refused("rds", exc, {"station": None}, decoder.watch)
-            _started("rds", {"freq_hz": decoder.freq_hz})
+            _started("rds", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1941,7 +1951,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("adsb", decoder.start)
             except AdsbUnavailable as exc:
                 return _refused("adsb", exc, {"aircraft": []}, decoder.watch)
-            _started("adsb", {"freq_hz": DEFAULT_ADSB_HZ})
+            _started("adsb", {"freq_hz": DEFAULT_ADSB_HZ, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1966,7 +1977,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("aprs", decoder.start)
             except AprsUnavailable as exc:
                 return _refused("aprs", exc, {"stations": []}, decoder.watch)
-            _started("aprs", {"freq_hz": decoder.freq_hz})
+            _started("aprs", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1990,7 +2002,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("pocsag", decoder.start)
             except PocsagUnavailable as exc:
                 return _refused("pocsag", exc, {"pages": []}, decoder.watch)
-            _started("pocsag", {"freq_hz": decoder.freq_hz})
+            _started("pocsag", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                                "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2014,7 +2027,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("acars", decoder.start)
             except AcarsUnavailable as exc:
                 return _refused("acars", exc, {"messages": []}, decoder.watch)
-            _started("acars", {"freq_hz": decoder.freq_hz})
+            _started("acars", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                               "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2045,7 +2059,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("ais", decoder.start)
             except AisUnavailable as exc:
                 return _refused("ais", exc, {"vessels": []}, decoder.watch)
-            _started("ais", {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ})
+            _started("ais", {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ,
+                             "command": decoder.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2070,7 +2085,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("dmr", decoder.start)
             except DmrUnavailable as exc:
                 return _refused("dmr", exc, {"calls": []}, decoder.watch)
-            _started("dmr", {"freq_hz": decoder.freq_hz})
+            _started("dmr", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2094,7 +2110,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("apt", decoder.start)
             except AptUnavailable as exc:
                 return _refused("apt", exc, {"images": []}, decoder.watch)
-            _started("apt", {"freq_hz": DEFAULT_APT_HZ})
+            _started("apt", {"freq_hz": DEFAULT_APT_HZ, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2117,7 +2134,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("sstv", decoder.start)
             except SstvUnavailable as exc:
                 return _refused("sstv", exc, {"images": []}, decoder.watch)
-            _started("sstv", {"freq_hz": DEFAULT_SSTV_HZ})
+            _started("sstv", {"freq_hz": DEFAULT_SSTV_HZ, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2506,6 +2524,31 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             request=request, name="logbook.html",
             context={"title": "Logbook", "back_href": "/operate", "back_label": "Rack",
                      "stamps": rows, "stamp_error": error},
+        )
+
+    @app.get("/field", response_class=HTMLResponse)
+    def field_card(request: Request):
+        """Show each rack instrument's real tool and the exact command the console ran.
+
+        Strictly read-only: starts nothing, claims nothing, logs nothing, never calls .command(),
+        and leaves the rack's remembered instrument untouched.
+        """
+        error = app.state.stamp_error
+        try:
+            events = read_events(app.state.events_path)
+        except OSError as exc:
+            events = []
+            error = error or f"the event log could not be read: {exc}"
+        try:
+            earned = app.state.progress.stamps()
+        except (OSError, sqlite3.Error) as exc:
+            earned = []
+            error = error or f"the logbook could not be read: {exc}"
+        rows = build_field_rows(app.state, events, earned)
+        return templates.TemplateResponse(
+            request=request, name="field.html",
+            context={"title": "Field card", "back_href": "/operate", "back_label": "Rack",
+                     "rows": rows, "field_error": error},
         )
 
     @app.get("/api/challenges/{unit_id}")

@@ -98,6 +98,8 @@
     if (law && law.scrollHeight - law.clientHeight > 2) return law;
     var bandmap = document.querySelector(".bandmap__entries");
     if (bandmap && bandmap.scrollHeight - bandmap.clientHeight > 2) return bandmap;
+    var field = document.querySelector(".field__entries");
+    if (field && field.scrollHeight - field.clientHeight > 2) return field;
     return null;
   }
 
