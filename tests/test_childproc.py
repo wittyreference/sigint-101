@@ -1,6 +1,7 @@
 # ABOUTME: Tests the shared radio-child helpers: own session, dies with the console, kill path.
 # ABOUTME: Real short-lived processes prove the OS behaviour; fakes at the boundary pin the reasons.
 
+import fcntl
 import gc
 import io
 import os
@@ -113,6 +114,43 @@ def test_a_child_dies_with_the_console(tmp_path):
         if console.poll() is None:  # pragma: no cover - only if the assertion path raised early
             console.kill()
             console.wait(timeout=5)
+
+
+def _opens(pid: int, path: Path) -> bool:
+    want = path.stat()
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            if os.path.samestat(os.stat(f"/proc/{pid}/fd/{fd}"), want):
+                return True
+        except FileNotFoundError:
+            continue  # The tool closed a file of its own (its locale) as we looked.
+    return False
+
+
+def test_a_passed_descriptor_keeps_its_flock_in_the_child_after_the_parent_closes_it(tmp_path):
+    # SSTV hands its staging lock to its stages, so a stage that outlives the console still holds
+    # it. Nothing else is passed: every other descriptor stays closed in the child.
+    lock = tmp_path / "owner.lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    passed = spawn(["sleep", "30"], stdout=subprocess.DEVNULL, pass_fds=(fd,))
+    unpassed = spawn(["sleep", "30"], stdout=subprocess.DEVNULL)
+    probe = None
+    try:
+        os.close(fd)
+        fd = None
+        assert _opens(passed.pid, lock) and not _opens(unpassed.pid, lock)
+        probe = os.open(lock, os.O_RDONLY)
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _reap(passed)
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        for open_fd in (fd, probe):
+            if open_fd is not None:
+                os.close(open_fd)
+        _reap(passed)
+        _reap(unpassed)
 
 
 # --- stop_process: terminate, wait, kill, wait ------------------------------------------------

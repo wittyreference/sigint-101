@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import sqlite3
 import threading
 import time
@@ -62,6 +61,7 @@ from .exam import (
     next_sim_question,
     score_exam,
 )
+from .fieldcard import build_field_rows
 from .flipper import FlipperError, FlipperSelectionError
 from .flipperconsole import FlipperConsole
 from .flock import FlockUnavailable, configured_flock_detector
@@ -87,7 +87,7 @@ from .operate import (
 )
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
-from .ppm import PpmUnavailable, measure_pilot_ppm
+from .ppm import PpmCalibration, PpmUnavailable, measure_pilot_ppm
 from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress, RecallNotDue
 from .provenance import (
     BaselineLog,
@@ -467,7 +467,11 @@ def initialize_console_state(
         state.exam_store = ExamStore(
             resolved_data / "exam.db", managed=managed, read_only=read_only
         )
-        state.ppm_measure = ppm_measure or measure_pilot_ppm
+        if trial:
+            state.ppm_measure = ppm_measure or measure_pilot_ppm
+        else:
+            state.ppm_calibration = PpmCalibration()
+            state.ppm_measure = ppm_measure or state.ppm_calibration.measure
         state.receptions = None
         state.reception_error = None
         state.stamp_error = None
@@ -522,10 +526,13 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
         for name in names
         if (receiver := getattr(state, name))
     ]
+    receivers.append(("ppm", state.ppm_calibration.stop))
     stores = [("progress", state.progress.close), ("exam", state.exam_store.close)]
     state.shutdown_errors = await finish_console(
         receivers, stores, state.reception_sink, SHUTDOWN_TOTAL_S
     )
+    if ppm_failure := state.ppm_calibration.release_failure():
+        state.shutdown_errors.append(f"ppm: {ppm_failure}")
     for reason in state.shutdown_errors:
         logging.getLogger(__name__).error("console shutdown: %s", reason)
     return state.shutdown_errors
@@ -1476,14 +1483,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         row is None with no radio, and until the sweep running now has finished a pass: a row kept
         from before a gain step, a retune or a restart was swept under other settings. It is None,
         too, while the newest row is stale: too old to be a reading, or one of the first two rows
-        after a stall (Sweeper.newest).
+        after a stall (Sweeper.newest). Respect a prior release to another receiver when polling.
         """
         sweeper = app.state.sweeper
-        if not sweeper.running:
+        if not sweeper.running and not getattr(sweeper, "released", False):
             try:
-                sweeper.start()
+                _claim_sdr("sweeper", sweeper.start, reclaim=False)
             except SpectrumUnavailable:
                 pass
+            else:
+                _started("spectrum", {"command": sweeper.live_command(),
+                                      "command_from": "process"})
         return sweeper.reading()
 
     def _snapshot():
@@ -1546,8 +1556,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """Measure the receiver's crystal error against a station's 19 kHz stereo pilot.
 
         rtl_fm needs the dongle to itself, so the measurement claims it like any other tenant and
-        holds the claim until rtl_fm is done: a waterfall poll arriving mid-capture waits rather
-        than taking the radio back (the next spectrum poll after it brings the sweep back). ppm is
+        holds the reservation during capture. A waterfall poll that arrives mid-capture waits,
+        and an unconfirmed exit blocks subsequent claims until reap. ppm is
         None with a reason whenever no pilot is there to measure against — a mono station carries
         none, and a weak one reads the same — never a guessed ppm. It is None with a reason, too,
         when the capture held nothing to measure: rtl_fm stalled and was cut off at its deadline,
@@ -1597,7 +1607,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
     }
 
-    def _claim_sdr(target: str, start=None):
+    def _claim_sdr(target: str, start=None, *, reclaim=True):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
         deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
         refusal = unavailable[target]
@@ -1605,7 +1615,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         receiver = consumers.get(target)
         intent = None
         prepare = getattr(receiver, "prepare_start", None)
+        calibration = app.state.ppm_calibration
         try:
+            if reason := calibration.release_failure():
+                raise refusal(reason)
             for consumer in consumers.values():
                 failure = getattr(consumer, "release_failure", None)
                 if failure and (reason := failure()):
@@ -1613,6 +1626,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if prepare is not None:
                 intent = prepare(for_claim=True, deadline=deadline)
             with app.state.radio_arbiter.reserve(target, refusal, deadline):
+                # PPM may have failed to reap since this request joined the queue.
+                if reason := calibration.release_failure():
+                    raise refusal(reason)
+                if not reclaim and getattr(receiver, "released", False):
+                    raise refusal("the radio was released to another program")
                 if prepare is not None:
                     receiver.validate_start(intent)
                 for name, consumer in consumers.items():
@@ -1623,7 +1641,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                             raise refusal(reason)
                 if prepare is not None:
                     return receiver.launch_start(intent, claimed=True)
-                if receiver is not None:
+                if receiver is not None and reclaim:
                     receiver.resume()
                 return start() if start is not None else None
         finally:
@@ -1723,7 +1741,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("sweeper", sweeper.start)
             except SpectrumUnavailable as exc:
                 return _refused("spectrum", exc, {"rows": []})
-            _started("spectrum", {"command": " ".join(sweeper.command())})
+            _started("spectrum", {"command": sweeper.live_command(), "command_from": "process"})
         # The span rides along with every response because the waterfall cannot label its axis
         # (or spot a retune) from bare rows of dB values. bin_size is the requested bin — a
         # maximum rtl_power may undercut — while each row's freq_step reports what the hardware
@@ -1743,7 +1761,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "bin_size": sweeper.bin_size,
             "gain": sweeper.gain,
             # The exact rtl_power line running now, for the panel's command strip.
-            "command": shlex.join(sweeper.command()) if sweeper.running else None,
+            "command": sweeper.live_command(),
             # Whether the newest row is still a reading, by the rule the baseline panel's reading
             # follows (Sweeper.newest): null while it is; "stalled" once rtl_power has gone too
             # long without a pass; "resuming" for the first two passes after, which carry levels
@@ -1794,7 +1812,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("decoder", decoder.start)
             except DecodeUnavailable as exc:
                 return _refused("decode", exc, {"decodes": []}, decoder.watch)
-            _started("decode", {"command": decoder.live_command()})
+            _started("decode", {"command": decoder.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1858,7 +1876,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 detector.start()
             except FlockUnavailable as exc:
                 return _refused("flock", exc, {"detections": []}, detector.watch)
-            _started("flock", {"interface": detector.interface})
+            tool = getattr(detector, "tool", None)
+            _started("flock", {"interface": detector.interface, "tool": tool,
+                                "command": detector.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": detector.live_command(),
@@ -1942,7 +1962,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("rds", decoder.start)
             except RDSUnavailable as exc:
                 return _refused("rds", exc, {"station": None}, decoder.watch)
-            _started("rds", {"freq_hz": decoder.freq_hz})
+            _started("rds", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1966,7 +1987,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("adsb", decoder.start)
             except AdsbUnavailable as exc:
                 return _refused("adsb", exc, {"aircraft": []}, decoder.watch)
-            _started("adsb", {"freq_hz": DEFAULT_ADSB_HZ})
+            _started("adsb", {"freq_hz": DEFAULT_ADSB_HZ, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1991,7 +2013,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("aprs", decoder.start)
             except AprsUnavailable as exc:
                 return _refused("aprs", exc, {"stations": []}, decoder.watch)
-            _started("aprs", {"freq_hz": decoder.freq_hz})
+            _started("aprs", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2015,7 +2038,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("pocsag", decoder.start)
             except PocsagUnavailable as exc:
                 return _refused("pocsag", exc, {"pages": []}, decoder.watch)
-            _started("pocsag", {"freq_hz": decoder.freq_hz})
+            _started("pocsag", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                                "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2039,7 +2063,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("acars", decoder.start)
             except AcarsUnavailable as exc:
                 return _refused("acars", exc, {"messages": []}, decoder.watch)
-            _started("acars", {"freq_hz": decoder.freq_hz})
+            _started("acars", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                               "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2070,7 +2095,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("ais", decoder.start)
             except AisUnavailable as exc:
                 return _refused("ais", exc, {"vessels": []}, decoder.watch)
-            _started("ais", {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ})
+            _started("ais", {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ,
+                             "command": decoder.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2095,7 +2121,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("dmr", decoder.start)
             except DmrUnavailable as exc:
                 return _refused("dmr", exc, {"calls": []}, decoder.watch)
-            _started("dmr", {"freq_hz": decoder.freq_hz})
+            _started("dmr", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2119,7 +2146,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("apt", decoder.start)
             except AptUnavailable as exc:
                 return _refused("apt", exc, {"images": []}, decoder.watch)
-            _started("apt", {"freq_hz": DEFAULT_APT_HZ})
+            _started("apt", {"freq_hz": DEFAULT_APT_HZ, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2142,7 +2170,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("sstv", decoder.start)
             except SstvUnavailable as exc:
                 return _refused("sstv", exc, {"images": []}, decoder.watch)
-            _started("sstv", {"freq_hz": DEFAULT_SSTV_HZ})
+            _started("sstv", {"freq_hz": DEFAULT_SSTV_HZ, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -2174,7 +2203,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         elif not radio.present:
             state = "absent"
         else:
-            busy = app.state.radio_arbiter.busy
+            busy = (app.state.radio_arbiter.busy
+                    or app.state.ppm_calibration.release_failure() is not None)
             for name in sdr_consumers:
                 if busy:
                     break
@@ -2531,6 +2561,31 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             request=request, name="logbook.html",
             context={"title": "Logbook", "back_href": "/operate", "back_label": "Rack",
                      "stamps": rows, "stamp_error": error},
+        )
+
+    @app.get("/field", response_class=HTMLResponse)
+    def field_card(request: Request):
+        """Show each rack instrument's real tool and the exact command the console ran.
+
+        Strictly read-only: starts nothing, claims nothing, logs nothing, never calls .command(),
+        and leaves the rack's remembered instrument untouched.
+        """
+        error = app.state.stamp_error
+        try:
+            events = read_events(app.state.events_path)
+        except OSError as exc:
+            events = []
+            error = error or f"the event log could not be read: {exc}"
+        try:
+            earned = app.state.progress.stamps()
+        except (OSError, sqlite3.Error) as exc:
+            earned = []
+            error = error or f"the logbook could not be read: {exc}"
+        rows = build_field_rows(app.state, events, earned)
+        return templates.TemplateResponse(
+            request=request, name="field.html",
+            context={"title": "Field card", "back_href": "/operate", "back_label": "Rack",
+                     "rows": rows, "field_error": error},
         )
 
     @app.get("/api/challenges/{unit_id}")
