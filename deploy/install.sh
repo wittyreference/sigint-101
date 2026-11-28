@@ -99,7 +99,15 @@ restart_watchdog() {
   local pid w
   local -a found holders session_env run
   mapfile -t found < <(watchdogs)
-  [ "${#found[@]}" -gt 0 ] || return 0
+  if [ "${#found[@]}" -eq 0 ]; then
+    # Held, yet no watchdog holds it: a lookalike, or a kernel whose fdinfo lists no locks. Say
+    # so, or the launcher change would go unapplied without a word.
+    if [ -e "$WATCH_LOCK" ] && ! flock -n "$WATCH_LOCK" true; then
+      echo "install: WARN the course watchdog's lock is held, but no watchdog holding it was" \
+        "found; it was not restarted, and the new launcher applies at the next login" >&2
+    fi
+    return 0
+  fi
   # Anything else holding the lock for good (a kiosk browser an older launcher started without
   # closing fd 9) would keep any new watchdog out, so the working one is left as it is.
   mapfile -t holders < <(lock_holders)
@@ -123,7 +131,8 @@ restart_watchdog() {
     mapfile -t holders < <(watchdogs)
     for w in "${found[@]}"; do
       for pid in "${holders[@]}"; do
-        [ "$pid" = "$w" ] && kill -KILL "${w%%:*}" 2>/dev/null
+        # It may exit between the re-check and the kill, so a failed kill is not an error.
+        if [ "$pid" = "$w" ]; then kill -KILL "${w%%:*}" 2>/dev/null || true; fi
       done
     done
     if ! flock -w 5 "$WATCH_LOCK" true; then
