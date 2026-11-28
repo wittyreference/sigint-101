@@ -228,12 +228,19 @@ class TuningGate:
 
     def wait_idle(self, until: float | None = None) -> None:
         """Wait for every restore under way to finish, or raise TuningBusy at `until`, saying
-        what really holds the radio."""
+        what really holds the radio.
+
+        A claim that had to wait keeps its deadline when it gets the lock back: a wait can time
+        out while another thread holds the condition, and find the gate idle once it reacquires
+        it. That claim's budget is spent, so it is refused rather than let through late."""
         if until is None:
             until = self.claim_budget()
         with self._state:
+            if self._restoring == 0:
+                return
             left = lambda: max(0.0, until - time.monotonic())  # noqa: E731
-            if not self._state.wait_for(lambda: self._restoring == 0, timeout=left()):
+            idle = self._state.wait_for(lambda: self._restoring == 0, timeout=left())
+            if not idle or self.past(until):
                 raise TuningBusy(self._reason())
 
     def admit_claim(self, owner: str | None = None) -> bool:

@@ -53,6 +53,9 @@ function stub() {
 // `band` puts a lesson band on the waterfall's canvas, as the lesson page's data-tune-* do.
 // `clock` stands in for action-clock.js: the stamp the page puts on the learner's action.
 // `gate` is what GET /api/tuning answers: the restore's state and what it waits on.
+// A gate state that never answers: a status GET the console holds.
+const HOLD = Symbol("held status answer");
+
 function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", band = null,
                       clock = null, navigation = null,
                       gate = { restoring: true, waiting_on: null } } = {}) {
@@ -83,6 +86,7 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
     requests.push({ url, method, hz: server.hz, at: now });
     if (url.startsWith("/api/tuning") && method === "GET") {
       const state = typeof gate === "function" ? gate() : gate;
+      if (state === HOLD) return new Promise(() => {});   // an answer that never comes
       return Promise.resolve({ ok: true, status: 200, json: async () => state });
     }
     if (url.startsWith("/api/tuning")) {
@@ -448,4 +452,51 @@ test("a page that names no lesson posts nothing and its panels poll at once", as
   assert.deepEqual(page.requests.filter(r => r.url.startsWith("/api/tuning")), []);
   assert.equal(page.polls("/api/decode").length, 1);
   assert.equal(page.polls("/api/spectrum").length, 1);
+});
+
+// --- round 7 (Codex D-146 F2): the rail names only an activity the console has just confirmed --
+
+test("a held status answer stops naming the calibration, and the rail asks again", async () => {
+  // Codex D-146 F2, probe 1: one status GET was held after the calibration ended. The rail sent no
+  // further request and still said "measuring ppm". Each status request now has a time limit; an
+  // unconfirmed status clears the activity, and the rail asks again.
+  let state = { restoring: true, waiting_on: "calibration" };
+  const page = lessonPage({ panels: ["decode"], gate: () => state });
+  await page.advance(TIMEOUT_MS);
+  assert.deepEqual(page.note.lines, ["Radio busy", "measuring ppm"]);
+  state = HOLD;                                   // the next answer never comes
+  await page.advance(1000 + 2000);
+  assert.notDeepEqual(page.note.lines, ["Radio busy", "measuring ppm"],
+                      "the rail still named a calibration it could no longer confirm");
+  assert.ok(!/^tuning/i.test(page.note.lines[0]), "the rail named tuning it had not confirmed");
+  assert.equal(page.note.hidden, false, "the rail went quiet while the restore was pending");
+  const asked = page.requests.filter(r => r.method === "GET").length;
+  state = { restoring: true, waiting_on: null };  // the console answers again: it is tuning
+  await page.advance(2000);
+  assert.ok(page.requests.filter(r => r.method === "GET").length > asked,
+            "the rail stopped asking after one held answer");
+  assert.deepEqual(page.note.lines, ["Tuning…", ""]);
+});
+
+test("an idle gate with the restore's answer still in flight shows no activity", async () => {
+  // Codex D-146 F2, probe 2: the console had finished a refused restore and reported idle while the
+  // POST's answer was still on its way, and the rail kept saying "Tuning…".
+  const page = lessonPage({ panels: ["decode"], gate: { restoring: false, waiting_on: null } });
+  await page.advance(TIMEOUT_MS);
+  assert.equal(page.note.hidden, false);
+  assert.ok(!/^tuning/i.test(page.note.lines[0]), `the rail said "${page.note.lines[0]}"`);
+  assert.notDeepEqual(page.note.lines, ["Radio busy", "measuring ppm"]);
+  for (const line of page.note.lines) assert.ok(line.length <= RAIL_CHARS, line);
+  await page.advance(2000);
+  assert.ok(!/^tuning/i.test(page.note.lines[0]), "a later poll of the idle gate said tuning");
+  await page.answer(503, { reason: "rtl_433 did not stop" });
+  assert.deepEqual(page.note.lines.slice(0, 1), ["Not retuned"]);
+});
+
+test("before the console has confirmed anything, the rail names no activity", async () => {
+  const page = lessonPage({ panels: ["decode"], gate: () => HOLD });
+  await page.advance(TIMEOUT_MS);
+  assert.equal(page.note.hidden, false);
+  assert.ok(!/^tuning/i.test(page.note.lines[0]), `the rail said "${page.note.lines[0]}"`);
+  assert.notDeepEqual(page.note.lines, ["Radio busy", "measuring ppm"]);
 });

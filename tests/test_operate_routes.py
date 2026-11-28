@@ -1630,3 +1630,66 @@ def test_a_measured_ppm_is_part_of_the_provenance(tmp_path):
     [event] = _events(tmp_path, "reception")
     assert event["payload"]["ppm"] == {"correction": "raw", "measured_ppm": 3.5}
     json.dumps(event)   # the whole record is plain JSON
+
+
+# --- round 7 (Codex D-146 F1): a claim that waited on a restore keeps its deadline ------------
+
+
+def _end_the_restore_late(gate, until):
+    """Hold the gate's condition past `until`, then end the restore under it: the waiting claim's
+    wait has timed out, and the gate is idle by the time it gets the lock back."""
+    with gate._state:
+        time.sleep(max(0.0, until - time.monotonic()) + 0.1)
+        gate.end_restore()
+
+
+def test_the_gate_refuses_a_claim_whose_wait_ran_out_even_if_the_restore_ended_meanwhile():
+    # Codex D-146 F1: the condition wait accepted an idle gate when it got the lock back after its
+    # timeout, so a claim that had waited out its whole budget went on to launch.
+    gate = radio_control.TuningGate()
+    gate.begin_restore(gate.now_ms())
+    until = time.monotonic() + 0.2
+    outcome = {}
+
+    def claim():
+        try:
+            gate.wait_idle(until=until)
+            outcome["result"] = "admitted"
+        except radio_control.TuningBusy as exc:
+            outcome["result"] = str(exc)
+
+    waiter = threading.Thread(target=claim, daemon=True)
+    waiter.start()
+    time.sleep(0.05)                        # the claim is waiting on the restore
+    _end_the_restore_late(gate, until)
+    waiter.join(JOIN_S)
+    assert not waiter.is_alive()
+    assert outcome["result"] == radio_control.TUNING_REASON
+
+
+def test_an_idle_gate_still_admits_a_claim_at_once():
+    # No restore: nothing to wait for, so no deadline applies.
+    gate = radio_control.TuningGate()
+    gate.wait_idle(until=time.monotonic() - 1.0)
+
+
+def test_a_claims_first_wait_on_a_restore_is_refused_at_its_deadline(tmp_path, monkeypatch):
+    # Codex D-146 F1, through the route: the first APRS poll waited on a restore, the restore
+    # ended just as the wait ran out, and the claim launched past its budget. It is refused, and
+    # nothing starts.
+    monkeypatch.setattr(radio_control, "TUNING_WAIT_S", 0.3)
+    spawned = []
+    packs = _radio_pack(tmp_path / "packs")
+    with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned),
+                 sweeper_factory=_sweeper, pack_dir=packs) as client:
+        gate = client.app.state.tuning_gate
+        gate.begin_restore(gate.now_ms())
+        started = time.monotonic()
+        poll = _Request(lambda: client.get("/api/aprs"))
+        poll.start()
+        time.sleep(0.05)                    # the claim is waiting on the restore
+        _end_the_restore_late(gate, started + radio_control.TUNING_WAIT_S)
+        answer = poll.finish()
+        assert answer.status_code == 503
+        assert answer.json()["reason"] == radio_control.TUNING_REASON
+        assert spawned == []

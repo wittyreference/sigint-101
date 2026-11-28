@@ -7,7 +7,7 @@
   // How long the panels wait for the restore before polling anyway. Retuning stops each moved
   // decoder, which is usually quick; a stuck tool can hold it for several seconds. The console
   // keeps that safe on its own (a poll's claim waits for the restore, and the restore never undoes
-  // a newer tune), so this only decides when the panels ask and when the rail says "Tuning…".
+  // a newer tune), so this only decides when the panels ask and when the rail starts to speak.
   var TIMEOUT_MS = 3000;
 
   var script = document.currentScript;
@@ -80,26 +80,58 @@
     return ["Not retuned", typeof reason === "string" && reason ? reason : "error " + res.status];
   }
 
-  // Past the timeout the rail says what the console is doing: a restore held up by a ppm
-  // calibration (which holds the radio for its capture) is "measuring", never "Tuning…". The
-  // console's gate state is a read-only GET, asked again every WAIT_POLL_MS while this restore is
-  // pending, so the rail follows the calibration's end; it stops once the restore answers.
+  // Past the timeout the rail says what the console is doing, and only what the console has just
+  // confirmed. The console's gate state is a read-only GET, asked again every WAIT_POLL_MS while
+  // this restore is pending, and it stops once the restore answers. Each ask has a time limit
+  // (STATUS_TIMEOUT_MS); an answer that is late, failed or not understood confirms nothing.
+  // - A restore held up by a ppm calibration (which holds the radio for its capture) is
+  //   "measuring", never "Tuning…".
+  // - A restore under way is "Tuning…".
+  // - Anything else is a plain wait that names no activity: before the first answer, after an
+  //   unconfirmed one, and when the gate is idle while this restore's own answer is still on its
+  //   way (a refused restore has finished; its answer will say why).
   var WAIT_POLL_MS = 1000;
+  var STATUS_TIMEOUT_MS = 1500;
+  var WAITING = "Waiting…";
+
+  // The gate's state, or null when it cannot be confirmed in time. Resolves exactly once.
+  function gateState() {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var abort = typeof AbortController === "function" ? new AbortController() : null;
+      function finish(state) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(limit);
+        resolve(state && typeof state === "object" ? state : null);
+      }
+      var limit = setTimeout(function () {
+        if (abort) abort.abort();
+        finish(null);
+      }, STATUS_TIMEOUT_MS);
+      var opts = { cache: "no-store" };
+      if (abort) opts.signal = abort.signal;
+      fetch("/api/tuning", opts)
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(finish, function () { finish(null); });
+    });
+  }
 
   function sayWaiting(isCurrent) {
-    say("Tuning…");
+    say(WAITING);
     (function ask() {
       if (!isCurrent()) return;
-      fetch("/api/tuning", { cache: "no-store" })
-        .then(function (res) { return res.ok ? res.json() : null; })
-        .then(function (state) {
-          if (!isCurrent()) return;
-          if (state && state.waiting_on === "calibration") say("Radio busy", "measuring ppm");
-          else say("Tuning…");
-          setTimeout(ask, WAIT_POLL_MS);
-        }, function () {
-          if (isCurrent()) setTimeout(ask, WAIT_POLL_MS);
-        });
+      gateState().then(function (state) {
+        if (!isCurrent()) return;
+        if (state && state.restoring && state.waiting_on === "calibration") {
+          say("Radio busy", "measuring ppm");
+        } else if (state && state.restoring) {
+          say("Tuning…");
+        } else {
+          say(WAITING);
+        }
+        setTimeout(ask, WAIT_POLL_MS);
+      });
     })();
   }
 
