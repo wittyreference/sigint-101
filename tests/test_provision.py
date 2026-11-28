@@ -222,14 +222,19 @@ def ais_install(box):
           '[[ "$*" != *install* ]] || exit 1\n'
           f'printf "%s\\n" "#!{BASH}" "echo ${{CAPABILITY:-sigint101-ais-udp-v1}}" > rtl_ais\n'
           'chmod +x rtl_ais')
-    for tool in ("bash", "chmod", "cp"):
+    for tool in ("bash", "chmod", "cp", "touch"):
         (box.bin / tool).symlink_to(shutil.which(tool))
     _stub(box.bin / "sudo",
           f'echo "sudo $*" >> "{box.log}"\n'
           'case "$1" in\n'
-          f'  tee) if [[ "$2" == "{stamp_dir}/"* ]]; then cat >"$2"; else cat >/dev/null; fi ;;\n'
+          f'  tee) if [[ "$2" == "{stamp_dir}/{companion.name}" && '
+          '"${FAIL_AIS_STAMP:-0}" == 1 ]]; then\n'
+          '      cat >/dev/null; exit 1; fi\n'
+          f'    if [[ "$2" == "{stamp_dir}/"* ]]; then cat >"$2"; else cat >/dev/null; fi ;;\n'
           f'  install) if [[ "${{@: -1}}" == "{companion}" ]]; then\n'
           f'    cp rtl_ais "{companion}"; fi ;;\n'
+          f'  touch|rm) if [[ "${{@: -1}}" == "{stamp_dir}/{companion.name}.pending" ]]; then\n'
+          '    exec "$@"; fi ;;\n'
           '  make) exit 1 ;;\n'
           'esac\n'
           'exit 0')
@@ -275,6 +280,26 @@ def test_provision_ais_build_failure_does_not_stamp(box, ais_install, failure):
     result = box.run(script=script)
     assert result.returncode != 0, result.stdout + result.stderr
     assert not companion.exists() and not stamp.exists()
+
+
+def test_provision_retries_an_ais_install_interrupted_before_stamping(box, ais_install):
+    script, patch, _, _, companion, stamp = ais_install
+    box.env["FAIL_AIS_STAMP"] = "1"
+    interrupted = box.run(script=script)
+    assert interrupted.returncode != 0, interrupted.stdout + interrupted.stderr
+    assert companion.is_file() and not stamp.exists()
+
+    check = box.run("--check", script=script)
+    assert "would  build rtl_ais-sigint101" in check.stdout
+    assert "unmanaged" not in check.stdout and not stamp.exists()
+
+    del box.env["FAIL_AIS_STAMP"]
+    patch.write_text("patch revision two\n", encoding="utf-8")
+    retried = box.run(script=script)
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    assert "built rtl_ais-sigint101" in retried.stdout
+    assert stamp.is_file() and not stamp.with_suffix(".pending").exists()
+    assert box.calls().count("patch ") == 2
 
 
 def test_provision_refuses_an_incompatible_unmanaged_companion(box, ais_install):

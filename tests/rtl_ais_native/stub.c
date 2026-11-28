@@ -13,6 +13,7 @@
 
 struct rtlsdr_dev { atomic_int reading; };
 static struct rtlsdr_dev device;
+static _Thread_local int send_error;
 
 uint32_t rtlsdr_get_device_count(void)
 {
@@ -67,6 +68,13 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
             break;
         if (cmd == 'X')
             close(STDOUT_FILENO);
+        switch (cmd) {
+        case 'P': send_error = EPERM; break;
+        case 'A': send_error = EAGAIN; break;
+        case 'B': send_error = ENOBUFS; break;
+        case 'I': send_error = EINTR; break;
+        default: send_error = 0; break;
+        }
         emit("!AIVDM,1,1,,A,fixture,0*00\r\n", 1, 1);
         emit("!AIVDM,2,1,1,A,first,0*00\r\n", 2, 1);
         emit("!AIVDM,2,2,1,A,last,2*00\r\n", 2, 2);
@@ -87,6 +95,10 @@ ssize_t __real_send(int fd, const void *buf, size_t len, int flags);
 
 ssize_t __wrap_send(int fd, const void *buf, size_t len, int flags)
 {
+    if (send_error) {
+        errno = send_error;
+        return -1;
+    }
     ssize_t result = __real_send(fd, buf, len, flags);
     if (result < 0 && errno == ECONNREFUSED) {
         fputs("stub: ECONNREFUSED\n", stderr);

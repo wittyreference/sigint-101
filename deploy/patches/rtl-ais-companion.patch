@@ -42,7 +42,7 @@
 +	}
 +
 +	int private_output = argc > 1 && strcmp(argv[1], SIGINT101_MODE) == 0;
-+	const char *device_arg = NULL;
++	char *device_arg = NULL;
 +	if (private_output) {
 +		if (!aisdecoder_use_udp_stdout()) {
 +			fprintf(stderr, "%s requires a connected IPv4 loopback UDP socket on stdout\n",
@@ -331,12 +331,12 @@
  int send_nmea( const char *sentence, unsigned int length) {
 +#ifndef WIN32
 +	if (udp_stdout) {
-+		/* The receiver can close first during handoff, leaving an ICMP error
-+		 * on this connected socket. A dropped packet does not stop the radio. */
++		/* A receiver that closes first during handoff can leave ECONNREFUSED. */
 +		if (!aisdecoder_udp_failed() &&
 +		    send(STDOUT_FILENO, sentence, length, MSG_DONTWAIT | MSG_NOSIGNAL) < 0) {
 +			int error = errno;
-+			if (error == EBADF || error == ENOTSOCK || error == EPIPE) {
++			if (error != ECONNREFUSED && error != EAGAIN && error != EWOULDBLOCK &&
++			    error != ENOBUFS && error != EINTR) {
 +				fprintf(stderr, "AIS output socket failed: %s\n", strerror(error));
 +				atomic_store(&udp_failed, 1);
 +			}

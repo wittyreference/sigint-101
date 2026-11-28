@@ -384,11 +384,13 @@ ensure_ais_companion() {
   local name="rtl_ais-sigint101" target="/usr/local/bin/rtl_ais-sigint101"
   local patch_file="$PROVISION_DIR/patches/rtl-ais-companion.patch"
   local stamp="$STAMP_DIR/$name" have digest revision
+  local pending="$stamp.pending"
   have="$(command -v "$name" || true)"
   if [ -z "$have" ] && { [ -e "$target" ] || [ -L "$target" ]; }; then
     have="$target"
   fi
-  if [ -n "$have" ] && { [ ! -f "$stamp" ] || [ "$have" != "$target" ] || [ -L "$target" ]; }; then
+  if [ -n "$have" ] && { [ "$have" != "$target" ] || [ -L "$target" ] ||
+      { [ ! -f "$stamp" ] && [ ! -f "$pending" ]; }; }; then
     if ais_companion_capable "$have"; then
       ok "$name: $have (unmanaged, compatible; left as is)"
       return 0
@@ -402,7 +404,8 @@ ensure_ais_companion() {
   fi
   digest="$(sha256sum "$patch_file")"
   revision="$RTL_AIS_REPO@$RTL_AIS_PIN+${digest%% *}"
-  if [ -n "$have" ] && [ "$(cat "$stamp")" = "$revision" ] && ais_companion_capable "$have"; then
+  if [ -n "$have" ] && [ ! -f "$pending" ] && [ "$(cat "$stamp")" = "$revision" ] &&
+      ais_companion_capable "$have"; then
     ok "$name: $have @ ${RTL_AIS_PIN:0:10}, patch ${digest:0:12}"
     return 0
   fi
@@ -418,11 +421,14 @@ ensure_ais_companion() {
       -o cache_dir="$SRC_DIR/$name/.pytest_cache" "$PROVISION_DIR/../tests/test_rtl_ais_native.py"
     make -j"$(nproc)"
     ais_companion_capable ./rtl_ais || die "$name build failed its capability query"
+    # Keep an interrupted install managed until a verified binary has its stamp.
+    sudo mkdir -p "$STAMP_DIR"
+    sudo touch "$pending"
     sudo install -m 0755 rtl_ais "$target"
   )
   ais_companion_capable "$target" || die "$name installation failed its capability query"
-  sudo mkdir -p "$STAMP_DIR"
   printf '%s\n' "$revision" | sudo tee "$stamp" >/dev/null
+  sudo rm -f "$pending"
   did "built $name @ ${RTL_AIS_PIN:0:10}, patch ${digest:0:12}"
 }
 
