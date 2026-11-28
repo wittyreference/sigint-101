@@ -31,6 +31,7 @@ from .hardware import (
     rtlsdr_radio_for_run,
 )
 from .receiver_lifecycle import PartialLaunch, SupervisedReceiver
+from .receiver_socket import PortOccupied, bind_receiver
 
 # Where the ADS-B lesson listens. Mode S transponders answer on 1090 MHz worldwide; dump1090 is
 # fixed to it, so this is shown to the learner rather than tuned.
@@ -59,7 +60,7 @@ class AdsbUnavailable(RuntimeError):
     """The ADS-B feed cannot be read. Never a reason to invent traffic — the scope stays empty."""
 
 
-class AdsbPortOccupied(AdsbUnavailable):
+class AdsbPortOccupied(AdsbUnavailable, PortOccupied):
     """dump1090's local SBS output port cannot be bound."""
 
 
@@ -304,15 +305,12 @@ class _Feed:
 
 def _probe_sbs_port():
     # Match dump1090's bind options so a previous run's TIME_WAIT does not look occupied.
-    address = f"{SBS_HOST}:{SBS_PORT}"
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            probe.bind((SBS_HOST, SBS_PORT))
+        with bind_receiver((SBS_HOST, SBS_PORT), socket.SOCK_STREAM, reuse=True,
+                           occupied=AdsbPortOccupied):
+            pass
     except OSError as exc:
-        if exc.errno == errno.EADDRINUSE:
-            raise AdsbPortOccupied(f"TCP port {address} is already in use.") from exc
-        raise AdsbUnavailable(f"cannot check TCP port {address}: {exc}") from exc
+        raise AdsbUnavailable(f"cannot check TCP port {SBS_HOST}:{SBS_PORT}: {exc}") from exc
 
 
 def _tcp_endpoint(endpoint, family):

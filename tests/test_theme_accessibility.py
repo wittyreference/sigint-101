@@ -264,6 +264,7 @@ def test_glow_is_kept_only_on_short_display_titles():
     for selector in (
         '.stage-panel[data-stage="predict"] .stage-panel__title',
         '.stage-panel[data-stage="check"] .stage-panel__title',
+        '.stage-panel[data-stage="recall"] .stage-panel__title',
     ):
         assert _decls_for(selector).get("text-shadow") == "none", selector
     assert "var(--glow" not in _decls_for(".exam__question").get("text-shadow", "")
@@ -300,6 +301,7 @@ def test_instructions_and_status_values_are_at_least_18px():
         ".stage-panel__body",
         '.stage-panel[data-stage="predict"] .stage-panel__title',
         '.stage-panel[data-stage="check"] .stage-panel__title',
+        '.stage-panel[data-stage="recall"] .stage-panel__title',
         ".predict__hint",
         ".predict__committed-note",
         ".verdict__line",
@@ -342,6 +344,7 @@ def test_predict_and_check_prompts_use_body_font_at_body_size():
     for selector in (
         '.stage-panel[data-stage="predict"] .stage-panel__title',
         '.stage-panel[data-stage="check"] .stage-panel__title',
+        '.stage-panel[data-stage="recall"] .stage-panel__title',
     ):
         decls = _decls_for(selector)
         assert decls.get("font-family") == "var(--font-mono)", (selector, decls.get("font-family"))

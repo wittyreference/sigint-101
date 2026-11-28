@@ -281,3 +281,132 @@ def test_a_blank_place_is_refused(tmp_path):
     with pytest.raises(ValueError):
         prog.record_place("rack", "  ")
     prog.close()
+
+
+# --- retrieval cards: additive table and locked writes ----------------------------------------
+
+
+def _dump_tables(db_path: Path, tables: tuple[str, ...]) -> dict[str, list[tuple]]:
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        out: dict[str, list[tuple]] = {}
+        for table in tables:
+            cols = [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
+            quote_sql = ", ".join(f'quote("{c}")' for c in cols)
+            order_sql = ", ".join(f'"{c}"' for c in cols)
+            out[table] = conn.execute(
+                f'SELECT {quote_sql} FROM "{table}" ORDER BY {order_sql}, {quote_sql}'
+            ).fetchall()
+        return out
+    finally:
+        conn.close()
+
+
+def test_preexisting_progress_db_gains_retrieval_with_every_old_row_unchanged(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "progress.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE progress (lesson_id INTEGER PRIMARY KEY, opened INTEGER NOT NULL DEFAULT 0,"
+        " completed INTEGER NOT NULL DEFAULT 0, updated REAL);"
+        "CREATE TABLE responses (lesson_id INTEGER NOT NULL, kind TEXT NOT NULL,"
+        " body TEXT NOT NULL, updated REAL, correct INTEGER, PRIMARY KEY (lesson_id, kind));"
+        "CREATE TABLE stages (lesson_id INTEGER PRIMARY KEY, stage TEXT NOT NULL,"
+        " furthest INTEGER NOT NULL DEFAULT 0, updated REAL);"
+        "CREATE TABLE places (name TEXT PRIMARY KEY, value TEXT NOT NULL, updated REAL);"
+        "CREATE TABLE stamps (instrument TEXT PRIMARY KEY, first_ts REAL NOT NULL,"
+        " count INTEGER NOT NULL, provenance TEXT NOT NULL, digest TEXT NOT NULL);"
+        "CREATE TABLE stamp_events (digest BLOB PRIMARY KEY) WITHOUT ROWID;"
+        "CREATE TABLE sort_answers (lesson_id INTEGER NOT NULL, card_key TEXT NOT NULL,"
+        " choice TEXT NOT NULL, correct INTEGER NOT NULL, updated REAL,"
+        " PRIMARY KEY (lesson_id, card_key));"
+        "INSERT INTO progress VALUES(1, 1, 1, 100.0);"
+        "INSERT INTO responses VALUES(1, 'prediction', 'a', 100.0, 1);"
+        "INSERT INTO responses VALUES(1, 'check', 'b', 101.0, 1);"
+        "INSERT INTO stages VALUES(1, 'check', 6, 101.0);"
+        "INSERT INTO places VALUES('rack', 'ism', 102.0);"
+        "INSERT INTO stamps VALUES('ism', 103.0, 1, '{\"tool\":\"rtl_433\"}', 'aa');"
+        "INSERT INTO stamp_events VALUES(X'aa');"
+        "INSERT INTO sort_answers VALUES(5, 'fm-rx', 'legal', 1, 104.0);"
+    )
+    conn.commit()
+    conn.close()
+
+    old_tables = (
+        "progress", "responses", "stages", "places", "stamps", "stamp_events", "sort_answers",
+    )
+    before = _dump_tables(db, old_tables)
+
+    prog = Progress(db)
+    assert prog.get_retrieval([1]) == {}
+    prog.close()
+
+    assert _dump_tables(db, old_tables) == before
+    conn = sqlite3.connect(str(db))
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(retrieval)")]
+    finally:
+        conn.close()
+    assert cols == ["lesson_id", "box", "last_seen", "seen", "correct", "last_choice"]
+
+
+def test_enroll_recall_never_overwrites_an_existing_row(tmp_path):
+    prog = Progress(tmp_path / "progress.db")
+    t0 = 1_700_000_000.0
+    prog.enroll_recall([1, 2], now=t0)
+    assert prog.get_retrieval([1, 2]) == {
+        1: {"lesson_id": 1, "box": 1, "last_seen": t0, "seen": 0, "correct": 0,
+            "last_choice": None},
+        2: {"lesson_id": 2, "box": 1, "last_seen": t0, "seen": 0, "correct": 0,
+            "last_choice": None},
+    }
+    prog.record_recall(1, "beta", correct=True, now=t0 + 86_400)
+    prog.enroll_recall([1, 2, 3], now=t0 + 2 * 86_400)
+    rows = prog.get_retrieval([1, 2, 3])
+    assert rows[1]["box"] == 2 and rows[1]["seen"] == 1 and rows[1]["last_choice"] == "beta"
+    assert rows[2]["last_seen"] == t0
+    assert rows[3]["last_seen"] == t0 + 2 * 86_400
+    prog.close()
+
+
+def test_record_recall_writes_only_retrieval_and_not_due_writes_nothing(tmp_path):
+    from sigint101.progress import RecallNotDue
+
+    db = tmp_path / "progress.db"
+    prog = Progress(db)
+    prog.mark_completed(1)
+    prog.record_prediction(1, "a", correct=True)
+    prog.record_stage(1, "explain", 5)
+    prog.record_place("rack", "ism")
+    prog.record_sort_answer(5, "fm-rx", "legal", correct=True)
+    prog.record_stamps(({
+        "instrument": "ism", "first_ts": 100.0, "provenance": {"tool": "rtl_433"},
+        "digest": "00" * 32,
+    },))
+
+    other_tables = (
+        "progress", "responses", "stages", "places", "stamps", "stamp_events", "sort_answers",
+    )
+    t0 = 1_700_000_000.0
+    prog.enroll_recall([1], now=t0)
+    before_others = _dump_tables(db, other_tables)
+    before_ret = _dump_tables(db, ("retrieval",))
+
+    # Missing row or not yet due -> RecallNotDue and zero writes.
+    with pytest.raises(RecallNotDue):
+        prog.record_recall(99, "beta", correct=True, now=t0 + 86_400)
+    with pytest.raises(RecallNotDue):
+        prog.record_recall(1, "beta", correct=True, now=t0 + 3600)
+    assert _dump_tables(db, ("retrieval",)) == before_ret
+    assert _dump_tables(db, other_tables) == before_others
+
+    # Due at +1 day -> updates ONLY retrieval.
+    new_box = prog.record_recall(1, "beta", correct=True, now=t0 + 86_400)
+    assert new_box == 2
+    assert _dump_tables(db, other_tables) == before_others
+    row = prog.get_retrieval([1])[1]
+    assert (row["box"], row["seen"], row["correct"], row["last_choice"]) == (2, 1, 1, "beta")
+    prog.close()

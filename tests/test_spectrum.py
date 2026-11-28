@@ -392,8 +392,9 @@ class FedProc(FakeProc):
     between, and ends when stopped or when it exits with a status of its own, as a pulled dongle is
     expected to end it."""
 
-    def __init__(self):
+    def __init__(self, args=()):
         super().__init__([])
+        self.args = list(args)
         self._lines = queue.Queue()
         self.returncode = None
         self.stdout = iter(self._lines.get, None)
