@@ -82,16 +82,25 @@
 
   // Past the timeout the rail says what the console is doing: a restore held up by a ppm
   // calibration (which holds the radio for its capture) is "measuring", never "Tuning…". The
-  // console's gate state is a read-only GET; until it answers, or if it cannot, "Tuning…".
+  // console's gate state is a read-only GET, asked again every WAIT_POLL_MS while this restore is
+  // pending, so the rail follows the calibration's end; it stops once the restore answers.
+  var WAIT_POLL_MS = 1000;
+
   function sayWaiting(isCurrent) {
     say("Tuning…");
-    fetch("/api/tuning", { cache: "no-store" })
-      .then(function (res) { return res.ok ? res.json() : null; })
-      .then(function (state) {
-        if (isCurrent() && state && state.waiting_on === "calibration") {
-          say("Radio busy", "measuring ppm");
-        }
-      }, function () { /* the restore's own answer will say what happened */ });
+    (function ask() {
+      if (!isCurrent()) return;
+      fetch("/api/tuning", { cache: "no-store" })
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (state) {
+          if (!isCurrent()) return;
+          if (state && state.waiting_on === "calibration") say("Radio busy", "measuring ppm");
+          else say("Tuning…");
+          setTimeout(ask, WAIT_POLL_MS);
+        }, function () {
+          if (isCurrent()) setTimeout(ask, WAIT_POLL_MS);
+        });
+    })();
   }
 
   var open;
@@ -103,11 +112,14 @@
   // page goes on as soon as it is sent; nothing here waits on the console. The panels below hold
   // their first poll on `ready`, which opens when the restore answers or, failing that, at the
   // timeout. Only the newest restore's answer is shown.
-  function restore() {
+  function restore(opening) {
     var run = ++latest;
     var current = function () { return run === latest; };
     var answered = false;
-    var stamp = root.ActionClock && root.ActionClock.stamp();
+    // The first restore is the learner's act of opening the lesson, so it is stamped at the
+    // page's navigation start, however late this script ran; a later one (a bfcache show) now.
+    var clock = root.ActionClock;
+    var stamp = clock && (opening && clock.navigationStamp ? clock.navigationStamp() : clock.stamp());
     var url = "/api/tuning?lesson_id=" + encodeURIComponent(lessonId) +
       (stamp ? "&epoch=" + encodeURIComponent(stamp.epoch) + "&at=" + stamp.at : "");
 
@@ -129,7 +141,7 @@
       });
   }
 
-  restore();
+  restore(true);
 
   // Shown again from the back/forward cache (Back, after another lesson retuned the radios): the
   // page is as it was left, with no load to post its restore, so it posts it again. Its clock
@@ -137,7 +149,7 @@
   // the stamp taken now is current, and the restore is newer than the other lesson's.
   if (root.addEventListener) {
     root.addEventListener("pageshow", function (event) {
-      if (event && event.persisted) restore();
+      if (event && event.persisted) restore(false);
     });
   }
 

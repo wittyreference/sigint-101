@@ -54,7 +54,8 @@ function stub() {
 // `clock` stands in for action-clock.js: the stamp the page puts on the learner's action.
 // `gate` is what GET /api/tuning answers: the restore's state and what it waits on.
 function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", band = null,
-                      clock = null, gate = { restoring: true, waiting_on: null } } = {}) {
+                      clock = null, navigation = null,
+                      gate = { restoring: true, waiting_on: null } } = {}) {
   let now = 0;
   let seq = 0;
   const timers = [];
@@ -81,7 +82,8 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
     const method = (opts && opts.method) || "GET";
     requests.push({ url, method, hz: server.hz, at: now });
     if (url.startsWith("/api/tuning") && method === "GET") {
-      return Promise.resolve({ ok: true, status: 200, json: async () => gate });
+      const state = typeof gate === "function" ? gate() : gate;
+      return Promise.resolve({ ok: true, status: 200, json: async () => state });
     }
     if (url.startsWith("/api/tuning")) {
       if (restore === "lost") return Promise.reject(new TypeError("Failed to fetch"));
@@ -126,7 +128,12 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
     addEventListener(type, fn) { this.listeners[type] = fn; },
   };
   context.window = context;
-  if (clock) context.ActionClock = { stamp: () => (typeof clock === "function" ? clock() : clock) };
+  if (clock) {
+    const stamp = () => (typeof clock === "function" ? clock() : clock);
+    // The opening restore is stamped at the navigation start (Codex D-139 F2); a test that gives
+    // a `navigation` stamp sees it there.
+    context.ActionClock = { stamp, navigationStamp: () => (navigation || stamp()) };
+  }
 
   const run = (name, attrs = {}) => {
     context.document.currentScript = { getAttribute: key => (key in attrs ? attrs[key] : null) };
@@ -258,6 +265,38 @@ test("a restore held up by a calibration says the radio is busy measuring, not t
                      .map(r => r.url), ["/api/tuning"]);
   await page.answer(200, { tuned: true, lesson_id: 7 });
   assert.equal(page.note.hidden, true);
+});
+
+test("the rail keeps the waiting reason current until the restore answers", async () => {
+  // Codex D-139 F4: the rail read the gate's state once, so it still said "measuring ppm" after
+  // the calibration had ended and the restore was tuning. It now asks again while the restore is
+  // pending, and stops once it answers.
+  let state = { restoring: true, waiting_on: "calibration" };
+  const page = lessonPage({ panels: ["decode"], gate: () => state });
+  await page.advance(TIMEOUT_MS);
+  assert.deepEqual(page.note.lines, ["Radio busy", "measuring ppm"]);
+  state = { restoring: true, waiting_on: null };          // the calibration ends
+  await page.advance(1000);
+  assert.deepEqual(page.note.lines, ["Tuning…", ""]);
+  await page.answer(200, { tuned: true, lesson_id: 7 });
+  assert.equal(page.note.hidden, true);
+  const asked = page.requests.filter(r => r.method === "GET").length;
+  await page.advance(5000);
+  assert.equal(page.requests.filter(r => r.method === "GET").length, asked,
+               "the rail kept asking after the restore answered");
+});
+
+test("the opening restore is stamped at the navigation start, a bfcache show stamped afresh", async () => {
+  // Codex D-139 F2.
+  let at = 3000;
+  const page = lessonPage({ panels: ["decode"], navigation: { epoch: "5eed", at: 994 },
+                            clock: () => ({ epoch: "5eed", at }) });
+  await page.answer(200, { tuned: true, lesson_id: 7 });
+  at = 9000;
+  await page.pageshow(true);
+  assert.deepEqual(page.requests.filter(r => r.method === "POST").map(r => r.url),
+                   ["/api/tuning?lesson_id=7&epoch=5eed&at=994",
+                    "/api/tuning?lesson_id=7&epoch=5eed&at=9000"]);
 });
 
 test("a restore still tuning past the timeout says so once the console confirms it", async () => {

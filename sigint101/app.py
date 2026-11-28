@@ -1792,10 +1792,6 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         while True:
             intent = None
             try:
-                # A claim a restore sent back tries again only while its deadline lasts, even if
-                # the restore has ended meanwhile: its time to wait on restores is spent.
-                if sent_back and gate.past(budget):
-                    raise refusal(gate.busy_reason())
                 if reason := calibration.release_failure():
                     raise refusal(reason)
                 for consumer in consumers.values():
@@ -1810,6 +1806,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     gate.wait_idle(until=budget)
                 except TuningBusy as exc:
                     raise refusal(str(exc)) from exc
+                # A claim a restore sent back tries again only while its deadline lasts, checked
+                # once its gate wait is over and before any new arbiter wait: an idle gate after
+                # the deadline does not let it through, whenever the restore ended.
+                if sent_back and gate.past(budget):
+                    raise refusal(gate.busy_reason())
                 deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
                 if prepare is not None:
                     intent = prepare(for_claim=True, deadline=deadline)

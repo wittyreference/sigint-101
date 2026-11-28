@@ -81,6 +81,62 @@ test("a document the browser served from its cache stamps nothing, so arrival or
                                       responseStart: 5 })), true);
 });
 
+// Codex D-139 F1: storage shared by every tab of one browser, as localStorage is.
+function sharedStorage() {
+  const stored = {};
+  return { getItem: k => (k in stored ? stored[k] : null),
+           setItem: (k, v) => { stored[k] = String(v); }, stored };
+}
+
+test("one browser keeps one conversion: the tightest any of its tabs has seen", () => {
+  // A delay between the console's render and the response reaching the browser only ever makes a
+  // tab's estimate of the console's clock lag. Tab B's response was held 950 ms; tab A's was not.
+  // B's later action must still stamp after A's earlier one.
+  const storage = sharedStorage();
+  let now = 0;
+  now = 101;
+  const a = clock.makeClock({ epoch: "5eed", ms: 1000 }, () => now, 101, storage);
+  now = 1452;
+  const b = clock.makeClock({ epoch: "5eed", ms: 1500 }, () => now, 1450, storage);
+  now = 2000;
+  const early = a.stamp().at;
+  now = 2100;
+  const late = b.stamp().at;
+  assert.ok(late > early, `the later action stamped ${late}, before the earlier one's ${early}`);
+  assert.equal(late, 2999);
+  assert.ok(Object.keys(storage.stored).some(k => k.includes("5eed")), "kept per boot");
+});
+
+test("a tab opened before the tightest one picks up its conversion at the next stamp", () => {
+  const storage = sharedStorage();
+  let now = 1452;
+  const b = clock.makeClock({ epoch: "5eed", ms: 1500 }, () => now, 1450, storage);  // held 950
+  now = 101;
+  clock.makeClock({ epoch: "5eed", ms: 1000 }, () => now, 101, storage);            // prompt
+  now = 2100;
+  assert.equal(b.stamp().at, 2999);
+});
+
+test("without working storage a tab keeps its own conversion and still stamps", () => {
+  const broken = { getItem() { throw new Error("denied"); }, setItem() { throw new Error("denied"); } };
+  let now = 50;
+  for (const storage of [broken, null, undefined]) {
+    const c = clock.makeClock({ epoch: "5eed", ms: 1000 }, () => now, 50, storage);
+    now = 1050;
+    assert.deepEqual(c.stamp(), { epoch: "5eed", at: 2000 });
+    now = 50;
+  }
+});
+
+test("a lesson's opening is stamped at its navigation start, on the same conversion", () => {
+  // Codex D-139 F2: the first restore is the learner's act of opening the lesson, so it is
+  // stamped when the navigation began, not when the script ran.
+  let now = 3000;                                        // the script ran late
+  const c = clock.makeClock({ epoch: "5eed", ms: 1000 }, () => now, 106, null, 100);
+  assert.deepEqual(c.navigationStamp(), { epoch: "5eed", at: 994 });
+  assert.equal(clock.makeClock(null, () => 0, 0, null, 0).navigationStamp(), null);
+});
+
 test("a page without the clock meta stamps nothing; the console then uses arrival order", () => {
   assert.equal(clock.makeClock(null, () => 0).stamp(), null);
 });
