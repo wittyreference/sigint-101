@@ -1057,6 +1057,81 @@ def test_an_open_of_a_lesson_the_course_lacks_is_refused_and_records_nothing(tmp
         assert client.app.state.progress.get(99) is None
 
 
+RACK_APRS_HZ = 144_800_000   # where the rack's tune keys left the 2 m decoder
+RACK_ISM_HZ = 434_000_000    # and the ISM decoder
+
+
+def _tuned_away(client):
+    """Leave two decoders where the rack retuned them, away from their lesson frequency."""
+    client.app.state.aprs.retune(RACK_APRS_HZ)
+    client.app.state.decoder.retune(RACK_ISM_HZ)
+    return client.app.state.aprs.home_hz, client.app.state.decoder.home_hz
+
+
+def test_showing_a_lesson_page_changes_no_receiver(tmp_path):
+    # A GET has no side effect: loading a lesson (a render check, a prefetch) must not retune a
+    # receiver, which can stop a running one and drop what it had decoded.
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        _tuned_away(client)
+        assert client.get("/lesson/1").status_code == 200
+        assert client.app.state.aprs.freq_hz == RACK_APRS_HZ
+        assert client.app.state.decoder.freq_hz == RACK_ISM_HZ
+
+
+def test_the_lesson_page_posting_its_tuning_puts_the_receivers_on_the_lessons_frequencies(
+        tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        aprs_home, ism_home = _tuned_away(client)
+        resp = client.post("/api/tuning?lesson_id=1")
+        assert resp.status_code == 200
+        assert resp.json() == {"tuned": True, "lesson_id": 1}
+        assert client.app.state.aprs.freq_hz == aprs_home
+        assert client.app.state.decoder.freq_hz == ism_home
+
+
+def test_a_tuning_post_for_a_lesson_the_course_lacks_is_refused_and_changes_nothing(tmp_path):
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        _tuned_away(client)
+        assert client.post("/api/tuning?lesson_id=99").status_code == 404
+        assert client.app.state.aprs.freq_hz == RACK_APRS_HZ
+
+
+def test_the_lesson_page_restores_its_tuning_before_any_panel_starts_polling(tmp_path):
+    # lesson-tuning.js posts synchronously, so it must load ahead of every panel script.
+    with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
+        html = client.get("/lesson/1").text
+    tag = re.search(r'<script src="/static/lesson-tuning\.js"([^>]*)>', html)
+    assert tag, "the lesson page does not load lesson-tuning.js"
+    assert 'data-lesson-id="1"' in tag.group(1)
+    first_panel = min(html.index(f'src="/static/{name}.js"')
+                      for name in ("decoder-panel", "waterfall", "decode", "aprs"))
+    assert tag.start() < first_panel
+
+
+# Every page the render checks load (tools/render/*.py), in the order make render-check runs them.
+RENDER_CHECK_PAGES = ("/lesson/29", "/", "/exam/review/T6C02", "/operate/ism", "/logbook",
+                      "/operate/lora", "/lesson/5", "/law?back=/lesson/5", "/lesson/39")
+
+
+def test_a_render_check_walk_against_a_live_console_changes_none_of_its_state(tmp_path):
+    # With /api/* blocked, a check's page loads are plain GETs. Against a console whose rack has
+    # retuned two decoders and holds a place, none of them may move a receiver or learner state.
+    app = create_app(data_dir=tmp_path, probe=_absent)
+    with TestClient(app) as client:
+        _tuned_away(client)
+        client.post("/api/rack/place", json={"instrument": "pager"})
+        lessons = (29, 5, 39)
+        before = ({n: app.state.progress.get(n) for n in lessons},
+                  {n: app.state.progress.get_stage(n) for n in lessons})
+        for page in RENDER_CHECK_PAGES:
+            assert client.get(page).status_code == 200, page
+        assert app.state.aprs.freq_hz == RACK_APRS_HZ
+        assert app.state.decoder.freq_hz == RACK_ISM_HZ
+        assert app.state.progress.get_place("rack") == "pager"
+        assert ({n: app.state.progress.get(n) for n in lessons},
+                {n: app.state.progress.get_stage(n) for n in lessons}) == before
+
+
 def test_reopening_a_lesson_resumes_the_stage_the_learner_left(tmp_path):
     with _client_with_packs(tmp_path, (1, {"intro": True})) as client:
         assert _shown_stage(client.get("/lesson/1").text) == "frame"

@@ -561,11 +561,17 @@ def test_the_pager_text_stays_withheld_when_the_rack_tunes_out_of_the_paging_ban
         assert "CALL EXT" not in served
 
 
+def _open_lesson(client, lesson_id):
+    """What opening a lesson does: the page's GET, then its tuning post (lesson-tuning.js)."""
+    assert client.get(f"/lesson/{lesson_id}").status_code == 200
+    assert client.post(f"/api/tuning?lesson_id={lesson_id}").status_code == 200
+
+
 def test_opening_a_lesson_tunes_a_decoder_back_to_its_own_frequency(tmp_path):
     spawned = []
     with _client(tmp_path, probe=_present, aprs_factory=_aprs_factory(spawned)) as client:
         client.post("/api/aprs/tune", json={"freq_hz": 144_800_000})
-        client.get("/lesson/1")
+        _open_lesson(client, 1)
         assert client.app.state.aprs.freq_hz == 144_390_000
 
 
@@ -583,7 +589,7 @@ def test_opening_a_lesson_with_no_band_puts_the_sweep_back_on_fm(tmp_path):
     packs = _radio_pack(tmp_path / "packs")
     with _client(tmp_path, probe=_present, sweeper_factory=_sweeper, pack_dir=packs) as client:
         client.post("/api/tune", json={"center": 433_920_000, "span": 2_000_000})
-        client.get("/lesson/1")
+        _open_lesson(client, 1)
         sweeper = client.app.state.sweeper
         assert (sweeper.low, sweeper.high, sweeper.target) == (DEFAULT_LOW, DEFAULT_HIGH, None)
 

@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from render_scroll import connect
+from render_scroll import connect, leave_page
 
 REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
@@ -173,10 +173,9 @@ def main(console):
     browser = connect()
     try:
         shim = fetch_shim(populated_payload())
+        # connect() has already blocked the whole of /api/* (render_scroll.block_console_api),
+        # /api/predict, /api/stage and /api/complete with the rest.
         browser.call("Page.enable")
-        browser.call("Network.enable")
-        browser.call("Network.setBlockedURLs",
-                     {"urls": ["*/api/predict*", "*/api/stage*", "*/api/complete*"]})
         browser.call("Emulation.setDeviceMetricsOverride",
                      {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False})
         browser.call("Page.addScriptToEvaluateOnNewDocument", {"source": shim})
@@ -220,7 +219,7 @@ def main(console):
             failed |= verdict(ok, f"survey {theme}", measures)
         return int(failed)
     finally:
-        browser.s.close()
+        leave_page(browser)
 
 
 if __name__ == "__main__":

@@ -744,13 +744,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         put into the HTML before the commit. Lesson.reveal() is asked for the sealed material only
         once committed — it refuses otherwise — as the code-level backstop behind the template.
         Opening a lesson counts as progress but never as completion; the page records it once
-        shown (POST /api/opened), so this GET writes no learner state. It opens on the stage the
-        learner last reached (a reload or a power cut resumes in place), and Back leads to the
-        lesson's unit rather than skipping it.
+        shown (POST /api/opened), so this GET writes no learner state. Nor does it touch a
+        receiver: the page puts the radios on the lesson's frequencies itself (POST /api/tuning)
+        before its panels start polling. It opens on the stage the learner last reached (a reload
+        or a power cut resumes in place), and Back leads to the lesson's unit rather than skipping
+        it.
         """
         _require_lesson(lesson_id)
         lesson = app.state.lessons[lesson_id]
-        _restore_lesson_tuning(lesson)
         prediction = app.state.progress.get_prediction(lesson_id)
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
@@ -938,6 +939,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             context={"title": "The Law", "back_href": back_href, "back_label": back_label,
                      "caution": LAW_CAUTION, "sections": LAW_SECTIONS},
         )
+
+    @app.post("/api/tuning")
+    def lesson_tuning(lesson_id: int):
+        """Put the radios where this lesson expects them, whatever the rack left them on.
+
+        The lesson page posts this as it loads, ahead of its panel scripts (lesson-tuning.js), so
+        the panels' first polls find their receivers on the lesson's frequencies. Loading the page
+        retunes nothing, so a render check or a prefetch cannot move a running receiver. An
+        unknown lesson is refused (404) like every lesson route.
+        """
+        _require_lesson(lesson_id)
+        _restore_lesson_tuning(app.state.lessons[lesson_id])
+        return {"tuned": True, "lesson_id": lesson_id}
 
     @app.post("/api/opened")
     def opened(lesson_id: int):

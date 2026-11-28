@@ -44,7 +44,7 @@ def block_console_api(c):
     """
     c.call("Network.enable")
     c.call("Network.setBlockedURLs", {"urls": [CONSOLE_API]})
-    atexit.register(leave_page, c)
+    atexit.register(_leave_at_exit, c)
 
 
 def _socket(c):
@@ -52,31 +52,59 @@ def _socket(c):
     return getattr(c, "s", None) or getattr(c, "sock", None)
 
 
-def leave_page(c):
-    """Navigate the page to about:blank, wait until it is there, then close the connection.
+def _leave_at_exit(c):
+    """At exit, leave the page; a check whose page could not leave fails, whatever it measured."""
+    if leave_page(c) is False:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
-    No console page is left running once its block is gone, so nothing it polls reaches the
-    console. Safe to call twice, and a no-op on a connection that is already closed.
-    """
-    sock = _socket(c)
-    if getattr(c, "left_page", False) or sock is None or sock.fileno() == -1:
-        return
-    c.left_page = True
+
+def _blank_failure(c):
+    """Why the page is not on about:blank, or None once it is."""
     try:
-        c.call("Page.navigate", {"url": BLANK})
+        nav = c.call("Page.navigate", {"url": BLANK})
+        if nav.get("errorText"):
+            return f"Chrome refused it: {nav['errorText']}"
+        where = None
         for _ in range(25):
             where = c.call("Runtime.evaluate",
                            {"expression": "location.href", "returnByValue": True})
-            if where.get("result", {}).get("value") == BLANK:
-                break
+            where = where.get("result", {}).get("value")
+            if where == BLANK:
+                return None
             time.sleep(0.2)
-        else:
-            print("the page did not reach about:blank before DevTools closed", file=sys.stderr)
-    except (OSError, TimeoutError, ValueError, SystemExit):
-        # A connection DevTools has already dropped; that check has its own failure to report.
-        pass
-    finally:
-        sock.close()
+        return f"the page is still on {where}"
+    except (OSError, TimeoutError, ValueError, SystemExit) as error:
+        return f"DevTools failed: {error}"
+
+
+def leave_page(c):
+    """Navigate the page to about:blank and, once it is confirmed there, close the connection.
+
+    True once the page has left; None when DevTools had already dropped the connection (that
+    check has its own failure to report). False, with the reason on stderr, when the page could
+    not leave: the connection, and with it the block, is then kept open, never closed with a
+    console page loaded. Safe to call twice.
+    """
+    if hasattr(c, "left_page"):
+        return c.left_page
+    sock = _socket(c)
+    if sock is None or sock.fileno() == -1:
+        c.left_page = None
+        return None
+    failure = _blank_failure(c)
+    if sock.fileno() == -1:
+        c.left_page = None
+        return None
+    if failure is not None:
+        print(f"Could not leave the console page for about:blank ({failure}). Its /api/* block "
+              "stays until this DevTools connection ends.", file=sys.stderr)
+        c.left_page = False
+        return False
+    c.left_page = True
+    sock.close()
+    return True
 
 
 def connect(port=None):

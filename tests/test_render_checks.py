@@ -91,9 +91,11 @@ class FakeDevTools:
     `disconnect_at` can end the connection during the handshake or the first reply frame.
     """
 
-    def __init__(self, answers, *, disconnect_at=None):
+    def __init__(self, answers, *, disconnect_at=None, blank_fails=False):
         self.answers = answers
         self.disconnect_at = disconnect_at
+        # A navigation to about:blank that Chrome refuses: the page stays where it was.
+        self.blank_fails = blank_fails
         # Every DevTools command a check sent, in order, as (method, params). A websocket that
         # closes adds ("<closed>", {}); a GET of /mark/<name> adds ("<mark>", {"name": name}).
         self.calls = []
@@ -193,6 +195,8 @@ class FakeDevTools:
         if method == "Page.captureScreenshot":
             return {"data": base64.b64encode(b"a png").decode()}
         if method == "Page.navigate":
+            if self.blank_fails and params.get("url") == "about:blank":
+                return {"frameId": "page-1", "errorText": "net::ERR_ABORTED"}
             self.url = params.get("url")
         if method != "Runtime.evaluate":
             return {}
@@ -214,8 +218,8 @@ class FakeDevTools:
 def devtools():
     made = []
 
-    def make(answers, *, disconnect_at=None):
-        fake = FakeDevTools(answers, disconnect_at=disconnect_at)
+    def make(answers, *, disconnect_at=None, blank_fails=False):
+        fake = FakeDevTools(answers, disconnect_at=disconnect_at, blank_fails=blank_fails)
         made.append(fake)
         return fake.port
 
@@ -470,6 +474,13 @@ def render_make(tmp_path, console_url, devtools):
         f"    subprocess.Popen([sys.executable, {str(browser)!r}, profile,\n"
         "                      os.environ['CHROMIUM_FORKS']],\n"
         "                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "if os.environ.get('MARK_STOP'):\n"
+        "    import signal, urllib.request\n"
+        "    def stopped(*_):\n"
+        "        urllib.request.urlopen('http://127.0.0.1:' + os.environ['FAKE_CDP_PORT']\n"
+        "                               + '/mark/chromium-stopped', timeout=5).close()\n"
+        "        os._exit(0)\n"
+        "    signal.signal(signal.SIGTERM, stopped)\n"
         "(Path(profile) / 'DevToolsActivePort').write_text(os.environ['FAKE_CDP_PORT'] + '\\n')\n"
         "time.sleep(30)\n",
         encoding="utf-8",
@@ -499,10 +510,10 @@ def render_make(tmp_path, console_url, devtools):
     make = shutil.which("make")
     assert make, "the render-check tests require make"
 
-    def environment(fit_answers, overrides):
+    def environment(fit_answers, overrides, blank_fails=False):
         """The check's environment; an override of None removes that variable."""
         env = dict(os.environ, PATH=str(path), RENDER_URL=console_url, TMPDIR=str(tmp_path),
-                   FAKE_CDP_PORT=str(devtools(fit_answers or {})),
+                   FAKE_CDP_PORT=str(devtools(fit_answers or {}, blank_fails=blank_fails)),
                    no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
         for name, value in overrides.items():
             if value is None:
@@ -511,14 +522,15 @@ def render_make(tmp_path, console_url, devtools):
                 env[name] = value
         return env
 
-    def run_make(*, has_chromium=True, fit_answers=None, timeout=15, **overrides):
+    def run_make(*, has_chromium=True, fit_answers=None, timeout=15, blank_fails=False,
+                 **overrides):
         """Run make render-check with these stand-ins."""
         if not has_chromium:
             chromium.unlink()
         if fit_answers is not None:
             (screen / FIT.name).unlink()
             (screen / FIT.name).symlink_to(FIT)
-        env = environment(fit_answers, overrides)
+        env = environment(fit_answers, overrides, blank_fails)
         return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
                                "render-check"], cwd=tmp_path, env=env, capture_output=True,
                               text=True, timeout=timeout)
@@ -667,6 +679,7 @@ API_TOOLS = {
     "lora": (LORA, ["http://127.0.0.1:9"], {}),
     "card-sort": (CARD_SORT, ["http://127.0.0.1:9"], {}),
     "eval": (EVAL, ["http://127.0.0.1:1/operate/ism", "1"], {}),
+    "survey": (SURVEY, ["http://127.0.0.1:9"], {}),
 }
 
 
@@ -733,6 +746,98 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     assert "<closed>" not in methods[blocks[0]:marks[-1]], methods
     _leaves_blank_before_closing(calls)
     assert methods.index("<closed>", marks[-1]) > marks[-1]
+
+
+def test_no_render_tool_sets_its_own_block_or_closes_devtools_itself():
+    # The block and the about:blank teardown live in render_scroll.py alone. A tool that sets its
+    # own blocked list replaces the shared one, and one that closes its socket skips the
+    # teardown; a tool that drives a page without the shared client has no block at all.
+    import re
+    for path in sorted((REPO / "tools" / "render").glob("*.py")):
+        if path == SCROLL:
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert "setBlockedURLs" not in text, f"{path.name} sets its own API block"
+        for match in re.finditer(r"([\w.]+)\.(?:s|sock)\.close\(\)", text):
+            # Only a client's own reader closes its socket, when DevTools has already hung up.
+            assert match.group(1) == "self", f"{path.name} closes DevTools itself: {match[0]}"
+        if "Page.navigate" in text:
+            assert re.search(r"\b(?:connect|block_console_api)\(", text), \
+                f"{path.name} loads pages without the shared block"
+
+
+@pytest.mark.parametrize("tool", [API_TOOLS["scroll"], API_TOOLS["fit"]], ids=["scroll", "fit"])
+def test_a_tool_whose_page_cannot_reach_about_blank_fails(devtools, tmp_path, tool):
+    # The block must not end with a console page loaded. If about:blank cannot be reached the
+    # check says so and fails, even when every layout verdict passed.
+    script, args, answers = tool
+    proc = run(script, *(arg.format(tmp=tmp_path) for arg in args),
+               port=devtools(answers, blank_fails=True))
+    assert "VERDICT: PASS" in proc.stdout, proc.stdout
+    assert proc.returncode != 0, (proc.stdout, proc.stderr)
+    assert "about:blank" in proc.stderr, proc.stderr
+
+
+def test_the_runner_keeps_its_block_until_chromium_has_stopped_when_blank_fails(render_make):
+    proc = render_make(blank_fails=True, MARK_STOP="1")
+    assert proc.returncode != 0, (proc.stdout, proc.stderr)
+    assert "about:blank" in proc.stderr, proc.stderr
+    calls = render_make.calls()
+    methods = [method for method, _ in calls]
+    stopped = calls.index(("<mark>", {"name": "chromium-stopped"}))
+    assert "<closed>" not in methods[:stopped], methods
+    assert "<closed>" in methods[stopped:], methods
+
+
+def test_render_check_keeps_the_profile_and_fails_when_the_browser_will_not_stop(
+        tmp_path, monkeypatch, console_url, capsys):
+    # A group that outlives SIGTERM and SIGKILL (here: signals that never land) may still be
+    # writing into its profile. The run fails, says where the folder is, and leaves it.
+    import contextlib
+    render_check = _load_render_check()
+    pidfile = tmp_path / "chromium.pid"
+    chromium = tmp_path / "chromium"
+    chromium.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "profile = Path(next(a.split('=', 1)[1] for a in sys.argv\n"
+        "                    if a.startswith('--user-data-dir=')))\n"
+        "profile.mkdir()\n"
+        "(profile / 'Default').write_text('in use')\n"
+        f"Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n", encoding="utf-8")
+    chromium.chmod(0o755)
+    monkeypatch.setenv("RENDER_URL", console_url)
+    monkeypatch.setattr(render_check.shutil, "which",
+                        lambda name: str(chromium) if name == "chromium" else None)
+    monkeypatch.setattr(render_check, "chromium_port", lambda browser, profile: "1")
+    monkeypatch.setattr(render_check, "api_block",
+                        lambda port, problems, held: contextlib.nullcontext())
+    monkeypatch.setattr(render_check, "run_checks", lambda console, port, output: 0)
+    monkeypatch.setattr(render_check, "BROWSER_STOP_S", 0.3)
+    monkeypatch.setattr(render_check.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(render_check.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(render_check.os, "killpg", lambda pgid, sig: None)
+    try:
+        try:
+            status = render_check.main()
+        except SystemExit as stop:
+            status = stop.code
+        monkeypatch.undo()
+        err = capsys.readouterr().err
+        profiles = list(tmp_path.glob("sigint101-render-*/profile"))
+        assert status not in (0, None), err
+        assert len(profiles) == 1 and (profiles[0] / "Default").is_file(), err
+        assert str(profiles[0].parent) in err, err
+    finally:
+        monkeypatch.undo()
+        if pidfile.is_file():
+            pid = int(pidfile.read_text())
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
 
 
 def _running(pid):
@@ -1177,7 +1282,8 @@ def test_survey_render_never_posts_predict_to_console_and_stubs_fetch():
     finally:
         fake.close()
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert any("/api/predict" in pattern for pattern in blocked_urls), blocked_urls
+    # The shared block (render_scroll.block_console_api) covers /api/predict with the whole API.
+    assert "*/api/*" in blocked_urls, blocked_urls
     assert not any(
         re.search(r"\bfetch\s*\(\s*['\"][^'\"]*/api/predict", expr) for expr in seen_evals
     ), f"render_survey.py posted /api/predict into the console: {seen_evals!r}"

@@ -93,7 +93,8 @@ def stop_group(process, grace):
     its profile, so the whole group is signalled: SIGTERM, then SIGKILL for whatever is still
     running after the grace period. The repo's rule (C42): the group is signalled and swept only
     while its leader is unreaped, so its number cannot have been handed to another process. The
-    leader is reaped last, with a bounded wait.
+    leader is reaped last, with a bounded wait. True only when no member is left running and
+    the leader is reaped; otherwise False, with what is left on stderr.
     """
     for sig in (signal.SIGTERM, signal.SIGKILL):
         if process.returncode is None:      # the leader is unreaped: the group number is ours
@@ -106,21 +107,33 @@ def stop_group(process, grace):
             time.sleep(0.05)
         if not _group_running(process.pid):
             break
-    else:
-        print(f"processes of group {process.pid} still run after SIGKILL", file=sys.stderr)
+    stopped = True
+    if survivors := _group_running(process.pid):
+        print(f"processes {survivors} of group {process.pid} still run after SIGKILL",
+              file=sys.stderr)
+        stopped = False
     try:
         process.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         print(f"process {process.pid} was not reaped", file=sys.stderr)
+        stopped = False
+    return stopped
+
+
+def _stop(process, grace, name, alive):
+    """Stop a child's group; if it will not stop, say so in `alive`, the run's list of them."""
+    if not stop_group(process, grace) and alive is not None:
+        alive.append(f"{name} (process group {process.pid}) is still running")
 
 
 @contextmanager
-def scratch_console(data_dir):
+def scratch_console(data_dir, alive=None):
     """Serve a console of this checkout on a free loopback port with `data_dir` as its data.
 
     The listening socket is bound and held here and handed to the console, so no other server
     can take the port between choosing it and serving on it. Yields the console's address and
-    stops the server, whole, when the block ends.
+    stops the server, whole, when the block ends; a server that will not stop is added to
+    `alive`.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -153,14 +166,14 @@ def scratch_console(data_dir):
                 time.sleep(0.2)
         yield url
     finally:
-        stop_group(server, CONSOLE_STOP_S)
+        _stop(server, CONSOLE_STOP_S, "the scratch console", alive)
 
 
 @contextmanager
-def headless_chromium(chromium, profile):
+def headless_chromium(chromium, profile, alive=None):
     """Run Chromium in a session of its own on `profile`; yield its DevTools port.
 
-    The profile is never removed while any process of that session is still running.
+    A browser group that will not stop is added to `alive`, and the run then keeps the profile.
     """
     command = [chromium, "--headless=new", "--disable-gpu", "--password-store=basic",
                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank"]
@@ -176,7 +189,7 @@ def headless_chromium(chromium, profile):
             sys.exit(str(error))
         yield port
     finally:
-        stop_group(browser, BROWSER_STOP_S)
+        _stop(browser, BROWSER_STOP_S, "Chromium", alive)
 
 
 def run_checks(console, port, output):
@@ -208,17 +221,21 @@ def run_checks(console, port, output):
 
 
 @contextmanager
-def api_block(port):
+def api_block(port, problems, held):
     """Hold a DevTools session on the page that blocks /api/* for the whole run.
 
     Each check's own block ends with its connection, and the next check's begins only when it
-    attaches. This one spans the gaps, and leaves the page on about:blank when the run ends.
+    attaches. This one spans the gaps. At the end the page leaves for about:blank; if it cannot,
+    the run fails and the session's socket goes to `held`, closed only once Chromium has stopped,
+    so the block never ends while a console page is loaded.
     """
     session = connect(port)
     try:
         yield
     finally:
-        leave_page(session)
+        if leave_page(session) is False:
+            problems.append("the page could not leave the console for about:blank")
+            held.append(session.s)
 
 
 def _stop_on_signal(signum, frame):
@@ -228,6 +245,11 @@ def _stop_on_signal(signum, frame):
     for sig in STOP_SIGNALS:
         signal.signal(sig, signal.SIG_IGN)
     sys.exit(128 + signum)
+
+
+def _close_all(sockets):
+    for sock in sockets:
+        sock.close()
 
 
 def main():
@@ -250,18 +272,32 @@ def main():
     if not chromium:
         sys.exit("Chromium executable not found. Install Chromium to run the layout checks.")
 
-    with tempfile.TemporaryDirectory(prefix="sigint101-render-") as directory:
-        output = Path(directory)
-        # All of them stop before the folder holding their state is removed: the block's page
-        # leaves for about:blank, then Chromium stops, then the console.
+    output = Path(tempfile.mkdtemp(prefix="sigint101-render-"))
+    problems = []   # what fails the run
+    alive = []      # what still runs: while anything does, its folder stays
+    held = []       # sockets that keep a block until Chromium has stopped
+    status = 1
+    try:
+        # The exit order, last in first out: the page leaves for about:blank, Chromium stops,
+        # any held block closes, then the console stops.
         with ExitStack() as running:
             if not console:
-                console = running.enter_context(scratch_console(output / "console"))
+                console = running.enter_context(scratch_console(output / "console", alive))
                 print(f"Started a scratch console at {console} with its own data folder.",
                       flush=True)
-            port = running.enter_context(headless_chromium(chromium, output / "profile"))
-            running.enter_context(api_block(port))
-            return run_checks(console, port, output)
+            running.callback(_close_all, held)
+            port = running.enter_context(headless_chromium(chromium, output / "profile", alive))
+            running.enter_context(api_block(port, problems, held))
+            status = run_checks(console, port, output)
+    finally:
+        for problem in problems + alive:
+            print(f"render-check: {problem}.", file=sys.stderr)
+        if alive:
+            print(f"render-check: left {output} in place while that runs; remove it once the "
+                  "processes have stopped.", file=sys.stderr)
+        else:
+            shutil.rmtree(output)
+    return 1 if problems or alive else status
 
 
 if __name__ == "__main__":
