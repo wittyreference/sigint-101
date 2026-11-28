@@ -110,10 +110,6 @@ REPO_DIR = BASE_DIR.parent
 PACK_DIR = REPO_DIR / "lesson_packs"
 DATA_DIR = REPO_DIR / "data"
 
-PACK_DIR_ENV = "SIGINT101_PACK_DIR"
-DATA_DIR_ENV = "SIGINT101_DATA_DIR"
-POOL_PATH_ENV = "SIGINT101_POOL_PATH"
-
 # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
 SDR_CONSUMERS = (
     "sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr", "apt", "sstv"
@@ -307,34 +303,6 @@ def _resume_stage(lesson, saved, committed: bool) -> tuple:
     return current, min(reached, len(open_now) - 1)
 
 
-def resolve_startup_paths(
-    *,
-    pack_dir=None,
-    data_dir=None,
-    pool_path=None,
-    environ=None,
-) -> tuple[Path, Path, Path | None]:
-    """Resolve console paths from explicit arguments, environment overrides, or repo defaults."""
-    env = os.environ if environ is None else environ
-    resolved_pack = (
-        Path(pack_dir)
-        if pack_dir is not None
-        else Path(env[PACK_DIR_ENV]) if env.get(PACK_DIR_ENV) else PACK_DIR
-    )
-    resolved_data = (
-        Path(data_dir)
-        if data_dir is not None
-        else Path(env[DATA_DIR_ENV]) if env.get(DATA_DIR_ENV) else DATA_DIR
-    )
-    if pool_path is not None:
-        resolved_pool = Path(pool_path)
-    elif env.get(POOL_PATH_ENV):
-        resolved_pool = Path(env[POOL_PATH_ENV])
-    else:
-        resolved_pool = None
-    return resolved_pack, resolved_data, resolved_pool
-
-
 def build_receiver_factories(
     *,
     data_dir: Path,
@@ -417,8 +385,8 @@ def build_receiver_factories(
 def initialize_console_state(
     state,
     *,
-    pack_dir=None,
-    data_dir=None,
+    pack_dir=PACK_DIR,
+    data_dir=DATA_DIR,
     pool_path=None,
     managed: bool = False,
     read_only: bool = False,
@@ -435,11 +403,15 @@ def initialize_console_state(
 
     When trial=True, stores open read-only, stamp backfill and exam_disabled log writes are
     suppressed, and no receiver hooks are attached so the data generation stays untouched.
+    Legacy startup (managed=False, trial=False) matches main exactly: no env path overrides and
+    a missing pack directory loads zero lessons rather than raising.
     """
-    resolved_pack, resolved_data, resolved_pool = resolve_startup_paths(
-        pack_dir=pack_dir, data_dir=data_dir, pool_path=pool_path
-    )
-    if not resolved_pack.is_dir():
+    from .exam import POOL_PATH as DEFAULT_POOL_PATH
+
+    resolved_pack = Path(pack_dir)
+    resolved_data = Path(data_dir)
+    resolved_pool = Path(pool_path) if pool_path is not None else None
+    if (managed or trial) and not resolved_pack.is_dir():
         raise FileNotFoundError(f"lesson pack directory does not exist: {resolved_pack}")
 
     if receiver_factories is None:
@@ -452,6 +424,7 @@ def initialize_console_state(
 
     state.pack_dir = resolved_pack
     state.data_dir = resolved_data
+    state.pool_path = resolved_pool if resolved_pool is not None else DEFAULT_POOL_PATH
     state.lessons = load_lessons(resolved_pack)
     state.progress = Progress(
         resolved_data / "progress.db", managed=managed, read_only=read_only
@@ -542,7 +515,7 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
     return state.shutdown_errors
 
 
-def create_app(*, pack_dir=None, data_dir=None, probe=probe_rtlsdr,
+def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
@@ -558,13 +531,6 @@ def create_app(*, pack_dir=None, data_dir=None, probe=probe_rtlsdr,
     reports "no radio" — which is how the suite honours the no-mock-hardware invariant with no
     dongle attached. The module-level `app` below uses the real ones.
     """
-    resolved_pack_dir, resolved_data_dir, resolved_pool_path = resolve_startup_paths(
-        pack_dir=pack_dir, data_dir=data_dir, pool_path=pool_path
-    )
-    data_dir = resolved_data_dir
-    pack_dir = resolved_pack_dir
-    pool_path = resolved_pool_path
-
     # The status bar reads the UPS's INA219. A box without a measurement shows a dash.
     # Tests can supply a gauge at the app boundary.
     battery = BatteryGauge() if battery_gauge is None else battery_gauge

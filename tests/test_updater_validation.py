@@ -711,20 +711,31 @@ def test_trial_uses_effective_drop_in_settings_and_public_initialization(tmp_pat
     assert res.settings_fingerprint == compute_settings_fingerprint(settings.unit_only())
     assert "top-secret-token-999" not in json.dumps(res.attestation)
 
-    # 4) Shared startup: a setting-dependent startup error (bad SIGINT101_PACK_DIR via drop-in)
-    # fails BOTH public create_app initialization AND the private trial.
-    bad_pack_dropin = (
-        "[Service]\n"
-        f'Environment="SIGINT101_PACK_DIR={tmp_path / "does_not_exist_packs"}"\n'
+    # 4) Shared startup: a broken release pack (invalid YAML) fails BOTH public startup
+    # AND the private trial through the shared initialize_console_state path.
+    rel_bad_yaml = _copy_release_tree(
+        tmp_path / "rel_bad_yaml", release_id="rel-bad-yaml", commit="4444bad"
     )
-    bad_settings = parse_systemd_unit_config(unit_text, dropin_texts=(bad_pack_dropin,))
+    (rel_bad_yaml / "lesson_packs" / "99-broken.yaml").write_text(
+        "id: 99\nnot_valid: [", encoding="utf-8"
+    )
+    with pytest.raises(Exception):
+        with TestClient(
+            create_app(
+                pack_dir=rel_bad_yaml / "lesson_packs",
+                data_dir=gen,
+                probe=_absent,
+                managed=True,
+            )
+        ):
+            pass
     bad_res = run_private_trial(
         python_executable=sys.executable,
-        release_root=rel_root,
+        release_root=rel_bad_yaml,
         data_dir=gen,
-        unit_settings=bad_settings,
-        expected_release_id="rel-cfg",
-        expected_commit="4444ddd",
+        unit_settings=settings,
+        expected_release_id="rel-bad-yaml",
+        expected_commit="4444bad",
         expected_generation_id="gen-cfg",
         socket_parent_dir=tmp_path,
     )
@@ -1038,12 +1049,12 @@ def test_trial_keeps_sealed_release_tree_byte_stable(tmp_path):
 
 
 def test_validation_snapshot_and_trial_edge_refusals(tmp_path):
-    # 1) Unit settings edge cases: WorkingDirectory, Restart, Environment= reset, quotes, errors.
+    # 1) Unit settings edge cases: WorkingDirectory, Restart, Environment= reset, errors.
     parsed = parse_systemd_unit_config(
         "[Service]\n"
         "WorkingDirectory=/srv/rel\n"
         "Restart=on-failure\n"
-        'Environment="A=1" "B=hello \\"world\\""\n',
+        'Environment="A=1" "B=hello world"\n',
         dropin_texts=("[Service]\nEnvironment=\nEnvironment=C=3\n",),
     )
     assert parsed.working_directory == "/srv/rel"
@@ -1087,11 +1098,12 @@ def test_validation_snapshot_and_trial_edge_refusals(tmp_path):
     with pytest.raises(ValidationError, match="generation_id"):
         read_generation_marker(bad_gen)
 
-    # 3) Snapshot refuses hardlink aliases and invalid generation_id.
+    # 3) Snapshot refuses external hardlink aliases and invalid generation_id.
     hard_src = tmp_path / "hard_src"
     hard_src.mkdir(mode=0o700)
-    (hard_src / "a.txt").write_text("one", encoding="utf-8")
-    os.link(hard_src / "a.txt", hard_src / "b.txt")
+    outside_hard = tmp_path / "outside_hard.txt"
+    outside_hard.write_text("one", encoding="utf-8")
+    os.link(outside_hard, hard_src / "b.txt")
     with pytest.raises(SnapshotError, match="hardlink"):
         inventory_generation(hard_src)
 
@@ -1127,4 +1139,406 @@ def test_validation_snapshot_and_trial_edge_refusals(tmp_path):
     )
     assert early.ready is False
     assert any("exited early" in err for err in early.errors)
+
+
+# --- Round 2 build-review fixes: F1-F11 regression tests ---------------------------------------
+
+
+def test_f1_dropin_pack_env_cannot_redirect_trial_and_pack_pool_are_attested(tmp_path):
+    # Break release's own lesson_packs by deleting lesson 1.
+    rel_broken = _copy_release_tree(
+        tmp_path / "rel_broken", release_id="rel-broken", commit="bad0001"
+    )
+    (rel_broken / "lesson_packs" / "01-see-the-invisible.yaml").unlink()
+    gen = _make_managed_generation(tmp_path, "gen_f1", generation_id="gen-f1")
+
+    # 1) Setting SIGINT101_PACK_DIR/DATA_DIR/POOL_PATH in unit settings is refused outright.
+    for var in ("SIGINT101_PACK_DIR", "SIGINT101_DATA_DIR", "SIGINT101_POOL_PATH"):
+        with pytest.raises(UnitSettingsError, match=var):
+            parse_systemd_unit_config(
+                "[Service]\nExecStart=/usr/bin/uvicorn sigint101.app:app\n",
+                dropin_texts=(f'[Service]\nEnvironment="{var}={PACK_DIR}"\n',),
+            )
+
+    # 2) Even if SIGINT101_PACK_DIR is smuggled via a raw UnitSettings object, the trial
+    # ignores it, validates the release's own broken pack, and fails with missing lesson 1!
+    from sigint101.validation import UnitSettings
+
+    smuggled = UnitSettings(dropin_env={"SIGINT101_PACK_DIR": str(PACK_DIR)})
+    res = run_private_trial(
+        python_executable=sys.executable,
+        release_root=rel_broken,
+        data_dir=gen,
+        unit_settings=smuggled,
+        expected_release_id="rel-broken",
+        expected_commit="bad0001",
+        expected_generation_id="gen-f1",
+        socket_parent_dir=tmp_path,
+    )
+    assert res.ready is False
+    assert any("lesson 1" in e.lower() for e in res.errors)
+
+    # 3) On a healthy release, attestation records exact pack dir and pool file identities,
+    # and verify_pair_attestation rejects an attestation pointing outside the release!
+    rel_ok = _copy_release_tree(tmp_path / "rel_ok", release_id="rel-ok", commit="ok00001")
+    ok_res = run_private_trial(
+        python_executable=sys.executable,
+        release_root=rel_ok,
+        data_dir=gen,
+        expected_release_id="rel-ok",
+        expected_commit="ok00001",
+        expected_generation_id="gen-f1",
+        socket_parent_dir=tmp_path,
+    )
+    assert ok_res.ready is True, ok_res.errors
+    assert ok_res.attestation["pack"]["path"] == str((rel_ok / "lesson_packs").resolve())
+    assert ok_res.attestation["pack"]["st_ino"] == os.stat(rel_ok / "lesson_packs").st_ino
+    expected_pool = rel_ok / "sigint101" / "exam_data" / "technician-2026-2030.json"
+    assert ok_res.attestation["pool"]["path"] == str(expected_pool.resolve())
+    assert ok_res.attestation["pool"]["st_ino"] == os.stat(expected_pool).st_ino
+
+    tampered_att = json.loads(json.dumps(ok_res.attestation))
+    tampered_att["pack"]["path"] = str(PACK_DIR.resolve())
+    tampered_att["pack"]["st_ino"] = os.stat(PACK_DIR).st_ino
+    with pytest.raises(ValidationError, match="pack"):
+        verify_pair_attestation(
+            tampered_att,
+            expected_release_id="rel-ok",
+            expected_commit="ok00001",
+            expected_package_root=rel_ok,
+            expected_generation_id="gen-f1",
+            expected_data_dir=gen,
+        )
+
+
+def test_f2_legacy_startup_matches_main_on_env_and_missing_packs(tmp_path, monkeypatch):
+    # V1: legacy create_app with a missing lesson_packs directory serves / with 200 (0 lessons).
+    missing_packs = tmp_path / "no_such_lesson_packs"
+    legacy_data = tmp_path / "legacy_data"
+    with TestClient(
+        create_app(pack_dir=missing_packs, data_dir=legacy_data, probe=_absent)
+    ) as client:
+        res = client.get("/")
+        assert res.status_code == 200
+        assert client.app.state.lessons == {}
+
+    # V2: legacy create_app ignores SIGINT101_DATA_DIR / SIGINT101_PACK_DIR in os.environ.
+    hijack_data = tmp_path / "hijack_data"
+    hijack_packs = tmp_path / "hijack_packs"
+    monkeypatch.setenv("SIGINT101_DATA_DIR", str(hijack_data))
+    monkeypatch.setenv("SIGINT101_PACK_DIR", str(hijack_packs))
+    leg_dir = tmp_path / "real_legacy_data"
+    with TestClient(create_app(data_dir=leg_dir, probe=_absent)) as client2:
+        assert client2.get("/").status_code == 200
+        assert (leg_dir / "progress.db").is_file()
+        assert not hijack_data.exists()
+
+
+def test_f3_snapshot_detects_concurrent_writes_after_inventory(tmp_path, monkeypatch):
+    from sigint101 import snapshot as snap_mod
+
+    def make_source(name: str) -> Path:
+        s = tmp_path / name
+        s.mkdir(mode=0o700)
+        p = Progress(s / "progress.db")
+        p.mark_completed(1)
+        p.close()
+        e = ExamStore(s / "exam.db")
+        e.record("T1A01", True)
+        e.close()
+        (s / "events.jsonl").write_text('{"kind":"boot","ts":1}\n', encoding="utf-8")
+        (s / "sstv").mkdir(mode=0o700)
+        (s / "sstv" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\na")
+        return s
+
+    real_migrate = snap_mod.migrate_store_copy
+
+    for case in ("append_events", "commit_progress_row", "publish_new_sstv"):
+        src = make_source(f"src_{case}")
+        injected = {"done": False}
+
+        def hooked_migrate(*args, _case=case, _src=src, _inj=injected, **kwargs):
+            if not _inj["done"]:
+                _inj["done"] = True
+                if _case == "append_events":
+                    with (_src / "events.jsonl").open("ab") as fh:
+                        fh.write(b'{"kind":"late","ts":2}\n')
+                elif _case == "commit_progress_row":
+                    p = Progress(_src / "progress.db")
+                    p.mark_completed(2)
+                    p.close()
+                elif _case == "publish_new_sstv":
+                    (_src / "sstv" / "b.png").write_bytes(b"\x89PNG\r\n\x1a\nb")
+            return real_migrate(*args, **kwargs)
+
+        monkeypatch.setattr(snap_mod, "migrate_store_copy", hooked_migrate)
+        with pytest.raises(SnapshotError, match="changed|drift"):
+            copy_generation_snapshot(
+                src,
+                tmp_path / f"dst_{case}",
+                generation_id=f"gen-{case}",
+                scratch_dir=tmp_path / f"sc_{case}",
+            )
+        monkeypatch.undo()
+
+
+def test_f4_snapshot_accepts_in_generation_sstv_hardlink_and_refuses_external(tmp_path):
+    # Legitimate interrupted SSTV publish: published PNG and staged PNG share inode (nlink=2)
+    # inside the same generation -> snapshot MUST succeed and preserve both names!
+    src = tmp_path / "src_sstv_link"
+    src.mkdir(mode=0o700)
+    migrate_store_copy(
+        tmp_path / "np.db",
+        src / "progress.db",
+        store="progress",
+        allow_missing_source=True,
+        scratch_dir=tmp_path / "sc_p",
+    )
+    migrate_store_copy(
+        tmp_path / "ne.db",
+        src / "exam.db",
+        store="exam",
+        allow_missing_source=True,
+        scratch_dir=tmp_path / "sc_e",
+    )
+    (src / "sstv").mkdir(mode=0o700)
+    (src / "sstv" / ".staging").mkdir(mode=0o700)
+    staged = src / "sstv" / ".staging" / "a.png"
+    published = src / "sstv" / "a.png"
+    staged.write_bytes(b"\x89PNG\r\n\x1a\nsstv-in-gen")
+    os.link(staged, published)
+    assert os.stat(published).st_nlink == 2
+
+    dest = tmp_path / "dst_sstv_link"
+    receipt = copy_generation_snapshot(
+        src, dest, generation_id="gen-sstv-hl", scratch_dir=tmp_path / "sc_hl"
+    )
+    assert (dest / "sstv" / "a.png").read_bytes() == b"\x89PNG\r\n\x1a\nsstv-in-gen"
+    assert (dest / "sstv" / ".staging" / "a.png").read_bytes() == b"\x89PNG\r\n\x1a\nsstv-in-gen"
+    assert "sstv/a.png" in receipt["files_copied"]
+    assert "sstv/.staging/a.png" in receipt["files_copied"]
+
+    # External hardlink (one link inside generation, one outside -> in_generation != nlink)
+    # MUST still be refused!
+    ext_src = tmp_path / "src_ext_hl"
+    ext_src.mkdir(mode=0o700)
+    outside = tmp_path / "outside_target.txt"
+    outside.write_text("outside", encoding="utf-8")
+    os.link(outside, ext_src / "linked.txt")
+    with pytest.raises(SnapshotError, match="hardlink"):
+        inventory_generation(ext_src)
+
+
+def test_f5_systemd_effective_settings_dropin_refusals_and_env_hygiene(tmp_path):
+    from sigint101.validation import load_systemd_unit_settings
+
+    # 1) Read structured settings from systemctl --user show + show-environment,
+    # preserving systemd-expanded %h, C escapes (\x30\x31 -> 01, \t), and session env!
+    unit_file = tmp_path / "sigint101.service"
+    unit_file.write_text(
+        "[Service]\n"
+        "ExecStart=/usr/bin/uvicorn sigint101.app:app\n"
+        'Environment="SIGINT101_UNIT_ONLY=from-unit"\n',
+        encoding="utf-8",
+    )
+    dropin_file = tmp_path / "10-site.conf"
+    dropin_file.write_text(
+        "[Service]\n"
+        'Environment="SIGINT101_TLE=%h/tle.txt" "SIGINT101_RTLSDR_SERIAL=\\x30\\x31"\n',
+        encoding="utf-8",
+    )
+
+    expanded_tle = str(tmp_path / "tle.txt")
+
+    def fake_systemctl(args):
+        if "show-environment" in args:
+            return "LANG=C.UTF-8\nSIGINT101_SESSION_VAR=from-manager\n"
+        return (
+            f"FragmentPath={unit_file}\n"
+            f"DropInPaths={dropin_file}\n"
+            "Environment=SIGINT101_UNIT_ONLY=from-unit "
+            f'SIGINT101_TLE={expanded_tle} "SIGINT101_RTLSDR_SERIAL=01" '
+            '"SIGINT101_TAB=00\t01"\n'
+            "EnvironmentFiles=\n"
+            "UnsetEnvironment=\n"
+            "ExecStart={ path=/usr/bin/uvicorn ; argv[]=/usr/bin/uvicorn sigint101.app:app }\n"
+            "WorkingDirectory=\n"
+            "DynamicUser=no\n"
+            "PrivateTmp=no\n"
+            "RootDirectory=\n"
+            "ProtectSystem=\n"
+        )
+
+    eff = load_systemd_unit_settings("sigint101.service", runner=fake_systemctl)
+    assert eff.env["SIGINT101_SESSION_VAR"] == "from-manager"
+    assert eff.env["SIGINT101_TLE"] == expanded_tle
+    assert eff.env["SIGINT101_RTLSDR_SERIAL"] == "01"
+    assert eff.env["SIGINT101_TAB"] == "00\t01"
+    assert eff.unit_env == {"SIGINT101_UNIT_ONLY": "from-unit"}
+
+    # 2) Drop-in overriding ExecStart, WorkingDirectory, or RestartSec is REFUSED!
+    for bad_dropin in (
+        "[Service]\nExecStart=\nExecStart=/usr/bin/env python3 -m http.server\n",
+        "[Service]\nWorkingDirectory=/tmp\n",
+        "[Service]\nRestartSec=10\n",
+    ):
+        bad_file = tmp_path / "bad-dropin.conf"
+        bad_file.write_text(bad_dropin, encoding="utf-8")
+
+        def bad_runner(args, _bf=bad_file):
+            if "show-environment" in args:
+                return "LANG=C.UTF-8\n"
+            return (
+                f"FragmentPath={unit_file}\n"
+                f"DropInPaths={_bf}\n"
+                "Environment=\nEnvironmentFiles=\nUnsetEnvironment=\n"
+                "DynamicUser=no\nPrivateTmp=no\nRootDirectory=\nProtectSystem=\n"
+            )
+
+        with pytest.raises(UnitSettingsError, match="drop-in|unsupported"):
+            load_systemd_unit_settings("sigint101.service", runner=bad_runner)
+        with pytest.raises(UnitSettingsError, match="drop-in|unsupported"):
+            parse_systemd_unit_config(unit_file.read_text(encoding="utf-8"), (bad_dropin,))
+
+    # 3) PYTHON* and LD_* are refused in unit/drop-in settings!
+    for forbidden_env in ("PYTHONHOME=/x", "LD_PRELOAD=/tmp/x.so", "PYTHONPATH=/tmp/evil"):
+        with pytest.raises(UnitSettingsError, match="PYTHON|LD_|forbidden|unsupported"):
+            parse_systemd_unit_config(
+                "[Service]\nExecStart=/usr/bin/uvicorn sigint101.app:app\n",
+                dropin_texts=(f'[Service]\nEnvironment="{forbidden_env}"\n',),
+            )
+
+    # 4) Text parser refuses unexpanded % specifiers and backslash escapes rather than guessing!
+    for ambiguous in (
+        '[Service]\nEnvironment="SIGINT101_TLE=%h/tle.txt"\n',
+        '[Service]\nEnvironment="SIGINT101_RTLSDR_SERIAL=\\x30\\x31"\n',
+        "[Service]\nEnvironment=SIGINT101_TAB=00\\t01\n",
+    ):
+        with pytest.raises(UnitSettingsError, match="specifier|escape|systemd"):
+            parse_systemd_unit_config(
+                "[Service]\nExecStart=/usr/bin/uvicorn sigint101.app:app\n",
+                dropin_texts=(ambiguous,),
+            )
+
+
+def test_f6_mount_id_fails_closed_without_proc_and_catches_file_mount(tmp_path):
+    from sigint101.snapshot import read_fd_mount_id
+
+    # 1) Unreadable/missing fdinfo MUST raise SnapshotError (never fall back to st_dev).
+    probe_file = tmp_path / "f.txt"
+    probe_file.write_text("hi", encoding="utf-8")
+    fd = os.open(os.fspath(probe_file), os.O_RDONLY)
+    try:
+        with pytest.raises(SnapshotError, match="mount|fdinfo"):
+            read_fd_mount_id(fd, "f.txt", fdinfo_root=tmp_path / "no_proc_fdinfo")
+    finally:
+        os.close(fd)
+
+    # 2) File-level mount boundary crossing (directory has mount 101, single file has mount 202)
+    # MUST be refused by inventory_generation!
+    s = tmp_path / "file_mnt_src"
+    s.mkdir(mode=0o700)
+    (s / "events.jsonl").write_text('{"kind":"ok"}\n', encoding="utf-8")
+
+    def file_only_mount(_fd: int, rel_path: str) -> int:
+        return 202 if rel_path == "events.jsonl" else 101
+
+    with pytest.raises(SnapshotError, match="mount"):
+        inventory_generation(s, mount_id_reader=file_only_mount)
+
+
+def test_f7_trial_ro_connections_package_root_r21_post_marker_and_sigkill_reap(tmp_path):
+    from sigint101.trial import _stop_and_reap
+
+    # 1) T2: trial opens both SQLite connections read-only (writes fail with OperationalError).
+    gen = _make_managed_generation(tmp_path, "gen_f7", generation_id="gen-f7")
+    trial_app = create_trial_app(
+        pack_dir=PACK_DIR,
+        data_dir=gen,
+        pool_path=POOL_PATH,
+        release_root=REPO_ROOT,
+        require_release_manifest=False,
+        probe=_absent,
+    )
+    with TestClient(trial_app) as client:
+        assert client.get(TRIAL_READY_PATH).status_code == 200
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            trial_app.state.progress._conn.execute(
+                "INSERT INTO progress(lesson_id, opened, completed) VALUES(1, 1, 0)"
+            )
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            trial_app.state.exam_store._conn.execute(
+                "INSERT INTO srs(question_id, box, last_seen, seen, correct) "
+                "VALUES('T1A01', 1, 1.0, 1, 1)"
+            )
+
+    # 2) A2: identical release.json in a DIFFERENT directory fails package-root identity check!
+    rel1 = _copy_release_tree(tmp_path / "rel_same_1", release_id="rel-same", commit="same123")
+    rel2 = _copy_release_tree(tmp_path / "rel_same_2", release_id="rel-same", commit="same123")
+    res = run_private_trial(
+        python_executable=sys.executable,
+        release_root=rel1,
+        data_dir=gen,
+        expected_release_id="rel-same",
+        expected_commit="same123",
+        expected_generation_id="gen-f7",
+        socket_parent_dir=tmp_path,
+    )
+    assert res.ready is True, res.errors
+    with pytest.raises(ValidationError, match="package root"):
+        verify_pair_attestation(
+            res.attestation,
+            expected_release_id="rel-same",
+            expected_commit="same123",
+            expected_package_root=rel2,
+            expected_generation_id="gen-f7",
+            expected_data_dir=gen,
+        )
+
+    # 3) R1 (R2-1): after serving marker exists, even a changed unit-owned setting MUST NOT refuse!
+    u1 = parse_systemd_unit_config(
+        '[Service]\nExecStart=/usr/bin/uvicorn sigint101.app:app\nEnvironment="A=1"\n'
+    )
+    u2 = parse_systemd_unit_config(
+        '[Service]\nExecStart=/usr/bin/uvicorn sigint101.app:app\nEnvironment="A=2"\n'
+    )
+    fp1 = compute_settings_fingerprint(u1.unit_only())
+    with pytest.raises(UnitSettingsError, match="parity|drift"):
+        check_unit_settings_parity(
+            recorded_fingerprint=fp1, current_settings=u2, serving_marker_exists=False
+        )
+    assert (
+        check_unit_settings_parity(
+            recorded_fingerprint=fp1, current_settings=u2, serving_marker_exists=True
+        )
+        is True
+    )
+
+    # 4) F8: unit_only() fingerprint covers ONLY unit env, not ExecStart/RestartSec.
+    u1_diff_restart = parse_systemd_unit_config(
+        '[Service]\nExecStart=/usr/bin/uvicorn sigint101.app:app\nRestartSec=9\nEnvironment="A=1"\n'
+    )
+    assert compute_settings_fingerprint(u1_diff_restart.unit_only()) == fp1
+
+    # 5) _stop_and_reap escalates to SIGKILL and reaps a child that ignores SIGTERM!
+    ign_code = (
+        "import signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-B", "-c", ign_code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert proc.stdout.readline().strip() == b"ready"
+    _stop_and_reap(proc, grace_s=0.3)
+    assert proc.poll() == -signal.SIGKILL
+    with pytest.raises(ProcessLookupError):
+        os.kill(proc.pid, 0)
+    proc.stdout.close()
+    proc.stderr.close()
+
 

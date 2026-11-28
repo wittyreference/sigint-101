@@ -30,16 +30,34 @@ class SnapshotError(RuntimeError):
 MountIdReader = Callable[[int, str], int]
 
 
-def read_fd_mount_id(fd: int, _rel_path: str = "") -> int:
-    """Return the kernel mount ID for an open descriptor via /proc/self/fdinfo."""
-    fdinfo = Path(f"/proc/self/fdinfo/{fd}")
+def read_fd_mount_id(
+    fd: int,
+    _rel_path: str = "",
+    *,
+    fdinfo_root: str | Path | None = None,
+) -> int:
+    """Return the kernel mount ID for an open descriptor via /proc/self/fdinfo.
+
+    Fails closed (SnapshotError) when fdinfo or mnt_id cannot be read — never falls back to st_dev
+    because same-device bind mounts share st_dev (F6).
+    """
+    base = Path(fdinfo_root) if fdinfo_root is not None else Path("/proc/self/fdinfo")
+    fdinfo = base / str(fd)
     try:
-        for line in fdinfo.read_text(encoding="utf-8").splitlines():
-            if line.startswith("mnt_id:"):
+        text = fdinfo.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SnapshotError(
+            f"cannot read mount ID from fdinfo for {_rel_path or fd!r}: {exc}"
+        ) from exc
+    for line in text.splitlines():
+        if line.startswith("mnt_id:"):
+            try:
                 return int(line.split(":", 1)[1].strip())
-    except (OSError, ValueError):
-        pass
-    return os.fstat(fd).st_dev
+            except ValueError as exc:
+                raise SnapshotError(
+                    f"malformed mnt_id in fdinfo for {_rel_path or fd!r}"
+                ) from exc
+    raise SnapshotError(f"mnt_id missing from fdinfo for {_rel_path or fd!r}")
 
 
 def _check_dir_stat(
@@ -72,8 +90,6 @@ def _check_file_stat(
 ) -> None:
     if not stat.S_ISREG(st.st_mode):
         raise SnapshotError(f"non-regular special file refused at {rel_path!r}")
-    if st.st_nlink > 1:
-        raise SnapshotError(f"hardlink alias refused at {rel_path!r} (nlink={st.st_nlink})")
     if check_permissions and st.st_uid != expected_uid:
         raise SnapshotError(
             f"untrusted file owner at {rel_path!r}: uid {st.st_uid} != {expected_uid}"
@@ -209,6 +225,7 @@ def inventory_generation(
     dirs: list[str] = []
     empty_dirs: list[str] = []
     files: dict[str, dict] = {}
+    inode_links: dict[tuple[int, int], list[tuple[str, int]]] = {}
 
     def walk(dir_fd: int, prefix: str) -> None:
         names = sorted(os.listdir(dir_fd))
@@ -249,6 +266,7 @@ def inventory_generation(
                     sha256, size = _hash_fd(file_fd)
                 finally:
                     os.close(file_fd)
+                inode_links.setdefault((st.st_dev, st.st_ino), []).append((rel, st.st_nlink))
                 files[rel] = {
                     "size": size,
                     "sha256": sha256,
@@ -256,6 +274,7 @@ def inventory_generation(
                     "atime_ns": st.st_atime_ns,
                     "st_dev": st.st_dev,
                     "st_ino": st.st_ino,
+                    "st_nlink": st.st_nlink,
                 }
             else:
                 raise SnapshotError(f"non-regular special file refused at {rel!r}")
@@ -264,6 +283,18 @@ def inventory_generation(
         walk(root_fd, "")
     finally:
         os.close(root_fd)
+
+    # F4: allow in-generation hardlinks (such as an interrupted SSTV publish where both
+    # sstv/<png> and sstv/.staging/<png> share one inode with nlink == 2), while refusing any
+    # inode whose link count exceeds the links observed inside this generation.
+    for entries in inode_links.values():
+        nlinks = {n for _, n in entries}
+        expected_nlink = entries[0][1]
+        if len(nlinks) != 1 or len(entries) != expected_nlink:
+            raise SnapshotError(
+                f"external hardlink alias refused at {entries[0][0]!r} "
+                f"(nlink={expected_nlink}, in_generation={len(entries)})"
+            )
 
     return {
         "root": str(src_path.resolve()),
@@ -526,6 +557,26 @@ def copy_generation_snapshot(
     finally:
         os.close(src_root_fd)
         os.close(dst_root_fd)
+
+    # F3: re-inventory the entire source generation after copy (including progress.db, exam.db,
+    # sidecars, captures, and directories) so any post-inventory write or newly published file
+    # fails closed rather than producing an inconsistent snapshot. Ignore read-updated atime_ns.
+    post_inv = inventory_generation(
+        src_path, mount_id_reader=reader, check_permissions=check_permissions
+    )
+
+    def _stable_files(file_map: dict[str, dict]) -> dict[str, dict]:
+        return {
+            rel: {k: v for k, v in meta.items() if k != "atime_ns"}
+            for rel, meta in file_map.items()
+        }
+
+    if (
+        post_inv["dirs"] != inv["dirs"]
+        or post_inv["empty_dirs"] != inv["empty_dirs"]
+        or _stable_files(post_inv["files"]) != _stable_files(inv["files"])
+    ):
+        raise SnapshotError("source generation changed during snapshot copy")
 
     fsync_dir(resolved_dst.parent)
     return {
