@@ -94,7 +94,7 @@ sort:
   - key: ham-tx-unlicensed
     text: "Key up and transmit on a local 2-meter amateur repeater with no amateur licence."
     answer: illegal
-    why: "Transmitting on ham bands requires an FCC amateur licence grant."
+    why: "Using a ham repeater requires an FCC amateur licence grant."
     cite: "47 USC 301; 47 CFR 97.5(a)"
   - key: pocsag-words
     text: "Decode and read the text of a commercial carrier's unencrypted POCSAG pager messages."
@@ -105,7 +105,7 @@ sort:
     text: "Capture emails, logins, or web traffic from a neighbour's unencrypted Wi-Fi network."
     answer: illegal
     why: "Ninth Circuit: Wi-Fi payload is not a 'radio communication'."
-    cite: "18 USC 2510(16), 2511; Joffe, 746 F.3d 920 (9th Cir.)"
+    cite: "18 USC 2510(16), 2511(1)(a); Joffe, 746 F.3d 920 (9th Cir.)"
   - key: break-encryption
     text: "Record an encrypted digital voice or cellular call and crack it to listen in."
     answer: illegal
@@ -114,7 +114,7 @@ sort:
   - key: meshtastic-tx
     text: "Transmit a Meshtastic text on 915 MHz without holding an individual FCC licence."
     answer: depends
-    why: "500 kHz Long Turbo allows 1 W; 250 kHz LongFast caps at ~0.75 mW."
+    why: "Certified Long Turbo (500 kHz) may run 1 W; LongFast caps ~0.75 mW."
     cite: "47 CFR 15.247(a)(2), (b)(3); 15.249"
   - key: police-scanner-car
     text: "Listen to unencrypted local police dispatch on a receiver mounted in your car."

@@ -60,10 +60,10 @@ LAW_SECTIONS: tuple[LawSection, ...] = (
             "documents) is not a 'radio communication' — a predominantly auditory broadcast — "
             "under 18 USC 2510(16), so the unencrypted-radio definition does not bring it into "
             "the 18 USC 2511(2)(g)(i) exemption. That appeal affirmed the denial of Google's "
-            "motion to dismiss, so the claim went forward; it decided no liability (the Supreme "
-            "Court denied review in 2014 and the suit later settled), binds only the Ninth "
-            "Circuit, and never decided whether beacon metadata (SSID, MAC, signal, channel) is "
-            "covered."
+            "motion to dismiss, so the claim went forward; it did not decide liability (the "
+            "Supreme Court denied review in 2014 and the suit later settled), binds only the "
+            "Ninth Circuit, and never decided whether beacon metadata (SSID, MAC, signal, "
+            "channel) is covered."
         ),
         url="https://cdn.ca9.uscourts.gov/datastore/general/2013/12/27/11-17483_opinion122713.pdf",
     ),

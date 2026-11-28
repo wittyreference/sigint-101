@@ -69,6 +69,8 @@ def test_m5_sort_carries_over_m15_pager_line_and_joffe_wifi_payload_line():
     assert all(c["answer"] != "legal" for c in joffe_cards), joffe_cards
     payload_card = next(c for c in joffe_cards if c["key"] == "open-wifi-payload")
     assert payload_card["answer"] == "illegal"
+    assert "2510(16)" in payload_card["cite"]
+    assert "2511(1)(a)" in payload_card["cite"]
     assert "746 F.3d 920" in payload_card["cite"]
     assert "9th Cir" in payload_card["cite"]
     assert "ninth circuit" in payload_card["why"].lower()
@@ -78,10 +80,17 @@ def test_m5_sort_carries_over_m15_pager_line_and_joffe_wifi_payload_line():
     beacon = next(c for c in cards if c["key"] == "wifi-beacons")
     assert "joffe" not in beacon["cite"].lower()
 
-    # F9: 1 W limit cites 47 CFR 15.247(b)(3) alongside (a)(2) and 15.249.
+    # F9 & R3: 1 W needs certified/compliant gear (not the preset alone) under 15.247(b)(3).
     mesh = next(c for c in cards if c["key"] == "meshtastic-tx")
     assert "15.247(b)(3)" in mesh["why"] or "(b)(3)" in mesh["cite"]
     assert "(b)(3)" in mesh["cite"]
+    assert re.search(r"\b(?:certified|compliant)\b", mesh["why"], re.I), mesh["why"]
+
+    # R3: ham-tx-unlicensed must not over-generalize to "ham bands" (902-928 MHz is shared).
+    ham = next(c for c in cards if c["key"] == "ham-tx-unlicensed")
+    assert "ham bands" not in ham["why"].lower(), ham["why"]
+    assert "amateur frequencies" not in ham["why"].lower(), ham["why"]
+    assert re.search(r"\b(?:repeater|amateur station)\b", ham["why"], re.I), ham["why"]
 
     # Routine marine/aeronautical traffic sits under 18 USC 2511(2)(g)(ii)(IV), not (I) (distress).
     air_marine = [c for c in cards if c["key"] in ("aircraft-am", "adsb-ais")]
@@ -126,16 +135,16 @@ def test_m5_pack_cites_primary_sources_for_sort_authorities():
 
 def test_law_sections_joffe_and_part15_are_exact_to_primary_sources():
     # F1: Joffe section keeps only the amended 2510(16) radio-communication holding, affirms the
-    # denial of Google's motion to dismiss (deciding no liability — never "finding no liability"),
-    # puts 2014 cert denial before settlement, limits reach to the Ninth Circuit, and notes silence
-    # on beacons.
+    # denial of Google's motion to dismiss ("it did not decide liability"), puts 2014 cert denial
+    # before settlement, limits reach to the Ninth Circuit, and notes silence on beacons.
     joffe = next(s for s in LAW_SECTIONS if s.id == "joffe-wifi")
     low = joffe.summary.lower()
     assert "nor 'readily accessible" not in low
     assert not re.search(r"\bheld\b[^.?!]*readily accessible", low)
     assert "finding no liability" not in low
+    assert "decided no liability" not in low
     assert "affirmed the denial" in low and "motion to dismiss" in low
-    assert "decided no liability" in low
+    assert "it did not decide liability" in low
     assert "2014" in low and "settled" in low and low.index("2014") < low.index("settled")
     assert "radio communication" in low and "2510(16)" in joffe.summary
     assert "ninth circuit" in low
