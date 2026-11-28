@@ -96,6 +96,8 @@
     if (picker && picker.scrollHeight - picker.clientHeight > 2) return picker;
     var law = document.querySelector(".law__entries");
     if (law && law.scrollHeight - law.clientHeight > 2) return law;
+    var field = document.querySelector(".field__entries");
+    if (field && field.scrollHeight - field.clientHeight > 2) return field;
     return null;
   }
 
