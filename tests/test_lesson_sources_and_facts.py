@@ -145,14 +145,92 @@ def test_apt_honesty_probe_rejects_defects_and_accepts_rewordings():
     assert _check_apt_honesty(fair_rewording) == []
 
 
+CALLS_8DBM_THE_GRANT = re.compile(
+    r"\b8\s*dBm\s+(?:fcc\s+)?grant\b"
+    r"|\b(?:fcc\s+)?grant\s+(?:of|is|at|:)\s+8\s*dBm\b"
+    r"|\b8\s*dBm\s+is\s+(?:the|its)\s+(?:module['’]?s\s+)?(?:fcc\s+)?grant\b",
+    re.I,
+)
+EIGHT_DBM_UNDER_GRANT = re.compile(
+    r"\b8\s*dBm\b[^.?!]*\b(?:under|below|within|inside)\b[^.?!]*\b(?:fcc\s+)?grant\b"
+    r"|\b(?:under|below|within|inside)\b[^.?!]*\b(?:fcc\s+)?grant\b[^.?!]*\b8\s*dBm\b",
+    re.I,
+)
+
+
+def _check_m28_long_turbo_pointer(text: str) -> list:
+    """M28 says why the kit runs Long Turbo (500 kHz), points to L05, and puts 8 dBm under grant."""
+    issues = []
+    if not LONGTURBO_500.search(text):
+        issues.append("missing Long Turbo 500 kHz")
+    if not RECON_LONG_TURBO.search(text):
+        issues.append("missing why the Recon runs Long Turbo")
+    if not re.search(r"\blesson\s+0?5\b", text, re.I):
+        issues.append("missing pointer to Lesson 05")
+    if not re.search(r"\b8\s*dBm\b", text):
+        issues.append("missing 8 dBm transmit power setting")
+    if not re.search(r"\bfcc\s+grant\b", text, re.I):
+        issues.append("missing module FCC grant attribution")
+    if CALLS_8DBM_THE_GRANT.search(text):
+        issues.append("calls 8 dBm the FCC grant (grant is ~9 dBm at 500 kHz; 8 dBm sits under it)")
+    if not EIGHT_DBM_UNDER_GRANT.search(text):
+        issues.append("does not place 8 dBm under/below/within the module's FCC grant")
+    if not re.search(r"\bprovision\w*\b", text, re.I):
+        issues.append("missing provisioning attribution for 8 dBm")
+    for sentence in _part15_preset_sentences(text):
+        if LOCKOUT_PHRASE.search(sentence):
+            issues.append(f"lockout phrasing in Part 15 preset text: {sentence!r}")
+    return issues
+
+
+def test_m28_pointer_probe_rejects_defects_and_accepts_rewordings():
+    missing_pointer = (
+        "This Recon runs Long Turbo (500 kHz) at 8 dBm because of Part 15."
+    )
+    calls_8dbm_the_grant = (
+        "This Recon runs Long Turbo (500 kHz) for the US Part 15 bandwidth rule in Lesson 05, "
+        "and provisioning keeps transmit power within the module's 8 dBm FCC grant."
+    )
+    grant_of_8dbm = (
+        "This Recon runs Long Turbo (500 kHz) for the US Part 15 bandwidth rule in Lesson 05, "
+        "and provisioning holds power under its FCC grant of 8 dBm."
+    )
+    fair_rewording = (
+        "This Recon runs Long Turbo (500 kHz) for the US Part 15 bandwidth rule in Lesson 05, "
+        "with provisioning keeping transmit power at 8 dBm, under the module's FCC grant."
+    )
+    assert _check_m28_long_turbo_pointer(missing_pointer)
+    assert any("8 dBm the FCC grant" in item
+               for item in _check_m28_long_turbo_pointer(calls_8dbm_the_grant))
+    assert any("8 dBm the FCC grant" in item
+               for item in _check_m28_long_turbo_pointer(grant_of_8dbm))
+    assert _check_m28_long_turbo_pointer(fair_rewording) == []
+
+
+def test_no_lesson_calls_8dbm_the_fcc_grant():
+    # The E22-900M22S module's FCC grant is ~9 dBm at 500 kHz; 8 dBm is the provisioned ceiling
+    # kept below it. No shipped lesson may call 8 dBm the grant itself.
+    for path in sorted(PACK_DIR.glob("*.yaml")):
+        lesson = load_lesson_file(path)
+        choice_labels = [str(c.get("label", "")) for c in (lesson.choices or [])]
+        prose = " ".join([_learner_prose(lesson), *choice_labels])
+        match = CALLS_8DBM_THE_GRANT.search(prose)
+        assert not match, f"{path.name} calls 8 dBm the FCC grant: {match.group(0)!r}"
+
+
 # --- Shipped pack checks (fail on main, pass after edits) --------------------------------------
 
 
-@pytest.mark.parametrize("path", [PACK_M5, PACK_M28], ids=["L05", "L28"])
-def test_m5_and_m28_state_part15_rule_and_why_recon_runs_long_turbo(path):
-    lesson = load_lesson_file(path)
+def test_m5_states_part15_rule_and_why_recon_runs_long_turbo():
+    lesson = load_lesson_file(PACK_M5)
     issues = _check_part15_claim(_learner_prose(lesson))
-    assert issues == [], f"{path.name}: {issues}"
+    assert issues == [], f"{PACK_M5.name}: {issues}"
+
+
+def test_m28_points_to_lesson_05_for_long_turbo_and_notes_8dbm_fcc_grant():
+    lesson = load_lesson_file(PACK_M28)
+    issues = _check_m28_long_turbo_pointer(_learner_prose(lesson))
+    assert issues == [], f"{PACK_M28.name}: {issues}"
 
 
 @pytest.mark.parametrize("path", [PACK_M5, PACK_M28], ids=["L05", "L28"])
