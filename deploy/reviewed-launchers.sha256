@@ -1,0 +1,7 @@
+# The reviewed course launchers, by SHA-256: deploy/watchdog_helper.py sends SIGKILL only to a
+# watchdog running one of these, from a file its own user cannot rewrite. Refreeze an entry only
+# on a reviewed launcher change; tests/test_kiosk_deploy.py, tests/test_legacy_provisioning.py and
+# tests/test_updater_launcher.py check these against the files.
+446893522cf963e16522f943317db2405e602eb0177b4118e95546bfc0795485  deploy/kiosk/start-kiosk.sh
+acb558c9cf59841776d2b2f05f79f30464369668ef0e2b1bc46b2950b557bbbd  deploy/kiosk/start-kiosk.sh at 3004a03 (tests/fixtures/kiosk/start-kiosk-3004a03.sh)
+73755b285993e6a4fa9e0a677d0536b6f6ca9b0c5c1842f6e4a0135b547107d8  deploy/managed/sigint101-course-managed.sh
