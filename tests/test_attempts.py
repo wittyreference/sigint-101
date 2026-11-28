@@ -26,17 +26,19 @@ def _create_bench_tables(db_path: Path) -> None:
                 bench_id   TEXT PRIMARY KEY,
                 started_at REAL NOT NULL,
                 window_s   INTEGER NOT NULL,
+                attempt_id TEXT NOT NULL,
                 recording  TEXT NOT NULL,
                 digest     TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS test_bench_passes (
                 bench_id   TEXT NOT NULL,
                 started_at REAL NOT NULL,
+                attempt_id TEXT NOT NULL,
                 passed_at  REAL NOT NULL,
                 recording  TEXT NOT NULL,
                 digest     TEXT NOT NULL,
                 answer     TEXT NOT NULL,
-                PRIMARY KEY (bench_id, started_at)
+                PRIMARY KEY (bench_id, attempt_id)
             );
             """
         )
@@ -80,6 +82,7 @@ def _bench_kind():
         passes_table="test_bench_passes",
         key_column="bench_id",
         slot_column=None,
+        identity_column="attempt_id",
         start_event="test_bench_start",
         pass_event="test_bench_pass",
         credit="replay_answer",
@@ -263,13 +266,12 @@ def test_progress_attempt_extra_columns_and_insert_once_pass_on_replay_kind(tmp_
             bench, "b1", 1000.0, 600, recording="clip-1.sigmf", digest="d1",
         ) is True
         first = prog.attempt(bench, "b1")
-        assert first["attempt"] == {
-            "bench_id": "b1",
-            "started_at": 1000.0,
-            "window_s": 600,
-            "recording": "clip-1.sigmf",
-            "digest": "d1",
-        }
+        assert first["attempt"]["bench_id"] == "b1"
+        assert first["attempt"]["started_at"] == 1000.0
+        assert first["attempt"]["window_s"] == 600
+        assert first["attempt"]["recording"] == "clip-1.sigmf"
+        assert first["attempt"]["digest"] == "d1"
+        assert isinstance(first["attempt"]["attempt_id"], str) and first["attempt"]["attempt_id"]
 
         # Overwrite and restore previous row including extra columns.
         assert prog.start_attempt(
@@ -286,6 +288,7 @@ def test_progress_attempt_extra_columns_and_insert_once_pass_on_replay_kind(tmp_
         assert prog.start_attempt(
             bench, "b1", 1000.0, 600, recording="clip-1.sigmf", digest="d1",
         ) is True
+        aid = prog.attempt(bench, "b1")["attempt"]["attempt_id"]
         pass_one = {
             "passed_at": 1050.0,
             "recording": "clip-1.sigmf",
@@ -298,8 +301,12 @@ def test_progress_attempt_extra_columns_and_insert_once_pass_on_replay_kind(tmp_
             "digest": "d1",
             "answer": "changed_answer",
         }
-        assert prog.record_attempt_pass(bench, "b1", 1000.0, None, pass_one) is True
-        assert prog.record_attempt_pass(bench, "b1", 1000.0, None, pass_two) is False
+        assert prog.record_attempt_pass(
+            bench, "b1", 1000.0, None, pass_one, attempt_id=aid,
+        ) is True
+        assert prog.record_attempt_pass(
+            bench, "b1", 1000.0, None, pass_two, attempt_id=aid,
+        ) is False
 
         saved = prog.attempt(bench, "b1")
         assert saved["passes"] == 1
@@ -319,6 +326,7 @@ def test_progress_attempt_extra_columns_and_insert_once_pass_on_replay_kind(tmp_
     assert prog.record_attempt_pass(
         _bench_kind(), "b1", 2000.0, None,
         {"passed_at": 2010.0, "recording": "x", "digest": "y", "answer": "a"},
+        attempt_id="closed-aid",
     ) is False
 
 
@@ -430,6 +438,7 @@ def test_app_replay_kind_never_credited_by_heard_or_backfill_and_derives_replay_
         assert app2.state.progress.attempt(bench, "bench-u4")["passes"] == 0
 
         # Record a replay answer pass through the shared insert-once path.
+        bench_aid = app2.state.progress.attempt(bench, "bench-u4")["attempt"]["attempt_id"]
         inserted, pass_err = app2.state.record_attempt_pass(
             bench,
             "bench-u4",
@@ -441,6 +450,7 @@ def test_app_replay_kind_never_credited_by_heard_or_backfill_and_derives_replay_
                 "digest": "deadbeef",
                 "answer": "fm_broadcast",
             },
+            attempt_id=bench_aid,
             event_fields={"replay": False, "source": "live"},
         )
         assert inserted is True
@@ -458,6 +468,7 @@ def test_app_replay_kind_never_credited_by_heard_or_backfill_and_derives_replay_
                 "digest": "deadbeef",
                 "answer": "other",
             },
+            attempt_id=bench_aid,
         )
         assert inserted_dup is False
         assert dup_err is None
@@ -519,6 +530,7 @@ def test_app_start_attempt_launch_and_log_failure_rollback_with_extra_columns(
         )
         assert err is None
         assert order == ["pre_start", "launch"]
+        first_aid = app.state.progress.attempt(bench, "b1")["attempt"]["attempt_id"]
 
         # Restart with failing launch rolls back to rec-1.sigmf / aaa and logs no second start.
         now[0] = 2100.0
@@ -539,6 +551,7 @@ def test_app_start_attempt_launch_and_log_failure_rollback_with_extra_columns(
             "bench_id": "b1",
             "started_at": 2000.0,
             "window_s": 600,
+            "attempt_id": first_aid,
             "recording": "rec-1.sigmf",
             "digest": "aaa",
         }
@@ -576,6 +589,7 @@ def test_app_start_attempt_launch_and_log_failure_rollback_with_extra_columns(
             "bench_id": "b1",
             "started_at": 2000.0,
             "window_s": 600,
+            "attempt_id": first_aid,
             "recording": "rec-1.sigmf",
             "digest": "aaa",
         }
@@ -793,6 +807,7 @@ def test_f2_queued_or_superseded_pass_cannot_credit_missing_or_failed_start(
                     "digest": "d-race",
                     "answer": "fm_broadcast",
                 },
+                attempt_id="race-attempt-id",
             )
 
         t_start = threading.Thread(target=run_start)
@@ -818,11 +833,13 @@ def test_f2_queued_or_superseded_pass_cannot_credit_missing_or_failed_start(
             bench, "b-sup", 600, extra={"recording": "r1.sigmf", "digest": "d1"}
         )
         assert err1 is None
+        aid1 = app.state.progress.attempt(bench, "b-sup")["attempt"]["attempt_id"]
         now[0] = 3100.0
         _, err2 = app.state.start_attempt(
             bench, "b-sup", 600, extra={"recording": "r2.sigmf", "digest": "d2"}
         )
         assert err2 is None
+        aid2 = app.state.progress.attempt(bench, "b-sup")["attempt"]["attempt_id"]
 
         stale_ins, stale_err = app.state.record_attempt_pass(
             bench,
@@ -830,6 +847,7 @@ def test_f2_queued_or_superseded_pass_cannot_credit_missing_or_failed_start(
             3000.0,
             None,
             {"passed_at": 3110.0, "recording": "r1.sigmf", "digest": "d1", "answer": "a"},
+            attempt_id=aid1,
         )
         assert (stale_ins, stale_err) == (False, None)
         assert app.state.progress.attempt(bench, "b-sup")["passes"] == 0
@@ -841,6 +859,7 @@ def test_f2_queued_or_superseded_pass_cannot_credit_missing_or_failed_start(
             3100.0,
             None,
             {"passed_at": 3120.0, "recording": "r2.sigmf", "digest": "d2", "answer": "b"},
+            attempt_id=aid2,
         )
         dup_ins, dup_err = app.state.record_attempt_pass(
             bench,
@@ -848,6 +867,7 @@ def test_f2_queued_or_superseded_pass_cannot_credit_missing_or_failed_start(
             3100.0,
             None,
             {"passed_at": 3125.0, "recording": "r2.sigmf", "digest": "d2", "answer": "c"},
+            attempt_id=aid2,
         )
         assert (ok_ins, ok_err) == (True, None)
         assert (dup_ins, dup_err) == (False, None)
@@ -978,6 +998,7 @@ def test_f5_reserved_replay_and_source_flags_win_over_descriptor_columns_key_and
         start_event="live_ks_start",
         pass_event="live_ks_pass",
         credit="live_reception",
+        event_key_field="ks_key",
     )
     replay_cols = challenges.AttemptKind(
         kind="replay_flag_cols",
@@ -985,11 +1006,13 @@ def test_f5_reserved_replay_and_source_flags_win_over_descriptor_columns_key_and
         passes_table="test_replay_flag_passes",
         key_column="source",
         slot_column="replay",
+        identity_column="attempt_id",
         start_event="replay_flag_start",
         pass_event="replay_flag_pass",
         credit="replay_answer",
-        attempt_columns=("note",),
-        pass_columns=("passed_at", "answer"),
+        attempt_columns=("recording", "note"),
+        pass_columns=("passed_at", "recording", "answer"),
+        event_key_field="rf_key",
     )
 
     prog_init = Progress(tmp_path / "progress.db")
@@ -1017,12 +1040,13 @@ def test_f5_reserved_replay_and_source_flags_win_over_descriptor_columns_key_and
             );
             CREATE TABLE test_replay_flag_attempts (
                 source TEXT PRIMARY KEY, started_at REAL NOT NULL, window_s INTEGER NOT NULL,
-                note TEXT NOT NULL
+                attempt_id TEXT NOT NULL, recording TEXT NOT NULL, note TEXT NOT NULL
             );
             CREATE TABLE test_replay_flag_passes (
-                source TEXT NOT NULL, started_at REAL NOT NULL, replay INTEGER NOT NULL,
-                passed_at REAL NOT NULL, answer TEXT NOT NULL,
-                PRIMARY KEY (source, started_at, replay)
+                source TEXT NOT NULL, started_at REAL NOT NULL, attempt_id TEXT NOT NULL,
+                replay INTEGER NOT NULL, passed_at REAL NOT NULL, recording TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                PRIMARY KEY (source, attempt_id, replay)
             );
             """
         )
@@ -1063,16 +1087,18 @@ def test_f5_reserved_replay_and_source_flags_win_over_descriptor_columns_key_and
             replay_cols,
             "live",
             600,
-            extra={"note": "ok"},
+            extra={"recording": "rf.sigmf", "note": "ok"},
             event_fields={"replay": False, "source": "live"},
         )
         assert err3 is None
+        rf_aid = app.state.progress.attempt(replay_cols, "live")["attempt"]["attempt_id"]
         ins, perr = app.state.record_attempt_pass(
             replay_cols,
             "live",
             4010.0,
             0,
-            {"passed_at": 4020.0, "answer": "fm"},
+            {"passed_at": 4020.0, "recording": "rf.sigmf", "answer": "fm"},
+            attempt_id=rf_aid,
             event_fields={"replay": False, "source": "live"},
         )
         assert (ins, perr) == (True, None)
@@ -1089,3 +1115,581 @@ def test_f5_reserved_replay_and_source_flags_win_over_descriptor_columns_key_and
         assert len(matched) == 1, kind_name
         assert matched[0]["payload"]["replay"] is True, (kind_name, matched[0]["payload"])
         assert matched[0]["payload"]["source"] == "replay", (kind_name, matched[0]["payload"])
+
+
+def _prepare_managed_dir(tmp_path: Path) -> Path:
+    from sigint101.migrations import migrate_store_copy
+
+    gen_dir = tmp_path / "gen"
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    for store in ("progress", "exam"):
+        migrate_store_copy(
+            tmp_path / f"missing-{store}.db",
+            gen_dir / f"{store}.db",
+            store=store,
+            allow_missing_source=True,
+            scratch_dir=tmp_path / f"scratch-{store}",
+        )
+    return gen_dir
+
+
+def _deny_sqlite_action(conn: sqlite3.Connection, action_code: int, arg1_match: str | None = None):
+    def auth(action, arg1, arg2, db_name, trigger):
+        if action == action_code and (arg1_match is None or arg1 == arg1_match):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(auth)
+
+
+@pytest.mark.parametrize("fail_at", ["insert", "event", "commit"])
+@pytest.mark.parametrize("managed", [False, True], ids=["legacy", "managed"])
+def test_f3a_failed_start_cleans_up_claimed_receiver_and_preserves_newer_claim(
+    tmp_path, monkeypatch, fail_at, managed
+):
+    """F3a: post-launch Start failures run scoped cleanup after locks and spare newer claims."""
+    from sigint101.decode import Decoder
+    from tests.child_fakes import Child
+    from tests.test_app import _present, _rows, _StubSweeper
+
+    data_dir = _prepare_managed_dir(tmp_path) if managed else tmp_path
+    now = [2000.0]
+    _patch_log_clock(monkeypatch, now)
+    app = app_mod.create_app(
+        data_dir=data_dir,
+        probe=_present,
+        sweeper_factory=lambda: _StubSweeper(_rows()),
+        clock=lambda: now[0],
+        managed=managed,
+    )
+
+    with TestClient(app) as client:
+        # 1. Fail Start at INSERT, Start event append, or COMMIT after launch claims sweeper.
+        lock_state: dict[str, bool] = {}
+
+        def launch_sweeper():
+            resp = client.get("/api/spectrum")
+            assert resp.status_code == 200
+            assert app.state.sweeper.running
+
+        def check_locks_cleanup():
+            # Verify neither DB lock nor reception lock is held during cleanup.
+            db_free = app.state.progress._lock.acquire(blocking=False)
+            if db_free:
+                app.state.progress._lock.release()
+            lock_state["db_free"] = db_free
+            if fail_at == "event":
+                # Invoking _heard acquires reception_lock -> Progress._lock; would deadlock if held.
+                app.state.lora.on_reception(_lora_item(from_id="!cleanup-unlocked"))
+                lock_state["reception_free"] = True
+
+        if fail_at == "insert":
+            _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_INSERT, "challenges")
+        elif fail_at == "commit":
+            _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_TRANSACTION, "COMMIT")
+        else:
+            real_log = app_mod.log_event
+
+            def fail_start_log(path, kind, payload, **kw):
+                if kind == "challenge_start":
+                    raise OSError("disk full on start event")
+                return real_log(path, kind, payload, **kw)
+
+            monkeypatch.setattr(app_mod, "log_event", fail_start_log)
+
+        try:
+            _, err = app.state.start_attempt(
+                challenges.CHALLENGE_KIND,
+                9,
+                900,
+                launch=launch_sweeper,
+                cleanup=check_locks_cleanup,
+            )
+        finally:
+            app.state.progress._conn.set_authorizer(None)
+
+        assert err is not None
+        assert not app.state.sweeper.running
+        assert lock_state.get("db_free") is True
+        if fail_at == "event":
+            assert lock_state.get("reception_free") is True
+
+        # 2. A newer claim taking over the sweeper before cleanup must keep running.
+        def launch_then_superseded():
+            resp = client.get("/api/spectrum")
+            assert resp.status_code == 200
+            assert app.state.sweeper.running
+
+        def supersede_and_fail(path, kind, payload, **kw):
+            if kind == "challenge_start":
+                # Simulate a newer claim taking over sweeper with a new run before cleanup runs.
+                app.state.sweeper.stop()
+                assert client.get("/api/spectrum").status_code == 200
+                raise OSError("event fail after newer claim")
+            return events.log_event(path, kind, payload, **kw)
+
+        monkeypatch.setattr(app_mod, "log_event", supersede_and_fail)
+        _, err_sup = app.state.start_attempt(
+            challenges.CHALLENGE_KIND,
+            9,
+            900,
+            launch=launch_then_superseded,
+        )
+        assert err_sup is not None
+        assert app.state.sweeper.running
+        app.state.sweeper.stop()
+
+    # 3. Unresolved reap on a decoder preserves the lifecycle's failure reason.
+    child = Child(["rtl_433"], unkillable=True)
+    rtl = Decoder(spawn=lambda *_: child, which=lambda n: n, radio_present=lambda: True)
+    data_dir2 = _prepare_managed_dir(tmp_path / "reap") if managed else (tmp_path / "reap")
+    data_dir2.mkdir(parents=True, exist_ok=True)
+    app2 = app_mod.create_app(
+        data_dir=data_dir2,
+        probe=_present,
+        sweeper_factory=lambda: _StubSweeper(_rows()),
+        decoder_factory=lambda: rtl,
+        clock=lambda: now[0],
+        managed=managed,
+    )
+    try:
+        with TestClient(app2):
+            monkeypatch.setattr(
+                app_mod,
+                "log_event",
+                lambda *_a, **_kw: (_ for _ in ()).throw(OSError("event fail")),
+            )
+            _, err_reap = app2.state.start_attempt(
+                challenges.CHALLENGE_KIND,
+                4,
+                900,
+                launch=rtl.start,
+            )
+            assert err_reap is not None
+            assert "rtl_433" in err_reap
+            assert rtl.release_failure(pending=True) is not None
+            child.unkillable = False
+    finally:
+        child.unkillable = False
+        rtl.stop()
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["legacy", "managed"])
+def test_f3b_unconfirmed_rollback_quarantines_connection_against_reception_and_next_start(
+    tmp_path, monkeypatch, managed
+):
+    """F3b: unconfirmed rollback quarantines the connection against reads, credit, and Starts."""
+    data_dir = _prepare_managed_dir(tmp_path) if managed else tmp_path
+    now = [3000.0]
+    _patch_log_clock(monkeypatch, now)
+    app = app_mod.create_app(data_dir=data_dir, clock=lambda: now[0], managed=managed)
+
+    with TestClient(app) as client:
+        real_log = app_mod.log_event
+
+        def fail_start_log(path, kind, payload, **kw):
+            if kind == "challenge_start":
+                raise OSError("append failed")
+            return real_log(path, kind, payload, **kw)
+
+        monkeypatch.setattr(app_mod, "log_event", fail_start_log)
+        _deny_sqlite_action(app.state.progress._conn, sqlite3.SQLITE_TRANSACTION, "ROLLBACK")
+        r1 = client.post("/api/challenges/9/start")
+        assert r1.status_code == 500
+        assert "quarantined" in (r1.json().get("error") or "").lower()
+
+        # Restore normal log_event; quarantined connection must still refuse reads and commits.
+        monkeypatch.setattr(app_mod, "log_event", real_log)
+
+        # Eligibility read via GET must not see the rejected attempt.
+        g = client.get("/api/challenges/9").json()
+        assert g["state"] == "idle"
+        assert g["passes"] == 0
+        assert g["error"] is not None
+
+        # A subsequent qualifying reception must NOT credit the rejected Start or log a pass.
+        now[0] = 3010.0
+        app.state.lora.on_reception(_lora_item(from_id="!f3b-lora"))
+
+        # Another Start on the quarantined connection must fail and must NOT commit anything.
+        now[0] = 3020.0
+        r2 = client.post("/api/challenges/9/start")
+        assert r2.status_code == 500
+
+    # Independent connection confirms zero attempts and zero passes were ever committed.
+    check_prog = Progress(data_dir / "progress.db", managed=managed)
+    try:
+        saved = check_prog.challenge(9)
+        assert saved["attempt"] is None
+        assert saved["passes"] == 0
+    finally:
+        check_prog.close()
+    evts = events.read_events(data_dir / "events.jsonl")
+    assert [e for e in evts if e.get("kind") == "challenge_pass"] == []
+
+
+def test_f2a_replay_attempts_bind_durable_identity_and_clip_across_identical_timestamps(
+    tmp_path, monkeypatch
+):
+    """F2a: replay attempts get a never-reused identity bound to recording/digest."""
+    now = [2000.0]
+    _patch_log_clock(monkeypatch, now)
+
+    # Descriptor construction must require identity_column and recording/digest binding for replay.
+    with pytest.raises(ValueError):
+        challenges.AttemptKind(
+            kind="bad_replay_no_id",
+            attempts_table="t_a",
+            passes_table="t_p",
+            key_column="bench_id",
+            slot_column=None,
+            start_event="bad_s",
+            pass_event="bad_p",
+            credit="replay_answer",
+            attempt_columns=("recording", "digest"),
+            pass_columns=("passed_at", "recording", "digest", "answer"),
+        )
+
+    bench = challenges.AttemptKind(
+        kind="bench_id_kind",
+        attempts_table="test_bench_id_attempts",
+        passes_table="test_bench_id_passes",
+        key_column="bench_id",
+        slot_column=None,
+        identity_column="attempt_id",
+        start_event="bench_id_start",
+        pass_event="bench_id_pass",
+        credit="replay_answer",
+        attempt_columns=("recording", "digest"),
+        pass_columns=("passed_at", "recording", "digest", "answer"),
+        label="bench replay",
+    )
+
+    prog_init = Progress(tmp_path / "progress.db")
+    prog_init.close()
+    conn = sqlite3.connect(tmp_path / "progress.db")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE test_bench_id_attempts (
+                bench_id   TEXT PRIMARY KEY,
+                started_at REAL NOT NULL,
+                window_s   INTEGER NOT NULL,
+                attempt_id TEXT NOT NULL,
+                recording  TEXT NOT NULL,
+                digest     TEXT NOT NULL
+            );
+            CREATE TABLE test_bench_id_passes (
+                bench_id   TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                attempt_id TEXT NOT NULL,
+                passed_at  REAL NOT NULL,
+                recording  TEXT NOT NULL,
+                digest     TEXT NOT NULL,
+                answer     TEXT NOT NULL,
+                PRIMARY KEY (bench_id, attempt_id)
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    app = app_mod.create_app(data_dir=tmp_path, clock=lambda: now[0])
+    app.state.register_attempt_kind(bench)
+
+    with TestClient(app):
+        # 1. Start clip A at fixed t=2000.0.
+        _, err_a = app.state.start_attempt(
+            bench, "b1", 600, extra={"recording": "clip-a.sigmf", "digest": "dig-a"}
+        )
+        assert err_a is None
+        row_a = app.state.progress.attempt(bench, "b1")["attempt"]
+        aid_a = row_a["attempt_id"]
+        assert isinstance(aid_a, str) and aid_a
+
+        # 2. Failed restart for clip B at IDENTICAL t=2000.0; answer submitted on 2nd connection.
+        entered = threading.Event()
+        release = threading.Event()
+        start_out: dict = {}
+
+        def paused_fail_b():
+            entered.set()
+            release.wait(timeout=5.0)
+            raise RuntimeError("clip B launch aborted")
+
+        t = threading.Thread(
+            target=lambda: start_out.update(
+                out=app.state.start_attempt(
+                    bench,
+                    "b1",
+                    600,
+                    extra={"recording": "clip-b.sigmf", "digest": "dig-b"},
+                    launch=paused_fail_b,
+                )
+            )
+        )
+        t.start()
+        assert entered.wait(timeout=5.0)
+
+        prog2 = Progress(tmp_path / "progress.db")
+        try:
+            # Even if a caller submits clip B's recording/digest with clip A's attempt_id OR
+            # a separate attempt_id at identical t=2000.0, clip A must NOT be credited!
+            assert (
+                prog2.record_attempt_pass(
+                    bench,
+                    "b1",
+                    2000.0,
+                    None,
+                    {
+                        "passed_at": 2005.0,
+                        "recording": "clip-b.sigmf",
+                        "digest": "dig-b",
+                        "answer": "clip-b-ans",
+                    },
+                    attempt_id=aid_a,
+                )
+                is False
+            )
+            assert (
+                prog2.record_attempt_pass(
+                    bench,
+                    "b1",
+                    2000.0,
+                    None,
+                    {
+                        "passed_at": 2005.0,
+                        "recording": "clip-b.sigmf",
+                        "digest": "dig-b",
+                        "answer": "clip-b-ans",
+                    },
+                    attempt_id="other-id",
+                )
+                is False
+            )
+        finally:
+            prog2.close()
+
+        release.set()
+        t.join(timeout=5.0)
+        assert start_out["out"][1] is not None
+        assert app.state.progress.attempt(bench, "b1")["passes"] == 0
+
+        # 3. Successful restart for clip B at IDENTICAL t=2000.0 gets a brand-new attempt_id.
+        _, err_b = app.state.start_attempt(
+            bench, "b1", 600, extra={"recording": "clip-b.sigmf", "digest": "dig-b"}
+        )
+        assert err_b is None
+        row_b = app.state.progress.attempt(bench, "b1")["attempt"]
+        aid_b = row_b["attempt_id"]
+        assert aid_b != aid_a
+
+        # Stale answer for clip A must be rejected against clip B's row (same started_at!).
+        ins_old, err_old = app.state.record_attempt_pass(
+            bench,
+            "b1",
+            2000.0,
+            None,
+            {"passed_at": 2006.0, "recording": "clip-a.sigmf", "digest": "dig-a", "answer": "a"},
+            attempt_id=aid_a,
+        )
+        assert (ins_old, err_old) == (False, None)
+        assert app.state.progress.attempt(bench, "b1")["passes"] == 0
+
+        # Valid answer for clip B succeeds once; duplicate is rejected.
+        ins_b, err_pb = app.state.record_attempt_pass(
+            bench,
+            "b1",
+            2000.0,
+            None,
+            {"passed_at": 2007.0, "recording": "clip-b.sigmf", "digest": "dig-b", "answer": "b"},
+            attempt_id=aid_b,
+        )
+        dup_b, _ = app.state.record_attempt_pass(
+            bench,
+            "b1",
+            2000.0,
+            None,
+            {"passed_at": 2008.0, "recording": "clip-b.sigmf", "digest": "dig-b", "answer": "b2"},
+            attempt_id=aid_b,
+        )
+        assert (ins_b, err_pb) == (True, None)
+        assert dup_b is False
+        assert app.state.progress.attempt(bench, "b1")["passes"] == 1
+
+        # 4. Restarting the SAME clip B at identical t=2000.0 produces a fresh attempt_id_c,
+        # and an answer carrying attempt_id_b cannot attach to attempt_id_c.
+        _, err_c = app.state.start_attempt(
+            bench, "b1", 600, extra={"recording": "clip-b.sigmf", "digest": "dig-b"}
+        )
+        assert err_c is None
+        aid_c = app.state.progress.attempt(bench, "b1")["attempt"]["attempt_id"]
+        assert aid_c not in (aid_a, aid_b)
+        stale_same_clip, _ = app.state.record_attempt_pass(
+            bench,
+            "b1",
+            2000.0,
+            None,
+            {"passed_at": 2009.0, "recording": "clip-b.sigmf", "digest": "dig-b", "answer": "b3"},
+            attempt_id=aid_b,
+        )
+        assert stale_same_clip is False
+        assert app.state.progress.attempt(bench, "b1")["passes"] == 1
+
+
+def test_f2b_live_credit_rejects_superseded_attempt_from_second_connection(tmp_path):
+    """F2b: live credit refuses to insert a pass if a 2nd connection superseded the attempt."""
+    db_path = tmp_path / "progress.db"
+    slotted = _slotted_live_kind()
+    prog1 = Progress(db_path)
+    _create_slotted_tables(db_path)
+    prog2 = Progress(db_path)
+    try:
+        # 1. Tier B (single-slot CHALLENGE_KIND)
+        assert prog1.start_challenge(9, 1000.0, 900) is True
+        superseded_tier_b = [False]
+
+        def tier_b_qualifies(attempt, stamp):
+            if not superseded_tier_b[0]:
+                superseded_tier_b[0] = True
+                # Second connection commits a superseding Start right after candidate SELECT!
+                assert prog2.start_challenge(9, 1100.0, 900) is True
+            return True
+
+        stamp = _make_stamp("lora", 1010.0, "d-f2b-1", event_id="ev-f2b-1")
+        credited_b = prog1.credit_challenges([stamp], tier_b_qualifies)
+        assert credited_b == []
+        assert prog2.challenge(9)["passes"] == 0
+        assert prog2.challenge(9)["attempt"]["started_at"] == 1100.0
+
+        # Normal credit against the current 1100.0 attempt still inserts once.
+        stamp2 = _make_stamp("lora", 1110.0, "d-f2b-2", event_id="ev-f2b-2")
+        assert len(prog1.credit_challenges([stamp2], lambda a, s: True)) == 1
+        assert prog1.credit_challenges([stamp2], lambda a, s: True) == []
+        assert prog2.challenge(9)["passes"] == 1
+
+        # 2. Slotted live_reception kind
+        assert prog1.start_attempt(slotted, "hunt-r", 1000.0, 900) is True
+        superseded_slot = [False]
+
+        def slot_qualifies(attempt, s):
+            if not superseded_slot[0]:
+                superseded_slot[0] = True
+                assert prog2.start_attempt(slotted, "hunt-r", 1100.0, 900) is True
+            return 0
+
+        credited_s = prog1.credit_attempts(slotted, [stamp], slot_qualifies)
+        assert credited_s == []
+        assert prog2.attempt(slotted, "hunt-r")["passes"] == 0
+        assert prog2.attempt(slotted, "hunt-r")["attempt"]["started_at"] == 1100.0
+
+        # Normal slotted credit against current 1100.0 attempt inserts once per slot.
+        assert len(prog1.credit_attempts(slotted, [stamp2], lambda a, s: 0)) == 1
+        assert prog1.credit_attempts(slotted, [stamp2], lambda a, s: 0) == []
+        assert prog2.attempt(slotted, "hunt-r")["passes"] == 1
+    finally:
+        prog1.close()
+        prog2.close()
+
+
+def test_f5_reserved_event_key_aliases_rejected_and_safe_alias_preserves_backfill_anchor(
+    tmp_path, monkeypatch
+):
+    """F5: reserved event keys are rejected at build; safe alias preserves backfill anchor."""
+    for bad_kwargs in (
+        {"key_column": "hunt_id", "event_key_field": "source"},
+        {"key_column": "hunt_id", "event_key_field": "replay"},
+        {"key_column": "source", "event_key_field": ""},
+        {"key_column": "replay", "event_key_field": ""},
+    ):
+        with pytest.raises(ValueError):
+            challenges.AttemptKind(
+                kind="bad_key",
+                attempts_table="t_a",
+                passes_table="t_p",
+                slot_column=None,
+                start_event="bad_s",
+                pass_event="bad_p",
+                credit="live_reception",
+                **bad_kwargs,
+            )
+
+    # A reserved SQL key_column WITH an explicit safe event_key_field works and anchors backfill.
+    now = [2000.0]
+    _patch_log_clock(monkeypatch, now)
+    safe_kind = challenges.AttemptKind(
+        kind="safe_alias_live",
+        attempts_table="test_safe_alias_attempts",
+        passes_table="test_safe_alias_passes",
+        key_column="source",
+        slot_column=None,
+        start_event="safe_alias_start",
+        pass_event="safe_alias_pass",
+        credit="live_reception",
+        event_key_field="attempt_key",
+    )
+
+    prog_init = Progress(tmp_path / "progress.db")
+    prog_init.close()
+    conn = sqlite3.connect(tmp_path / "progress.db")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE test_safe_alias_attempts (
+                source     TEXT PRIMARY KEY,
+                started_at REAL NOT NULL,
+                window_s   INTEGER NOT NULL
+            );
+            CREATE TABLE test_safe_alias_passes (
+                source     TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                passed_at  REAL NOT NULL,
+                instrument TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                digest     TEXT NOT NULL,
+                PRIMARY KEY (source, started_at)
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def qualifies(attempt, stamp):
+        return stamp.get("instrument") == "lora" and challenges.in_window(attempt, stamp)
+
+    app = app_mod.create_app(data_dir=tmp_path, clock=lambda: now[0])
+    app.state.register_attempt_kind(safe_kind, qualifies=qualifies)
+    with TestClient(app):
+        # 1. Pre-Start reception at t=2000.0.
+        app.state.lora.on_reception(_lora_item(from_id="!f5-pre"))
+        # 2. Clock steps backward to t=1500.0; start attempt.
+        now[0] = 1500.0
+        _, err = app.state.start_attempt(
+            safe_kind,
+            "k1",
+            900,
+            event_fields={"replay": True, "source": "replay"},
+        )
+        assert err is None
+
+    # 3. Restart -> backfill must map safe_alias_start via attempt_key and reject pre-Start rx!
+    app2 = app_mod.create_app(data_dir=tmp_path, clock=lambda: now[0])
+    app2.state.register_attempt_kind(safe_kind, qualifies=qualifies)
+    with TestClient(app2):
+        assert app2.state.progress.attempt(safe_kind, "k1")["passes"] == 0
+        # Post-Start reception credits cleanly with reserved flags stripped.
+        now[0] = 1510.0
+        app2.state.lora.on_reception(_lora_item(from_id="!f5-post"))
+        assert app2.state.progress.attempt(safe_kind, "k1")["passes"] == 1
+
+    evts = events.read_events(tmp_path / "events.jsonl")
+    starts = [e for e in evts if e.get("kind") == "safe_alias_start"]
+    passes = [e for e in evts if e.get("kind") == "safe_alias_pass"]
+    assert len(starts) == 1
+    assert starts[0]["payload"]["attempt_key"] == "k1"
+    assert "source" not in starts[0]["payload"] and "replay" not in starts[0]["payload"]
+    assert len(passes) == 1
+    assert passes[0]["payload"]["attempt_key"] == "k1"
+    assert "source" not in passes[0]["payload"] and "replay" not in passes[0]["payload"]

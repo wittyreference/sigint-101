@@ -42,6 +42,7 @@ from .bandmap import build_map as build_band_map
 from .battery import BatteryGauge
 from .challenges import (
     CHALLENGE_KIND,
+    RESERVED_EVENT_FLAGS,
     AttemptKind,
     challenge_for,
     format_evidence,
@@ -1852,6 +1853,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
         "meteor": MeteorUnavailable,
     }
+    claim_state_lock = threading.Lock()
+    claim_epoch: dict[str, int] = {}
+
+    def _bump_claim_epoch(target: str) -> None:
+        with claim_state_lock:
+            claim_epoch[target] = claim_epoch.get(target, 0) + 1
 
     def _claim_sdr(target: str, start=None, *, reclaim=True):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
@@ -1917,10 +1924,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                     if failure and (reason := failure(pending=True)):
                                         raise refusal(reason)
                             if prepare is not None:
-                                return receiver.launch_start(intent, claimed=True)
+                                launched = receiver.launch_start(intent, claimed=True)
+                                _bump_claim_epoch(target)
+                                return launched
                             if receiver is not None and reclaim:
                                 receiver.resume()
-                            return start() if start is not None else None
+                            result = start() if start is not None else None
+                            _bump_claim_epoch(target)
+                            return result
                         finally:
                             gate.end_claim(target)
             finally:
@@ -2711,7 +2722,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             backfill_gate=backfill_gate,
         )
 
-    _reserved_event_flags = frozenset({"replay", "source"})
+    _reserved_event_flags = RESERVED_EVENT_FLAGS
 
     def _finalize_event_payload(kind: AttemptKind, payload: dict) -> dict:
         """Reserve replay/source across every payload source and derive them strictly from kind."""
@@ -2727,6 +2738,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         window_s: int,
         extra_cols: dict,
         *,
+        attempt_id: str | None = None,
         event_fields: dict | None = None,
     ) -> dict:
         payload: dict = {
@@ -2734,6 +2746,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "started_at": started_at,
             "window_s": window_s,
         }
+        if kind.identity_column is not None and attempt_id is not None:
+            payload[kind.identity_column] = attempt_id
         for col, val in extra_cols.items():
             if col not in _reserved_event_flags and col not in payload:
                 payload[col] = val
@@ -2751,12 +2765,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         slot,
         pass_row: dict,
         *,
+        attempt_id: str | None = None,
         event_fields: dict | None = None,
     ) -> dict:
         payload: dict = {
             kind.payload_key: key,
             "started_at": started_at,
         }
+        if kind.identity_column is not None:
+            resolved_id = (
+                attempt_id if attempt_id is not None else pass_row.get(kind.identity_column)
+            )
+            if resolved_id is not None:
+                payload[kind.identity_column] = resolved_id
         if kind.slot_column is not None and kind.slot_column not in _reserved_event_flags:
             payload[kind.slot_column] = slot
         json_cols = set(kind.json_pass_columns)
@@ -2794,12 +2815,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         _set_attempt_error(kind, None)
         for passed in credited:
             slot = passed.get(kind.slot_column) if kind.slot_column is not None else None
+            aid = (
+                passed.get(kind.identity_column)
+                if kind.identity_column is not None
+                else None
+            )
             payload = _pass_event_payload(
                 kind,
                 passed[kind.key_column],
                 passed["started_at"],
                 slot,
                 passed,
+                attempt_id=aid,
             )
             try:
                 log_event(
@@ -2817,6 +2844,113 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 continue
             _credit_attempts(entry.kind, progress, stamps, qualifies_fn=entry.qualifies)
 
+    _tracked_receivers = tuple(SDR_CONSUMERS) + ("lora", "flock", "rayhunter", "replay")
+
+    def _receiver_run_token(rx):
+        if rx is None:
+            return None
+        if hasattr(rx, "_cancel") and hasattr(rx, "_run"):
+            return ("supervised", getattr(rx, "_run", None))
+        if hasattr(rx, "_proc"):
+            return ("proc", bool(getattr(rx, "running", False)), getattr(rx, "_proc", None))
+        return ("running", bool(getattr(rx, "running", False)))
+
+    def _receiver_snapshot() -> dict[str, tuple[int, object]]:
+        with claim_state_lock:
+            epochs = dict(claim_epoch)
+        return {
+            name: (epochs.get(name, 0), _receiver_run_token(getattr(app.state, name, None)))
+            for name in _tracked_receivers
+        }
+
+    def _stop_owned_receiver(name: str, expected_epoch: int, expected_token) -> str | None:
+        rx = getattr(app.state, name, None)
+        if rx is None:
+            return None
+        if (expected_token is not None and expected_token[0] == "supervised"
+                and hasattr(rx, "_life") and hasattr(rx, "_run") and hasattr(rx, "_cancel")):
+            expected_run = expected_token[1]
+            with rx._life:
+                with claim_state_lock:
+                    cur_epoch = claim_epoch.get(name, 0)
+                if cur_epoch != expected_epoch or rx._run is not expected_run:
+                    return None
+                run, intent, retry = rx._cancel()
+            rx._wait_physical(run, intent, retry)
+            failure = getattr(rx, "release_failure", None)
+            if failure and (reason := failure(pending=True)):
+                return reason
+            if getattr(rx, "running", False):
+                return f"{name} did not stop after Start failed"
+            return None
+        if hasattr(rx, "_life") and hasattr(rx, "stop"):
+            with rx._life:
+                with claim_state_lock:
+                    cur_epoch = claim_epoch.get(name, 0)
+                if cur_epoch != expected_epoch or _receiver_run_token(rx) != expected_token:
+                    return None
+                rx.stop()
+            failure = getattr(rx, "release_failure", None)
+            if failure and (reason := failure(pending=True)):
+                return reason
+            if getattr(rx, "running", False):
+                return f"{name} did not stop after Start failed"
+            return None
+        with claim_state_lock:
+            if claim_epoch.get(name, 0) != expected_epoch:
+                return None
+            if _receiver_run_token(rx) != expected_token:
+                return None
+            stop_fn = getattr(rx, "stop", None) or getattr(rx, "release", None)
+            if stop_fn is not None:
+                stop_fn()
+        failure = getattr(rx, "release_failure", None)
+        if failure and (reason := failure(pending=True)):
+            return reason
+        if getattr(rx, "running", False):
+            return f"{name} did not stop after Start failed"
+        return None
+
+    def _build_launch_cleanup(before_snap, after_snap, *, launched, explicit_cleanup):
+        owned: list[tuple[str, int, object]] = []
+        for name in _tracked_receivers:
+            if before_snap.get(name) == after_snap.get(name):
+                continue
+            rx = getattr(app.state, name, None)
+            if rx is None:
+                continue
+            epoch, token = after_snap[name]
+            is_active = bool(getattr(rx, "running", False)) or (
+                token is not None and token[0] == "supervised" and token[1] is not None
+            )
+            if is_active:
+                owned.append((name, epoch, token))
+        extra_cleanup = explicit_cleanup
+        if extra_cleanup is None and callable(launched):
+            extra_cleanup = launched
+        if extra_cleanup is None and not owned:
+            return None
+
+        def _cleanup_launched() -> str | None:
+            failures: list[str] = []
+            if extra_cleanup is not None:
+                try:
+                    res = extra_cleanup()
+                    if isinstance(res, str) and res.strip():
+                        failures.append(res.strip())
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(str(exc) or exc.__class__.__name__)
+            for name, epoch, token in owned:
+                try:
+                    err = _stop_owned_receiver(name, epoch, token)
+                    if err:
+                        failures.append(err)
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(str(exc) or exc.__class__.__name__)
+            return "; ".join(failures) if failures else None
+
+        return _cleanup_launched
+
     def _start_attempt(
         kind: AttemptKind,
         key,
@@ -2826,6 +2960,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         event_fields: dict | None = None,
         pre_start=None,
         launch=None,
+        cleanup=None,
     ) -> tuple[float, str | None]:
         label = kind.display_label
         start_error = None
@@ -2836,28 +2971,47 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         # _heard callback, and a failed launch never writes an eligible attempt row to SQLite.
         if pre_start is not None:
             pre_start()
+        if reason := app.state.progress.quarantined_reason:
+            started_at = round(clock(), 3)
+            start_error = f"the {label} could not be started: {reason}"
+            with reception_lock:
+                _set_attempt_start_error(kind, key, start_error)
+            return started_at, start_error
         if app.state.progress.closed:
             started_at = round(clock(), 3)
             start_error = f"the {label} store is closed"
             with reception_lock:
                 _set_attempt_start_error(kind, key, start_error)
             return started_at, start_error
+        run_cleanup = None
         if launch is not None:
+            before_snap = _receiver_snapshot()
             try:
-                launch()
+                launched = launch()
             except Exception as exc:  # noqa: BLE001
                 started_at = round(clock(), 3)
                 start_error = f"the {label} could not be launched: {exc}"
                 with reception_lock:
                     _set_attempt_start_error(kind, key, start_error)
                 return started_at, start_error
+            after_snap = _receiver_snapshot()
+            run_cleanup = _build_launch_cleanup(
+                before_snap, after_snap, launched=launched, explicit_cleanup=cleanup,
+            )
         # Hold reception_lock across reading the clock, staging the attempt, and appending the
         # start event so log order matches what live receptions see, while preserving lock order
         # (reception_lock -> Progress._lock -> events._WRITE_LOCK).
         with reception_lock:
             started_at = round(clock(), 3)
+            attempt_id = uuid4().hex if kind.identity_column is not None else None
             payload = _start_event_payload(
-                kind, key, started_at, window_s, extra_cols, event_fields=event_fields
+                kind,
+                key,
+                started_at,
+                window_s,
+                extra_cols,
+                attempt_id=attempt_id,
+                event_fields=event_fields,
             )
 
             def _log_start() -> None:
@@ -2897,6 +3051,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                         window_s,
                         extra=extra_cols,
                         on_staged=_log_start,
+                        attempt_id=attempt_id,
                     )
                 except OSError as exc:
                     start_error = f"the {label} start could not be logged: {exc}"
@@ -2906,6 +3061,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     if not saved:
                         start_error = f"the {label} store is closed"
             _set_attempt_start_error(kind, key, start_error)
+        # Both reception_lock and Progress._lock are released before running launch cleanup so
+        # stopping a receiver that joins its reader thread cannot deadlock _heard.
+        if start_error is not None and run_cleanup is not None:
+            cleanup_err = run_cleanup()
+            if cleanup_err:
+                start_error = f"{start_error}; {cleanup_err}"
+                with reception_lock:
+                    _set_attempt_start_error(kind, key, start_error)
         return started_at, start_error
 
     def _record_attempt_pass(
@@ -2915,6 +3078,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         slot,
         pass_row: dict,
         *,
+        attempt_id: str | None = None,
         event_fields: dict | None = None,
     ) -> tuple[bool, str | None]:
         if kind.credit != "replay_answer":
@@ -2925,7 +3089,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         with reception_lock:
             try:
                 inserted = app.state.progress.record_attempt_pass(
-                    kind, key, started_at, slot, pass_row,
+                    kind, key, started_at, slot, pass_row, attempt_id=attempt_id,
                 )
             except (OSError, sqlite3.Error) as exc:
                 err = f"a {label} pass could not be saved: {exc}"
@@ -2935,7 +3099,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if not inserted:
                 return False, None
             payload = _pass_event_payload(
-                kind, key, started_at, slot, pass_row, event_fields=event_fields,
+                kind,
+                key,
+                started_at,
+                slot,
+                pass_row,
+                attempt_id=attempt_id,
+                event_fields=event_fields,
             )
             try:
                 log_event(app.state.events_path, kind.pass_event, payload, sync=managed)
