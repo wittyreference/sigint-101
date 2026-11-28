@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from render_scroll import connect, leave_page
+from render_scroll import connect, fence, leave_page
 
 REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
@@ -151,7 +151,8 @@ function measureSurvey(expectedTheme) {
 
 
 def load_page(browser, url):
-    nav = browser.call("Page.navigate", {"url": url})
+    # Through the render proxy, never the console itself (render_scroll.fence).
+    nav = browser.call("Page.navigate", {"url": fence(url)})
     if nav.get("errorText"):
         raise RuntimeError(nav["errorText"])
     for _ in range(25):

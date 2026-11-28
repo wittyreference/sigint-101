@@ -1144,28 +1144,9 @@ def test_the_rack_never_restores_a_lessons_tuning(tmp_path):
     assert "lesson-tuning" not in html
 
 
-# Every page the render checks load (tools/render/*.py), in the order make render-check runs them.
-# Every page the render checks load (tools/render/*.py), in the order make render-check runs them.
-# test_every_page_a_render_check_loads_is_in_the_walk keeps this list whole.
-RENDER_CHECK_PAGES = ("/lesson/29", "/", "/exam/review/T6C02", "/operate/ism", "/logbook",
-                      "/operate/lora", "/lesson/5", "/law?back=/lesson/5", "/lesson/39",
-                      "/lesson/1", "/lesson/1?recall=card&card=2", "/unit/4", "/unit/5",
-                      "/unit/4/challenge", "/unit/5/challenge",
-                      "/operate/ism?back=/unit/4/challenge", "/operate/waterfall",
-                      "/field")
-
-
-def test_every_page_a_render_check_loads_is_in_the_walk():
-    # A page a render tool loads (f"{console}/..." or f"{base}/...") must be walked below, so a
-    # GET that starts writing fails here. A {placeholder} matches any one path segment.
-    tools = Path(__file__).resolve().parent.parent / "tools" / "render"
-    found = set()
-    for path in tools.glob("*.py"):
-        found |= set(re.findall(r'f"\{(?:console|base)\}(/[^"]*)"', path.read_text("utf-8")))
-    assert found, "no page paths found in tools/render"
-    for page in sorted(found):
-        pattern = re.sub(r"\\\{[^}]*\\\}", "[^/?&]+", re.escape(page))
-        assert any(re.fullmatch(pattern, walked) for walked in RENDER_CHECK_PAGES), page
+# Every page the render checks load, walked below. tests/render_routes.py holds the list, and
+# test_render_checks.py compares it with the pages the real checks navigate to under the runner.
+from tests.render_routes import RENDER_CHECK_PAGES  # noqa: E402
 
 
 def _stored_state(data_dir):

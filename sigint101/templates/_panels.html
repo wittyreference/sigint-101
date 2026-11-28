@@ -3,6 +3,7 @@
 
 {% macro reception_badge() %}<span class="logbook-mark logbook-mark--stamp">STAMP</span>{% endmacro %}
 {% macro replay_mark() %}<span class="logbook-mark logbook-mark--replay">REPLAY</span>{% endmacro %}
+{% macro mhz(hz) -%}{{ ("%d.%06d"|format(hz // 1000000, hz % 1000000)).rstrip("0").rstrip(".") }}{%- endmacro %}
 
 {# Every process-backed panel's head carries a command strip between its title and badge: the exact
    command the console is running, read off the live process by the route (`command` in its JSON)

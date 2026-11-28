@@ -1,5 +1,5 @@
 # ABOUTME: Runs the layout checks against a scratch SIGINT 101 console it starts, or RENDER_URL.
-# ABOUTME: Starts an isolated headless Chromium, holds an /api/* block, and stops both whole.
+# ABOUTME: Pages load through a render proxy that refuses the API and writes; all of it stops whole.
 import os
 import shutil
 import signal
@@ -10,7 +10,9 @@ import tempfile
 import time
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from urllib.request import ProxyHandler, build_opener, urlopen
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 # The repository this script belongs to, for the scratch console's code. Resolved, so a linked
 # copy of this script still finds it and the DevTools helpers beside it.
@@ -27,9 +29,13 @@ from sigint101.childproc import _die_with_parent  # noqa: E402
 # on a loopback socket bound here. Nothing of the kiosk's console (make run, port 8008) is
 # shared: not its learner state, not its server.
 CONSOLE = HERE / "render_console.py"
+PROXY = HERE / "render_proxy.py"
+FENCE_ENV = "RENDER_FENCE"   # render_scroll.fence: pages at this origin are already fenced
 CONSOLE_START_S = 60    # a Pi loads every lesson pack and verifies the exam pool before serving
 CONSOLE_STOP_S = 15     # the console's own shutdown stands its receivers down within this
 BROWSER_STOP_S = 5
+PROXY_STOP_S = 5
+HOLD_S = 30            # how long a held block waits for a browser that will not stop
 
 # The signals that end a run early: a kill, an ssh session dropping, Ctrl-C, Ctrl-\. Each stops
 # the console and Chromium on the way out. SIGKILL cannot be caught; for that case both are
@@ -62,26 +68,38 @@ def chromium_port(browser, profile):
     raise RuntimeError("Cannot reach Chromium DevTools. Check that headless Chromium can start.")
 
 
+def _proc_stat(entry):
+    """A process's /proc stat line, or None when the process has gone since it was listed.
+
+    Any other failure to read it raises: an unreadable entry is not evidence of an exit.
+    """
+    try:
+        return Path("/proc", entry, "stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
 def _group_running(pgid):
     """The members of a process group that are still running, read from /proc.
 
     Exited members awaiting their reaper (the leader, kept unreaped, or orphans init will reap)
-    do not count: they hold no files open and run no code.
+    do not count: they hold no files open and run no code. A /proc that cannot be listed, or an
+    entry that cannot be read or parsed, raises rather than read as an empty group: the caller
+    then counts the group's exit as unconfirmed.
     """
     running = []
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return running
-    for entry in entries:
+    for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
-        try:
-            stat = Path("/proc", entry, "stat").read_text()
-        except OSError:
+        stat = _proc_stat(entry)
+        if stat is None:
             continue
-        fields = stat.rsplit(")", 1)[1].split()
-        if int(fields[2]) == pgid and fields[0] != "Z":
+        try:
+            fields = stat.rsplit(")", 1)[1].split()
+            group, state = int(fields[2]), fields[0]
+        except (IndexError, ValueError) as error:
+            raise OSError(f"cannot parse /proc/{entry}/stat: {error}") from error
+        if group == pgid and state != "Z":
             running.append(int(entry))
     return running
 
@@ -147,37 +165,79 @@ def _stop(process, grace, entry, alive):
 
 
 def _hold_until_gone(process, entry, alive):
-    """Keep this process, and the held /api/* block with it, until the browser group is gone.
+    """Keep the held /api/* block while the browser group lives, up to HOLD_S, then give up.
 
     Reached only when the page could neither leave the console nor be closed, and the group
-    would not stop. Dropping the block then would let the still-loaded page post to the console
-    (the reviewer saw /api/opened arrive and write progress). So the run waits, saying how to
-    end it, and ignores further signals; SIGKILL of this check still takes the browser's leader
-    with it (the parent-death signal).
+    would not stop. The render proxy is the fence that matters: the page never had the
+    console's own address, and the proxy refuses the API and every write, so dropping the block
+    cannot open the console to it. The DevTools block is the second layer, held a while longer
+    in case the group goes. At the deadline the run fails, and the browser stays on `alive`, so
+    its profile is kept. Further signals are ignored while it waits.
     """
     for sig in STOP_SIGNALS:
         signal.signal(sig, signal.SIG_IGN)
-    notice = (f"render-check: Chromium (process group {process.pid}) will not stop and its page "
-              "could not leave the console. Holding its /api/* block until the group is gone; "
-              f"end it with: kill -9 -{process.pid}")
-    print(notice, file=sys.stderr, flush=True)
-    said = time.monotonic()
-    while True:
+    print(f"render-check: Chromium (process group {process.pid}) will not stop and its page "
+          f"could not leave the console. Holding its /api/* block for up to {HOLD_S:g} s; end "
+          f"it with: kill -9 -{process.pid}", file=sys.stderr, flush=True)
+    deadline = time.monotonic() + HOLD_S
+    while time.monotonic() < deadline:
         try:
             if not _group_running(process.pid):
                 break
-        except Exception as error:   # not known to be gone: keep holding
+        except Exception as error:   # not known to be gone: keep holding until the deadline
             print(f"render-check: cannot read group {process.pid}: {error}", file=sys.stderr)
-        if time.monotonic() - said > 30:
-            print(notice, file=sys.stderr, flush=True)
-            said = time.monotonic()
         time.sleep(0.2)
+    else:
+        print(f"render-check: gave up holding the block for group {process.pid} after "
+              f"{HOLD_S:g} s; its profile is kept.", file=sys.stderr, flush=True)
+        return
+    _stop(process, BROWSER_STOP_S, entry, alive)   # confirms the group empty and reaps it
+
+
+@contextmanager
+def render_proxy(console, alive=None):
+    """Put the render proxy (render_proxy.py) in front of `console`; yield the proxy's address.
+
+    Its own process, in a session of its own with the parent-death signal, on a loopback socket
+    bound and held here. It forwards GET and HEAD of pages, and refuses the console's API and
+    every write. The checks' browser only ever gets this address. It stops with the run, by its
+    process group, after Chromium.
+    """
+    listener = socket.socket()
     try:
-        process.wait(timeout=BROWSER_STOP_S)
-    except (subprocess.TimeoutExpired, ChildProcessError):
-        pass
-    if alive is not None and entry in alive:
-        alive.remove(entry)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(64)
+        url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        command = [sys.executable, str(PROXY), str(listener.fileno()), console]
+        try:
+            proxy = subprocess.Popen(command, cwd=REPO, stdout=subprocess.DEVNULL,
+                                     pass_fds=(listener.fileno(),), start_new_session=True,
+                                     preexec_fn=_die_with_parent())
+        except OSError as error:
+            sys.exit(f"Cannot start the render proxy. ({error})")
+    finally:
+        listener.close()
+    entry = _launched(proxy, "the render proxy", alive)
+    try:
+        opener = build_opener(ProxyHandler({}))
+        deadline = time.monotonic() + 10
+        while True:
+            if _exited(proxy):
+                sys.exit("The render proxy exited before it answered.")
+            try:
+                opener.open(Request(f"{url}/", method="HEAD"), timeout=2).close()
+                break
+            except HTTPError:
+                break    # it answered: an upstream error is still the proxy's answer
+            except OSError as error:
+                if time.monotonic() > deadline:
+                    sys.exit(f"The render proxy did not answer at {url}. ({error})")
+                time.sleep(0.1)
+        print(f"Fenced the console behind a render proxy at {url} (process {proxy.pid}).",
+              flush=True)
+        yield url
+    finally:
+        _stop(proxy, PROXY_STOP_S, entry, alive)
 
 
 @contextmanager
@@ -268,10 +328,12 @@ def run_checks(console, port, output):
         ("render_recall.py", console),
         ("render_live_find.py", console),
         ("render_field.py", console),
+        ("render_bandmap.py", console),
     )
     no_proxy = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))
     no_proxy = f"{no_proxy},127.0.0.1" if no_proxy else "127.0.0.1"
     env = dict(os.environ, CDP_PORT=port, no_proxy=no_proxy, NO_PROXY=no_proxy)
+    env[FENCE_ENV] = _origin(console)   # the checks load pages through this proxy only
     status = 0
     for script, *args in checks:
         command = [sys.executable, str(Path(__file__).with_name(script)), *args]
@@ -316,6 +378,11 @@ def _stop_on_signal(signum, frame):
     sys.exit(128 + signum)
 
 
+def _origin(url):
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def _close_all(sockets):
     for sock in sockets:
         sock.close()
@@ -348,15 +415,16 @@ def main():
     status = 1
     try:
         # The exit order, last in first out: the page leaves for about:blank, Chromium stops,
-        # any held block closes, then the console stops.
+        # any held block closes, the render proxy stops, then the console stops.
         with ExitStack() as running:
             if not console:
                 console = running.enter_context(scratch_console(output / "console", alive))
+            fenced = running.enter_context(render_proxy(console, alive))
             running.callback(_close_all, held)
             port = running.enter_context(
                 headless_chromium(chromium, output / "profile", alive, held))
             running.enter_context(api_block(port, problems, held))
-            status = run_checks(console, port, output)
+            status = run_checks(fenced, port, output)
     finally:
         for problem in problems + alive:
             print(f"render-check: {problem}.", file=sys.stderr)

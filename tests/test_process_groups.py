@@ -275,3 +275,29 @@ def test_poll_cannot_reap_a_leader_while_its_group_is_being_signaled(monkeypatch
                 sending.join(3)
         assert not sending.is_alive()
         assert tool.wait(timeout=3) == 0
+
+
+def test_group_priority_changes_only_a_live_owned_leader(forked_group, monkeypatch):
+    tool, helper = forked_group
+    previous = os.getpriority(os.PRIO_PROCESS, tool.pid)
+    helper_priority = os.getpriority(os.PRIO_PROCESS, helper)
+    target = min(previous + 1, 19)
+    changed = []
+    setpriority = os.setpriority
+
+    def record(which, pid, nice):
+        changed.append((pid, nice, tool._waitpid_lock.locked()))
+        setpriority(which, pid, nice)
+
+    monkeypatch.setattr(os, "setpriority", record)
+    assert tool.lower_priority(target)
+    assert not tool.lower_priority(previous)
+    assert os.getpriority(os.PRIO_PROCESS, tool.pid) == target
+    assert os.getpriority(os.PRIO_PROCESS, helper) == helper_priority
+    assert changed == ([(tool.pid, target, True)] if target > previous else [])
+    tool.stdin.write("x")
+    tool.stdin.flush()
+    assert select.select([tool.stdout], [], [], 3)[0] or tool.poll() is not None
+    tool.wait(timeout=3)
+    assert not tool.lower_priority(19)
+    assert len(changed) == (1 if target > previous else 0)

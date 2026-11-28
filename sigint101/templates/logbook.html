@@ -3,10 +3,6 @@
 {% extends "base.html" %}
 {% import "_panels.html" as panels %}
 
-{% macro mhz(hz) -%}
-  {{ ("%d.%06d"|format(hz // 1000000, hz % 1000000)).rstrip("0").rstrip(".") }}
-{%- endmacro %}
-
 {% block content %}
 <section class="logbook" aria-label="Reception badges">
   <div class="logbook__legend">
@@ -29,7 +25,7 @@
             <time datetime="{{ stamp.first_heard.isoformat() }}">{{ stamp.first_heard.strftime("%Y-%m-%d %H:%M:%S UTC") }}</time>
             · {{ p.tool }}
             {% if stamp.instrument != "lora" %}
-              · {% if p.freq_hz is sequence %}{% for hz in p.freq_hz %}{{ mhz(hz) }}{% if not loop.last %} + {% endif %}{% endfor %}{% else %}{{ mhz(p.freq_hz) }}{% endif %} MHz
+              · {% if p.freq_hz is sequence %}{% for hz in p.freq_hz %}{{ panels.mhz(hz) }}{% if not loop.last %} + {% endif %}{% endfor %}{% else %}{{ panels.mhz(p.freq_hz) }}{% endif %} MHz
             {% endif %}
           </p>
           {% if p.radio.kind == "meshtasticd" %}

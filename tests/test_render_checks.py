@@ -28,6 +28,7 @@ SURVEY = REPO / "tools" / "render" / "render_survey.py"
 RECALL = REPO / "tools" / "render" / "render_recall.py"
 LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 FIELD = REPO / "tools" / "render" / "render_field.py"
+BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
 EVAL = REPO / "tools" / "render" / "render_eval.py"
 CHECK = REPO / "tools" / "render" / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
@@ -96,13 +97,16 @@ class FakeDevTools:
     """
 
     def __init__(self, answers, *, disconnect_at=None, blank_fails=False, errors=(),
-                 polls=False):
+                 polls=False, drop_on_blank=False):
         self.answers = answers
         self.disconnect_at = disconnect_at
         # A navigation to about:blank that Chrome refuses: the page stays where it was.
         self.blank_fails = blank_fails
         # Methods Chrome answers with a protocol error instead of a result.
         self.errors = set(errors)
+        # DevTools going away mid-teardown: the connection drops when about:blank is asked for,
+        # and the page stays where it was.
+        self.drop_on_blank = drop_on_blank
         # Every DevTools command a check sent, in order, as (method, params). A websocket that
         # closes adds ("<closed>", {}); a GET of /mark/<name> adds ("<mark>", {"name": name}).
         self.calls = []
@@ -110,11 +114,19 @@ class FakeDevTools:
         self.page_closed = False
         self.browser_gone = False
         self.sessions = 0
+        # Signalled each time a session ends, after its close is recorded (settled).
+        self.idle = threading.Condition()
         self.server = socket.create_server(("127.0.0.1", 0))
         self.port = self.server.getsockname()[1]
         threading.Thread(target=self._serve, daemon=True).start()
         if polls:
             threading.Thread(target=self._poll, daemon=True).start()
+
+    def settled(self, timeout=5):
+        """The calls, once every session has ended and its close is recorded (or at timeout)."""
+        with self.idle:
+            self.idle.wait_for(lambda: self.sessions == 0, timeout)
+        return self.calls
 
     def close(self):
         self.browser_gone = True
@@ -135,11 +147,14 @@ class FakeDevTools:
             url = self.url or ""
             if self.sessions == 0 and not self.page_closed and url.startswith("http"):
                 origin = "/".join(url.split("/")[:3])
-                try:
-                    opener.open(Request(f"{origin}/api/opened?lesson_id=1", data=b"",
-                                        method="POST"), timeout=2).close()
-                except OSError:
-                    pass
+                # The lesson page's open post, and a panel's poll.
+                for request in (Request(f"{origin}/api/opened?lesson_id=1", data=b"",
+                                        method="POST"),
+                                Request(f"{origin}/api/decode")):
+                    try:
+                        opener.open(request, timeout=2).close()
+                    except OSError:
+                        pass
             threading.Event().wait(0.02)
 
     def _serve(self):
@@ -165,11 +180,14 @@ class FakeDevTools:
                     return
                 conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                              b"Connection: Upgrade\r\n\r\n")
-                self.sessions += 1
+                with self.idle:
+                    self.sessions += 1
                 try:
                     self._websocket(conn, rest)
                 finally:
-                    self.sessions -= 1
+                    with self.idle:
+                        self.sessions -= 1
+                        self.idle.notify_all()
                 return
             if path.startswith("/mark/"):
                 self.calls.append(("<mark>", {"name": path[len("/mark/"):]}))
@@ -213,6 +231,12 @@ class FakeDevTools:
                 data = bytes(b ^ mask[i % 4] for i, b in enumerate(buf[off + 4:off + 4 + n]))
                 buf = buf[off + 4 + n:]
                 msg = json.loads(data)
+                if (self.drop_on_blank and msg["method"] == "Page.navigate"
+                        and msg.get("params", {}).get("url") == "about:blank"):
+                    self.calls.append((msg["method"], msg.get("params", {})))
+                    self.calls.append(("<closed>", {}))
+                    conn.shutdown(socket.SHUT_RDWR)
+                    return
                 result = self._result(msg)
                 if msg["method"] in self.errors:
                     reply = {"id": msg["id"],
@@ -270,9 +294,9 @@ class FakeDevTools:
 def devtools():
     made = []
 
-    def make(answers, *, disconnect_at=None, blank_fails=False, errors=()):
+    def make(answers, *, disconnect_at=None, blank_fails=False, errors=(), drop_on_blank=False):
         fake = FakeDevTools(answers, disconnect_at=disconnect_at, blank_fails=blank_fails,
-                            errors=errors)
+                            errors=errors, drop_on_blank=drop_on_blank)
         made.append(fake)
         return fake.port
 
@@ -539,7 +563,9 @@ def render_make(tmp_path, console_url, devtools, strays):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD):
+    for script in (
+        FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD, BANDMAP
+    ):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -577,13 +603,15 @@ def render_make(tmp_path, console_url, devtools, strays):
         return env
 
     def run_make(*, has_chromium=True, fit_answers=None, timeout=15, blank_fails=False,
-                 errors=(), **overrides):
-        """Run make render-check with these stand-ins."""
+                 errors=(), real=(), **overrides):
+        """Run make render-check with these stand-ins; the scripts in `real` run for real."""
         if not has_chromium:
             chromium.unlink()
         if fit_answers is not None:
-            (screen / FIT.name).unlink()
-            (screen / FIT.name).symlink_to(FIT)
+            real = (*real, FIT)
+        for script in real:
+            (screen / script.name).unlink()
+            (screen / script.name).symlink_to(script)
         env = environment(fit_answers, overrides, blank_fails, errors)
         return subprocess.run([make, "--no-print-directory", "-f", str(REPO / "Makefile"),
                                "render-check"], cwd=tmp_path, env=env, capture_output=True,
@@ -597,7 +625,8 @@ def render_make(tmp_path, console_url, devtools, strays):
                                 stderr=subprocess.PIPE, text=True)
 
     run_make.start = start
-    run_make.calls = lambda: devtools.made[-1].calls
+    run_make.calls = lambda: devtools.made[-1].settled()
+    run_make.screen = screen
     return run_make
 
 
@@ -608,31 +637,44 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
     assert _verdicts(proc) == [FIT_CASES["choice-below-screen"][-1]]
 
 
+def _proxy_url(proc):
+    """The render proxy the runner put in front of the console, from its own report."""
+    found = re.search(r"behind a render proxy at (http://127\.0\.0\.1:\d+) \(process (\d+)\)",
+                      proc.stdout)
+    assert found, proc.stdout
+    return found.group(1), int(found.group(2))
+
+
 @pytest.mark.parametrize(
     "failing",
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
-        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
-        "recall-fails", "live-find-fails", "field-fails",
+        "recall-fails", "live-find-fails", "field-fails", "bandmap-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
     proc = render_make(FAILING_CHECK=failing)
+    # The checks get the render proxy's address, never the console's own.
+    proxy, pid = _proxy_url(proc)
+    assert proxy != console_url
     assert proc.stdout.splitlines() == [
-        f"ran {FIT.name} {console_url}/lesson/29",
-        f"ran {SCROLL.name} {console_url}/",
-        f"ran {FIGURE.name} {console_url}/exam/review/T6C02",
-        f"ran {LOGBOOK.name} {console_url}",
-        f"ran {LORA.name} {console_url}",
-        f"ran {CARD_SORT.name} {console_url}",
-        f"ran {SURVEY.name} {console_url}",
-        f"ran {RECALL.name} {console_url}",
-        f"ran {LIVE_FIND.name} {console_url}",
-        f"ran {FIELD.name} {console_url}",
+        f"Fenced the console behind a render proxy at {proxy} (process {pid}).",
+        f"ran {FIT.name} {proxy}/lesson/29",
+        f"ran {SCROLL.name} {proxy}/",
+        f"ran {FIGURE.name} {proxy}/exam/review/T6C02",
+        f"ran {LOGBOOK.name} {proxy}",
+        f"ran {LORA.name} {proxy}",
+        f"ran {CARD_SORT.name} {proxy}",
+        f"ran {SURVEY.name} {proxy}",
+        f"ran {RECALL.name} {proxy}",
+        f"ran {LIVE_FIND.name} {proxy}",
+        f"ran {FIELD.name} {proxy}",
+        f"ran {BANDMAP.name} {proxy}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -675,7 +717,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 10, proc.stdout
+    assert len(urls) == 11, proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -743,6 +785,7 @@ API_TOOLS = {
     "survey": (SURVEY, ["http://127.0.0.1:9"], {}),
     "live-find": (LIVE_FIND, ["http://127.0.0.1:9"], {}),
     "field": (FIELD, ["http://127.0.0.1:9"], {}),
+    "bandmap": (BANDMAP, ["http://127.0.0.1:9"], {}),
 }
 
 
@@ -754,7 +797,7 @@ def test_every_render_tool_blocks_the_console_api_before_it_loads_a_page(devtool
     # first navigation keeps a check to layout alone.
     script, args, answers = tool
     run(script, *(arg.format(tmp=tmp_path) for arg in args), port=devtools(answers))
-    calls = devtools.made[-1].calls
+    calls = devtools.made[-1].settled()
     methods = [method for method, _ in calls]
     assert "Page.navigate" in methods, methods
     first_load = methods.index("Page.navigate")
@@ -791,7 +834,7 @@ def test_every_render_tool_leaves_its_page_on_about_blank_before_it_closes(devto
                                                                            tool):
     script, args, answers = tool
     run(script, *(arg.format(tmp=tmp_path) for arg in args), port=devtools(answers))
-    _leaves_blank_before_closing(devtools.made[-1].calls)
+    _leaves_blank_before_closing(devtools.made[-1].settled())
 
 
 def test_render_check_holds_its_own_api_block_across_every_check(render_make):
@@ -802,7 +845,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 10, methods
+    assert len(marks) == 11, methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -874,7 +917,7 @@ def test_a_refused_api_block_stops_a_tool_before_it_loads_any_page(devtools, tmp
     proc = run(script, *(arg.format(tmp=tmp_path) for arg in args),
                port=devtools(answers, errors={refused}))
     assert proc.returncode != 0, (proc.stdout, proc.stderr)
-    loads = [params.get("url") for method, params in devtools.made[-1].calls
+    loads = [params.get("url") for method, params in devtools.made[-1].settled()
              if method == "Page.navigate"]
     assert all(url == "about:blank" for url in loads), loads
 
@@ -906,6 +949,144 @@ def test_both_devtools_clients_refuse_to_load_a_page_before_the_block_is_confirm
         _socket = getattr(client, "s", None) or client.sock
         _socket.close()
     assert "Page.navigate" not in [method for method, _ in fake.calls]
+
+
+@pytest.mark.parametrize("tool", API_TOOLS.values(), ids=API_TOOLS.keys())
+def test_a_tool_run_on_its_own_loads_its_pages_through_a_render_proxy(devtools, tmp_path, tool):
+    # Run alone, a tool puts its own render proxy in front of the console it was given: the
+    # browser never gets the console's own address.
+    script, args, answers = tool
+    args = [arg.format(tmp=tmp_path) for arg in args]
+    given = "/".join(args[0].split("/")[:3])
+    run(script, *args, port=devtools(answers))
+    pages = [params["url"] for method, params in devtools.made[-1].settled()
+             if method == "Page.navigate" and params.get("url") != "about:blank"]
+    assert pages, "the tool loaded no page"
+    for url in pages:
+        assert not url.startswith(given + "/"), url
+        assert url.startswith("http://127.0.0.1:"), url
+
+
+def test_neither_devtools_client_loads_a_console_page_directly(devtools, monkeypatch):
+    # A blocked client still refuses a page that is not behind a render proxy.
+    import importlib
+    port = devtools({})
+    monkeypatch.syspath_prepend(str(SCROLL.parent))
+    monkeypatch.setenv("CDP_PORT", str(port))
+    monkeypatch.delenv("RENDER_FENCE", raising=False)
+    scroll = importlib.import_module("render_scroll")
+    fit = importlib.import_module("render_fit")
+    monkeypatch.setattr(fit, "PORT", port)
+    clients = [scroll.CDP(f"ws://127.0.0.1:{port}/devtools/browser/fake", port=port),
+               fit.CDP(f"ws://127.0.0.1:{port}/devtools/page/fake")]
+    for client in clients:
+        client.blocked = True
+        with pytest.raises(RuntimeError, match="render proxy"):
+            client.call("Page.navigate", {"url": "http://127.0.0.1:9/lesson/1"})
+        (getattr(client, "s", None) or client.sock).close()
+    assert "Page.navigate" not in [method for method, _ in devtools.made[-1].settled()]
+
+
+def _stubborn_group(tmp_path):
+    """A leader that dies on SIGTERM and a child of its group that ignores it; (leader, pidfile)."""
+    child_pid = tmp_path / "child.pid"
+    child = tmp_path / "stubborn.py"
+    child.write_text("import os, signal, sys, time\n"
+                     "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                     "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                     "time.sleep(60)\n", encoding="utf-8")
+    leader = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess, sys, time\n"
+         "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+         "time.sleep(60)\n", str(child), str(child_pid)],
+        start_new_session=True)
+    for _ in range(200):
+        if child_pid.is_file() and child_pid.read_text():
+            break
+        subprocess.run(["sleep", "0.05"])
+    return leader, child_pid
+
+
+@pytest.mark.parametrize("denied", ["enumeration", "stat-read"])
+def test_an_unreadable_proc_never_counts_as_the_group_gone(tmp_path, monkeypatch, denied):
+    # With /proc unreadable, a TERM-resistant child may still be running: stop_group must not
+    # report the group stopped, and the run's live marker stays.
+    render_check = _load_render_check()
+    leader, child_pid = _stubborn_group(tmp_path)
+    try:
+        if denied == "enumeration":
+            real_listdir = os.listdir
+            monkeypatch.setattr(render_check.os, "listdir", lambda path: (
+                _raise(PermissionError(13, "Permission denied"))() if str(path) == "/proc"
+                else real_listdir(path)))
+        else:
+            monkeypatch.setattr(render_check, "_proc_stat",
+                                _raise(PermissionError(13, "Permission denied")))
+        try:
+            confirmed = render_check.stop_group(leader, 0.3)
+        except OSError:
+            confirmed = None
+        alive = []
+        entry = render_check._launched(leader, "the stand-in", alive)
+        assert render_check._stop(leader, 0.3, entry, alive) is False
+        monkeypatch.undo()
+        assert confirmed is not True
+        assert alive == [entry]
+        assert _running(int(child_pid.read_text())), "the child really is still running"
+    finally:
+        monkeypatch.undo()
+        if leader.poll() is None:
+            leader.kill()
+            leader.wait()
+        if child_pid.is_file() and _running(int(child_pid.read_text())):
+            os.kill(int(child_pid.read_text()), 9)
+
+
+# The checks make render-check runs, as run_checks names them (the scripts that load pages).
+RUNNER_CHECKS = (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND, FIELD,
+                 BANDMAP)
+
+
+def _pages_loaded_from(proxy, calls):
+    """The path and query of every page loaded from the runner's render proxy."""
+    pages = set()
+    for method, params in calls:
+        url = params.get("url", "") if method == "Page.navigate" else ""
+        if url.startswith(proxy + "/") or url == proxy:
+            pages.add(url[len(proxy):] or "/")
+    return pages
+
+
+def test_every_page_the_real_checks_load_is_walked(render_make):
+    # The real checks, run by the runner against the fake DevTools, navigate to their pages
+    # through the runner's proxy; every one of them must be in the GET guard's walk. Recall
+    # loads its pages from scratch consoles of its own, behind proxies of its own.
+    from tests.render_routes import RENDER_CHECK_PAGES
+    proc = render_make(real=RUNNER_CHECKS, timeout=240)
+    proxy, _ = _proxy_url(proc)
+    loaded = _pages_loaded_from(proxy, render_make.calls())
+    assert len(loaded) >= 10, (loaded, proc.stdout[-2000:], proc.stderr[-2000:])
+    assert sorted(loaded - set(RENDER_CHECK_PAGES)) == [], proc.stderr[-2000:]
+
+
+def test_a_page_the_walk_lacks_is_caught_however_its_url_is_written(render_make):
+    # The case that slipped past the source scan: a check given an unwalked page in a single-
+    # quoted f-string. Read from the navigations, it is caught.
+    from tests.render_routes import RENDER_CHECK_PAGES
+    runner = render_make.screen / "render_check.py"
+    text = CHECK.read_text(encoding="utf-8")
+    old = '("render_fit.py", f"{console}/lesson/29",'
+    assert old in text
+    text = text.replace(old, "(\"render_fit.py\", f'{console}/lesson/28',")
+    text = text.replace("HERE = Path(__file__).resolve().parent",
+                        f"HERE = Path({str(CHECK.parent)!r})")
+    runner.unlink()
+    runner.write_text(text, encoding="utf-8")
+    proc = render_make(real=(FIT,), timeout=120)
+    proxy, _ = _proxy_url(proc)
+    missing = sorted(_pages_loaded_from(proxy, render_make.calls()) - set(RENDER_CHECK_PAGES))
+    assert missing == ["/lesson/28"], (missing, proc.stdout, proc.stderr)
 
 
 def _fake_browser(tmp_path):
@@ -1031,56 +1212,92 @@ def recording_console():
             worker.join()
 
 
-def test_a_browser_that_will_not_stop_keeps_its_page_blocked_until_it_is_gone(
+def _writes_or_api(hits):
+    """What reached the target that a render check must never send it: any API path, any write.
+
+    The runner's own reachability check of RENDER_URL is a GET of / and does not count.
+    """
+    return [hit for hit in hits if hit[0] not in ("GET", "HEAD") or "/api" in hit[1]]
+
+
+def _run_runner_in_thread(render_check):
+    result = []
+    runner = threading.Thread(target=lambda: result.append(render_check.main()), daemon=True)
+    runner.start()
+    return runner, result
+
+
+def test_devtools_gone_before_blank_with_the_browser_alive_reaches_nothing_at_the_target(
         tmp_path, monkeypatch, recording_console, capsys):
-    # The scenario of the review: the page cannot reach about:blank, its target cannot be closed,
-    # and the browser group will not stop. Dropping the block then would let the still-loaded
-    # page post to the console. The runner fails, and holds its block until the browser is gone.
+    # Codex's D-121 scenario: DevTools drops the connection before the blank navigation finishes,
+    # and the browser stays up. The page is still loaded and posts as soon as no session blocks
+    # it, but it only ever had the render proxy's address, which refuses the API and writes.
+    import contextlib
+    console, hits = recording_console
+    fake = FakeDevTools({}, drop_on_blank=True, polls=True)
+    chromium, pidfile = _fake_browser(tmp_path)
+    loaded = []
+
+    def checks_leave_a_page_loaded(fenced, port, output):
+        loaded.append(fenced)
+        fake.url = f"{fenced}/lesson/1"
+        return 0
+
+    render_check = _runner_in_process(
+        monkeypatch, tmp_path, console, chromium, real_block=True,
+        chromium_port=lambda browser, profile: str(fake.port),
+        run_checks=checks_leave_a_page_loaded)
+    try:
+        runner, result = _run_runner_in_thread(render_check)
+        runner.join(timeout=60)
+        assert not runner.is_alive()
+        # The page goes on polling after the run, at an address that no longer answers.
+        threading.Event().wait(0.5)
+        assert _writes_or_api(hits) == [], hits
+        assert loaded and not loaded[0].startswith(console), loaded
+        assert result == [1], capsys.readouterr().err
+    finally:
+        fake.browser_gone = True
+        _kill_fake_browser(pidfile)
+        with contextlib.suppress(OSError):
+            fake.close()
+
+
+def test_a_browser_that_will_not_stop_is_held_until_a_deadline_then_the_run_fails(
+        tmp_path, monkeypatch, recording_console, capsys):
+    # The page cannot reach about:blank, its target cannot be closed, and the browser group will
+    # not stop. The runner holds its DevTools block a while, then gives up at the deadline:
+    # the run fails and the unconfirmed profile is kept. Through all of it, and after, the
+    # still-loaded page reaches nothing at the target, because it only has the proxy's address.
     import contextlib
     console, hits = recording_console
     fake = FakeDevTools({}, blank_fails=True, errors={"Target.closeTarget"}, polls=True)
     chromium, pidfile = _fake_browser(tmp_path)
 
-    def checks_leave_a_console_page_loaded(console_url, port, output):
-        fake.url = f"{console_url}/lesson/1"
+    def checks_leave_a_page_loaded(fenced, port, output):
+        fake.url = f"{fenced}/lesson/1"
         return 0
 
     render_check = _runner_in_process(
         monkeypatch, tmp_path, console, chromium, real_block=True,
-        killpg=lambda pgid, sig: None,
+        killpg=lambda pgid, sig: None, HOLD_S=1.0,
         chromium_port=lambda browser, profile: str(fake.port),
-        run_checks=checks_leave_a_console_page_loaded)
-    result = []
-    runner = threading.Thread(target=lambda: result.append(render_check.main()), daemon=True)
-
-    def api_calls():   # the runner's own reachability check of RENDER_URL is a GET of /
-        return [hit for hit in hits if hit[1].startswith("/api/")]
-
+        run_checks=checks_leave_a_page_loaded)
     try:
-        runner.start()
-        waited, err = 0.0, ""
-        while "holding" not in err.lower() and waited < 30:
-            threading.Event().wait(0.1)
-            waited += 0.1
-            err += capsys.readouterr().err
-        assert "holding" in err.lower(), err
+        runner, result = _run_runner_in_thread(render_check)
+        runner.join(timeout=60)
+        assert not runner.is_alive(), "the hold has no deadline"
+        err = capsys.readouterr().err
+        assert result == [1], err
+        assert "holding" in err.lower() and "gave up" in err, err
+        profiles = list(tmp_path.glob("sigint101-render-*/profile"))
+        assert len(profiles) == 1 and (profiles[0] / "Default").is_file(), err
+        assert "<closed>" in [method for method, _ in fake.settled()]
         threading.Event().wait(0.5)
-        assert runner.is_alive(), "the runner gave up the block with the browser still running"
-        assert "<closed>" not in [method for method, _ in fake.calls]
-        assert api_calls() == [], hits
-        # The browser is killed from outside, as the message says to; the page dies with it.
-        _kill_fake_browser(pidfile)
-        fake.browser_gone = True
-        runner.join(timeout=30)
-        assert not runner.is_alive()
-        assert result == [1]
-        assert "<closed>" in [method for method, _ in fake.calls]
-        threading.Event().wait(0.3)
-        assert api_calls() == [], hits
+        assert _writes_or_api(hits) == [], hits
     finally:
         fake.browser_gone = True
         _kill_fake_browser(pidfile)
-        runner.join(timeout=5)
         with contextlib.suppress(OSError):
             fake.close()
 
@@ -1910,3 +2127,106 @@ def test_field_render_fails_on_split_hyphen_overflow_or_small_font(devtools, def
     proc = run(FIELD, "http://127.0.0.1:9", port=port)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert _verdicts(proc)[-1] == "VERDICT: FAIL - field red-night"
+
+
+BANDMAP_HOME_FITS = {
+    "doc": [800, 480],
+    "bandsKey": [76, 72],
+    "bandsInViewport": True,
+    "titleUnclipped": True,
+    "exitWhole": True,
+}
+BANDMAP_PAGE_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "captionSingleLine": True,
+    "captionUnclipped": True,
+    "keyVisible": True,
+    "headingsForcedUpper": False,
+    "overviewBounds": [18, 782],
+    "entriesClientH": 308,
+    "rowCount": 24,
+    "minRowH": 76,
+    "rowsOverlap": False,
+    "clippedLines": 0,
+    "replayRadius": "0px",
+    "replayText": "REPLAY ONLY",
+    "lessonBordersDouble": True,
+    "offDialBordersDashed": True,
+    "minFontPx": 18,
+}
+BANDMAP_END_FITS = {
+    "scrollTop": 1800,
+    "lastOffDialVisible": True,
+    "noRadioVisible": True,
+}
+
+
+def _bandmap_pages(*, home_defect=None, page_defect=None, end_defect=None):
+    pages = {}
+    for theme in THEMES:
+        home = {**BANDMAP_HOME_FITS, "theme": theme}
+        page = {**BANDMAP_PAGE_FITS, "theme": theme}
+        end = {**BANDMAP_END_FITS, "theme": theme}
+        if theme == "red-night":
+            home.update(home_defect or {})
+            page.update(page_defect or {})
+            end.update(end_defect or {})
+        pages[f"measureBandmapHome({json.dumps(theme)})"] = home
+        pages[f"measureBandmapPage({json.dumps(theme)})"] = page
+        pages[f"measureBandmapEnd({json.dumps(theme)})"] = end
+    return pages
+
+
+def test_bandmap_render_checks_home_and_bands_in_all_three_themes(devtools):
+    port = devtools(_bandmap_pages())
+    proc = run(BANDMAP, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - bandmap home dark",
+        "VERDICT: PASS - bandmap dark",
+        "VERDICT: PASS - bandmap home sunlight",
+        "VERDICT: PASS - bandmap sunlight",
+        "VERDICT: PASS - bandmap home red-night",
+        "VERDICT: PASS - bandmap red-night",
+    ]
+
+
+@pytest.mark.parametrize("kind, defect", [
+    ("home", {"doc": [800, 481]}),
+    ("home", {"bandsKey": [71, 75]}),
+    ("home", {"bandsKey": [76, 71]}),
+    ("home", {"bandsInViewport": False}),
+    ("home", {"titleUnclipped": False}),
+    ("home", {"exitWhole": False}),
+    ("page", {"doc": [801, 480]}),
+    ("page", {"back": False}),
+    ("page", {"captionSingleLine": False}),
+    ("page", {"captionUnclipped": False}),
+    ("page", {"keyVisible": False}),
+    ("page", {"headingsForcedUpper": True}),
+    ("page", {"overviewBounds": [17, 782]}),
+    ("page", {"overviewBounds": [18, 783]}),
+    ("page", {"entriesClientH": 279}),
+    ("page", {"minRowH": 71}),
+    ("page", {"rowsOverlap": True}),
+    ("page", {"clippedLines": 1}),
+    ("page", {"replayRadius": "16px"}),
+    ("page", {"replayText": "REPLAY"}),
+    ("page", {"lessonBordersDouble": False}),
+    ("page", {"offDialBordersDashed": False}),
+    ("page", {"minFontPx": 16}),
+    ("end", {"lastOffDialVisible": False}),
+    ("end", {"noRadioVisible": False}),
+])
+def test_bandmap_render_fails_on_layout_or_shape_defects(devtools, kind, defect):
+    kwargs = {f"{kind}_defect": defect}
+    port = devtools(_bandmap_pages(**kwargs))
+    proc = run(BANDMAP, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    expected = (
+        "VERDICT: FAIL - bandmap home red-night"
+        if kind == "home"
+        else "VERDICT: FAIL - bandmap red-night"
+    )
+    assert expected in _verdicts(proc)

@@ -11,7 +11,12 @@ import urllib.request
 
 # The real folder of this script, so a linked copy still imports the DevTools helpers beside it.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from render_scroll import block_console_api, check_navigation, check_reply  # noqa: E402
+from render_scroll import (  # noqa: E402
+    block_console_api,
+    check_navigation,
+    check_reply,
+    fence,
+)
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "9222"))
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8008/lesson/29"
@@ -191,7 +196,7 @@ def main():
         "Emulation.setDeviceMetricsOverride",
         {"width": 800, "height": 480, "deviceScaleFactor": 1, "mobile": False},
     )
-    cdp.call("Page.navigate", {"url": URL})
+    cdp.call("Page.navigate", {"url": fence(URL)})
     time.sleep(2.5)
     for _ in range(20):
         if cdp.evaluate("document.readyState") == "complete":

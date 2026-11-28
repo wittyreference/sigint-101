@@ -196,6 +196,21 @@ class GroupPopen(subprocess.Popen):
                 if self.returncode is None:
                     self._signal_group(sig)
 
+    def lower_priority(self, nice: int) -> bool:
+        """Lower only a live, owned leader's priority while managed reaping is excluded."""
+        with self._waitpid_lock:
+            if self.returncode is not None or self._exit_pending() is not None:
+                return False
+            if self.returncode is not None:
+                return False  # waitid reported that the leader was reaped elsewhere
+            try:
+                if os.getpriority(os.PRIO_PROCESS, self.pid) >= nice:
+                    return False
+                os.setpriority(os.PRIO_PROCESS, self.pid, nice)
+            except ProcessLookupError:
+                return False
+            return True
+
     def _signal_group(self, sig):
         """Signal with the waitpid lock held and the leader still owned."""
         try:
@@ -214,8 +229,8 @@ def spawn(argv, *, stdin=None, stdout=subprocess.PIPE, stderr=CAPTURE, text=Fals
 
     stderr defaults to a scratch file rather than a pipe: nothing drains stderr while the tool
     runs, and a full pipe would wedge the tool rather than the diagnostic. The file is attached as
-    `proc.stderr`, so the reason a tool died is in one place to read. `pass_fds` are the only
-    other descriptors the tool inherits (SSTV hands its stages its staging lock this way).
+    `proc.stderr`, so the reason a tool died is in one place to read.
+    SSTV and Meteor use `pass_fds` to keep their staging locks held by the child.
     """
     scratch = None
     if stderr is CAPTURE:

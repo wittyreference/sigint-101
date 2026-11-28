@@ -3513,3 +3513,151 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ===== Course band map (/bands) =========================================== */
+/* Fixed caption + decorative log-scale overview dial above a scrolling ladder of 764x76 rows. */
+.bandmap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 0 10px;
+  overflow: hidden;
+}
+.bandmap__caption {
+  flex: none;
+  margin: 0;
+  padding: 6px var(--gutter) 0;
+  height: 30px;
+  font-size: 18px;
+  line-height: 24px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.bandmap__overview {
+  flex: none;
+  height: 48px;
+  margin-bottom: 6px;
+}
+.bandmap__dial {
+  display: block;
+  width: 800px;
+  height: 48px;
+}
+.bandmap__axis {
+  stroke: var(--border-strong);
+  stroke-width: 2;
+}
+.bandmap__fm-bar {
+  fill: var(--accent);
+}
+.bandmap__tick {
+  stroke: var(--fg);
+  stroke-width: 2;
+}
+.bandmap__tick--replay {
+  stroke: var(--fg-dim);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+}
+.bandmap__dial-label {
+  fill: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 18px;
+}
+.bandmap__frame {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.bandmap__entries {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--gutter);
+}
+.bandmap__key {
+  margin: 0 0 6px;
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg-dim);
+}
+.bandmap__group {
+  margin: 0 0 8px;
+}
+.bandmap__heading {
+  margin: 8px 0 4px;
+  padding: 0 0 4px;
+  border: 0;
+  border-bottom: 2px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.25;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--fg-dim);
+}
+.bandmap__group:first-child .bandmap__heading {
+  margin-top: 0;
+}
+.bandmap__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bandmap__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--touch);
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 3px double var(--accent);
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 18px;
+  line-height: 1.25;
+}
+.bandmap__row--off-dial {
+  border: 3px dashed var(--border-strong);
+}
+.bandmap__row-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bandmap__line1 {
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bandmap__line2 {
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bandmap__row .logbook-mark--replay {
+  font-size: 18px;
+  padding: 0 6px;
+  line-height: 1.1;
+}
+.bandmap__arrow {
+  flex: none;
+  font-size: 24px;
+  color: var(--accent);
+}
+.bandmap__no-radio {
+  margin: 10px 0 6px;
+  font-size: 18px;
+  line-height: 1.3;
+  color: var(--fg-dim);
+}
