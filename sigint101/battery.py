@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from dataclasses import dataclass
 
 INA219_BUS = 1
 INA219_ADDRESS = 0x41
+INA219_CONFIG_REG = 0x00
+INA219_MODE_CONTINUOUS_SHUNT_BUS = 0x07
 # Waveshare UPS Module 3S schematic, R2 across the INA219 inputs: 0.1 ohm.
 # https://www.waveshare.net/w/upload/5/53/Ups01.pdf
 UPS_SHUNT_OHMS = 0.1
@@ -56,6 +59,38 @@ def percent_from_voltage(volts: float) -> int:
 
 
 @dataclass(frozen=True)
+class INA219Config:
+    """Decoded INA219 Configuration Register (0x00, TI SBOS448G §8.6.2.1)."""
+
+    raw: int
+    mode: int
+    sadc: int
+    badc: int
+
+    @classmethod
+    def from_word(cls, raw: int) -> INA219Config:
+        word = raw & 0xFFFF
+        return cls(
+            raw=word,
+            mode=word & 0x07,
+            sadc=(word >> 3) & 0x0F,
+            badc=(word >> 7) & 0x0F,
+        )
+
+    @property
+    def continuous_shunt_and_bus(self) -> bool:
+        return self.mode == INA219_MODE_CONTINUOUS_SHUNT_BUS
+
+
+class ConversionNotReadyError(ValueError):
+    """Raised when the INA219 Bus Voltage CNVR bit is clear."""
+
+    def __init__(self, message: str, *, config: INA219Config | None = None):
+        super().__init__(message)
+        self.config = config
+
+
+@dataclass(frozen=True)
 class INA219Sample:
     voltage: float
     shunt_voltage: float
@@ -71,6 +106,22 @@ def _register(bus, number, *, signed=False):
     return int.from_bytes(data, "big", signed=signed)
 
 
+def read_ina219_config(bus) -> INA219Config:
+    """Read the INA219 Configuration Register (0x00) without modifying it."""
+    return INA219Config.from_word(_register(bus, INA219_CONFIG_REG))
+
+
+def open_i2c_bus(bus_number: int = INA219_BUS):
+    """Open the I2C bus using smbus2, falling back to system python3-smbus."""
+    try:
+        from smbus2 import SMBus
+    except ImportError:
+        from smbus import SMBus
+
+        return contextlib.closing(SMBus(bus_number))
+    return SMBus(bus_number)
+
+
 def read_ina219(bus) -> INA219Sample:
     """Read a completed INA219 conversion using TI SBOS448G §§8.5.1–8.5.3 and 8.6.3.
 
@@ -82,7 +133,7 @@ def read_ina219(bus) -> INA219Sample:
     if bus_word & 0x01:
         raise ValueError("INA219 measurement overflow")
     if not bus_word & 0x02:
-        raise ValueError("INA219 conversion not ready")
+        raise ConversionNotReadyError("INA219 conversion not ready")
     voltage = (bus_word >> 3) * 0.004
     shunt = _register(bus, 0x01, signed=True) * 0.00001
     calibration = _register(bus, 0x05) & 0xFFFE  # Read existing scale. Bit 0 is unused.
@@ -92,6 +143,30 @@ def read_ina219(bus) -> INA219Sample:
         return INA219Sample(voltage, shunt, shunt / UPS_SHUNT_OHMS, None)
     current_lsb = 0.04096 / (calibration * UPS_SHUNT_OHMS)
     return INA219Sample(voltage, shunt, current * current_lsb, power * 20 * current_lsb)
+
+
+def read_battery_once(*, bus_factory=None) -> tuple[INA219Config, BatteryReading | None]:
+    """Read register 0x00 and one uncached INA219 battery sample (read-only).
+
+    When MODE is not continuous shunt-and-bus (0b111), returns (config, None) without
+    reading the measurement registers. If CNVR is clear in continuous mode, raises
+    ConversionNotReadyError carrying the decoded config so callers can size a retry.
+    """
+    bus_cm = bus_factory(INA219_BUS) if bus_factory is not None else open_i2c_bus(INA219_BUS)
+    with bus_cm as bus:
+        config = read_ina219_config(bus)
+        if not config.continuous_shunt_and_bus:
+            return config, None
+        try:
+            sample = read_ina219(bus)
+        except ConversionNotReadyError as exc:
+            raise ConversionNotReadyError(str(exc), config=config) from exc
+    return config, BatteryReading(
+        voltage=sample.voltage,
+        current_a=sample.current_a,
+        percent=percent_from_voltage(sample.voltage),
+        charging=sample.current_a > 0,
+    )
 
 
 class BatteryGauge:

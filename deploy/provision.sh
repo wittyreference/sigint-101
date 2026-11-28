@@ -64,7 +64,7 @@ SSTV_VENV="/opt/sigint101/sstv"
 # (APRS + POCSAG), tcpdump + setcap (Flock), iw (monitor mode), lsusb (the radio probe), a system
 # font that carries U+262D (the bundled fonts don't), and the kiosk's browser and compositor.
 APT_RUNTIME=(rtl-sdr rtl-433 multimon-ng tcpdump libcap2-bin iw usbutils fonts-dejavu-core
-             git curl python3-venv chromium labwc)
+             git curl python3-venv chromium labwc python3-smbus polkitd)
 # What the pinned core builds need (the set the reference Recon built them with).
 APT_BUILD=(build-essential cmake pkg-config meson ninja-build librtlsdr-dev libncurses-dev
            libsndfile1-dev libliquid-dev)
@@ -651,6 +651,181 @@ step_kiosk() {
   apply "run deploy/install.sh (differs: ${stale[*]})" "$d/install.sh"
 }
 
+ensure_power_user() {
+  if command -v systemd-sysusers >/dev/null; then
+    sudo systemd-sysusers /usr/local/lib/sysusers.d/sigint101-power.conf
+  else
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin --user-group sigint101-power
+  fi
+}
+
+install_power_dropin() {
+  local dst="$1" content="$2" tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$content" > "$tmp"
+  sudo install -D -m 0644 "$tmp" "$dst"
+  rm -f "$tmp"
+}
+
+# Installs the non-root low-battery power watcher on legacy (non-managed) boxes. Never creates
+# or overwrites /etc/sigint101/power.conf, installs the unit under /usr/local/lib/systemd/system
+# so owner masks in /etc/systemd/system win, and respects any non-enabled owner unit state.
+step_power() {
+  step "Low-battery power watcher (sigint101-power.service; ships disarmed)"
+  local updater_root="${SIGINT101_UPDATER_ROOT:-$HOME/.local/state/sigint101-updater}"
+  if [ -e "$updater_root/current.json" ] || [ -e "$updater_root/control.json" ]; then
+    warn "skip: managed box, the updater owns the watcher"
+    return 0
+  fi
+
+  local d="$COURSE_DIR/deploy/system" p="$COURSE_DIR/sigint101"
+  local req_files=(
+    "$p/__init__.py"
+    "$p/battery.py"
+    "$p/power.py"
+    "$d/sigint101-power.service"
+    "$d/sigint101-power"
+    "$d/50-sigint101-power.rules"
+    "$d/sigint101-power.sysusers.conf"
+  )
+  local f
+  for f in "${req_files[@]}"; do
+    if [ ! -f "$f" ]; then
+      if [ "$CHECK" = 1 ] && [ ! -d "$COURSE_DIR/.git" ]; then
+        would "install sigint101-power once the course is cloned"
+        return 0
+      fi
+      warn "power watcher source $f is missing; skipping power watcher"
+      return 0
+    fi
+  done
+
+  # Check the unit state before installing anything so a masked unit is never overwritten.
+  local pre_state=""
+  pre_state="$(systemctl is-enabled sigint101-power.service 2>/dev/null || true)"
+  if [ "$pre_state" = "masked" ] || [ "$pre_state" = "masked-runtime" ]; then
+    skip "sigint101-power.service turned off by the owner ($pre_state)"
+    return 0
+  fi
+
+  local unit_dst="/usr/local/lib/systemd/system/sigint101-power.service"
+  local unit_existed=0 changed=0 unit_changed=0
+  # Use cmp -s against itself as an existence check so sysroot cmp stubs redirect it cleanly.
+  if cmp -s "$unit_dst" "$unit_dst" 2>/dev/null; then
+    unit_existed=1
+  fi
+
+  local pairs=(
+    "0644|$d/sigint101-power.sysusers.conf|/usr/local/lib/sysusers.d/sigint101-power.conf|power watcher sysusers"
+    "0644|$p/__init__.py|/usr/local/lib/sigint101-power/sigint101/__init__.py|power watcher package init"
+    "0644|$p/battery.py|/usr/local/lib/sigint101-power/sigint101/battery.py|power watcher battery helper"
+    "0644|$p/power.py|/usr/local/lib/sigint101-power/sigint101/power.py|power watcher module"
+    "0755|$d/sigint101-power|/usr/local/bin/sigint101-power|power watcher launcher"
+    "0644|$d/50-sigint101-power.rules|/etc/polkit-1/rules.d/50-sigint101-power.rules|power watcher polkit rule"
+    "0644|$d/sigint101-power.service|$unit_dst|power watcher unit"
+  )
+  local entry mode src dst label
+  for entry in "${pairs[@]}"; do
+    IFS='|' read -r mode src dst label <<< "$entry"
+    if cmp -s "$src" "$dst" 2>/dev/null; then
+      ok "$dst"
+    else
+      changed=1
+      [ "$dst" != "$unit_dst" ] || unit_changed=1
+      apply "install $label ($dst)" sudo install -D -m "$mode" "$src" "$dst"
+    fi
+  done
+
+  local have_user=0
+  if command -v getent >/dev/null && getent passwd sigint101-power >/dev/null 2>&1; then
+    have_user=1
+  elif ! command -v getent >/dev/null && grep -q '^sigint101-power:' /etc/passwd 2>/dev/null; then
+    have_user=1
+  fi
+  if [ "$have_user" = 1 ]; then
+    ok "system user sigint101-power"
+  else
+    apply "create system user sigint101-power" ensure_power_user
+  fi
+
+  local grp="" gid="" have_i2c_group=0 dropin_content="" dropin_label=""
+  local dropin_dst="/etc/systemd/system/sigint101-power.service.d/10-i2c-group.conf"
+  if command -v getent >/dev/null && getent group i2c >/dev/null 2>&1; then
+    have_i2c_group=1
+  fi
+  if command -v stat >/dev/null; then
+    grp="$(stat -c %G /dev/i2c-1 2>/dev/null)" || grp=""
+  fi
+  if [ -z "$grp" ]; then
+    warn "I2C not enabled; /dev/i2c-1 missing, the watcher cannot read"
+    if [ "$have_i2c_group" = 0 ]; then
+      dropin_content="$(printf '[Service]\nSupplementaryGroups=\n')"
+      dropin_label="reset-only (no i2c group)"
+    fi
+  elif [ "$grp" = "i2c" ]; then
+    ok "/dev/i2c-1 group is i2c"
+  else
+    if command -v getent >/dev/null; then
+      gid="$(getent group "$grp" 2>/dev/null | cut -d: -f3)" || gid=""
+    fi
+    if [ "$grp" = "root" ] || [[ ! "$gid" =~ ^[0-9]+$ ]] || (( gid < 100 )); then
+      warn "/dev/i2c-1 group '$grp' (gid ${gid:-unknown}) refused; leaving unit without a group drop-in"
+      if [ "$have_i2c_group" = 0 ]; then
+        dropin_content="$(printf '[Service]\nSupplementaryGroups=\n')"
+        dropin_label="reset-only (no i2c group)"
+      fi
+    else
+      dropin_content="$(printf '[Service]\nSupplementaryGroups=\nSupplementaryGroups=%s\n' "$grp")"
+      dropin_label="for $grp"
+    fi
+  fi
+  if [ -n "$dropin_content" ]; then
+    if printf '%s\n' "$dropin_content" | cmp -s - "$dropin_dst" 2>/dev/null; then
+      ok "$dropin_dst"
+    else
+      changed=1
+      unit_changed=1
+      apply "install I2C group drop-in ($dropin_dst $dropin_label)" \
+        install_power_dropin "$dropin_dst" "$dropin_content"
+    fi
+  fi
+
+  if [ "$unit_existed" = 0 ]; then
+    if [ "$CHECK" = 1 ]; then
+      would "enable and start sigint101-power.service"
+    else
+      sudo systemctl daemon-reload || true
+      if sudo systemctl enable --now sigint101-power.service; then
+        did "enable and start sigint101-power.service"
+      else
+        warn "sigint101-power.service did not start; see systemctl status sigint101-power"
+      fi
+    fi
+  else
+    local state
+    state="$(systemctl is-enabled sigint101-power.service 2>/dev/null || true)"
+    if [ "$state" != "enabled" ]; then
+      if [ "$unit_changed" = 1 ]; then
+        apply "reload systemd units" sudo systemctl daemon-reload
+      fi
+      skip "sigint101-power.service turned off by the owner (${state:-unknown})"
+    elif [ "$changed" = 1 ]; then
+      if [ "$CHECK" = 1 ]; then
+        would "reload and restart sigint101-power.service"
+      else
+        sudo systemctl daemon-reload || true
+        if sudo systemctl restart sigint101-power.service; then
+          did "reload and restart sigint101-power.service"
+        else
+          warn "sigint101-power.service did not start; see systemctl status sigint101-power"
+        fi
+      fi
+    else
+      ok "sigint101-power.service enabled and up to date"
+    fi
+  fi
+}
+
 # FCC grant 2ALPH-E22900M22S (2021-10-29), Ebyte E22-900M22S: 0.0076 W conducted
 # (about 8.8 dBm). Use 8 dBm as the provisioning ceiling for US Long Turbo.
 readonly MESH_TX_POWER_CEILING_DBM=8
@@ -923,6 +1098,7 @@ main() {
   step_monitor_mode
   step_glyph_font
   step_kiosk
+  step_power
   step_meshtastic_defaults "$mesh_ceiling" "$mesh_target"
   step_stock_report
   step_handover_report
