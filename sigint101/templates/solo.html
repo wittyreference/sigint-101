@@ -1,0 +1,101 @@
+<!-- ABOUTME: Tier C solo screen for one unit or the capstone, fitting 800x480 with zero scroll.
+     ABOUTME: Renders Hunt, Step A (legal call), Step B (why + Change call/Submit), and Result views. -->
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+{% set SOLO_MARKS = {'idle': 'READY', 'active': 'HUNTING', 'reception_passed': 'CALL', 'passed': 'PASSED', 'call_missed': 'MISSED', 'expired': 'TIME UP'} %}
+{% set START_LABELS = {'idle': 'Start', 'active': 'Restart', 'reception_passed': 'Restart', 'passed': 'Try again', 'call_missed': 'Try again', 'expired': 'Start again'} %}
+{% set rem = solo.remaining_s|int %}
+{% set init_view = 'result' if solo.state in ('passed', 'call_missed') else ('call-a' if solo.state == 'reception_passed' else 'hunt') %}
+{% set first_leg = solo.legs[0] %}
+<section class="solo-screen" data-solo-screen data-solo-id="{{ solo.id }}" data-solo-back="{{ back_self }}">
+  {# --- View 1: Hunt (idle / active / expired) --- #}
+  <div class="solo-view solo-view--hunt" data-solo-view="hunt"{% if init_view != 'hunt' %} hidden{% endif %}>
+    <div class="solo-hunt__brief" data-solo-brief>
+      {% if solo.legs|length == 1 %}
+      <p class="solo-hunt__band" data-solo-band>{{ first_leg.band_label }}</p>
+      <p class="solo-hunt__clue" data-solo-clue>{{ first_leg.clue }}</p>
+      {% if first_leg.hardware_note %}
+      <p class="solo-hunt__hw" data-solo-hw>{{ first_leg.hardware_note }}</p>
+      {% endif %}
+      {% else %}
+      <div class="solo-legs" data-solo-legs>
+        {% for leg in solo.legs %}
+        <div class="solo-leg" data-solo-leg="{{ leg.slot }}">
+          <div class="solo-leg__head">
+            <span class="solo-leg__band">{{ leg.band_label }}</span>
+            <span class="solo-leg__tag" data-solo-leg-tag="{{ leg.slot }}">{{ 'HEARD' if leg.passed else 'HUNT' }}</span>
+          </div>
+          <p class="solo-leg__clue">{{ leg.clue }}</p>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="solo-hunt__row">
+      <div class="solo-hunt__status">
+        <span class="solo-mark solo-mark--{{ solo.state }}" data-solo-mark>{{ SOLO_MARKS.get(solo.state, 'READY') }}</span>
+        <span class="solo-hunt__clock" data-solo-clock>{{ "%02d:%02d"|format(rem // 60, rem % 60) }}</span>
+      </div>
+      <button class="btn btn--primary solo-hunt__start" type="button" data-solo-start>{{ START_LABELS.get(solo.state, 'Start') }}</button>
+    </div>
+
+    <div class="solo-hunt__actions">
+      <a class="btn solo-hunt__rack" href="/operate?back={{ back_self }}" data-solo-rack>Open the rack</a>
+    </div>
+
+    <p class="solo-hunt__evidence" data-solo-evidence role="status">{% if solo.error %}{{ solo.error }}{% elif solo.reason == 'clock_moved' %}The clock changed. Start again.{% elif solo.passed_before_date %}Passed before &middot; {{ solo.passed_before_date }}{% endif %}</p>
+  </div>
+
+  {# --- View 2: Step A (Legal call choice after reception passes) --- #}
+  <div class="solo-view solo-view--call-a" data-solo-view="call-a"{% if init_view != 'call-a' %} hidden{% endif %}>
+    <p class="solo-heard" data-solo-heard></p>
+    <p class="solo-call__prompt" data-solo-legal-prompt></p>
+    <div class="solo-call__choices" role="group" aria-label="Legal call">
+      <button class="btn solo-call__choice" type="button" data-solo-call-choice="legal">Legal to listen</button>
+      <button class="btn solo-call__choice" type="button" data-solo-call-choice="illegal">Not legal</button>
+      <button class="btn solo-call__choice" type="button" data-solo-call-choice="not_sure">Not sure</button>
+    </div>
+    <p class="solo-call__error" data-solo-call-error role="alert" hidden></p>
+  </div>
+
+  {# --- View 3: Step B (Why chip + Change call beside Submit call in one 74 px foot row) --- #}
+  <div class="solo-view solo-view--call-b" data-solo-view="call-b" hidden>
+    <div class="solo-stepb__head">
+      <span class="solo-stepb__picked" data-solo-picked-call></span>
+      <span class="solo-stepb__error" data-solo-stepb-error role="alert" hidden></span>
+    </div>
+    <div class="solo-why-list" data-solo-why-list role="radiogroup" aria-label="Reason"></div>
+    <div class="solo-stepb__foot">
+      <button class="btn btn--prev solo-stepb__change" type="button" data-solo-change-call>Change call</button>
+      <button class="btn btn--primary solo-stepb__submit" type="button" data-solo-submit disabled>Submit call</button>
+    </div>
+  </div>
+
+  {# --- View 4: Result (two-part marks, feedback + cite, Try again + The Law) --- #}
+  <div class="solo-view solo-view--result" data-solo-view="result"{% if init_view != 'result' %} hidden{% endif %}>
+    <div class="solo-result__head">
+      <span class="solo-mark solo-mark--{{ solo.state }}" data-solo-result-mark>{{ SOLO_MARKS.get(solo.state, 'PASSED') }}</span>
+      <span class="solo-result__heard" data-solo-result-heard></span>
+    </div>
+    <div class="solo-result__parts">
+      <span class="solo-part-mark solo-part-mark--ok" data-solo-part-rx>RECEPTION: HEARD</span>
+      <span class="solo-part-mark" data-solo-part-law></span>
+    </div>
+    <p class="solo-result__feedback" data-solo-feedback></p>
+    <p class="solo-result__cite" data-solo-cite></p>
+    <div class="solo-result__foot">
+      <button class="btn btn--primary solo-result__retry" type="button" data-solo-retry>Try again</button>
+      <a class="btn btn--prev solo-result__law" href="/law?back={{ back_self }}" data-solo-law>The Law</a>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/find.js"></script>
+<script src="/static/solo.js"></script>
+{% endblock %}

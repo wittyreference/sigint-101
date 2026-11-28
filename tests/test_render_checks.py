@@ -2678,3 +2678,135 @@ def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devto
         else "VERDICT: FAIL - closing-stages red-night"
     )
     assert expected in _verdicts(proc)
+
+
+SOLO_TILE_FITS = {
+    "doc": [800, 480],
+    "overflowY": "auto",
+    "tilesWithClippedMeta": 0,
+    "distinctMarks": True,
+}
+SOLO_SCREEN_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "huntFits": True,
+    "huntKeyHeights": [76, 74],
+    "stepAFits": True,
+    "stepAHeights": [76, 76, 76],
+    "stepBFits": True,
+    "footSameRow": True,
+    "stepBChipHeights": [76, 76, 76],
+    "stepBFootHeights": [74, 74],
+    "stepBBottom": 472,
+    "resultFits": True,
+    "resultHeights": [74, 74],
+    "distinctResultParts": True,
+    "promptGlow": False,
+    "minFontPx": 18,
+}
+SOLO_RACK_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "backHref": "/unit/4/solo",
+    "backLabel": "Solo",
+    "rdsPickHref": "/operate/rds?back=/unit/4/solo",
+    "titleUnclipped": True,
+}
+
+
+def _solo_pages(*, tile_defect=None, screen_defect=None, rack_defect=None):
+    pages = {}
+    for theme in THEMES:
+        tile = {**SOLO_TILE_FITS, "theme": theme}
+        screen = {**SOLO_SCREEN_FITS, "theme": theme}
+        rack = {**SOLO_RACK_FITS, "theme": theme}
+        if theme == "red-night":
+            tile.update(tile_defect or {})
+            screen.update(screen_defect or {})
+            rack.update(rack_defect or {})
+        pages[f"measureSoloTile({json.dumps(theme)})"] = tile
+        pages[f"measureSoloScreen({json.dumps(theme)},"] = screen
+        pages[f"measureSoloRack({json.dumps(theme)})"] = rack
+    return pages
+
+
+def test_solo_render_checks_tile_views_and_rack_in_all_three_themes(devtools):
+    port = devtools(_solo_pages())
+    proc = run(render_tool("solo"), "http://127.0.0.1:9", port=port, fast=False)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - solo tile u4 dark",
+        "VERDICT: PASS - solo screen u4 dark",
+        "VERDICT: PASS - solo rack dark",
+        "VERDICT: PASS - solo tile u4 sunlight",
+        "VERDICT: PASS - solo screen u4 sunlight",
+        "VERDICT: PASS - solo rack sunlight",
+        "VERDICT: PASS - solo tile u4 red-night",
+        "VERDICT: PASS - solo screen u4 red-night",
+        "VERDICT: PASS - solo rack red-night",
+    ]
+
+
+@pytest.mark.parametrize("kind, defect", [
+    ("tile", {"tilesWithClippedMeta": 1}),
+    ("tile", {"distinctMarks": False}),
+    ("screen", {"doc": [800, 481]}),
+    ("screen", {"stepBFits": False}),
+    ("screen", {"footSameRow": False}),
+    ("screen", {"stepBFootHeights": [70, 74]}),
+    ("screen", {"promptGlow": True}),
+    ("screen", {"minFontPx": 17}),
+    ("screen", {"distinctResultParts": False}),
+    ("rack", {"backHref": "/"}),
+    ("rack", {"rdsPickHref": "/operate/rds"}),
+])
+def test_solo_render_fails_on_overflow_stepb_foot_glow_or_lost_back(devtools, kind, defect):
+    kwargs = {f"{kind}_defect": defect}
+    port = devtools(_solo_pages(**kwargs))
+    proc = run(render_tool("solo"), "http://127.0.0.1:9", port=port, fast=False)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    expected = {
+        "tile": "VERDICT: FAIL - solo tile u4 red-night",
+        "screen": "VERDICT: FAIL - solo screen u4 red-night",
+        "rack": "VERDICT: FAIL - solo rack red-night",
+    }[kind]
+    assert expected in _verdicts(proc)
+
+
+def test_solo_render_console_uses_no_radio_probe(tmp_path, monkeypatch):
+    sys.path.insert(0, str(render_tool("solo").parent))
+    try:
+        import render_solo  # noqa: PLC0415
+    finally:
+        sys.path.remove(str(render_tool("solo").parent))
+
+    captured: dict = {}
+
+    def fake_create_app(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    class FakeServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        def run(self):
+            return None
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(render_solo, "create_app", fake_create_app)
+    monkeypatch.setattr(render_solo.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(render_solo, "urlopen", lambda *_a, **_kw: FakeResp())
+
+    server, thread, _base, _solo = render_solo._run_server(tmp_path, lambda: 1_764_330_000.0)
+    render_solo._stop_server(server, thread)
+
+    probe_fn = captured["kwargs"].get("probe")
+    assert callable(probe_fn), "render_solo._run_server must pass a no-radio probe"
+    assert probe_fn().present is False

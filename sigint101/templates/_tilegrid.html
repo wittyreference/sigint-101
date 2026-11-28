@@ -32,6 +32,7 @@
 
 {% if tiles %}
   {% set FIND_MARKS = {'idle': 'READY', 'active': 'HUNTING', 'passed': 'FOUND', 'expired': 'TIME UP'} %}
+  {% set SOLO_MARKS = {'idle': 'READY', 'active': 'HUNTING', 'reception_passed': 'CALL', 'passed': 'PASSED', 'call_missed': 'MISSED', 'expired': 'TIME UP'} %}
   <div class="tiles">
     {% for t in tiles %}
       {% if t.kind == 'find' %}
@@ -45,6 +46,19 @@
         <div class="tile__meta tile__meta--find">
           <span class="find-mark find-mark--{{ t.find_state }}" data-find-mark>{{ FIND_MARKS.get(t.find_state, 'READY') }}</span>
           <span class="find-tile__clock" data-find-clock{% if t.find_state != 'active' %} hidden{% endif %}>{{ "%02d:%02d"|format(rem // 60, rem % 60) }}</span>
+        </div>
+      </a>
+      {% elif t.kind == 'solo' %}
+      {% set rem = t.remaining_s|int %}
+      <a class="tile tile--solo" href="{{ t.href }}" data-solo-tile data-solo-id="{{ t.solo_id }}">
+        <div class="tile__head">
+          <span class="tile__code">{{ t.code }}</span>
+        </div>
+        {{ glyph(t.glyph) }}
+        <div class="tile__name">{{ t.name }}</div>
+        <div class="tile__meta tile__meta--solo">
+          <span class="solo-mark solo-mark--{{ t.solo_state }}" data-solo-mark>{{ SOLO_MARKS.get(t.solo_state, 'READY') }}</span>
+          <span class="solo-tile__clock" data-solo-clock{% if t.solo_state != 'active' %} hidden{% endif %}>{{ "%02d:%02d"|format(rem // 60, rem % 60) }}</span>
         </div>
       </a>
       {% else %}

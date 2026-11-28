@@ -327,6 +327,20 @@ def test_instructions_and_status_values_are_at_least_18px():
         ".rack__gain-value",
         ".radar__count b",
         ".exam-sim__score",
+        # Tier C solos
+        ".solo-hunt__band",
+        ".solo-hunt__clue",
+        ".solo-hunt__hw",
+        ".solo-hunt__evidence",
+        ".solo-heard",
+        ".solo-call__prompt",
+        ".solo-call__error",
+        ".solo-stepb__picked",
+        ".solo-stepb__error",
+        ".solo-why-chip",
+        ".solo-result__heard",
+        ".solo-result__feedback",
+        ".solo-result__cite",
     )
     failures = []
     for selector in must_be_18:
