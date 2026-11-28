@@ -248,7 +248,13 @@ def test_meteor_clean_exit_classifies_the_gallery(rig, kind):
     assert run.complete.wait(2)
     body = decoder.snapshot()
     assert body["state"] == ("done" if kind.endswith("picture") else "no_picture")
-    assert body["passes"] == []
+    if kind.endswith("picture"):
+        assert len(body["passes"]) == 1
+        assert [img["path"].rsplit("/", 1)[-1] for img in body["passes"][0]["images"]] == [
+            "MSU-MR-1.png"
+        ]
+    else:
+        assert body["passes"] == []
     if kind == "markerless-empty":
         assert body["reason"] == "The close marker was never seen."
 

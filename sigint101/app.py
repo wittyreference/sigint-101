@@ -25,7 +25,7 @@ from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -2224,9 +2224,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     @app.post("/api/meteor/listen")
     def meteor_listen():
         decoder = app.state.meteor
-        if decoder.running:
+        if decoder.running and not decoder.handoff_in_progress():
             return decoder.snapshot()
         try:
+            if decoder.handoff_in_progress():
+                raise MeteorUnavailable(
+                    decoder.release_failure(pending=True)
+                    or "SatDump is still releasing the radio"
+                )
             launched = _claim_sdr("meteor")
         except MeteorUnavailable as exc:
             empty = decoder.snapshot()
@@ -2238,14 +2243,18 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             _started("meteor", {"freq_hz": status["freq_hz"], "mode": status["mode"]})
         return status
 
-    # The image decoders (APT, SSTV) write their decoded PNGs under data/apt and data/sstv; this
-    # serves those files to the panels and nothing else. The path is confined to those two folders
-    # and to .png files, so the console never serves the progress or events stores that also live
-    # under data/. A produced PNG is a real reception; there is no placeholder to serve.
+    # The image decoders (APT, SSTV, Meteor) write their decoded PNGs under data/; this serves
+    # those files to the panels and nothing else. Meteor images are restricted to files named by
+    # each pass's verified manifest and opened with O_NOFOLLOW descriptor traversal.
     media_roots = tuple((Path(data_dir) / name).resolve() for name in ("apt", "sstv"))
 
     @app.get("/media/{path:path}")
     def media(path: str):
+        if path.startswith("meteor/"):
+            data = app.state.meteor.read_media(path)
+            if data is not None:
+                return Response(content=data, media_type="image/png")
+            raise HTTPException(status_code=404, detail="no such image")
         target = (Path(data_dir) / path).resolve()
         if (target.suffix.lower() == ".png" and target.is_file()
                 and any(target.is_relative_to(root) for root in media_roots)):
