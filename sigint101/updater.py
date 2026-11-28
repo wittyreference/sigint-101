@@ -1003,10 +1003,26 @@ def recover(
         fsync_file(sel_path)
         fsync_dir(resolved_root)
 
-        if selector["mode"] == "legacy":
-            from .enrollment import ENROLLMENT_RECOVERY_FILENAME, recover_interrupted_enrollment
+        from .enrollment import (
+            ENROLLMENT_RECOVERY_FILENAME,
+            _is_journal_already_committed,
+            recover_interrupted_enrollment,
+        )
 
-            if (resolved_root / ENROLLMENT_RECOVERY_FILENAME).exists():
+        rec_path = resolved_root / ENROLLMENT_RECOVERY_FILENAME
+        if selector["mode"] == "legacy":
+            if rec_path.exists():
+                recover_interrupted_enrollment(
+                    resolved_root,
+                    reload_systemd=getattr(service, "daemon_reload", None),
+                )
+        elif rec_path.exists():
+            # F3c: Retire any leftover journal belonging to an already-committed handover.
+            try:
+                rec_obj = json.loads(rec_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                rec_obj = None
+            if isinstance(rec_obj, dict) and _is_journal_already_committed(resolved_root, rec_obj):
                 recover_interrupted_enrollment(
                     resolved_root,
                     reload_systemd=getattr(service, "daemon_reload", None),

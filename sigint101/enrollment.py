@@ -51,10 +51,10 @@ def _atomic_write_bytes(
             written = 0
             while written < len(view):
                 written += os.write(fd, view[written:])
+            os.fchmod(fd, mode)
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.chmod(tmp, mode)
         if before_replace is not None:
             before_replace()
         os.replace(tmp, path)
@@ -512,12 +512,117 @@ def _refuse_if_managed_selected(root: Path) -> None:
         )
 
 
-def _destination_matches_original(path: Path, orig_bytes: bytes | None) -> bool:
+def _verify_destination_matches(
+    path: Path,
+    *,
+    existed: bool,
+    expected_bytes: bytes | None = None,
+    expected_sha: str | None = None,
+    expected_mode: int | None = None,
+    expected_uid: int | None = None,
+    expected_gid: int | None = None,
+) -> str | None:
+    """Verify file type, contents, mode, and ownership match pre-enrollment state (F3b).
+
+    Returns None iff every checked attribute matches, otherwise a diagnostic naming the drift.
+    """
+    if not existed:
+        if path.exists() or path.is_symlink():
+            return "file still exists (originally absent)"
+        return None
+    try:
+        lst = os.lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        return f"cannot stat: {exc}"
+    if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+        return "not a regular file"
+
+    fflags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(os.fspath(path), fflags)
+    except OSError as exc:
+        return f"cannot open: {exc}"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return "not a regular file"
+        chunks: list[bytes] = []
+        while True:
+            part = os.read(fd, 65536)
+            if not part:
+                break
+            chunks.append(part)
+        actual = b"".join(chunks)
+    except OSError as exc:
+        return f"cannot read: {exc}"
+    finally:
+        os.close(fd)
+
+    diffs: list[str] = []
+    if expected_bytes is not None:
+        if actual != expected_bytes:
+            diffs.append("bytes mismatch")
+    elif expected_sha is not None:
+        if hashlib.sha256(actual).hexdigest() != expected_sha:
+            diffs.append("bytes mismatch")
+    if expected_mode is not None:
+        actual_mode = st.st_mode & 0o7777
+        if actual_mode != expected_mode:
+            diffs.append(f"mode {actual_mode:04o} != expected {expected_mode:04o}")
+    if expected_uid is not None and st.st_uid != expected_uid:
+        diffs.append(f"uid {st.st_uid} != expected {expected_uid}")
+    if expected_gid is not None and st.st_gid != expected_gid:
+        diffs.append(f"gid {st.st_gid} != expected {expected_gid}")
+    return "; ".join(diffs) if diffs else None
+
+
+def _destination_matches_original(
+    path: Path,
+    orig_bytes: bytes | None,
+    *,
+    mode: int | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> bool:
     """Return True iff `path` on disk currently matches its pre-enrollment state."""
-    if orig_bytes is None:
-        return not path.exists() and not path.is_symlink()
-    actual = _read_regular_bytes(path)
-    return actual == orig_bytes
+    return (
+        _verify_destination_matches(
+            path,
+            existed=orig_bytes is not None,
+            expected_bytes=orig_bytes,
+            expected_mode=mode,
+            expected_uid=uid,
+            expected_gid=gid,
+        )
+        is None
+    )
+
+
+def _persist_recovery_journal(rec_path: Path, record: dict[str, object]) -> None:
+    payload = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _restore_file_best_effort(rec_path, payload, mode=0o600)
+
+
+def _is_journal_already_committed(root: Path, record: dict[str, object]) -> bool:
+    """Return True iff `enrollment.json` durably committed this exact journal's attempt_id (F3c)."""
+    journal_aid = record.get("attempt_id")
+    if not isinstance(journal_aid, str) or not journal_aid:
+        return False
+    enr_raw = _read_regular_bytes(root / "enrollment.json")
+    if not enr_raw:
+        return False
+    try:
+        enr = json.loads(enr_raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return (
+        isinstance(enr, dict)
+        and enr.get("status") == "complete"
+        and enr.get("handoff_complete") is True
+        and enr.get("attempt_id") == journal_aid
+    )
 
 
 def recover_interrupted_enrollment(
@@ -540,9 +645,29 @@ def recover_interrupted_enrollment(
     if not isinstance(record, dict) or not isinstance(record.get("destinations"), list):
         raise EnrollmentError(f"invalid durable enrollment recovery state at {rec_path}")
 
+    # F3c: If this journal belongs to an already-committed handover, retire it cleanly without
+    # replaying or restoring legacy files.
+    if _is_journal_already_committed(root, record):
+        try:
+            rec_path.unlink(missing_ok=True)
+            fsync_dir(root)
+        except OSError as exc:
+            raise EnrollmentError(
+                f"enrollment already committed but failed to retire leftover journal "
+                f"{rec_path}: {exc}"
+            ) from exc
+        return {
+            "recovered": False,
+            "had_recovery_state": True,
+            "retired_completed_journal": True,
+            "restored": [],
+        }
+
     restored: list[str] = []
     unrestored: list[str] = []
-    unit_restored = False
+    reload_pending = bool(record.get("unit_reload_pending", False))
+    unit_unrestored = False
+    unit_reloaded = False
 
     for entry in reversed(record["destinations"]):
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
@@ -556,9 +681,26 @@ def recover_interrupted_enrollment(
             expected_sha = entry.get("original_sha256")
             backup_str = entry.get("backup_path")
             orig_mode = int(entry.get("original_mode", 0o644))
-            cur_bytes = _read_regular_bytes(dest)
-            if cur_bytes is not None and hashlib.sha256(cur_bytes).hexdigest() == expected_sha:
+            raw_uid = entry.get("original_uid")
+            raw_gid = entry.get("original_gid")
+            orig_uid = int(raw_uid) if isinstance(raw_uid, int) and not isinstance(
+                raw_uid, bool
+            ) else None
+            orig_gid = int(raw_gid) if isinstance(raw_gid, int) and not isinstance(
+                raw_gid, bool
+            ) else None
+
+            mismatch = _verify_destination_matches(
+                dest,
+                existed=True,
+                expected_sha=expected_sha if isinstance(expected_sha, str) else None,
+                expected_mode=orig_mode,
+                expected_uid=orig_uid,
+                expected_gid=orig_gid,
+            )
+            if mismatch is None:
                 continue
+
             backup_bytes = (
                 _read_regular_bytes(Path(backup_str)) if isinstance(backup_str, str) else None
             )
@@ -567,37 +709,81 @@ def recover_interrupted_enrollment(
                 or not _is_valid_hex_sha256(expected_sha)
                 or hashlib.sha256(backup_bytes).hexdigest() != expected_sha
             ):
-                unrestored.append(f"{label} (missing or mismatched backup)")
+                unrestored.append(f"{label} (missing or mismatched backup; {mismatch})")
+                if label == "unit_install":
+                    unit_unrestored = True
+                    reload_pending = True
                 continue
-            ok = _restore_file_best_effort(dest, backup_bytes, mode=orig_mode)
-            if not ok or not _destination_matches_original(dest, backup_bytes):
-                unrestored.append(label)
+            ok = _restore_file_with_owner(
+                dest, backup_bytes, mode=orig_mode, uid=orig_uid, gid=orig_gid
+            )
+            post_mismatch = _verify_destination_matches(
+                dest,
+                existed=True,
+                expected_bytes=backup_bytes,
+                expected_mode=orig_mode,
+                expected_uid=orig_uid,
+                expected_gid=orig_gid,
+            )
+            if not ok or post_mismatch is not None:
+                detail = post_mismatch or "restore write/sync failed"
+                unrestored.append(f"{label} ({detail})")
+                if label == "unit_install":
+                    unit_unrestored = True
+                    reload_pending = True
                 continue
             restored.append(label)
             if label == "unit_install":
-                unit_restored = True
+                reload_pending = True
         else:
-            if dest.exists() or dest.is_symlink():
+            mismatch = _verify_destination_matches(dest, existed=False)
+            if mismatch is not None:
                 try:
                     dest.unlink()
                     fsync_dir(dest.parent)
-                except OSError:
-                    unrestored.append(label)
+                except OSError as exc:
+                    unrestored.append(f"{label} ({exc})")
+                    if label == "unit_install":
+                        unit_unrestored = True
+                        reload_pending = True
                     continue
-                if dest.exists() or dest.is_symlink():
-                    unrestored.append(label)
+                post_mismatch = _verify_destination_matches(dest, existed=False)
+                if post_mismatch is not None:
+                    unrestored.append(f"{label} ({post_mismatch})")
+                    if label == "unit_install":
+                        unit_unrestored = True
+                        reload_pending = True
                     continue
                 restored.append(label)
                 if label == "unit_install":
-                    unit_restored = True
+                    reload_pending = True
 
-    if unit_restored and reload_systemd is not None:
-        try:
-            reload_systemd()
-        except Exception as exc:
-            unrestored.append(f"reload_systemd ({exc})")
+    # F3a: Durably persist unit_reload_pending BEFORE attempting reload so a crash or failure
+    # during reload guarantees the next recovery retries reload even when the unit file matches.
+    if reload_pending and not record.get("unit_reload_pending"):
+        record = {**record, "unit_reload_pending": True}
+        _persist_recovery_journal(rec_path, record)
 
-    if unrestored:
+    if reload_pending and not unit_unrestored:
+        if reload_systemd is None:
+            unrestored.append("reload_systemd (no service manager reload callback)")
+        else:
+            try:
+                reload_systemd()
+            except Exception as exc:
+                unrestored.append(f"reload_systemd ({exc})")
+            else:
+                reload_pending = False
+                unit_reloaded = True
+
+    if unrestored or reload_pending:
+        incomplete_rec = {
+            **record,
+            "status": "recovery_incomplete",
+            "unit_reload_pending": reload_pending,
+            "unrestored": unrestored,
+        }
+        _persist_recovery_journal(rec_path, incomplete_rec)
         raise EnrollmentError(
             f"enrollment recovery incomplete for {', '.join(unrestored)}; "
             f"durable recovery state kept at {rec_path}"
@@ -611,7 +797,12 @@ def recover_interrupted_enrollment(
             f"recovered destinations but failed to clear recovery state {rec_path}: {exc}"
         ) from exc
 
-    return {"recovered": True, "had_recovery_state": True, "restored": restored}
+    return {
+        "recovered": True,
+        "had_recovery_state": True,
+        "restored": restored,
+        "unit_reloaded": unit_reloaded,
+    }
 
 
 def _read_regular_bytes(path: Path) -> bytes | None:
@@ -627,8 +818,13 @@ def _read_regular_bytes(path: Path) -> bytes | None:
         return None
 
 
-def _restore_file_best_effort(path: Path, data: bytes, *, mode: int) -> bool:
-    """Restore a file after a late enrollment write failure, even if temp creation fails."""
+def _restore_file_best_effort(
+    path: Path,
+    data: bytes,
+    *,
+    mode: int,
+) -> bool:
+    """Restore a file after a late enrollment write failure, fencing bytes and mode."""
     try:
         _atomic_write_bytes(path, data, mode=mode)
         return True
@@ -642,11 +838,45 @@ def _restore_file_best_effort(path: Path, data: bytes, *, mode: int) -> bool:
             written = 0
             while written < len(view):
                 written += os.write(fd, view[written:])
-            os.fsync(fd)
             os.fchmod(fd, mode)
+            os.fsync(fd)
         finally:
             os.close(fd)
         fsync_dir(path.parent)
+        return True
+    except OSError:
+        return False
+
+
+def _restore_file_with_owner(
+    path: Path,
+    data: bytes,
+    *,
+    mode: int,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> bool:
+    """Restore file bytes, mode, and original ownership, fencing metadata before returning."""
+    if not _restore_file_best_effort(path, data, mode=mode):
+        return False
+    if uid is None and gid is None:
+        return True
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(os.fspath(path), flags)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return False
+            target_uid = st.st_uid if uid is None else uid
+            target_gid = st.st_gid if gid is None else gid
+            if (st.st_uid, st.st_gid) != (target_uid, target_gid):
+                os.fchown(fd, target_uid, target_gid)
+                os.fchmod(fd, mode)
+                os.fsync(fd)
+                fsync_dir(path.parent)
+        finally:
+            os.close(fd)
         return True
     except OSError:
         return False
@@ -831,7 +1061,9 @@ def enroll_legacy_fixture(
             ctrl_mod.stage_control_generation(repo, control_dir, control_id=control_id)
 
         # Verify control generation against its manifest immediately before selecting it.
-        ctrl_mod.verify_control_generation(control_dir, expected_control_id=control_id)
+        ctrl_manifest = ctrl_mod.verify_control_generation(
+            control_dir, expected_control_id=control_id
+        )
 
         bin_dir = root / "bin"
         bin_dir.mkdir(mode=0o700, exist_ok=True)
@@ -848,6 +1080,7 @@ def enroll_legacy_fixture(
         control_payload = {
             "format_version": 1,
             "control_id": control_id,
+            "contract_digest": ctrl_manifest["contract_digest"],
         }
         _atomic_write_bytes(
             root / "control.json",
@@ -894,7 +1127,9 @@ def enroll_legacy_fixture(
             prior_shims = {}
 
         shim_records: dict[str, dict[str, str]] = {}
-        shim_writes: list[tuple[Path, bytes, bytes | None, int, Path | None]] = []
+        shim_writes: list[
+            tuple[Path, bytes, bytes | None, int, int | None, int | None, Path | None]
+        ] = []
         for legacy_name, shim_name in (
             ("install.sh", "install-shim.sh"),
             ("provision.sh", "provision-shim.sh"),
@@ -903,7 +1138,15 @@ def enroll_legacy_fixture(
             shim_bytes = (managed_dir / shim_name).read_bytes()
             shim_sha = hashlib.sha256(shim_bytes).hexdigest()
             cur_bytes = _read_regular_bytes(target)
-            cur_mode = (os.lstat(target).st_mode & 0o7777) if cur_bytes is not None else 0o755
+            if cur_bytes is not None:
+                cur_st = os.lstat(target)
+                cur_mode = cur_st.st_mode & 0o7777
+                cur_uid: int | None = cur_st.st_uid
+                cur_gid: int | None = cur_st.st_gid
+            else:
+                cur_mode = 0o755
+                cur_uid = None
+                cur_gid = None
             cur_sha = hashlib.sha256(cur_bytes or b"").hexdigest()
             backup_path: Path | None = None
 
@@ -953,7 +1196,9 @@ def enroll_legacy_fixture(
                 "shim_sha256": shim_sha,
             }
             if target.parent.is_dir():
-                shim_writes.append((target, shim_bytes, cur_bytes, cur_mode, backup_path))
+                shim_writes.append(
+                    (target, shim_bytes, cur_bytes, cur_mode, cur_uid, cur_gid, backup_path)
+                )
 
         reviewed_legacy_digests, _default_legacy_digest, reviewed_managed_digest = (
             _load_reviewed_launchers(repo)
@@ -1030,9 +1275,15 @@ def enroll_legacy_fixture(
             desktop_wrapper_record["original_backup_path"] = str(wrapper_backup_path)
 
         prior_unit_bytes = _read_regular_bytes(unit_file)
-        prior_unit_mode = (
-            (os.lstat(unit_file).st_mode & 0o7777) if prior_unit_bytes is not None else 0o644
-        )
+        if prior_unit_bytes is not None:
+            prior_unit_st = os.lstat(unit_file)
+            prior_unit_mode = prior_unit_st.st_mode & 0o7777
+            prior_unit_uid: int | None = prior_unit_st.st_uid
+            prior_unit_gid: int | None = prior_unit_st.st_gid
+        else:
+            prior_unit_mode = 0o644
+            prior_unit_uid = None
+            prior_unit_gid = None
         prior_unit_backup_path: Path | None = None
         if prior_unit_bytes is not None:
             prior_unit_backup_path, _ = _save_digest_backup(
@@ -1041,11 +1292,21 @@ def enroll_legacy_fixture(
             if b"dispatcher.py" not in prior_unit_bytes:
                 _update_latest_original(originals_dir, "sigint101.service", prior_unit_bytes)
 
-        # F3: Write durable recovery state BEFORE modifying any shim or unit destination so a
-        # process crash or incomplete rollback leaves a verified restoration plan on disk.
+        # F3: Write durable recovery state with a unique per-attempt identity BEFORE modifying any
+        # shim or unit destination so a crash or incomplete rollback leaves a verified restoration
+        # plan on disk, and a matching committed receipt safely retires any leftover journal.
+        attempt_id = f"{operation_id}-{secrets.token_hex(8)}"
         recovery_path = root / ENROLLMENT_RECOVERY_FILENAME
         recovery_destinations: list[dict[str, object]] = []
-        for target, _shim_bytes, orig_bytes, orig_mode, backup_path in shim_writes:
+        for (
+            target,
+            _shim_bytes,
+            orig_bytes,
+            orig_mode,
+            orig_uid,
+            orig_gid,
+            backup_path,
+        ) in shim_writes:
             recovery_destinations.append(
                 {
                     "label": f"deploy/{target.name}",
@@ -1055,6 +1316,8 @@ def enroll_legacy_fixture(
                         hashlib.sha256(orig_bytes).hexdigest() if orig_bytes is not None else None
                     ),
                     "original_mode": orig_mode,
+                    "original_uid": orig_uid,
+                    "original_gid": orig_gid,
                     "backup_path": str(backup_path) if backup_path is not None else None,
                 }
             )
@@ -1069,6 +1332,8 @@ def enroll_legacy_fixture(
                     else None
                 ),
                 "original_mode": prior_unit_mode,
+                "original_uid": prior_unit_uid,
+                "original_gid": prior_unit_gid,
                 "backup_path": (
                     str(prior_unit_backup_path) if prior_unit_backup_path is not None else None
                 ),
@@ -1077,7 +1342,9 @@ def enroll_legacy_fixture(
         recovery_payload: dict[str, object] = {
             "format_version": 1,
             "operation_id": operation_id,
+            "attempt_id": attempt_id,
             "status": "in_progress",
+            "unit_reload_pending": False,
             "destinations": recovery_destinations,
         }
         _atomic_write_bytes(
@@ -1090,6 +1357,7 @@ def enroll_legacy_fixture(
             "status": "in_progress",
             "handoff_complete": False,
             "operation_id": operation_id,
+            "attempt_id": attempt_id,
             "control_id": control_id,
             "runtime_id": runtime_id,
             "legacy_checkout": str(checkout),
@@ -1112,21 +1380,37 @@ def enroll_legacy_fixture(
 
         # 6b) Install checkout shims, unit, reload, drain, and final record inside one recovery
         # scope (F3). Each replacement is recorded BEFORE os.replace, unpublished temp files are
-        # cleaned up, and rollback_ok is True ONLY after verifying every destination on disk.
-        attempted_shims: list[tuple[Path, bytes | None, int]] = []
+        # cleaned up, and rollback_ok is True ONLY after verifying every destination (bytes, mode,
+        # ownership) and confirming systemd reload.
+        attempted_shims: list[tuple[Path, bytes | None, int, int | None, int | None]] = []
         unit_attempted = False
 
         def _rollback_late_writes(failed_step: str, exc: BaseException) -> EnrollmentError:
             rollback_ok = True
             _cleanup_unpublished_temps(unit_file)
             _cleanup_unpublished_temps(enr_path)
-            for target, _sb, _ob, _om, _bp in shim_writes:
+            for target, _sb, _ob, _om, _ou, _og, _bp in shim_writes:
                 _cleanup_unpublished_temps(target)
 
-            if unit_attempted or not _destination_matches_original(unit_file, prior_unit_bytes):
+            unit_mismatch_before = _verify_destination_matches(
+                unit_file,
+                existed=prior_unit_bytes is not None,
+                expected_bytes=prior_unit_bytes,
+                expected_mode=prior_unit_mode,
+                expected_uid=prior_unit_uid,
+                expected_gid=prior_unit_gid,
+            )
+            reload_pending = False
+            reload_error: str | None = None
+            if unit_attempted or unit_mismatch_before is not None:
+                reload_pending = True
                 if prior_unit_bytes is not None:
-                    rollback_ok &= _restore_file_best_effort(
-                        unit_file, prior_unit_bytes, mode=prior_unit_mode
+                    rollback_ok &= _restore_file_with_owner(
+                        unit_file,
+                        prior_unit_bytes,
+                        mode=prior_unit_mode,
+                        uid=prior_unit_uid,
+                        gid=prior_unit_gid,
                     )
                 else:
                     try:
@@ -1134,26 +1418,27 @@ def enroll_legacy_fixture(
                         fsync_dir(unit_file.parent)
                     except OSError:
                         rollback_ok = False
-                if reload_systemd is not None:
-                    try:
-                        reload_systemd()
-                    except Exception:
-                        rollback_ok = False
 
             seen_targets: set[Path] = set()
-            restore_order: list[tuple[Path, bytes | None, int]] = list(reversed(attempted_shims))
-            for target, _sb, orig_bytes, orig_mode, _bp in reversed(shim_writes):
-                if target not in {t for t, _, _ in restore_order}:
-                    if not _destination_matches_original(target, orig_bytes):
-                        restore_order.append((target, orig_bytes, orig_mode))
+            restore_order: list[
+                tuple[Path, bytes | None, int, int | None, int | None]
+            ] = list(reversed(attempted_shims))
+            for target, _sb, orig_bytes, orig_mode, orig_uid, orig_gid, _bp in reversed(
+                shim_writes
+            ):
+                if target not in {t for t, _, _, _, _ in restore_order}:
+                    if not _destination_matches_original(
+                        target, orig_bytes, mode=orig_mode, uid=orig_uid, gid=orig_gid
+                    ):
+                        restore_order.append((target, orig_bytes, orig_mode, orig_uid, orig_gid))
 
-            for shim_target, orig_bytes, orig_mode in restore_order:
+            for shim_target, orig_bytes, orig_mode, orig_uid, orig_gid in restore_order:
                 if shim_target in seen_targets:
                     continue
                 seen_targets.add(shim_target)
                 if orig_bytes is not None:
-                    rollback_ok &= _restore_file_best_effort(
-                        shim_target, orig_bytes, mode=orig_mode
+                    rollback_ok &= _restore_file_with_owner(
+                        shim_target, orig_bytes, mode=orig_mode, uid=orig_uid, gid=orig_gid
                     )
                 else:
                     try:
@@ -1162,15 +1447,44 @@ def enroll_legacy_fixture(
                     except OSError:
                         rollback_ok = False
 
-            # Independently verify every single destination on disk: NEVER report rollback_ok=True
-            # if any destination is still changed!
+            # Independently verify every single destination on disk (bytes, mode, ownership):
+            # NEVER report rollback_ok=True if any destination drifted or reload is unconfirmed!
             unrestored: list[str] = []
-            if not _destination_matches_original(unit_file, prior_unit_bytes):
-                unrestored.append("unit_install")
-            for target, _sb, orig_bytes, _om, _bp in shim_writes:
-                if not _destination_matches_original(target, orig_bytes):
-                    unrestored.append(f"deploy/{target.name}")
-            if unrestored:
+            unit_mismatch = _verify_destination_matches(
+                unit_file,
+                existed=prior_unit_bytes is not None,
+                expected_bytes=prior_unit_bytes,
+                expected_mode=prior_unit_mode,
+                expected_uid=prior_unit_uid,
+                expected_gid=prior_unit_gid,
+            )
+            if unit_mismatch is not None:
+                unrestored.append(f"unit_install ({unit_mismatch})")
+            elif reload_pending:
+                if reload_systemd is None:
+                    reload_error = "reload_systemd (no service manager reload callback)"
+                    unrestored.append(reload_error)
+                else:
+                    try:
+                        reload_systemd()
+                    except Exception as r_exc:
+                        reload_error = f"reload_systemd ({r_exc})"
+                        unrestored.append(reload_error)
+                    else:
+                        reload_pending = False
+
+            for target, _sb, orig_bytes, orig_mode, orig_uid, orig_gid, _bp in shim_writes:
+                shim_mismatch = _verify_destination_matches(
+                    target,
+                    existed=orig_bytes is not None,
+                    expected_bytes=orig_bytes,
+                    expected_mode=orig_mode,
+                    expected_uid=orig_uid,
+                    expected_gid=orig_gid,
+                )
+                if shim_mismatch is not None:
+                    unrestored.append(f"deploy/{target.name} ({shim_mismatch})")
+            if unrestored or reload_pending:
                 rollback_ok = False
 
             if rollback_ok:
@@ -1183,13 +1497,11 @@ def enroll_legacy_fixture(
                 incomplete_rec = {
                     **recovery_payload,
                     "status": "rollback_incomplete",
+                    "unit_reload_pending": reload_pending,
                     "failed_step": failed_step,
                     "unrestored": unrestored,
                 }
-                rec_bytes = (json.dumps(incomplete_rec, indent=2, sort_keys=True) + "\n").encode(
-                    "utf-8"
-                )
-                _restore_file_best_effort(recovery_path, rec_bytes, mode=0o600)
+                _persist_recovery_journal(recovery_path, incomplete_rec)
 
             recovery_cmd = (
                 "resolve the write error and rerun sigint101-updater --enroll"
@@ -1205,6 +1517,7 @@ def enroll_legacy_fixture(
                 "handoff_complete": False,
                 "failed_step": failed_step,
                 "rollback_ok": rollback_ok,
+                "unit_reload_pending": reload_pending,
                 "unrestored_destinations": unrestored,
                 "recovery_command": recovery_cmd,
             }
@@ -1212,7 +1525,7 @@ def enroll_legacy_fixture(
                 "utf-8"
             )
             _restore_file_best_effort(enr_path, failed_bytes, mode=0o600)
-            detail = ", ".join(unrestored) or "reload/sync failed"
+            detail = ", ".join(unrestored) or reload_error or "reload/sync failed"
             state_note = (
                 "earlier enrollment writes rolled back cleanly"
                 if rollback_ok
@@ -1223,14 +1536,15 @@ def enroll_legacy_fixture(
                 f"({state_note}; recovery: {recovery_cmd})"
             )
 
-        for target, shim_bytes, orig_bytes, orig_mode, _bp in shim_writes:
+        for target, shim_bytes, orig_bytes, orig_mode, orig_uid, orig_gid, _bp in shim_writes:
             try:
                 _atomic_write_bytes(
                     target,
                     shim_bytes,
                     mode=0o755,
-                    before_replace=lambda t=target, ob=orig_bytes, om=orig_mode: (
-                        attempted_shims.append((t, ob, om))
+                    before_replace=lambda t=target, ob=orig_bytes, om=orig_mode,
+                    ou=orig_uid, og=orig_gid: (
+                        attempted_shims.append((t, ob, om, ou, og))
                     ),
                 )
             except Exception as exc:
@@ -1243,6 +1557,8 @@ def enroll_legacy_fixture(
         def _mark_unit_attempted() -> None:
             nonlocal unit_attempted
             unit_attempted = True
+            recovery_payload["unit_reload_pending"] = True
+            _persist_recovery_journal(recovery_path, recovery_payload)
 
         try:
             ctrl_mod.verify_control_generation(control_dir, expected_control_id=control_id)
@@ -1273,7 +1589,12 @@ def enroll_legacy_fixture(
         except Exception as exc:
             raise _rollback_late_writes("drain_old_service", exc) from exc
 
-        # 8) F3: Publish durable completed hand-over record BEFORE enabling the managed wrapper.
+        if on_boundary is not None:
+            on_boundary("before_completed_record")
+
+        # 8) F3/F3c: Publish durable completed hand-over record with matching attempt_id BEFORE
+        # retiring the recovery journal or enabling the managed wrapper. This atomic replace is
+        # the single commit point of the hand-over.
         final_wrapper_state = (
             "staged_pending_activation" if wrapper_mode == "staged_privileged" else "active"
         )
@@ -1297,7 +1618,12 @@ def enroll_legacy_fixture(
         except Exception as exc:
             raise _rollback_late_writes("completed_record", exc) from exc
 
-        # Completed hand-over record is durable; clear enrollment recovery journal.
+        if on_boundary is not None:
+            on_boundary("after_completed_record_before_journal_unlink")
+
+        # Completed hand-over record is durable; retire the recovery journal atomically.
+        # Even if unlink fails or the process dies before unlink, the matching committed
+        # attempt_id in enrollment.json ensures recovery retires this journal without replay.
         try:
             recovery_path.unlink(missing_ok=True)
             fsync_dir(root)
