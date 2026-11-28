@@ -29,8 +29,9 @@ then
 fi
 # The lock's directory is this user's own, 0700, and neither it nor the lock is a symlink, so the
 # lock can never be opened through a link to some other file.
+# Two installs may get here at once, so "already there" is no error; the checks below decide.
 mkdir -p "${INSTALL_LOCK_DIR%/*}"
-[ -e "$INSTALL_LOCK_DIR" ] || mkdir -m 0700 "$INSTALL_LOCK_DIR"
+mkdir -m 0700 "$INSTALL_LOCK_DIR" 2>/dev/null || true
 if [ -L "$INSTALL_LOCK_DIR" ] || [ ! -d "$INSTALL_LOCK_DIR" ] || [ ! -O "$INSTALL_LOCK_DIR" ] ||
   [ -L "$INSTALL_LOCK" ] || { [ -e "$INSTALL_LOCK" ] && { [ ! -f "$INSTALL_LOCK" ] ||
   [ ! -O "$INSTALL_LOCK" ]; }; }; then
