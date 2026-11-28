@@ -105,6 +105,15 @@ _PROGRESS_TABLE_DDL: tuple[tuple[str, str], ...] = (
         "digest TEXT NOT NULL, "
         "PRIMARY KEY (unit_id, started_at))",
     ),
+    (
+        "replays_seen",
+        "CREATE TABLE replays_seen ("
+        "instrument TEXT PRIMARY KEY, "
+        "first_ts REAL NOT NULL, "
+        "count INTEGER NOT NULL, "
+        "recording TEXT NOT NULL, "
+        "digest TEXT NOT NULL)",
+    ),
 )
 
 _EXAM_TABLE_DDL: tuple[tuple[str, str], ...] = (

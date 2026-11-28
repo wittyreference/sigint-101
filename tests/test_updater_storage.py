@@ -53,8 +53,17 @@ def _absent():
 # --- Historical v0 builders matching main's real git history -----------------------------------
 
 
+_REPLAY_PROGRESS_BASES = {
+    "v0_replays_seen": "v0_1a35a1a",
+    "v0_retrieval_replays_seen": "v0_retrieval",
+    "v0_challenges_retrieval_replays_seen": "v0_challenges_retrieval",
+}
+
+
 def _build_progress_v0(path: Path, variant: str) -> dict:
     """Create a real historical version-0 progress.db fixture and return seeded expected rows."""
+    with_replay = variant in _REPLAY_PROGRESS_BASES
+    variant = _REPLAY_PROGRESS_BASES.get(variant, variant)
     conn = sqlite3.connect(path)
     expected: dict = {}
     if variant == "empty":
@@ -168,12 +177,13 @@ def _build_progress_v0(path: Path, variant: str) -> dict:
         "VALUES(5, 'aircraft-am', 'legal', 1, 104.0)"
     )
     expected["sort_answers"] = [(5, "aircraft-am", "legal", 1, 104.0)]
-    if variant == "v0_1a35a1a":
+    if variant == "v0_1a35a1a" and not with_replay:
         conn.commit()
         conn.close()
         return expected
 
-    assert variant in ("v0_challenges", "v0_retrieval", "v0_challenges_retrieval")
+    assert variant in ("v0_1a35a1a", "v0_challenges", "v0_retrieval",
+                       "v0_challenges_retrieval")
     if variant in ("v0_retrieval", "v0_challenges_retrieval"):
         conn.executescript("""
             CREATE TABLE retrieval (
@@ -220,6 +230,19 @@ def _build_progress_v0(path: Path, variant: str) -> dict:
         )
         expected["challenges"] = [(4, 1000.0, 900)]
         expected["challenge_passes"] = [(4, 1000.0, 1050.0, "ism", ch_prov, ch_digest)]
+    if with_replay:
+        conn.execute("""
+            CREATE TABLE replays_seen (
+                instrument TEXT PRIMARY KEY,
+                first_ts   REAL NOT NULL,
+                count      INTEGER NOT NULL,
+                recording  TEXT NOT NULL,
+                digest     TEXT NOT NULL
+            )
+        """)
+        replay_row = ("ism", 106.0, 2, "clip", "ab" * 32)
+        conn.execute("INSERT INTO replays_seen VALUES(?, ?, ?, ?, ?)", replay_row)
+        expected["replays_seen"] = [replay_row]
     conn.commit()
     conn.close()
     return expected
@@ -337,6 +360,7 @@ def _counting_write_authorizer(counter: list[str]):
     [
         "empty", "v0_72ddf9c", "v0_02c2095", "v0_e72c706", "v0_1a35a1a",
         "v0_retrieval", "v0_challenges", "v0_challenges_retrieval",
+        *_REPLAY_PROGRESS_BASES,
     ],
 )
 @pytest.mark.parametrize(
@@ -397,6 +421,7 @@ def test_both_v0_stores_migrate_once_and_keep_every_value(tmp_path, p_variant, e
     assert prog.get(1) is not None or p_variant == "empty"
     if p_variant in (
         "v0_e72c706", "v0_1a35a1a", "v0_retrieval", "v0_challenges", "v0_challenges_retrieval",
+        *_REPLAY_PROGRESS_BASES,
     ):
         assert len(prog.stamps()) == 1
         assert prog.stamps()[0]["count"] == 3
