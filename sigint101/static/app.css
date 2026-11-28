@@ -3640,3 +3640,81 @@ body {
   line-height: 1.3;
   color: var(--fg-dim);
 }
+
+/* ===== Low-battery safe-shutdown banner =================================== */
+/* Mounted inside .app below the 75 px status bar so Back / Exit stay whole and
+   tappable, and above full-screen overlays (.exam-figure z-index 50). Inverted
+   high-contrast fill, warning triangle glyph, heavy border, and explicit words
+   ensure legibility in dark, sunlight, and red-night without relying on hue. */
+.power-notice {
+  position: absolute;
+  top: var(--bar-h);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: 96px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px var(--gutter);
+  background: var(--warn);
+  color: var(--bg);
+  border-top: 3px double var(--bg);
+  border-bottom: 4px solid var(--bg);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+.power-notice[hidden] {
+  display: none;
+}
+.power-notice--failed {
+  background: var(--crit);
+  color: var(--bg);
+  border-top: 3px solid var(--bg);
+  border-bottom: 6px double var(--bg);
+}
+.app[data-theme="sunlight"] .power-notice {
+  box-shadow: 0 3px 0 var(--border-strong);
+}
+.app[data-theme="red-night"] .power-notice {
+  background: var(--fg);
+  color: var(--bg);
+  box-shadow: none;
+}
+.app[data-theme="red-night"] .power-notice--failed {
+  background: var(--crit);
+  color: var(--bg);
+}
+.power-notice__glyph {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.power-notice__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.power-notice__headline {
+  font-size: 20px;
+  line-height: 1.12;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  text-shadow: none;
+}
+.power-notice__detail {
+  font-size: 18px;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: none;
+}

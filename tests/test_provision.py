@@ -839,8 +839,11 @@ POWER_SOURCE_FILES = (
     "sigint101/__init__.py",
     "sigint101/battery.py",
     "sigint101/power.py",
+    "sigint101/power_desktop.py",
     "deploy/system/sigint101-power.service",
     "deploy/system/sigint101-power",
+    "deploy/system/sigint101-power-notice.service",
+    "deploy/system/sigint101-power-notice",
     "deploy/system/50-sigint101-power.rules",
     "deploy/system/sigint101-power.sysusers.conf",
 )
@@ -854,6 +857,7 @@ def _setup_power_box(
     i2c_gid: int = 998,
     has_i2c_group: bool = True,
     unit_state: str = "enabled",
+    notice_unit_state: str = "enabled",
     user_exists: bool = False,
     fail_systemctl_actions: tuple[str, ...] = (),
 ):
@@ -923,6 +927,9 @@ def _setup_power_box(
         '  "is-enabled sigint101-power.service")\n'
         f'    echo "{unit_state}"\n'
         f'    [ "{unit_state}" = "enabled" ] ;;\n'
+        '  "--user is-enabled sigint101-power-notice.service")\n'
+        f'    echo "{notice_unit_state}"\n'
+        f'    [ "{notice_unit_state}" = "enabled" ] ;;\n'
         f'{fail_cases}\n'
         '  *) exit 0 ;;\n'
         'esac\n',
@@ -957,7 +964,7 @@ def _setup_power_box(
         'fi\n'
         'exit 2',
     )
-    for extra in ("mktemp", "touch"):
+    for extra in ("install", "mktemp", "touch"):
         found = shutil.which(extra)
         assert found
         if not (box.bin / extra).exists():
@@ -993,17 +1000,21 @@ def test_step_power_installs_files_is_idempotent_and_preserves_power_conf(box, t
     expected_installed = [
         "usr/local/lib/systemd/system/sigint101-power.service",
         "usr/local/bin/sigint101-power",
+        "usr/local/bin/sigint101-power-notice",
         "usr/local/lib/sigint101-power/sigint101/__init__.py",
         "usr/local/lib/sigint101-power/sigint101/battery.py",
         "usr/local/lib/sigint101-power/sigint101/power.py",
+        "usr/local/lib/sigint101-power/sigint101/power_desktop.py",
         "etc/polkit-1/rules.d/50-sigint101-power.rules",
         "usr/local/lib/sysusers.d/sigint101-power.conf",
     ]
     for rel in expected_installed:
         assert (sysroot / rel).is_file(), f"missing installed {rel}"
+    assert (box.home / ".config/systemd/user/sigint101-power-notice.service").is_file()
     assert not (sysroot / "etc/systemd/system/sigint101-power.service").exists()
     assert not (sysroot / "etc/sigint101/power.conf").exists()
     assert "enable --now sigint101-power.service" in box.calls()
+    assert "--user enable --now sigint101-power-notice.service" in box.calls()
 
     # Plant an operator power.conf and confirm a second run makes 0 changes and preserves it.
     conf = sysroot / "etc/sigint101/power.conf"
@@ -1164,3 +1175,23 @@ def test_step_power_preserves_masked_unit_symlink_without_overwriting(box, tmp_p
     assert etc_mask.is_symlink() and etc_mask.resolve() == mask_target.resolve()
     assert vendor_unit.read_text(encoding="utf-8") == "# pre-existing\n"
     assert not (sysroot / "usr/local/bin/sigint101-power").exists()
+
+
+def test_step_power_respects_disabled_or_masked_desktop_notice_user_unit(box, tmp_path):
+    for state in ("disabled", "masked"):
+        d = tmp_path / f"notice-{state}"
+        d.mkdir()
+        b = ProvisionBox(d)
+        _setup_power_box(b, d, notice_unit_state=state, user_exists=True)
+        user_unit = b.home / ".config/systemd/user/sigint101-power-notice.service"
+        user_unit.parent.mkdir(parents=True, exist_ok=True)
+        user_unit.write_text("# owner copy\n", encoding="utf-8")
+        res = b.run()
+        assert res.returncode == 0, res.stdout + res.stderr
+        sec = _power_section(res.stdout)
+        assert "sigint101-power-notice.service turned off by the owner" in sec
+        assert state in sec
+        assert "--user enable --now sigint101-power-notice.service" not in b.calls()
+        assert "--user restart sigint101-power-notice.service" not in b.calls()
+        if state == "masked":
+            assert user_unit.read_text(encoding="utf-8") == "# owner copy\n"

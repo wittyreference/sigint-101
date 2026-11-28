@@ -1,5 +1,5 @@
 # ABOUTME: Low-battery safe-shutdown watcher reading the UPS INA219 over I2C (read-only).
-# ABOUTME: Ships hard-disarmed in slice 2a; manages hold, notice.json contract, and poweroff.
+# ABOUTME: Ships disarmed until power.conf sets a threshold; manages hold, notice, and poweroff.
 
 from __future__ import annotations
 
@@ -61,8 +61,6 @@ CAN_POWER_OFF_CMD = (
 )
 MINIMAL_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
 
-LOCKED_2A_REASON = "arming waits on the notice slice (2b)"
-
 # TI SBOS448G §8.6.2.1 Table 5 typical ADC conversion times (seconds) indexed by 4-bit BADC/SADC.
 _ADC_CONVERSION_TIME_S: tuple[float, ...] = (
     0.000084,  # 0000: 9-bit, 1 sample (84 us)
@@ -96,14 +94,20 @@ def _validate_threshold_v(value: float) -> float:
 
 
 def parse_threshold(raw: str | None) -> tuple[float | None, str]:
-    """Parse SIGINT101_POWER_THRESHOLD_V.
-
-    Slice 2a ships hard-disarmed in code: any configured value is refused until the
-    notice slice (2b) lands under its own review.
-    """
+    """Parse SIGINT101_POWER_THRESHOLD_V; unset, invalid, or out-of-range stays disarmed."""
     if raw is None or not raw.strip():
         return None, "unset"
-    return None, LOCKED_2A_REASON
+    text = raw.strip()
+    try:
+        value = float(text)
+    except ValueError:
+        return None, f"invalid {ENV_THRESHOLD_V} value {raw!r}"
+    if not math.isfinite(value) or not (THRESHOLD_MIN_V < value < THRESHOLD_MAX_V):
+        return (
+            None,
+            f"{ENV_THRESHOLD_V}={text} outside ({THRESHOLD_MIN_V}, {THRESHOLD_MAX_V}) V",
+        )
+    return value, ""
 
 
 def parse_recover_v(raw: str | None) -> tuple[float, str]:
@@ -217,6 +221,50 @@ def read_power_notice(
         "remaining_s": max(0, math.ceil(deadline_mono - now)),
         "voltage": voltage,
         "threshold_v": threshold_v,
+    }
+
+
+def format_power_notice(notice: dict | None) -> dict:
+    """Format a validated read_power_notice() dict into banner fields (matches power-notice.js)."""
+    hidden = {"visible": False, "failed": False, "headline": "", "detail": ""}
+    if not isinstance(notice, dict) or notice.get("active") is not True:
+        return hidden
+    failed = notice.get("failed")
+    if not isinstance(failed, bool):
+        return hidden
+    voltage = notice.get("voltage")
+    threshold_v = notice.get("threshold_v")
+    if _is_finite_number(voltage) and _is_finite_number(threshold_v):
+        detail = (
+            f"Pack {float(voltage):.2f} V (limit {float(threshold_v):.2f} V) "
+            "· Plug in charger now to cancel"
+        )
+    else:
+        detail = "Plug in charger now to cancel"
+    if failed:
+        retry_in = notice.get("retry_in_s")
+        if not _is_finite_number(retry_in):
+            return hidden
+        sec = max(0, math.ceil(float(retry_in)))
+        when = "RETRYING NOW" if sec == 0 else f"RETRYING IN {sec} s"
+        return {
+            "visible": True,
+            "failed": True,
+            "headline": (
+                f"LOW BATTERY · AUTOMATIC POWER-OFF FAILED · {when} · SAVE AND SHUT DOWN NOW"
+            ),
+            "detail": detail,
+        }
+    remaining = notice.get("remaining_s")
+    if not _is_finite_number(remaining):
+        return hidden
+    sec = max(0, math.ceil(float(remaining)))
+    when = "POWERING OFF NOW" if sec == 0 else f"POWERING OFF IN {sec} s"
+    return {
+        "visible": True,
+        "failed": False,
+        "headline": f"LOW BATTERY · {when}",
+        "detail": detail,
     }
 
 

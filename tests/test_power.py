@@ -16,7 +16,6 @@ import pytest
 from sigint101 import battery
 from sigint101.battery import BatteryReading, ConversionNotReadyError, INA219Config
 from sigint101.power import (
-    LOCKED_2A_REASON,
     MAX_GAP_S,
     MINIMAL_ENV,
     NOTICE_S,
@@ -100,29 +99,28 @@ def _make_watcher(
     return watcher, clk, notice_path, poweroffs, sleeps
 
 
-# --- Test 1: disarmed threshold handling (including 2a hard-disarm lock) --------
+# --- Test 1: threshold parsing (slice 2b arms valid (8.0, 12.6), invalid stays disarmed) ---
 
 
-@pytest.mark.parametrize("raw,expected_reason", [
+@pytest.mark.parametrize("raw,expected_fragment", [
     (None, "unset"),
     ("", "unset"),
     ("   ", "unset"),
-    ("abc", LOCKED_2A_REASON),
-    ("nan", LOCKED_2A_REASON),
-    ("inf", LOCKED_2A_REASON),
-    ("-inf", LOCKED_2A_REASON),
-    ("8.0", LOCKED_2A_REASON),
-    ("7.5", LOCKED_2A_REASON),
-    ("12.6", LOCKED_2A_REASON),
-    ("96", LOCKED_2A_REASON),
-    ("9.50", LOCKED_2A_REASON),
+    ("abc", "invalid"),
+    ("nan", "outside"),
+    ("inf", "outside"),
+    ("-inf", "outside"),
+    ("8.0", "outside"),
+    ("7.5", "outside"),
+    ("12.6", "outside"),
+    ("96", "outside"),
 ])
-def test_unset_invalid_or_2a_locked_threshold_stays_disarmed_logs_once_and_makes_zero_bus_calls(
-    tmp_path, caplog, raw, expected_reason
+def test_unset_or_invalid_threshold_stays_disarmed_logs_once_and_makes_zero_bus_calls(
+    tmp_path, caplog, raw, expected_fragment
 ):
     threshold_v, reason = parse_threshold(raw)
     assert threshold_v is None
-    assert reason == expected_reason
+    assert expected_fragment in reason
 
     bus_calls = 0
 
@@ -151,7 +149,18 @@ def test_unset_invalid_or_2a_locked_threshold_stays_disarmed_logs_once_and_makes
     assert poweroffs == []
     disarmed_logs = [r.getMessage() for r in caplog.records if "disarmed" in r.getMessage().lower()]
     assert len(disarmed_logs) == 1
-    assert expected_reason in disarmed_logs[0]
+    assert expected_fragment in disarmed_logs[0]
+
+
+@pytest.mark.parametrize("raw,expected_v", [
+    ("9.50", 9.50),
+    (" 8.01 ", 8.01),
+    ("12.59", 12.59),
+])
+def test_valid_threshold_arms_watcher_in_slice_2b(raw, expected_v):
+    threshold_v, reason = parse_threshold(raw)
+    assert threshold_v == pytest.approx(expected_v)
+    assert reason == ""
 
 
 @pytest.mark.parametrize("bad_threshold", [float("nan"), float("inf"), 8.0, 7.5, 12.6, 96.0])
@@ -817,8 +826,8 @@ def test_poweroff_command_hygiene_timeout_and_startup_can_power_off_check(
             for r in caplog.records
         )
 
-    # --startup-only logs SHA-256 digests of power.py and battery.py + disarmed status, exits 0,
-    # and touches no I2C bus.
+    # --startup-only logs SHA-256 digests of power.py and battery.py + disarmed status when
+    # unset, exits 0, and touches no I2C bus.
     bus_touched = False
 
     def boom(*_a, **_kw):
@@ -827,7 +836,7 @@ def test_poweroff_command_hygiene_timeout_and_startup_can_power_off_check(
         raise AssertionError("disarmed --startup-only must not read I2C")
 
     monkeypatch.setattr(battery, "read_battery_once", boom)
-    monkeypatch.setenv("SIGINT101_POWER_THRESHOLD_V", "9.50")
+    monkeypatch.delenv("SIGINT101_POWER_THRESHOLD_V", raising=False)
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="sigint101.power"):
         rc = main(["--startup-only", "--notice-path", str(tmp_path / "cli-notice.json")])
@@ -835,7 +844,21 @@ def test_poweroff_command_hygiene_timeout_and_startup_can_power_off_check(
     assert bus_touched is False
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "power.py" in msgs and "battery.py" in msgs
-    assert LOCKED_2A_REASON in msgs
+    assert "disarmed (unset)" in msgs
+
+    # Armed --startup-only checks CanPowerOff (stubbed here; never calls host polkit/busctl),
+    # logs armed threshold, touches no I2C bus, and exits 0.
+    import sigint101.power as power_mod
+
+    monkeypatch.setattr(power_mod, "check_can_power_off", lambda: (True, 's "yes"'))
+    monkeypatch.setenv("SIGINT101_POWER_THRESHOLD_V", "9.50")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sigint101.power"):
+        rc_armed = main(["--startup-only", "--notice-path", str(tmp_path / "cli-notice.json")])
+    assert rc_armed == 0
+    assert bus_touched is False
+    armed_msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "armed at 9.50 V" in armed_msgs
 
 
 # --- Test 9: systemd unit file is non-root and hardened -------------------------
@@ -950,3 +973,248 @@ def test_notice_write_failure_logs_error_and_does_not_block_poweroff(tmp_path, c
     assert w_fail.state == "POWEROFF_FAILED"
     clk.advance(2.0)
     assert w_fail.tick() == "POWEROFF_FAILED"
+
+
+# --- Slice 2b: GET /api/power, base.html banner, and learner-side desktop notice ---
+
+
+def test_api_power_is_strictly_read_only_and_base_html_renders_notice(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from sigint101.app import create_app
+    from sigint101.hardware import RadioProbe
+
+    clk = _Clock(1000.0)
+    notice_path = tmp_path / "notice.json"
+    data_dir = tmp_path / "data"
+    gauge_calls = 0
+
+    class _CountingGauge:
+        reason = "test gauge"
+
+        def read(self):
+            nonlocal gauge_calls
+            gauge_calls += 1
+            return None
+
+    app = create_app(
+        pack_dir=REPO / "lesson_packs",
+        data_dir=data_dir,
+        probe=lambda: RadioProbe(False, "lsusb", "test"),
+        battery_gauge=_CountingGauge(),
+        power_notice_path=notice_path,
+        power_clock=clk,
+    )
+    with TestClient(app) as client:
+        db_path = data_dir / "progress.db"
+        events_path = data_dir / "events.jsonl"
+        db_before = db_path.read_bytes() if db_path.exists() else None
+        events_before = events_path.read_bytes() if events_path.exists() else None
+
+        # Absent notice -> inactive, zero I2C/gauge reads, zero DB/event writes.
+        gauge_calls = 0
+        r = client.get("/api/power")
+        assert r.status_code == 200
+        assert r.json() == {"active": False}
+        assert gauge_calls == 0
+
+        # Home HTML renders .power-notice hidden and loads power-notice.js.
+        home = client.get("/")
+        assert home.status_code == 200
+        assert "/static/power-notice.js" in home.text
+        assert 'data-power-notice' in home.text
+        assert 'role="alert"' in home.text
+        assert 'aria-live="assertive"' in home.text
+        assert "LOW BATTERY · POWERING OFF" not in home.text
+
+        # Active countdown notice -> /api/power serves remaining_s and base.html shows banner.
+        notice_path.write_text(json.dumps({
+            "active": True,
+            "failed": False,
+            "voltage": 9.21,
+            "threshold_v": 9.5,
+            "started_mono": 982.0,
+            "deadline_mono": 1042.0,
+            "updated_mono": 999.0,
+        }), encoding="utf-8")
+        gauge_calls = 0
+        r2 = client.get("/api/power")
+        assert r2.status_code == 200
+        assert r2.json() == {
+            "active": True,
+            "failed": False,
+            "remaining_s": 42,
+            "voltage": 9.21,
+            "threshold_v": 9.5,
+        }
+        assert gauge_calls == 0
+        home2 = client.get("/")
+        assert "LOW BATTERY · POWERING OFF IN 42 s" in home2.text
+        assert "Pack 9.21 V (limit 9.50 V)" in home2.text
+        assert "power-notice--failed" not in home2.text
+
+        # Failed power-off notice -> /api/power serves retry_in_s and base.html marks failed.
+        notice_path.write_text(json.dumps({
+            "active": True,
+            "failed": True,
+            "voltage": 9.18,
+            "threshold_v": 9.5,
+            "started_mono": 900.0,
+            "deadline_mono": 960.0,
+            "updated_mono": 999.5,
+            "retry_deadline_mono": 1047.0,
+        }), encoding="utf-8")
+        gauge_calls = 0
+        r3 = client.get("/api/power")
+        assert r3.status_code == 200
+        assert r3.json() == {
+            "active": True,
+            "failed": True,
+            "retry_in_s": 47,
+            "voltage": 9.18,
+            "threshold_v": 9.5,
+        }
+        assert gauge_calls == 0
+        home3 = client.get("/")
+        assert "power-notice--failed" in home3.text
+        assert "AUTOMATIC POWER-OFF FAILED · RETRYING IN 47 s" in home3.text
+
+        # Stale notice -> inactive.
+        clk.advance(NOTICE_STALE_S + 2.0)
+        assert client.get("/api/power").json() == {"active": False}
+
+        # Confirm zero DB or event-log mutation across all /api/power and GET / calls.
+        assert (db_path.read_bytes() if db_path.exists() else None) == db_before
+        assert (events_path.read_bytes() if events_path.exists() else None) == events_before
+
+
+def test_desktop_notice_reads_contract_updates_in_place_and_clears(tmp_path):
+    from sigint101.power_desktop import (
+        DesktopNoticeMonitor,
+        GdbusNotifier,
+        NotifySendNotifier,
+        format_desktop_notice,
+    )
+    from sigint101.power_desktop import (
+        main as desktop_main,
+    )
+
+    clk = _Clock(500.0)
+    notice_path = tmp_path / "notice.json"
+    shown: list[tuple[str, str, bool]] = []
+    clears = 0
+
+    class _FakeNotifier:
+        def show(self, summary: str, body: str, *, failed: bool) -> bool:
+            shown.append((summary, body, failed))
+            return True
+
+        def clear(self) -> None:
+            nonlocal clears
+            clears += 1
+
+    mon = DesktopNoticeMonitor(notice_path=notice_path, clock=clk, notifier=_FakeNotifier())
+
+    # Absent notice -> INACTIVE, no show/clear calls.
+    assert mon.tick() == "INACTIVE"
+    assert shown == [] and clears == 0
+
+    # Active countdown -> ACTIVE, shows countdown.
+    notice_path.write_text(json.dumps({
+        "active": True, "failed": False, "voltage": 9.21, "threshold_v": 9.5,
+        "started_mono": 480.0, "deadline_mono": 540.0, "updated_mono": 499.0,
+    }), encoding="utf-8")
+    assert mon.tick() == "ACTIVE"
+    assert len(shown) == 1
+    assert shown[-1][0] == "LOW BATTERY · POWERING OFF IN 40 s"
+    assert "9.21 V" in shown[-1][1] and shown[-1][2] is False
+
+    # Failed state -> FAILED, shows retry countdown.
+    notice_path.write_text(json.dumps({
+        "active": True, "failed": True, "voltage": 9.18, "threshold_v": 9.5,
+        "started_mono": 400.0, "deadline_mono": 460.0, "updated_mono": 499.5,
+        "retry_deadline_mono": 547.0,
+    }), encoding="utf-8")
+    assert mon.tick() == "FAILED"
+    assert "RETRYING IN 47 s" in shown[-1][0] and shown[-1][2] is True
+
+    # Stale notice -> INACTIVE and clears the desktop notification once.
+    clk.advance(NOTICE_STALE_S + 1.0)
+    assert mon.tick() == "INACTIVE"
+    assert clears == 1
+    assert mon.tick() == "INACTIVE"
+    assert clears == 1
+
+    # Fresh notice then unlink -> shows again, then clears on unlink.
+    notice_path.write_text(json.dumps({
+        "active": True, "failed": False, "voltage": 9.20, "threshold_v": 9.5,
+        "started_mono": clk() - 5.0, "deadline_mono": clk() + 55.0, "updated_mono": clk(),
+    }), encoding="utf-8")
+    assert mon.tick() == "ACTIVE"
+    notice_path.unlink()
+    assert mon.tick() == "INACTIVE"
+    assert clears == 2
+
+    # Active notice cleared on clean shutdown.
+    notice_path.write_text(json.dumps({
+        "active": True, "failed": False, "voltage": 9.20, "threshold_v": 9.5,
+        "started_mono": clk() - 5.0, "deadline_mono": clk() + 55.0, "updated_mono": clk(),
+    }), encoding="utf-8")
+    assert mon.tick() == "ACTIVE"
+    mon.shutdown()
+    assert clears == 3
+
+    # Pure formatter returns None for inactive.
+    assert format_desktop_notice({"active": False}) is None
+
+    # GdbusNotifier uses replaces_id and CloseNotification with bounded timeout + DEVNULL.
+    gdbus_calls: list[tuple] = []
+
+    def fake_gdbus(cmd, **kw):
+        gdbus_calls.append((cmd, kw))
+        return SimpleNamespace(returncode=0, stdout="(uint32 42,)\n", stderr="")
+
+    gn = GdbusNotifier(gdbus_bin="/usr/bin/gdbus", runner=fake_gdbus)
+    assert gn.show("LOW BATTERY · POWERING OFF IN 40 s", "Plug in", failed=False) is True
+    assert gdbus_calls[-1][0][0] == "/usr/bin/gdbus"
+    assert "org.freedesktop.Notifications.Notify" in gdbus_calls[-1][0]
+    assert "0" in gdbus_calls[-1][0]
+    assert gdbus_calls[-1][1]["stdin"] is subprocess.DEVNULL
+    assert gdbus_calls[-1][1]["close_fds"] is True
+    assert gdbus_calls[-1][1]["timeout"] > 0
+
+    assert gn.show("LOW BATTERY · POWERING OFF IN 38 s", "Plug in", failed=False) is True
+    assert "42" in gdbus_calls[-1][0]
+    gn.clear()
+    assert "org.freedesktop.Notifications.CloseNotification" in gdbus_calls[-1][0]
+    assert gdbus_calls[-1][0][-1] == "42"
+
+    # NotifySendNotifier fallback invokes notify-send with urgency=critical and DEVNULL.
+    ns_calls: list[tuple] = []
+
+    def fake_ns(cmd, **kw):
+        ns_calls.append((cmd, kw))
+        return SimpleNamespace(returncode=0, stdout="17\n", stderr="")
+
+    ns = NotifySendNotifier(notify_send_bin="/usr/bin/notify-send", runner=fake_ns)
+    assert ns.show("LOW BATTERY · POWERING OFF IN 40 s", "Plug in", failed=False) is True
+    assert ns_calls[-1][0][0] == "/usr/bin/notify-send"
+    assert "--urgency=critical" in ns_calls[-1][0]
+    assert ns_calls[-1][1]["stdin"] is subprocess.DEVNULL
+    assert ns_calls[-1][1]["close_fds"] is True
+
+    # --once exits 0 when no notice file exists.
+    assert desktop_main(["--once", "--notice-path", str(tmp_path / "missing.json")]) == 0
+
+
+def test_desktop_notice_unit_and_launcher_run_in_learner_session():
+    unit_file = REPO / "deploy" / "system" / "sigint101-power-notice.service"
+    launcher = REPO / "deploy" / "system" / "sigint101-power-notice"
+    assert unit_file.is_file()
+    assert launcher.is_file()
+    text = unit_file.read_text(encoding="utf-8")
+    assert "ExecStart=/usr/local/bin/sigint101-power-notice" in text
+    assert "WantedBy=default.target" in text
+    assert "User=root" not in text
+    assert "sigint101.power_desktop" in launcher.read_text(encoding="utf-8")
+    assert "python3 -I" in launcher.read_text(encoding="utf-8")

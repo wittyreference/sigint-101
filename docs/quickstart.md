@@ -141,3 +141,69 @@ Three decoders are not installed by default: digital voice (M27), NOAA APT (M24)
 - **Logs:** run `journalctl --user -u sigint101 -b`. The journal is kept across reboots.
 - **Powering off:** exit the course and use **Shutdown** in the desktop menu (or run
   `sudo poweroff`) before cutting power.
+
+## Low-battery safe shutdown
+`deploy/provision.sh` installs the non-root low-battery power watcher (`sigint101-power.service`)
+and the learner-session desktop notice (`sigint101-power-notice.service`). **It ships disarmed**:
+no cut-off voltage is set or guessed in code or config, so the box will not power itself off until
+you measure your pack's cut-off voltage at the bench and configure a threshold.
+
+### Arming the watcher (after bench measurement)
+1. Measure your Recon's real pack cut-off voltage under load and choose a threshold strictly between
+   `8.0` and `12.6` V with enough margin for the 60 s hold, 60 s notice, and clean OS shutdown.
+2. Create `/etc/sigint101/power.conf` as root (`deploy/provision.sh` never creates or overwrites
+   this file):
+
+   ```
+   sudo install -d -m 0755 /etc/sigint101
+   sudo tee /etc/sigint101/power.conf >/dev/null <<'EOF'
+   SIGINT101_POWER_THRESHOLD_V=<MEASURED_V>
+   # Optional recovery hysteresis in (0.0, 1.0] V above the threshold:
+   # SIGINT101_POWER_RECOVER_V=0.15
+   EOF
+   sudo chmod 0644 /etc/sigint101/power.conf
+   ```
+
+   Replace `<MEASURED_V>` with the threshold you measured for your pack (for example `9.50`, strictly
+   between `8.0` and `12.6` V). Any unset, blank, non-numeric, or out-of-range value keeps the
+   watcher disarmed with zero I2C reads.
+3. Restart the watcher and confirm it is armed in the journal:
+
+   ```
+   sudo systemctl restart sigint101-power.service
+   journalctl -u sigint101-power -b
+   ```
+
+   Look for `armed at <X.XX> V` (and no `not authorized to power off` error).
+
+When armed and discharging below the threshold for 60 continuous seconds, the watcher writes
+`/run/sigint101-power/notice.json` and starts a 60-second countdown. The course shows a high-contrast
+`LOW BATTERY` banner below the status bar (leaving **Back** and **Exit** tappable), and
+`sigint101-power-notice.service` shows a critical desktop notification in the learner's session so
+anyone on the desktop or in Terminal is warned too. Plugging in the charger cancels the countdown
+and clears both notices immediately. If automatic `systemctl poweroff` ever fails, both notices
+stay visible with the retry countdown and tell you to save and shut down manually.
+
+### Off switch
+- **Disarm cleanly (keeps the service installed, zero I2C reads):** empty or delete
+  `/etc/sigint101/power.conf` and restart the watcher:
+
+  ```
+  sudo rm -f /etc/sigint101/power.conf
+  sudo systemctl restart sigint101-power.service
+  ```
+
+- **Disable or mask completely (preserved across future `deploy/provision.sh` runs):**
+
+  ```
+  sudo systemctl disable --now sigint101-power.service
+  # Or prevent any activation:
+  sudo systemctl mask --now sigint101-power.service
+  # Optional: also stop the learner-session desktop notice:
+  systemctl --user disable --now sigint101-power-notice.service
+  ```
+
+- **Re-running `deploy/provision.sh` during a notice:** plug in the charger before running updates.
+  If `provision.sh` restarts `sigint101-power.service` while a countdown is active, the watcher
+  clears `/run/sigint101-power/notice.json` on shutdown and starts a fresh 60 s hold and 60 s notice
+  if the pack is still low.

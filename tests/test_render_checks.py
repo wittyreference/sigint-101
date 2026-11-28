@@ -31,6 +31,7 @@ LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 FIELD = REPO / "tools" / "render" / "render_field.py"
 BANDMAP = REPO / "tools" / "render" / "render_bandmap.py"
 CLOSING = REPO / "tools" / "render" / "render_closing.py"
+POWER_NOTICE = REPO / "tools" / "render" / "render_power_notice.py"
 EVAL = REPO / "tools" / "render" / "render_eval.py"
 CHECK = REPO / "tools" / "render" / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
@@ -700,11 +701,13 @@ def _proxy_url(proc):
     [
         "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
         SURVEY.name, RECALL.name, LIVE_FIND.name, FIELD.name, BANDMAP.name, CLOSING.name,
+        POWER_NOTICE.name,
     ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
         "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
         "recall-fails", "live-find-fails", "field-fails", "bandmap-fails", "closing-fails",
+        "power-notice-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -727,6 +730,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {FIELD.name} {proxy}",
         f"ran {BANDMAP.name} {proxy}",
         f"ran {CLOSING.name} {proxy}",
+        f"ran {POWER_NOTICE.name} {proxy}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -839,6 +843,7 @@ API_TOOLS = {
     "field": (FIELD, ["http://127.0.0.1:9"], {}),
     "bandmap": (BANDMAP, ["http://127.0.0.1:9"], {}),
     "closing": (CLOSING, ["http://127.0.0.1:9"], {}),
+    "power-notice": (POWER_NOTICE, ["http://127.0.0.1:9"], {}),
 }
 
 
@@ -1156,7 +1161,7 @@ def _runner_copy(render_make, edit):
 
 
 def _add_check(text, line):
-    old = '        ("render_closing.py", console),\n'
+    old = '        ("render_power_notice.py", console),\n'
     assert old in text
     return text.replace(old, old + line)
 
@@ -2712,3 +2717,59 @@ def test_closing_render_fails_on_overflow_split_hyphen_or_missing_complete(devto
         else "VERDICT: FAIL - closing-stages red-night"
     )
     assert expected in _verdicts(proc)
+
+
+POWER_NOTICE_OK = {
+    "doc": [800, 480],
+    "roleAlert": True,
+    "initialHidden": True,
+    "countdownOk": True,
+    "failedOk": True,
+    "hiddenAfterClear": True,
+    "aboveFigure": True,
+    "countdownH": 68,
+    "failedH": 88,
+    "noticeTop": 75,
+    "backBottom": 75,
+    "headlinePx": 20,
+    "detailPx": 18,
+}
+
+
+def _power_notice_pages(*, defect=None):
+    pages = {}
+    for theme in THEMES:
+        def _answer(url, t=theme):
+            m = {**POWER_NOTICE_OK, "theme": t}
+            if t == "red-night" and url.endswith("/exam/review/T6C02") and defect:
+                m.update(defect)
+            return m
+        pages[f"measurePowerNotice({json.dumps(theme)},"] = _answer
+    return pages
+
+
+def test_power_notice_render_checks_all_four_screens_in_all_three_themes(devtools):
+    port = devtools(_power_notice_pages())
+    proc = run(POWER_NOTICE, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    expected = [
+        f"VERDICT: PASS - power-notice {name} {theme}"
+        for theme in THEMES
+        for name in ("home", "lesson1", "predict29", "figure")
+    ]
+    assert _verdicts(proc) == expected
+
+
+@pytest.mark.parametrize("defect", [
+    {"countdownOk": False},
+    {"failedOk": False},
+    {"hiddenAfterClear": False},
+    {"aboveFigure": False},
+    {"initialHidden": False},
+    {"roleAlert": False},
+])
+def test_power_notice_render_fails_on_banner_or_zindex_defects(devtools, defect):
+    port = devtools(_power_notice_pages(defect=defect))
+    proc = run(POWER_NOTICE, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "VERDICT: FAIL - power-notice figure red-night" in _verdicts(proc)

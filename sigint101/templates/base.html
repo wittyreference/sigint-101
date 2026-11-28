@@ -66,6 +66,22 @@
       </div>
     </header>
 
+    {% set pn = power_notice|default({'visible': false, 'failed': false, 'headline': '', 'detail': ''}) %}
+    <div class="power-notice{% if pn.failed %} power-notice--failed{% endif %}"
+         role="alert"
+         aria-live="assertive"
+         data-power-notice
+         {% if not pn.visible %}hidden{% endif %}>
+      <svg class="power-notice__glyph" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3L2 20h20L12 3z"/>
+        <path d="M12 9v5M12 17h.01"/>
+      </svg>
+      <div class="power-notice__text">
+        <div class="power-notice__headline" data-power-headline>{{ pn.headline }}</div>
+        <div class="power-notice__detail" data-power-detail>{{ pn.detail }}</div>
+      </div>
+    </div>
+
     <main class="content">
       {% block content %}{% endblock %}
     </main>
@@ -130,6 +146,8 @@
   <script src="/static/scroll-keys.js"></script>
   <!-- The battery gauge redraws itself from /api/battery, so a screen left open stays true. -->
   <script src="/static/battery.js"></script>
+  <!-- Low-battery shutdown banner polls read-only /api/power every 2 s without touching I2C. -->
+  <script src="/static/power-notice.js"></script>
   <script src="/static/status-bar.js"></script>
   {% block scripts %}{% endblock %}
 </body>
