@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+from uuid import uuid4
 
 from . import retrieval
 from .challenges import CHALLENGE_KIND, AttemptKind
@@ -223,6 +224,7 @@ class Progress:
         # a different thread than the one that opened it. The lock serializes access.
         self._lock = threading.Lock()
         self._closed = False
+        self._quarantined_reason: str | None = None
         if managed:
             from .migrations import PROGRESS_SCHEMA_VERSION, reviewed_signatures
             from .storage import open_managed_sqlite
@@ -466,6 +468,7 @@ class Progress:
     def record_stamps(self, stamps, *, backfill=False) -> bool:
         """Count each event once, keeping the first evidence and any retired badge rows."""
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return False
             with self._conn:
@@ -494,6 +497,7 @@ class Progress:
     def stamps(self) -> list[dict]:
         """The stamps earned so far, with the evidence of each first reception."""
         with self._lock:
+            self._require_usable_unlocked()
             rows = self._conn.execute(
                 "SELECT instrument, first_ts, count, provenance, digest FROM stamps"
             ).fetchall()
@@ -508,17 +512,45 @@ class Progress:
         return out
 
     @staticmethod
+    def _resolve_attempt_id(
+        kind: AttemptKind,
+        attempt_id: str | None,
+        source: dict | None = None,
+        *,
+        generate: bool = False,
+    ) -> str | None:
+        if kind.identity_column is None:
+            if attempt_id is not None:
+                raise ValueError(
+                    f"attempt kind {kind.kind!r} does not define an identity_column"
+                )
+            return None
+        resolved = attempt_id
+        if resolved is None and source is not None:
+            resolved = source.get(kind.identity_column)
+        if resolved is None and generate:
+            resolved = uuid4().hex
+        if not isinstance(resolved, str) or not resolved.strip():
+            raise ValueError(
+                f"attempt kind {kind.kind!r} requires a non-empty {kind.identity_column!r}"
+            )
+        return resolved
+
+    @staticmethod
     def _pass_columns_and_values(
         kind: AttemptKind,
         key,
         started_at: float,
         slot,
         pass_row: dict,
-    ) -> tuple[list[str], list]:
+        *,
+        attempt_id: str | None = None,
+    ) -> tuple[list[str], list, str | None]:
         if kind.slot_column is not None and slot is None:
             raise ValueError(f"attempt kind {kind.kind!r} requires a slot value")
         if kind.slot_column is None and slot is not None:
             raise ValueError(f"attempt kind {kind.kind!r} does not accept a slot value")
+        resolved_id = Progress._resolve_attempt_id(kind, attempt_id, pass_row)
         missing = [col for col in kind.pass_columns if col not in pass_row]
         if missing:
             raise ValueError(
@@ -526,6 +558,9 @@ class Progress:
             )
         cols = [kind.key_column, "started_at"]
         vals = [key, started_at]
+        if kind.identity_column is not None:
+            cols.append(kind.identity_column)
+            vals.append(resolved_id)
         if kind.slot_column is not None:
             cols.append(kind.slot_column)
             vals.append(slot)
@@ -534,23 +569,7 @@ class Progress:
             cols.append(col)
             val = pass_row[col]
             vals.append(json.dumps(val) if col in json_cols else val)
-        return cols, vals
-
-    @staticmethod
-    def _prepare_pass_insert(
-        kind: AttemptKind,
-        key,
-        started_at: float,
-        slot,
-        pass_row: dict,
-    ) -> tuple[str, tuple]:
-        cols, vals = Progress._pass_columns_and_values(kind, key, started_at, slot, pass_row)
-        placeholders = ", ".join("?" for _ in cols)
-        sql = (
-            f"INSERT INTO {kind.passes_table}({', '.join(cols)}) "
-            f"VALUES({placeholders}) ON CONFLICT DO NOTHING"
-        )
-        return sql, tuple(vals)
+        return cols, vals, resolved_id
 
     @staticmethod
     def _prepare_guarded_pass_insert(
@@ -559,19 +578,32 @@ class Progress:
         started_at: float,
         slot,
         pass_row: dict,
+        *,
+        attempt_id: str | None = None,
     ) -> tuple[str, tuple]:
         """Build an atomic insert-once pass SQL guarded on the matching attempt row."""
-        cols, vals = Progress._pass_columns_and_values(kind, key, started_at, slot, pass_row)
+        cols, vals, resolved_id = Progress._pass_columns_and_values(
+            kind, key, started_at, slot, pass_row, attempt_id=attempt_id,
+        )
         placeholders = ", ".join("?" for _ in cols)
+        guards = [f"{kind.key_column}=?", "started_at=?"]
+        guard_vals: list = [key, started_at]
+        if kind.identity_column is not None:
+            guards.append(f"{kind.identity_column}=?")
+            guard_vals.append(resolved_id)
+        for col in kind.replay_binding_columns:
+            guards.append(f"{col}=?")
+            guard_vals.append(pass_row[col])
+        where_sql = " AND ".join(guards)
         sql = (
             f"INSERT INTO {kind.passes_table}({', '.join(cols)}) "
             f"SELECT {placeholders} "
             f"WHERE EXISTS ("
             f"  SELECT 1 FROM {kind.attempts_table} "
-            f"  WHERE {kind.key_column}=? AND started_at=?"
+            f"  WHERE {where_sql}"
             f") ON CONFLICT DO NOTHING"
         )
-        return sql, (*vals, key, started_at)
+        return sql, (*vals, *guard_vals)
 
     @staticmethod
     def _validate_attempt_extra(kind: AttemptKind, extra: dict) -> None:
@@ -590,6 +622,38 @@ class Progress:
         with self._lock:
             return self._closed
 
+    @property
+    def quarantined_reason(self) -> str | None:
+        with self._lock:
+            return self._quarantined_reason
+
+    def _require_usable_unlocked(self) -> None:
+        if self._quarantined_reason is not None:
+            raise sqlite3.OperationalError(self._quarantined_reason)
+
+    def _quarantine_unlocked(self, reason: str) -> None:
+        self._quarantined_reason = reason
+        self._closed = True
+        try:
+            self._conn.close()
+        except sqlite3.Error:
+            pass
+
+    def _check_fresh_identity_unlocked(self, kind: AttemptKind, key, attempt_id: str) -> None:
+        assert kind.identity_column is not None
+        id_col = kind.identity_column
+        existing = self._conn.execute(
+            f"SELECT 1 FROM {kind.attempts_table} WHERE {kind.key_column}=? AND {id_col}=? "
+            f"UNION ALL "
+            f"SELECT 1 FROM {kind.passes_table} WHERE {kind.key_column}=? AND {id_col}=? "
+            f"LIMIT 1",
+            (key, attempt_id, key, attempt_id),
+        ).fetchone()
+        if existing is not None:
+            raise ValueError(
+                f"attempt kind {kind.kind!r} cannot reuse {id_col} {attempt_id!r}"
+            )
+
     def _insert_attempt_pass_unlocked(
         self,
         kind: AttemptKind,
@@ -597,8 +661,12 @@ class Progress:
         started_at: float,
         slot,
         pass_row: dict,
+        *,
+        attempt_id: str | None = None,
     ) -> bool:
-        sql, params = self._prepare_pass_insert(kind, key, started_at, slot, pass_row)
+        sql, params = self._prepare_guarded_pass_insert(
+            kind, key, started_at, slot, pass_row, attempt_id=attempt_id,
+        )
         return bool(self._conn.execute(sql, params).rowcount)
 
     def stage_attempt(
@@ -610,22 +678,45 @@ class Progress:
         *,
         extra: dict | None = None,
         on_staged=None,
+        attempt_id: str | None = None,
     ) -> bool:
         """Upsert an attempt in an uncommitted transaction; commit only if `on_staged` succeeds."""
         extra_cols = dict(extra or {})
         self._validate_attempt_extra(kind, extra_cols)
-        cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
-        update_cols = ["started_at", "window_s", *kind.attempt_columns]
+        resolved_id = self._resolve_attempt_id(kind, attempt_id, generate=True)
+        cols = [kind.key_column, "started_at", "window_s"]
+        update_cols = ["started_at", "window_s"]
+        val_list: list = [key, started_at, window_s]
+        if kind.identity_column is not None:
+            cols.append(kind.identity_column)
+            update_cols.append(kind.identity_column)
+            val_list.append(resolved_id)
+        cols.extend(kind.attempt_columns)
+        update_cols.extend(kind.attempt_columns)
+        val_list.extend(extra_cols[col] for col in kind.attempt_columns)
         placeholders = ", ".join("?" for _ in cols)
         updates = ", ".join(f"{col}=excluded.{col}" for col in update_cols)
-        values = (key, started_at, window_s, *(extra_cols[col] for col in kind.attempt_columns))
+        values = tuple(val_list)
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return False
             if self._conn.in_transaction:
-                self._conn.commit()
+                rb_err = None
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error as exc:
+                    rb_err = exc
+                if rb_err is not None or self._conn.in_transaction:
+                    detail = str(rb_err) if rb_err is not None else "transaction remained open"
+                    msg = f"progress store quarantined after unconfirmed rollback: {detail}"
+                    self._quarantine_unlocked(msg)
+                    raise sqlite3.OperationalError(msg) from rb_err
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                if kind.identity_column is not None:
+                    assert resolved_id is not None
+                    self._check_fresh_identity_unlocked(kind, key, resolved_id)
                 self._conn.execute(
                     f"INSERT INTO {kind.attempts_table}({', '.join(cols)}) VALUES({placeholders}) "
                     f"ON CONFLICT({kind.key_column}) DO UPDATE SET {updates}",
@@ -634,12 +725,21 @@ class Progress:
                 if on_staged is not None:
                     on_staged()
                 self._conn.commit()
-            except BaseException:
-                try:
-                    if self._conn.in_transaction:
+            except BaseException as exc:
+                rollback_error = None
+                if self._conn.in_transaction:
+                    try:
                         self._conn.rollback()
-                except sqlite3.Error:
-                    pass
+                    except sqlite3.Error as rb_exc:
+                        rollback_error = rb_exc
+                if rollback_error is not None or self._conn.in_transaction:
+                    detail = (
+                        str(rollback_error) if rollback_error is not None
+                        else "transaction remained open"
+                    )
+                    msg = f"progress store quarantined after unconfirmed rollback: {detail}"
+                    self._quarantine_unlocked(msg)
+                    raise sqlite3.OperationalError(msg) from (rollback_error or exc)
                 raise
             return True
 
@@ -649,18 +749,33 @@ class Progress:
         key,
         started_at: float,
         window_s: int,
+        *,
+        attempt_id: str | None = None,
         **extra,
     ) -> bool:
         """Upsert one attempt row (including any kind.attempt_columns) without altering passes."""
         self._validate_attempt_extra(kind, extra)
-        cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
-        update_cols = ["started_at", "window_s", *kind.attempt_columns]
+        resolved_id = self._resolve_attempt_id(kind, attempt_id, generate=True)
+        cols = [kind.key_column, "started_at", "window_s"]
+        update_cols = ["started_at", "window_s"]
+        val_list: list = [key, started_at, window_s]
+        if kind.identity_column is not None:
+            cols.append(kind.identity_column)
+            update_cols.append(kind.identity_column)
+            val_list.append(resolved_id)
+        cols.extend(kind.attempt_columns)
+        update_cols.extend(kind.attempt_columns)
+        val_list.extend(extra[col] for col in kind.attempt_columns)
         placeholders = ", ".join("?" for _ in cols)
         updates = ", ".join(f"{col}=excluded.{col}" for col in update_cols)
-        values = (key, started_at, window_s, *(extra[col] for col in kind.attempt_columns))
+        values = tuple(val_list)
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return False
+            if kind.identity_column is not None:
+                assert resolved_id is not None
+                self._check_fresh_identity_unlocked(kind, key, resolved_id)
             self._conn.execute(
                 f"INSERT INTO {kind.attempts_table}({', '.join(cols)}) VALUES({placeholders}) "
                 f"ON CONFLICT({kind.key_column}) DO UPDATE SET {updates}",
@@ -671,8 +786,13 @@ class Progress:
 
     def restore_attempt(self, kind: AttemptKind, key, previous: dict | None) -> bool:
         """Restore a key's previous attempt row (including extra columns), or delete if None."""
+        extra_needed = (
+            (kind.identity_column, *kind.attempt_columns)
+            if kind.identity_column is not None
+            else kind.attempt_columns
+        )
         if previous is not None:
-            needed = ("started_at", "window_s", *kind.attempt_columns)
+            needed = ("started_at", "window_s", *extra_needed)
             missing = [col for col in needed if col not in previous]
             if missing:
                 raise ValueError(
@@ -680,6 +800,7 @@ class Progress:
                     f"{', '.join(missing)}"
                 )
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return False
             if previous is None:
@@ -688,15 +809,15 @@ class Progress:
                     (key,),
                 )
             else:
-                cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
-                update_cols = ["started_at", "window_s", *kind.attempt_columns]
+                cols = [kind.key_column, "started_at", "window_s", *extra_needed]
+                update_cols = ["started_at", "window_s", *extra_needed]
                 placeholders = ", ".join("?" for _ in cols)
                 updates = ", ".join(f"{col}=excluded.{col}" for col in update_cols)
                 values = (
                     key,
                     previous["started_at"],
                     previous["window_s"],
-                    *(previous[col] for col in kind.attempt_columns),
+                    *(previous[col] for col in extra_needed),
                 )
                 self._conn.execute(
                     f"INSERT INTO {kind.attempts_table}({', '.join(cols)}) "
@@ -709,15 +830,20 @@ class Progress:
 
     def attempt(self, kind: AttemptKind, key) -> dict:
         """Return a key's current attempt, its own pass(es), newest pass overall, and pass count."""
-        attempt_cols = ", ".join(
-            [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
-        )
+        attempt_cols_list = [kind.key_column, "started_at", "window_s"]
+        if kind.identity_column is not None:
+            attempt_cols_list.append(kind.identity_column)
+        attempt_cols_list.extend(kind.attempt_columns)
+        attempt_cols = ", ".join(attempt_cols_list)
         pass_cols_list = [kind.key_column, "started_at"]
+        if kind.identity_column is not None:
+            pass_cols_list.append(kind.identity_column)
         if kind.slot_column is not None:
             pass_cols_list.append(kind.slot_column)
         pass_cols_list.extend(kind.pass_columns)
         pass_cols = ", ".join(pass_cols_list)
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return {
                     "attempt": None,
@@ -732,18 +858,23 @@ class Progress:
             ).fetchone()
             attempt_pass_rows = []
             if attempt_row is not None:
+                where_parts = [f"{kind.key_column}=?", "started_at=?"]
+                where_vals: list = [key, attempt_row["started_at"]]
+                if kind.identity_column is not None:
+                    where_parts.append(f"{kind.identity_column}=?")
+                    where_vals.append(attempt_row[kind.identity_column])
+                where_sql = " AND ".join(where_parts)
                 if kind.slot_column is not None:
                     attempt_pass_rows = self._conn.execute(
                         f"SELECT {pass_cols} FROM {kind.passes_table} "
-                        f"WHERE {kind.key_column}=? AND started_at=? "
+                        f"WHERE {where_sql} "
                         f"ORDER BY {kind.slot_column}",
-                        (key, attempt_row["started_at"]),
+                        tuple(where_vals),
                     ).fetchall()
                 else:
                     row = self._conn.execute(
-                        f"SELECT {pass_cols} FROM {kind.passes_table} "
-                        f"WHERE {kind.key_column}=? AND started_at=?",
-                        (key, attempt_row["started_at"]),
+                        f"SELECT {pass_cols} FROM {kind.passes_table} WHERE {where_sql}",
+                        tuple(where_vals),
                     ).fetchone()
                     if row is not None:
                         attempt_pass_rows = [row]
@@ -774,29 +905,43 @@ class Progress:
         started_at: float,
         slot,
         pass_row: dict,
+        *,
+        attempt_id: str | None = None,
     ) -> bool:
         """Insert one pass row atomically only if the matching attempt still exists."""
-        sql, params = self._prepare_guarded_pass_insert(kind, key, started_at, slot, pass_row)
+        sql, params = self._prepare_guarded_pass_insert(
+            kind, key, started_at, slot, pass_row, attempt_id=attempt_id,
+        )
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return False
             with self._conn:
                 return bool(self._conn.execute(sql, params).rowcount)
 
     def credit_attempts(self, kind: AttemptKind, stamps, qualifies) -> list[dict]:
-        """Credit open live_reception attempts in one transaction using insert-once pass writes."""
+        """Credit open live_reception attempts in one transaction using guarded insert-once."""
         if kind.credit != "live_reception":
             raise ValueError(
                 f"credit_attempts only accepts live_reception kinds, got {kind.credit!r}"
             )
-        attempt_cols = [kind.key_column, "started_at", "window_s", *kind.attempt_columns]
+        attempt_cols = [kind.key_column, "started_at", "window_s"]
+        if kind.identity_column is not None:
+            attempt_cols.append(kind.identity_column)
+        attempt_cols.extend(kind.attempt_columns)
         with self._lock:
+            self._require_usable_unlocked()
             if self._closed:
                 return []
             credited: list[dict] = []
             with self._conn:
                 if kind.slot_column is None:
                     col_sql = ", ".join(f"c.{col}" for col in attempt_cols)
+                    id_join = (
+                        f" AND p.{kind.identity_column} = c.{kind.identity_column}"
+                        if kind.identity_column is not None
+                        else ""
+                    )
                     open_attempts = [
                         dict(row) for row in self._conn.execute(
                             f"SELECT {col_sql} "
@@ -804,7 +949,7 @@ class Progress:
                             f"WHERE NOT EXISTS ("
                             f"  SELECT 1 FROM {kind.passes_table} p "
                             f"  WHERE p.{kind.key_column} = c.{kind.key_column} "
-                            f"    AND p.started_at = c.started_at"
+                            f"    AND p.started_at = c.started_at{id_join}"
                             f") ORDER BY c.{kind.key_column}"
                         ).fetchall()
                     ]
@@ -822,20 +967,29 @@ class Progress:
                                     "provenance": stamp["provenance"],
                                     "digest": stamp["digest"],
                                 }
+                                aid = (
+                                    attempt[kind.identity_column]
+                                    if kind.identity_column is not None
+                                    else None
+                                )
                                 inserted = self._insert_attempt_pass_unlocked(
                                     kind,
                                     attempt[kind.key_column],
                                     attempt["started_at"],
                                     None,
                                     pass_row,
+                                    attempt_id=aid,
                                 )
                                 if inserted:
-                                    credited.append({
+                                    item = {
                                         kind.key_column: attempt[kind.key_column],
                                         "started_at": attempt["started_at"],
                                         **pass_row,
                                         "event_id": stamp.get("event_id"),
-                                    })
+                                    }
+                                    if kind.identity_column is not None:
+                                        item[kind.identity_column] = aid
+                                    credited.append(item)
                             else:
                                 remaining.append(attempt)
                         open_attempts = remaining
@@ -849,6 +1003,11 @@ class Progress:
                     ]
                     if not open_attempts:
                         return []
+                    id_join = (
+                        f" AND p.{kind.identity_column} = c.{kind.identity_column}"
+                        if kind.identity_column is not None
+                        else ""
+                    )
                     passed_slots = {
                         (row[0], row[1], row[2])
                         for row in self._conn.execute(
@@ -856,7 +1015,7 @@ class Progress:
                             f"FROM {kind.passes_table} p "
                             f"JOIN {kind.attempts_table} c "
                             f"  ON p.{kind.key_column} = c.{kind.key_column} "
-                            f" AND p.started_at = c.started_at"
+                            f" AND p.started_at = c.started_at{id_join}"
                         ).fetchall()
                     }
                     for stamp in stamps:
@@ -878,22 +1037,31 @@ class Progress:
                                 "provenance": stamp["provenance"],
                                 "digest": stamp["digest"],
                             }
+                            aid = (
+                                attempt[kind.identity_column]
+                                if kind.identity_column is not None
+                                else None
+                            )
                             inserted = self._insert_attempt_pass_unlocked(
                                 kind,
                                 attempt[kind.key_column],
                                 attempt["started_at"],
                                 slot,
                                 pass_row,
+                                attempt_id=aid,
                             )
                             passed_slots.add(slot_key)
                             if inserted:
-                                credited.append({
+                                item = {
                                     kind.key_column: attempt[kind.key_column],
                                     "started_at": attempt["started_at"],
                                     kind.slot_column: slot,
                                     **pass_row,
                                     "event_id": stamp.get("event_id"),
-                                })
+                                }
+                                if kind.identity_column is not None:
+                                    item[kind.identity_column] = aid
+                                credited.append(item)
             return credited
 
     def start_challenge(self, unit_id: int, started_at: float, window_s: int) -> bool:

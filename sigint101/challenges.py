@@ -18,6 +18,8 @@ FORBIDDEN_INSTRUMENTS = ("apt", "flock", "rayhunter")
 
 CREDIT_MODES = ("live_reception", "replay_answer")
 CreditMode = Literal["live_reception", "replay_answer"]
+RESERVED_EVENT_FLAGS = frozenset({"replay", "source"})
+_REPLAY_BINDING_COLUMNS = frozenset({"recording", "digest"})
 _IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _BASE_ATTEMPT_COLUMNS = frozenset({"started_at", "window_s"})
 
@@ -39,6 +41,7 @@ class AttemptKind:
     json_columns: tuple[str, ...] | None = None
     event_key_field: str = ""
     label: str = ""
+    identity_column: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, str) or not _IDENT_RE.match(self.kind):
@@ -57,6 +60,19 @@ class AttemptKind:
                 raise ValueError(f"invalid SQL identifier for slot_column: {self.slot_column!r}")
             if self.slot_column == self.key_column or self.slot_column in _BASE_ATTEMPT_COLUMNS:
                 raise ValueError(f"slot_column {self.slot_column!r} collides with base columns")
+        if self.identity_column is not None:
+            if (not isinstance(self.identity_column, str)
+                    or not _IDENT_RE.match(self.identity_column)):
+                raise ValueError(
+                    f"invalid SQL identifier for identity_column: {self.identity_column!r}"
+                )
+            if (self.identity_column == self.key_column
+                    or self.identity_column == self.slot_column
+                    or self.identity_column in _BASE_ATTEMPT_COLUMNS
+                    or self.identity_column in RESERVED_EVENT_FLAGS):
+                raise ValueError(
+                    f"identity_column {self.identity_column!r} collides with reserved columns"
+                )
         for field_name in ("start_event", "pass_event"):
             val = getattr(self, field_name)
             if not isinstance(val, str) or not _IDENT_RE.match(val):
@@ -66,7 +82,17 @@ class AttemptKind:
                 self.event_key_field
             ):
                 raise ValueError(f"invalid event_key_field: {self.event_key_field!r}")
+        effective_key = self.event_key_field or self.key_column
+        if (effective_key in RESERVED_EVENT_FLAGS
+                or effective_key in _BASE_ATTEMPT_COLUMNS
+                or (self.identity_column is not None and effective_key == self.identity_column)):
+            raise ValueError(
+                f"attempt kind {self.kind!r} event key {effective_key!r} is reserved; "
+                f"set a safe event_key_field"
+            )
         reserved_attempt = _BASE_ATTEMPT_COLUMNS | {self.key_column}
+        if self.identity_column is not None:
+            reserved_attempt = reserved_attempt | {self.identity_column}
         seen_attempt: set[str] = set()
         for col in self.attempt_columns:
             if not isinstance(col, str) or not _IDENT_RE.match(col):
@@ -79,6 +105,8 @@ class AttemptKind:
         reserved_pass = {self.key_column, "started_at"}
         if self.slot_column is not None:
             reserved_pass.add(self.slot_column)
+        if self.identity_column is not None:
+            reserved_pass.add(self.identity_column)
         seen_pass: set[str] = set()
         for col in self.pass_columns:
             if not isinstance(col, str) or not _IDENT_RE.match(col):
@@ -92,6 +120,27 @@ class AttemptKind:
             for col in self.json_columns:
                 if col not in seen_pass:
                     raise ValueError(f"json_column {col!r} is not in pass_columns")
+        if self.credit == "replay_answer":
+            if self.identity_column is None:
+                raise ValueError(
+                    f"replay_answer attempt kind {self.kind!r} requires an identity_column"
+                )
+            if not (seen_attempt & seen_pass & _REPLAY_BINDING_COLUMNS):
+                raise ValueError(
+                    f"replay_answer attempt kind {self.kind!r} must bind 'recording' or "
+                    f"'digest' across attempt_columns and pass_columns"
+                )
+
+    @property
+    def replay_binding_columns(self) -> tuple[str, ...]:
+        """Attempt columns shared with pass_columns that bind a replay answer to its clip."""
+        if self.credit != "replay_answer":
+            return ()
+        pass_set = set(self.pass_columns)
+        return tuple(
+            col for col in self.attempt_columns
+            if col in pass_set and col in _REPLAY_BINDING_COLUMNS
+        )
 
     @property
     def payload_key(self) -> str:
@@ -265,7 +314,11 @@ def attempt_status(
         }
     started_at, attempt_window_s = _attempt_bounds(attempt)
     own_pass = attempt_pass if attempt_pass is not None else latest_pass
-    if own_pass is not None and own_pass.get("started_at") == started_at:
+    identity_match = True
+    if (isinstance(attempt, dict) and isinstance(own_pass, dict)
+            and "attempt_id" in attempt and attempt["attempt_id"] is not None):
+        identity_match = own_pass.get("attempt_id") == attempt["attempt_id"]
+    if own_pass is not None and own_pass.get("started_at") == started_at and identity_match:
         return {
             "state": "passed",
             "started_at": started_at,
