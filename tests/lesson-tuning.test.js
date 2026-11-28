@@ -50,7 +50,9 @@ function stub() {
 // answered, and the scripts run in page order, each in its own tag. As in a browser, a script that
 // throws is reported and the next tag still runs.
 // `band` puts a lesson band on the waterfall's canvas, as the lesson page's data-tune-* do.
-function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", band = null } = {}) {
+// `clock` stands in for action-clock.js: the stamp the page puts on the learner's action.
+function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", band = null,
+                      clock = null } = {}) {
   let now = 0;
   let seq = 0;
   const timers = [];
@@ -108,6 +110,7 @@ function lessonPage({ lessonId = "7", panels = ["decode"], restore = "held", ban
     console,
   };
   context.window = context;
+  if (clock) context.ActionClock = { stamp: () => clock };
 
   const run = (name, attrs = {}) => {
     context.document.currentScript = { getAttribute: key => (key in attrs ? attrs[key] : null) };
@@ -269,6 +272,41 @@ test("a waterfall with a band and no lesson restore still tunes to the band itse
   await settle();
   const tunes = page.requests.filter(r => r.url === "/api/tune");
   assert.deepEqual(tunes.map(r => r.method), ["POST"]);
+});
+
+test("the restore carries the learner's action stamp, so the console orders it by that", () => {
+  const page = lessonPage({ clock: { epoch: "5eed", at: 1234.5 } });
+  const posts = page.requests.filter(r => r.url.startsWith("/api/tuning"));
+  assert.deepEqual(posts.map(r => r.url), ["/api/tuning?lesson_id=7&epoch=5eed&at=1234.5"]);
+});
+
+test("a band the console refuses says so with the validator's own reason", async () => {
+  const page = lessonPage({ panels: ["decode"] });
+  const reason = "the span is narrower than one 125 kHz bin";
+  await page.answer(422, { tuned: false, lesson_id: 7, reason });
+  assert.equal(page.note.hidden, false);
+  assert.deepEqual(page.note.lines, ["Not retuned", reason]);
+});
+
+test("a restore that skipped a receiver for the learner's own tune says so, not done", async () => {
+  const page = lessonPage({ panels: ["decode"] });
+  await page.answer(200, { tuned: false, lesson_id: 7, skipped: { sweeper: "you retuned" } });
+  assert.equal(page.note.hidden, false);
+  assert.deepEqual(page.note.lines, ["Tuning skipped", "you retuned"]);
+  for (const line of page.note.lines) assert.ok(line.length <= RAIL_CHARS, line);
+});
+
+test("a restore overtaken by a newer lesson says the lesson changed", async () => {
+  const page = lessonPage({ panels: ["decode"] });
+  await page.answer(200, { tuned: false, lesson_id: 7, skipped: { decoder: "a newer lesson" } });
+  assert.deepEqual(page.note.lines, ["Tuning skipped", "lesson changed"]);
+});
+
+test("a restore refused as stale says the lesson changed", async () => {
+  const page = lessonPage({ panels: ["decode"] });
+  await page.answer(409, { tuned: false, lesson_id: 7, stale: true,
+                           reason: "a newer lesson was opened" });
+  assert.deepEqual(page.note.lines, ["Not retuned", "lesson changed"]);
 });
 
 test("a page that names no lesson posts nothing and its panels poll at once", async () => {

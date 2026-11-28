@@ -2,6 +2,8 @@
 # ABOUTME: Runs console shutdown work in daemon threads with a single monotonic deadline.
 
 import asyncio
+import math
+import secrets
 import threading
 import time
 from contextlib import contextmanager
@@ -59,72 +61,146 @@ class RadioArbiter:
 TUNING_WAIT_S = 2.0
 TUNING_REASON = "tuning the radios for this lesson"
 
+# What a restore did with each receiver it is responsible for (C81).
+TUNED = "tuned"
+YOU_RETUNED = "you retuned"           # the learner tuned it after the restore's action
+NEWER_LESSON = "a newer lesson"       # a lesson opened after this one is restoring instead
+STALE_REASON = "a newer lesson was opened"
+
 
 class TuningBusy(Exception):
     """A claim or a tune waited TUNING_WAIT_S on a lesson's tuning restore and gave up."""
+
+
+class Superseded(Exception):
+    """A restore or a tune that a newer learner action has already overtaken."""
 
 
 class TuningGate:
     """Orders a lesson's tuning restore (POST /api/tuning) against tunes and radio claims.
 
     The lesson page posts the restore without blocking, so a tune or a panel poll can arrive
-    while a slow one is still stopping tools. Three rules keep what the learner sees true:
+    while a slow one is still stopping tools, and a request can reach the console after one the
+    learner sent later. These rules keep what the learner sees true:
 
-    - No receiver starts mid-restore: a claim waits for every restore to finish (wait_idle), so
-      a panel's first poll starts its tool on the lesson's frequency, not the rack's.
-    - A restore never undoes a newer tune: each receiver it resets is a step taken under the
-      step lock, and a step is skipped when a tune of that receiver, or a newer restore, has
-      landed since the restore began.
-    - Nothing waits without bound: a claim or a tune that waits TUNING_WAIT_S is refused with
-      TUNING_REASON. A tune waits only for the step in hand, not the whole restore.
+    - Order is the learner's, not the network's. Each restore and tune carries the time of the
+      learner's action on the console's own clock (`stamp`; the page reads the clock's epoch and
+      time from its render and adds its own elapsed time). A restore older than the newest one
+      is refused before it starts (Superseded), as is a tune older than the newest restore or
+      the newest tune of its receiver. A request without a stamp, or from another epoch (a page
+      rendered before the console restarted), is stamped on arrival.
+    - A restore never undoes a newer action: each receiver it resets is a step under the step
+      lock, skipped when the learner tuned that receiver after the restore's action
+      (YOU_RETUNED) or a newer lesson's restore has begun (NEWER_LESSON). The restore reports
+      each receiver's outcome, so the page never says "tuned" for a skipped one.
+    - No receiver starts mid-restore. A claim's last admission and its launch hold a permit
+      (admit_claim/end_claim) that a restore cannot begin under: begin_restore marks itself
+      first, so no new permit is granted, then waits for the permits in hand to end. A claim
+      that finds a restore begun while it queued lets the radio go and waits (wait_idle).
+    - Nothing waits without bound: a claim (across its retries) and a tune wait at most
+      TUNING_WAIT_S, then are refused with TUNING_REASON. A tune waits only for the step in
+      hand. A restore waits for the permits in hand, each bounded by its own launch.
     """
 
     def __init__(self):
         self._step = threading.Lock()
         self._state = threading.Condition()
         self._restoring = 0
-        self._seq = 0
-        self._restore_seq = 0
-        self._tuned = {}
+        self._claims = 0
+        self._newest_restore = float("-inf")
+        self._tuned_at = {}
+        self.epoch = secrets.token_hex(8)
 
-    def begin_restore(self) -> int:
+    @staticmethod
+    def now_ms() -> float:
+        return time.monotonic() * 1000.0
+
+    def anchor(self) -> tuple:
+        """The clock a page stamps its actions on: (epoch, the console's time in ms). Read-only."""
+        return self.epoch, round(self.now_ms(), 3)
+
+    def stamp(self, epoch, at) -> float:
+        """The time of a learner's action as the page stamped it, or its arrival when it cannot
+        be trusted: no stamp, another epoch, not a number. Never later than now, so a page cannot
+        stamp an action ahead of what it has seen."""
+        now = self.now_ms()
+        if at is None or epoch != self.epoch:
+            return now
+        try:
+            at = float(at)
+        except (TypeError, ValueError):
+            return now
+        return min(at, now) if math.isfinite(at) else now
+
+    def begin_restore(self, at: float) -> float:
+        """Register a restore of the learner's action at `at`, or raise Superseded if a newer
+        lesson's restore is already registered. Returns the restore's token."""
         with self._state:
-            self._seq += 1
-            self._restore_seq = self._seq
+            if at < self._newest_restore:
+                raise Superseded(STALE_REASON)
+            self._newest_restore = at
             self._restoring += 1
-            return self._seq
+            # No new permit is granted from here; the ones in hand end with their launch.
+            self._state.wait_for(lambda: self._claims == 0)
+            return at
 
     def end_restore(self) -> None:
         with self._state:
             self._restoring -= 1
             self._state.notify_all()
 
-    def restore_step(self, receiver: str, token: int, reset) -> bool:
-        """Run `reset` for `receiver` unless something newer landed since restore `token` began."""
+    def restore_step(self, receiver: str, token: float, reset) -> str:
+        """Run `reset` for `receiver` unless a newer action overtook restore `token`; say which."""
         with self._step:
             with self._state:
-                if self._restore_seq > token or self._tuned.get(receiver, 0) > token:
-                    return False
+                if self._newest_restore > token:
+                    return NEWER_LESSON
+                if self._tuned_at.get(receiver, float("-inf")) > token:
+                    return YOU_RETUNED
             reset()
-            return True
+            return TUNED
 
-    def tune(self, receiver: str, action):
-        """Run a tune of `receiver`, marking it newer than any restore under way."""
+    def tune(self, receiver: str, at: float, action):
+        """Run a learner's tune of `receiver` at `at`, unless a newer action has overtaken it."""
         if not self._step.acquire(timeout=TUNING_WAIT_S):
             raise TuningBusy(TUNING_REASON)
         try:
             with self._state:
-                self._seq += 1
-                self._tuned[receiver] = self._seq
+                if at < self._newest_restore:
+                    raise Superseded(STALE_REASON)
+                if at < self._tuned_at.get(receiver, float("-inf")):
+                    raise Superseded("a newer tune was sent")
+                self._tuned_at[receiver] = at
             return action()
         finally:
             self._step.release()
 
-    def wait_idle(self) -> None:
-        """Wait for every restore under way to finish, or raise TuningBusy after the bound."""
+    @staticmethod
+    def claim_budget() -> float:
+        """The deadline a claim's waits on restores share, across its retries."""
+        return time.monotonic() + TUNING_WAIT_S
+
+    def wait_idle(self, until: float | None = None) -> None:
+        """Wait for every restore under way to finish, or raise TuningBusy at `until`."""
+        if until is None:
+            until = self.claim_budget()
         with self._state:
-            if not self._state.wait_for(lambda: self._restoring == 0, timeout=TUNING_WAIT_S):
+            left = lambda: max(0.0, until - time.monotonic())  # noqa: E731
+            if not self._state.wait_for(lambda: self._restoring == 0, timeout=left()):
                 raise TuningBusy(TUNING_REASON)
+
+    def admit_claim(self) -> bool:
+        """Take the permit a claim launches under, unless a restore has begun (then False)."""
+        with self._state:
+            if self._restoring:
+                return False
+            self._claims += 1
+            return True
+
+    def end_claim(self) -> None:
+        with self._state:
+            self._claims -= 1
+            self._state.notify_all()
 
 
 class ReceptionSink:

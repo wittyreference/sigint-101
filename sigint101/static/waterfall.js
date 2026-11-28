@@ -21,7 +21,7 @@
       gainMeterGeometry: gainMeterGeometry, parseTuneBand: parseTuneBand,
       rowBounds: rowBounds, binColour: binColour, parseRamp: parseRamp, rampColour: rampColour,
       tapToHz: tapToHz, bandRequest: bandRequest, formatTuneMHz: formatTuneMHz,
-      makeTuner: makeTuner, nextGain: nextGain, formatGain: formatGain,
+      makeTuner: makeTuner, nextGain: nextGain, formatGain: formatGain, tuneRequest: tuneRequest,
       makeGainStepper: makeGainStepper, meterReading: meterReading,
       meterLabelTops: meterLabelTops, sweepBadge: sweepBadge, meterState: meterState,
       restartKey: restartKey, makeRestarter: makeRestarter, restartNote: restartNote,
@@ -45,6 +45,18 @@
   // A lesson's band as an /api/tune request: its centre and width (and bin, if it names one). The
   // console builds the span around the centre itself, offset so the target is not lost in a hop's
   // unmeasured centre bin, and answers with the span it chose and the centre the dial reads.
+  // The /api/tune post for a span. A tune is a learner action, so it carries the action clock's
+  // stamp (action-clock.js): the console refuses one sent before the newest lesson opened, and a
+  // lesson's restore skips a sweep the learner tuned after it.
+  function tuneRequest(request, clock) {
+    var body = {};
+    Object.keys(request).forEach(function (key) { body[key] = request[key]; });
+    var stamp = clock && clock.stamp();
+    if (stamp) { body.epoch = stamp.epoch; body.at = stamp.at; }
+    return { method: "POST", cache: "no-store", headers: { "content-type": "application/json" },
+             body: JSON.stringify(body) };
+  }
+
   function bandRequest(band) {
     if (!band) return null;
     var request = { center: Math.round((band.low + band.high) / 2), span: band.high - band.low };
@@ -612,11 +624,7 @@
   }
 
   function postTune(request) {
-    return fetch("/api/tune", {
-      method: "POST", cache: "no-store",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    }).then(function (res) {
+    return fetch("/api/tune", tuneRequest(request, window.ActionClock)).then(function (res) {
       return res.json().then(function (body) {
         body.ok = res.ok;
         body.status = res.status;

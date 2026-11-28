@@ -187,3 +187,13 @@ test("with nothing logged the line says so plainly", () => {
   assert.equal(rack.logText({ receptions: [], error: null }), "no receptions logged yet");
   assert.equal(rack.logText({ receptions: [], error: "disk full" }), "disk full");
 });
+
+// C81 round 4: a decoder tune is a learner action, so it carries the action clock's stamp.
+test("a decoder tune carries the learner's action stamp beside the frequency", () => {
+  const clock = { stamp: () => ({ epoch: "5eed", at: 4321 }) };
+  const request = rack.decoderTuneRequest("aprs", 144390000, clock);
+  assert.equal(request.url, "/api/aprs/tune");
+  assert.equal(request.init.method, "POST");
+  assert.deepEqual(JSON.parse(request.init.body), { freq_hz: 144390000, epoch: "5eed", at: 4321 });
+  assert.deepEqual(JSON.parse(rack.decoderTuneRequest("aprs", 1, null).init.body), { freq_hz: 1 });
+});

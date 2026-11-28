@@ -593,3 +593,15 @@ test("the status SNR comes from the newest live sweep, including a measured zero
   assert.equal(panel.liveSnr({ code: 200, body: { ...body, rows: [] } }, true), null);
   assert.equal(panel.liveSnr(null, true), null);
 });
+
+// C81 round 4: a tune is a learner action, so it carries the action clock's stamp. The console
+// refuses one sent before the newest lesson opened, and a lesson's restore skips a receiver the
+// learner tuned after it.
+test("a sweep tune carries the learner's action stamp beside the span", () => {
+  const clock = { stamp: () => ({ epoch: "5eed", at: 4321 }) };
+  const init = panel.tuneRequest({ center: 433920000, span: 2000000 }, clock);
+  assert.equal(init.method, "POST");
+  assert.deepEqual(JSON.parse(init.body),
+                   { center: 433920000, span: 2000000, epoch: "5eed", at: 4321 });
+  assert.deepEqual(JSON.parse(panel.tuneRequest({ low: 1, high: 2 }, null).body), { low: 1, high: 2 });
+});

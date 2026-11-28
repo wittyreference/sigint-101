@@ -37,15 +37,31 @@
     note.hidden = true;
   }
 
-  // Why the console refused: its own words when it gave any, else the status.
-  function refusal(res) {
-    return res.json().then(function (body) {
-      var detail = body && body.detail;
-      return typeof detail === "string" && detail ? detail : "error " + res.status;
-    }, function () {
-      return "error " + res.status;
-    });
+  // What the console's answer means for the rail, as [verdict, why], or null when every
+  // receiver is on the lesson's frequency. A step the console skipped for a newer action is not
+  // "done": the learner's own tune ("you retuned") or a newer lesson's restore. A refusal gives
+  // the console's own reason: a band the sweep cannot take, a stale restore, or the status.
+  function outcome(res) {
+    return res.json().then(function (body) { return read(res, body || {}); },
+                           function () { return read(res, {}); });
   }
+
+  function read(res, body) {
+    if (res.ok) {
+      if (body.tuned !== false) return null;
+      var why = Object.keys(body.skipped || {}).map(function (k) { return body.skipped[k]; });
+      return ["Tuning skipped", why.indexOf("you retuned") >= 0 ? "you retuned" : "lesson changed"];
+    }
+    if (body.stale) return ["Not retuned", "lesson changed"];
+    var reason = body.reason || body.detail;
+    return ["Not retuned", typeof reason === "string" && reason ? reason : "error " + res.status];
+  }
+
+  // The learner's action, stamped on the console's clock (action-clock.js), so a request that
+  // reaches the console late is ordered by when the learner opened the lesson.
+  var stamp = root.ActionClock && root.ActionClock.stamp();
+  var url = "/api/tuning?lesson_id=" + encodeURIComponent(lessonId) +
+    (stamp ? "&epoch=" + encodeURIComponent(stamp.epoch) + "&at=" + stamp.at : "");
 
   var answered = false;
   var open;
@@ -60,13 +76,12 @@
     open();
   }, TIMEOUT_MS);
 
-  fetch("/api/tuning?lesson_id=" + encodeURIComponent(lessonId), { method: "POST", cache: "no-store" })
-    .then(function (res) { return res.ok ? null : refusal(res); },
-          function () { return "no console"; })
+  fetch(url, { method: "POST", cache: "no-store" })
+    .then(outcome, function () { return ["Not retuned", "no console"]; })
     .then(function (problem) {
       answered = true;
       clearTimeout(timer);
-      if (problem) say("Not retuned", problem);
+      if (problem) say(problem[0], problem[1]);
       else clear();
       open();
     });

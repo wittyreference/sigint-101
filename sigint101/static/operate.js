@@ -101,6 +101,20 @@
     return newest ? receptionLine(newest) : "no receptions logged yet";
   }
 
+  // The post that retunes a decoder. A tune is a learner action, so it carries the action clock's
+  // stamp (action-clock.js): the console refuses one sent before the newest lesson opened, and a
+  // lesson's restore skips a decoder the learner tuned after it.
+  function decoderTuneRequest(api, hz, clock) {
+    var body = { freq_hz: hz };
+    var stamp = clock && clock.stamp();
+    if (stamp) { body.epoch = stamp.epoch; body.at = stamp.at; }
+    return {
+      url: "/api/" + api + "/tune",
+      init: { method: "POST", cache: "no-store", headers: { "content-type": "application/json" },
+              body: JSON.stringify(body) },
+    };
+  }
+
   // The post that remembers a picked instrument as the rack's place. keepalive lets it finish
   // after the tap has navigated away to the instrument's page.
   function placeRequest(key) {
@@ -120,7 +134,7 @@
       formatStep: formatStep, parseSteps: parseSteps, nextStep: nextStep,
       formatDecoderMHz: formatDecoderMHz, tuneCaption: tuneCaption, makeStepper: makeStepper,
       freqLabel: freqLabel, receptionLine: receptionLine, logQuery: logQuery, logText: logText,
-      placeRequest: placeRequest,
+      placeRequest: placeRequest, decoderTuneRequest: decoderTuneRequest,
     };
     return;
   }
@@ -189,11 +203,8 @@
       current: function () { return confirmed; },
       stepHz: function () { return parseInt(tuneStrip.getAttribute("data-step-hz"), 10) || 0; },
       send: function (hz) {
-        return fetch("/api/" + api + "/tune", {
-          method: "POST", cache: "no-store",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ freq_hz: hz }),
-        }).then(function (res) { return res.json(); })
+        var request = decoderTuneRequest(api, hz, window.ActionClock);
+        return fetch(request.url, request.init).then(function (res) { return res.json(); })
           .catch(function (err) {
             return { tuned: false, reason: "lost contact with the console: " + err.message };
           });

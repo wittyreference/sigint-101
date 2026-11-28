@@ -97,8 +97,10 @@ from .provenance import (
 )
 from .radio_control import (
     CLAIM_QUEUE_WAIT_S,
+    TUNED,
     RadioArbiter,
     ReceptionSink,
+    Superseded,
     TuningBusy,
     TuningGate,
     finish_console,
@@ -769,7 +771,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "unit": unit, "tiles": tiles},
         )
 
-    def _restore_lesson_tuning(lesson) -> None:
+    def _restore_lesson_tuning(lesson, at: float) -> tuple[dict, str | None]:
         """Put the radios back where a lesson expects them, whatever the rack left them on.
 
         The rack retunes the single-channel decoders and the sweep; a lesson's copy and panels
@@ -777,12 +779,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         the sweep goes to the lesson's band, or to the FM sweep a lesson with no band of its own
         was written against. Nothing restarts that is already there.
 
-        The page posts this without blocking, so it runs through the tuning gate: no radio claim
-        starts a tool until it is done, and each reset is skipped if a tune of that receiver (the
-        next lesson's band, the learner's own step) or a newer restore landed after it began.
+        The page posts this without blocking, so it runs through the tuning gate, ordered by the
+        learner's action `at` (the page's stamp): a restore older than the newest is refused
+        before it starts (Superseded), no radio claim launches a tool until it is done, and each
+        reset is skipped if the learner tuned that receiver after `at`, or a newer lesson's
+        restore has begun. Returns each receiver's outcome, and the reason when the lesson's own
+        band is one the sweep cannot take (a pack the loader let through).
         """
         gate = app.state.tuning_gate
-        token = gate.begin_restore()
+        token = gate.begin_restore(at)
 
         def home(receiver):
             want = getattr(receiver, "home_hz", None)
@@ -805,16 +810,22 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                     or getattr(sweeper, "target", None) != center):
                 sweeper.retune(low, high, bin_size, target=center)
 
+        outcomes, refusal = {}, None
         try:
             for inst in INSTRUMENTS:
                 if inst.band:
                     receiver = getattr(app.state, inst.receiver)
-                    gate.restore_step(inst.receiver, token, lambda r=receiver: home(r))
+                    outcomes[inst.receiver] = gate.restore_step(
+                        inst.receiver, token, lambda r=receiver: home(r))
             sweeper = app.state.sweeper
-            gate.restore_step("sweeper", token,
-                              lambda: band(sweeper) if lesson.tune else fm(sweeper))
+            try:
+                outcomes["sweeper"] = gate.restore_step(
+                    "sweeper", token, lambda: band(sweeper) if lesson.tune else fm(sweeper))
+            except TuneError as exc:
+                refusal = str(exc)
         finally:
             gate.end_restore()
+        return outcomes, refusal
 
     def _recall_sources() -> list[int]:
         """Loaded lessons that carry a check block and have been completed."""
@@ -1191,16 +1202,37 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         )
 
     @app.post("/api/tuning")
-    def lesson_tuning(lesson_id: int):
+    def lesson_tuning(lesson_id: int, epoch: str | None = None, at: str | None = None):
         """Put the radios where this lesson expects them, whatever the rack left them on.
 
         The lesson page posts this as it loads, ahead of its panel scripts (lesson-tuning.js), so
         the panels' first polls find their receivers on the lesson's frequencies. Loading the page
         retunes nothing, so a render check or a prefetch cannot move a running receiver. An
         unknown lesson is refused (404) like every lesson route.
+
+        `epoch` and `at` stamp the learner's action on the console's clock (action-clock.js), so
+        a request that arrives late is ordered by when the learner acted. The answer says what
+        happened, never more: {"tuned": true} only when every receiver is on the lesson's
+        frequency; {"tuned": false, "skipped": {receiver: why}} when a step gave way to a newer
+        action; 409 with "stale" when a newer lesson's restore already ran; 422 with the sweep's
+        own reason when the lesson's band is one it cannot take.
         """
         _require_lesson(lesson_id)
-        _restore_lesson_tuning(app.state.lessons[lesson_id])
+        gate = app.state.tuning_gate
+        try:
+            outcomes, refusal = _restore_lesson_tuning(app.state.lessons[lesson_id],
+                                                       gate.stamp(epoch, at))
+        except Superseded as exc:
+            return JSONResponse(status_code=409, content={
+                "tuned": False, "lesson_id": lesson_id, "stale": True, "reason": str(exc)})
+        if refusal is not None:
+            log_event(app.state.events_path, "tuning_refused",
+                      {"lesson_id": lesson_id, "reason": refusal})
+            return JSONResponse(status_code=422, content={
+                "tuned": False, "lesson_id": lesson_id, "reason": refusal})
+        skipped = {name: outcome for name, outcome in outcomes.items() if outcome != TUNED}
+        if skipped:
+            return {"tuned": False, "lesson_id": lesson_id, "skipped": skipped}
         return {"tuned": True, "lesson_id": lesson_id}
 
     @app.post("/api/opened")
@@ -1646,50 +1678,64 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         refusal = unavailable[target]
         consumers = {name: getattr(app.state, name) for name in sdr_consumers}
         receiver = consumers.get(target)
-        intent = None
         prepare = getattr(receiver, "prepare_start", None)
         calibration = app.state.ppm_calibration
-        try:
-            if reason := calibration.release_failure():
-                raise refusal(reason)
-            for consumer in consumers.values():
-                failure = getattr(consumer, "release_failure", None)
-                if failure and (reason := failure()):
-                    raise refusal(reason)
-            # Then a lesson's tuning restore, if one is running: a tool started now would open on
-            # the frequency the rack left (C81). The wait is bounded, then refused with the reason.
-            # It comes after the refusals above, which need no wait, and before the queue's own
-            # deadline starts, so the time spent here is not taken from the arbiter's wait. A
-            # failure that arises meanwhile is caught by the checks under the arbiter below.
+        gate = app.state.tuning_gate
+        # A lesson's tuning restore must not run while a receiver launches, or the tool opens on
+        # the frequency the rack left (C81). The claim's waits on restores share one budget.
+        budget = gate.claim_budget()
+        while True:
+            intent = None
             try:
-                app.state.tuning_gate.wait_idle()
-            except TuningBusy as exc:
-                raise refusal(str(exc)) from exc
-            deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
-            if prepare is not None:
-                intent = prepare(for_claim=True, deadline=deadline)
-            with app.state.radio_arbiter.reserve(target, refusal, deadline):
-                # PPM may have failed to reap since this request joined the queue.
                 if reason := calibration.release_failure():
                     raise refusal(reason)
-                if not reclaim and getattr(receiver, "released", False):
-                    raise refusal("the radio was released to another program")
+                for consumer in consumers.values():
+                    failure = getattr(consumer, "release_failure", None)
+                    if failure and (reason := failure()):
+                        raise refusal(reason)
+                # Then any restore under way, bounded and refused with the reason. It comes after
+                # the refusals above, which need no wait, and before the queue's own deadline
+                # starts, so it is not taken from the arbiter's wait. A failure that arises
+                # meanwhile is caught by the checks under the arbiter below.
+                try:
+                    gate.wait_idle(until=budget)
+                except TuningBusy as exc:
+                    raise refusal(str(exc)) from exc
+                deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
                 if prepare is not None:
-                    receiver.validate_start(intent)
-                for name, consumer in consumers.items():
-                    if name != target:
-                        consumer.release()
-                        failure = getattr(consumer, "release_failure", None)
-                        if failure and (reason := failure(pending=True)):
-                            raise refusal(reason)
-                if prepare is not None:
-                    return receiver.launch_start(intent, claimed=True)
-                if receiver is not None and reclaim:
-                    receiver.resume()
-                return start() if start is not None else None
-        finally:
-            if intent is not None:
-                receiver.discard_start(intent)
+                    intent = prepare(for_claim=True, deadline=deadline)
+                with app.state.radio_arbiter.reserve(target, refusal, deadline):
+                    # PPM may have failed to reap since this request joined the queue.
+                    if reason := calibration.release_failure():
+                        raise refusal(reason)
+                    if not reclaim and getattr(receiver, "released", False):
+                        raise refusal("the radio was released to another program")
+                    # The last admission: a receiver launches under the gate's permit, which no
+                    # restore begins under. A restore that began while this claim queued sends it
+                    # back, letting the radio go, to wait for the restore and try again. ppm
+                    # starts no receiver, so it needs no permit.
+                    permitted = receiver is None or gate.admit_claim()
+                    if permitted:
+                        try:
+                            if prepare is not None:
+                                receiver.validate_start(intent)
+                            for name, consumer in consumers.items():
+                                if name != target:
+                                    consumer.release()
+                                    failure = getattr(consumer, "release_failure", None)
+                                    if failure and (reason := failure(pending=True)):
+                                        raise refusal(reason)
+                            if prepare is not None:
+                                return receiver.launch_start(intent, claimed=True)
+                            if receiver is not None and reclaim:
+                                receiver.resume()
+                            return start() if start is not None else None
+                        finally:
+                            if receiver is not None:
+                                gate.end_claim()
+            finally:
+                if intent is not None:
+                    receiver.discard_start(intent)
 
     # The last refusal logged per route. A route that cannot start answers every poll, and logging
     # every identical refusal is how events.jsonl grew by 42 lines a minute behind a dead Flock. A
@@ -2309,9 +2355,10 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             else:
                 app.state.sweeper.retune(low, high, bin_size)
 
+        gate = app.state.tuning_gate
         try:
-            app.state.tuning_gate.tune("sweeper", retune)
-        except TuningBusy as exc:
+            gate.tune("sweeper", gate.stamp(payload.get("epoch"), payload.get("at")), retune)
+        except (TuningBusy, Superseded) as exc:
             log_event(app.state.events_path, "tune_blocked", {"reason": str(exc)})
             return JSONResponse(status_code=409, content={"tuned": False, "reason": str(exc)})
         tuned = {"low": low, "high": high, "bin_size": bin_size, "center": center}
@@ -2794,10 +2841,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             log_event(app.state.events_path, "decoder_tune_blocked",
                       {"instrument": inst.key, "reason": reason})
             return JSONResponse(status_code=503, content={"tuned": False, "reason": reason})
+        gate = app.state.tuning_gate
         try:
-            app.state.tuning_gate.tune(inst.receiver,
-                                       lambda: getattr(app.state, inst.receiver).retune(hz))
-        except TuningBusy as exc:
+            gate.tune(inst.receiver, gate.stamp(payload.get("epoch"), payload.get("at")),
+                      lambda: getattr(app.state, inst.receiver).retune(hz))
+        except (TuningBusy, Superseded) as exc:
             log_event(app.state.events_path, "decoder_tune_blocked",
                       {"instrument": inst.key, "reason": str(exc)})
             return JSONResponse(status_code=409, content={"tuned": False, "reason": str(exc)})
