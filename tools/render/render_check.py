@@ -329,16 +329,19 @@ def run_checks(console, port, output, checks):
     status = 0
     for check in checks:
         script = check.path.name
-        command = [sys.executable, str(check.path), *check.arguments(console, output)]
-        try:
-            # Scratch checks create their own console and fence its browser pages themselves.
-            result = subprocess.run(command, env=env if check.scratch else fenced_env, timeout=60)
-        except subprocess.TimeoutExpired:
-            print(f"{script} timed out. Check the console and Chromium DevTools.", file=sys.stderr)
-            return status or 1
-        if result.returncode:
-            print(f"{script} exited with status {result.returncode}", file=sys.stderr)
-            status = status or result.returncode
+        # Scratch checks create their own console and fence its browser pages themselves.
+        check_env = env if check.scratch else fenced_env
+        for args in check.invocations(console, output):
+            command = [sys.executable, str(check.path), *args]
+            try:
+                result = subprocess.run(command, env=check_env, timeout=60)
+            except subprocess.TimeoutExpired:
+                print(f"{script} timed out. Check the console and Chromium DevTools.",
+                      file=sys.stderr)
+                return status or 1
+            if result.returncode:
+                print(f"{script} exited with status {result.returncode}", file=sys.stderr)
+                status = status or result.returncode
     return status
 
 
