@@ -29,6 +29,7 @@ COMMAND_SOURCES: dict[str, tuple[str, str, str | None]] = {
 }
 
 PROMPT_LINE = "Run it once in the rack to see its command."
+LESSON_PROMPT_LINE = "Run it once in the rack first."
 
 MARAUDER_NOTE = (
     "Typed into Marauder's serial console over the Flipper's USB-UART bridge, "
@@ -251,3 +252,13 @@ def build_field_rows(app_state, events: list, stamps: list) -> list[dict]:
         })
 
     return rows
+
+
+def field_row_for(instrument_key: str, app_state, events: list, stamps: list) -> dict:
+    """Return the exact /field row for one command-backed instrument from the same source."""
+    if instrument_key not in COMMAND_SOURCES:
+        raise KeyError(f"unknown command-backed field instrument '{instrument_key}'")
+    for row in build_field_rows(app_state, events, stamps):
+        if row["key"] == instrument_key:
+            return row
+    raise KeyError(f"instrument '{instrument_key}' not in build_field_rows")

@@ -674,6 +674,35 @@
                 </div>
               </div>
             </div>
+            {% elif stage == 'operate' and field_row|default(none) %}
+            <div class="scroll-frame">
+              <div class="stage-panel__body">
+                <div class="scroll-copy">
+                  <div class="field-lesson" data-field-lesson="{{ field_row.key }}">
+                    {% if field_error %}<p class="field__error" role="status">{{ field_error }}</p>{% endif %}
+                    <div class="field__heading">
+                      <span class="field__name">
+                        <strong>{{ field_row.label }}</strong>{% if field_row.tool %} <span class="field__tool">{{ field_row.tool }}</span>{% endif %}
+                      </span>
+                      {% if field_row.state_label %}
+                      <span class="field__state field__state--{{ field_row.state }}">{{ field_row.state_label }}</span>
+                      {% endif %}
+                    </div>
+                    {% if field_row.command %}
+                    {% if field_row.when %}
+                    <p class="field__when">
+                      <time datetime="{{ field_row.when.isoformat() }}">{{ field_row.when.strftime("%Y-%m-%d %H:%M:%S UTC") }}</time>
+                    </p>
+                    {% endif %}
+                    <p class="field__cmd"><code>{% for tok in field_row.command.split(" ") %}{% if not loop.first %} {% endif %}<span class="field__tok">{{ tok }}</span>{% endfor %}</code></p>
+                    {% else %}
+                    <p class="field__prompt">{{ field_lesson_prompt }}</p>
+                    {% endif %}
+                  </div>
+                  <p>{{ lesson.stages[stage] }}</p>
+                </div>
+              </div>
+            </div>
             {% elif stage == 'observe' and call_choice %}
             <div class="scroll-frame">
               <div class="stage-panel__body">
