@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from sigint101 import app, ppm
 from sigint101.app import PACK_DIR, create_app
 from sigint101.events import log_event
 from sigint101.exam import POOL_PATH, ExamStore
@@ -476,6 +477,38 @@ def test_readiness_rejects_every_unsupported_saved_reference(tmp_path, case):
 
 
 # --- 3. Read-only, private socket, no leaked lock FD, and reaped on parent death (§8) ----------
+
+
+def test_calibration_lifecycle_runs_only_in_the_public_console(tmp_path, monkeypatch):
+    calls = []
+
+    class ObservedCalibration(ppm.PpmCalibration):
+        def __init__(self):
+            super().__init__()
+            calls.append("created")
+
+        def stop(self):
+            calls.append("stopped")
+            super().stop()
+
+    monkeypatch.setattr(app, "PpmCalibration", ObservedCalibration, raising=False)
+    trial = create_trial_app(
+        data_dir=_make_managed_generation(tmp_path),
+        release_root=REPO_ROOT,
+        require_release_manifest=False,
+        probe=_absent,
+    )
+    with TestClient(trial):
+        assert trial.state.initialized, trial.state.startup_errors
+        assert calls == []
+    assert trial.state.shutdown_errors == []
+    assert calls == []
+
+    with TestClient(create_app(data_dir=tmp_path / "public", probe=_absent)) as public:
+        state = public.app.state
+        assert calls == ["created"]
+        assert state.ppm_measure == state.ppm_calibration.measure
+    assert calls == ["created", "stopped"]
 
 
 def test_trial_is_read_only_private_and_reaped_even_on_parent_death(tmp_path):

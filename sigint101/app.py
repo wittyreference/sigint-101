@@ -7,14 +7,12 @@ import json
 import logging
 import os
 import re
-import shlex
 import sqlite3
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from itertools import chain
 from pathlib import Path
 from secrets import token_hex, token_urlsafe
 from time import monotonic
@@ -33,11 +31,23 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .acars import AcarsDecoder, AcarsUnavailable
-from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbPortOccupied, AdsbUnavailable
+from .adsb import DEFAULT_ADSB_HZ, AdsbDecoder, AdsbUnavailable
 from .ais import AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AisDecoder, AisUnavailable
 from .aprs import AprsDecoder, AprsUnavailable
 from .apt import DEFAULT_APT_HZ, AptDecoder, AptUnavailable
 from .battery import BatteryGauge
+from .challenges import (
+    challenge_for,
+    format_evidence,
+    format_pass_summary,
+    rack_label,
+)
+from .challenges import (
+    qualifies as challenge_qualifies,
+)
+from .challenges import (
+    status as challenge_status,
+)
 from .decode import Decoder, DecodeUnavailable
 from .dmr import DmrDecoder, DmrUnavailable
 from .events import log_event, read_events
@@ -51,6 +61,7 @@ from .exam import (
     next_sim_question,
     score_exam,
 )
+from .fieldcard import build_field_rows
 from .flipper import FlipperError, FlipperSelectionError
 from .flipperconsole import FlipperConsole
 from .flock import FlockUnavailable, configured_flock_detector
@@ -65,6 +76,7 @@ from .kiosk import request_exit
 from .law import LAW_CAUTION, LAW_SECTIONS
 from .lessons import CHECK_STAGE, COMMIT_STAGE, SORT_ANSWERS, load_lessons
 from .lora import LoRaListener, LoRaSendLost, LoRaTxDisabled, LoRaUnavailable
+from .meteor import MeteorDecoder, MeteorUnavailable
 from .operate import (
     DEFAULT_INSTRUMENT,
     INSTRUMENTS,
@@ -76,8 +88,8 @@ from .operate import (
 )
 from .operate import instrument as rack_instrument
 from .pocsag import PocsagDecoder, PocsagUnavailable
-from .ppm import PpmUnavailable, measure_pilot_ppm
-from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress
+from .ppm import PpmCalibration, PpmUnavailable, measure_pilot_ppm
+from .progress import CheckAlreadyAnswered, PredictionAlreadyCommitted, Progress, RecallNotDue
 from .provenance import (
     BaselineLog,
     compare_to_baseline,
@@ -87,6 +99,9 @@ from .provenance import (
 from .radio_control import CLAIM_QUEUE_WAIT_S, RadioArbiter, ReceptionSink, finish_console
 from .rayhunter import RayhunterMonitor, RayhunterUnavailable
 from .rds import RDSDecoder, RDSUnavailable
+from .receiver_socket import PortOccupied
+from .retrieval import MAX_CARDS
+from .retrieval import due as recall_due
 from .safety import notice_for, rack_lora_send
 from .spectrum import (
     DEFAULT_BIN,
@@ -101,7 +116,7 @@ from .spectrum import (
     validate_target_span,
 )
 from .sstv import DEFAULT_SSTV_HZ, SstvDecoder, SstvUnavailable
-from .stamps import STAMP_INSTRUMENTS, mint, stamps_from_log
+from .stamps import STAMP_INSTRUMENTS, mint
 from .survey import SurveyUnavailable, WifiSurvey
 from .units import UNITS, get_unit, teaching_position, unit_for_lesson
 
@@ -112,7 +127,8 @@ DATA_DIR = REPO_DIR / "data"
 
 # The RTL-SDR has one antenna input, so only one of these consumers can hold it at a time.
 SDR_CONSUMERS = (
-    "sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr", "apt", "sstv"
+    "sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
+    "apt", "sstv", "meteor",
 )
 
 # The line glyph a home tile falls back to. The waterfall glyph is the one every lesson earns —
@@ -321,6 +337,7 @@ def build_receiver_factories(
     dmr_factory=None,
     apt_factory=None,
     sstv_factory=None,
+    meteor_factory=None,
     flock_factory=None,
     rayhunter_factory=None,
     flipper_factory=None,
@@ -371,6 +388,14 @@ def build_receiver_factories(
                 output_dir=Path(data_dir) / "sstv",
                 data_dir=Path(data_dir),
                 **_sdr_kwargs(),
+                sync_assets=managed,
+            )
+        ),
+        "meteor": meteor_factory or (
+            lambda: MeteorDecoder(
+                data_dir=data_dir,
+                radio_present=lambda: probe().present,
+                list_devices=enumerate_radios,
                 sync_assets=managed,
             )
         ),
@@ -453,10 +478,16 @@ def initialize_console_state(
         state.exam_store = ExamStore(
             resolved_data / "exam.db", managed=managed, read_only=read_only
         )
-        state.ppm_measure = ppm_measure or measure_pilot_ppm
+        if trial:
+            state.ppm_measure = ppm_measure or measure_pilot_ppm
+        else:
+            state.ppm_calibration = PpmCalibration()
+            state.ppm_measure = ppm_measure or state.ppm_calibration.measure
         state.receptions = None
         state.reception_error = None
         state.stamp_error = None
+        state.challenge_error = None
+        state.challenge_start_errors = {}
         state.stamp_window = None
         state.stamp_retry_at = 0.0
         if not trial and backfill_stamps is not None:
@@ -506,10 +537,13 @@ async def shutdown_console_state(state, *, trial: bool = False) -> list[str]:
         for name in names
         if (receiver := getattr(state, name))
     ]
+    receivers.append(("ppm", state.ppm_calibration.stop))
     stores = [("progress", state.progress.close), ("exam", state.exam_store.close)]
     state.shutdown_errors = await finish_console(
         receivers, stores, state.reception_sink, SHUTDOWN_TOTAL_S
     )
+    if ppm_failure := state.ppm_calibration.release_failure():
+        state.shutdown_errors.append(f"ppm: {ppm_failure}")
     for reason in state.shutdown_errors:
         logging.getLogger(__name__).error("console shutdown: %s", reason)
     return state.shutdown_errors
@@ -519,12 +553,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                sweeper_factory=None, decoder_factory=None, lora_factory=None,
                rds_factory=None, adsb_factory=None, aprs_factory=None, pocsag_factory=None,
                acars_factory=None, ais_factory=None, dmr_factory=None,
-               apt_factory=None, sstv_factory=None,
+               apt_factory=None, sstv_factory=None, meteor_factory=None,
                flock_factory=None, rayhunter_factory=None, flipper_factory=None,
                survey_factory=None, pool_path=None,
                ppm_measure=None, list_devices=list_rtlsdr_devices,
                kiosk_exit=request_exit, battery_gauge=None,
-               managed: bool = False) -> FastAPI:
+               clock=time.time, managed: bool = False) -> FastAPI:
     """Build the console with its collaborators injectable.
 
     Tests hand in a fixture pack, a temp data dir, their own probe, and a sweeper that truthfully
@@ -573,6 +607,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         dmr_factory=dmr_factory,
         apt_factory=apt_factory,
         sstv_factory=sstv_factory,
+        meteor_factory=meteor_factory,
         flock_factory=flock_factory,
         rayhunter_factory=rayhunter_factory,
         flipper_factory=flipper_factory,
@@ -597,6 +632,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             receiver = getattr(state, attr)
             receiver.on_reception = _heard(inst, receiver)
             receiver.reception_sink = state.reception_sink
+        if isinstance(state.ais, AisDecoder):
+            state.ais.on_foreign_datagrams = _log_foreign_ais
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -707,6 +744,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if unit is None:
             raise HTTPException(status_code=404, detail=f"unit {unit_id} not found")
         tiles = _lesson_tiles(unit, app.state.lessons, app.state.progress)
+        if tiles and challenge_for(unit.id) is not None:
+            find = _challenge_payload(unit.id)
+            tiles.append({
+                "kind": "find",
+                "unit_id": unit.id,
+                "code": "FIND",
+                "name": "Live find",
+                "glyph": unit.glyph,
+                "status": "",
+                "href": f"/unit/{unit.id}/challenge",
+                "find_state": find["state"],
+                "remaining_s": find["remaining_s"],
+            })
         return templates.TemplateResponse(
             request=request,
             name="unit.html",
@@ -735,6 +785,123 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 or getattr(sweeper, "target", None) is not None):
             sweeper.retune(DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_BIN)
 
+    def _recall_sources() -> list[int]:
+        """Loaded lessons that carry a check block and have been completed."""
+        sources = []
+        for lid, item in app.state.lessons.items():
+            if not item.check:
+                continue
+            row = app.state.progress.get(lid)
+            if row and row["completed"]:
+                sources.append(lid)
+        return sources
+
+    def _parse_int_param(value: str | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _recall_response(request: Request, lesson, unit, sources: list[int], now: float):
+        """Render a pre-lesson recall card or feedback when applicable, else None."""
+        recall_mode = request.query_params.get("recall")
+        if recall_mode in ("skip", "done"):
+            return None
+
+        back_href = f"/unit/{unit.id}" if unit else "/"
+        back_label = f"Unit {unit.id}" if unit else "Home"
+        skip_url = f"/lesson/{lesson.id}?recall=skip"
+        rows = app.state.progress.get_retrieval(sources)
+
+        if recall_mode is None:
+            due_ids = recall_due(rows, now=now, exclude=lesson.id)
+            if not due_ids:
+                return None
+            source = app.state.lessons[due_ids[0]]
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": source,
+                    "card_num": 1,
+                    "card_total": min(MAX_CARDS, len(due_ids)),
+                    "commit_url": f"/api/recall?lesson_id={lesson.id}&source={source.id}&card=1",
+                    "skip_url": skip_url,
+                    "recall_choice": None,
+                    "recall_feedback": None,
+                },
+            )
+
+        if recall_mode == "answered":
+            src_id = _parse_int_param(request.query_params.get("source"))
+            card = _parse_int_param(request.query_params.get("card"))
+            if card not in (1, 2) or src_id not in sources or src_id == lesson.id:
+                return None
+            ret_row = rows.get(src_id)
+            src_lesson = app.state.lessons[src_id]
+            choice = ret_row["last_choice"] if ret_row else None
+            valid_choices = [c["key"] for c in src_lesson.check["choices"]]
+            if choice not in valid_choices:
+                return None
+            remaining = recall_due(rows, now=now, exclude=lesson.id)
+            if card == 1 and remaining:
+                card_total = MAX_CARDS
+                next_label = "Next card"
+                next_url = f"/lesson/{lesson.id}?recall=card&card=2"
+            else:
+                card_total = card
+                next_label = "Start lesson"
+                next_url = f"/lesson/{lesson.id}?recall=done"
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": src_lesson,
+                    "card_num": card,
+                    "card_total": card_total,
+                    "skip_url": skip_url,
+                    "recall_choice": choice,
+                    "recall_feedback": src_lesson.check_feedback(choice),
+                    "next_label": next_label,
+                    "next_url": next_url,
+                },
+            )
+
+        if recall_mode == "card":
+            card = _parse_int_param(request.query_params.get("card"))
+            if card != 2:
+                return None
+            due_ids = recall_due(rows, now=now, exclude=lesson.id)
+            if not due_ids:
+                return None
+            source = app.state.lessons[due_ids[0]]
+            return templates.TemplateResponse(
+                request=request,
+                name="recall.html",
+                context={
+                    "title": lesson.title,
+                    "back_href": back_href,
+                    "back_label": back_label,
+                    "source": source,
+                    "card_num": 2,
+                    "card_total": MAX_CARDS,
+                    "commit_url": f"/api/recall?lesson_id={lesson.id}&source={source.id}&card=2",
+                    "skip_url": skip_url,
+                    "recall_choice": None,
+                    "recall_feedback": None,
+                },
+            )
+
+        return None
+
     @app.get("/lesson/{lesson_id}", response_class=HTMLResponse)
     def lesson_view(request: Request, lesson_id: int):
         """Render one lesson, sealing every post-predict stage until a prediction exists.
@@ -752,12 +919,19 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         lesson = app.state.lessons[lesson_id]
         _restore_lesson_tuning(lesson)
         app.state.progress.mark_opened(lesson_id)
+        saved_stage = app.state.progress.get_stage(lesson_id)
         prediction = app.state.progress.get_prediction(lesson_id)
+        unit = unit_for_lesson(lesson_id)
+        sources = _recall_sources()
+        now = clock()
+        app.state.progress.enroll_recall(sources, now=now)
+        if saved_stage is None and prediction is None:
+            recall_page = _recall_response(request, lesson, unit, sources, now)
+            if recall_page is not None:
+                return recall_page
         committed = prediction is not None
         revealed = lesson.reveal(prediction_committed=True) if committed else None
-        current, reached = _resume_stage(lesson, app.state.progress.get_stage(lesson_id),
-                                         committed)
-        unit = unit_for_lesson(lesson_id)
+        current, reached = _resume_stage(lesson, saved_stage, committed)
         context = {
             "title": lesson.title,
             "back_href": f"/unit/{unit.id}" if unit else "/",
@@ -875,6 +1049,47 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                                         lesson.stage_order.index(CHECK_STAGE))
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
 
+    @app.post("/api/recall")
+    async def recall_answer(lesson_id: int, source: int, card: int, request: Request):
+        """Record one pre-lesson retrieval-card answer into the retrieval table only."""
+        _require_lesson(lesson_id)
+        if card not in (1, 2):
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"recall card must be 1 or 2, got {card}"})
+        src_lesson = app.state.lessons.get(source)
+        src_progress = app.state.progress.get(source) if src_lesson is not None else None
+        if (src_lesson is None or not src_lesson.check or source == lesson_id
+                or not src_progress or not src_progress["completed"]):
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"lesson {source} is not a recall source"})
+        choice = (await _field(request, "choice")).strip()
+        if choice not in [c["key"] for c in src_lesson.check["choices"]]:
+            return JSONResponse(status_code=400, content={
+                "recorded": False, "reason": f"'{choice}' is not one of the check's choices"})
+        correct = choice == src_lesson.check["answer"]
+        try:
+            new_box = app.state.progress.record_recall(
+                source, choice, correct=correct, now=clock()
+            )
+        except RecallNotDue as exc:
+            return JSONResponse(status_code=409, content={"recorded": False, "reason": str(exc)})
+        try:
+            log_event(
+                app.state.events_path,
+                "recall",
+                {"lesson": lesson_id, "source": source, "correct": correct, "box": new_box},
+                sync=managed,
+            )
+        except OSError as exc:
+            if not managed:
+                raise
+            return JSONResponse(status_code=500, content={
+                "recorded": False, "reason": f"event log sync failed: {exc}"})
+        return RedirectResponse(
+            f"/lesson/{lesson_id}?recall=answered&source={source}&card={card}",
+            status_code=303,
+        )
+
     @app.post("/api/sort")
     async def sort_answer(lesson_id: int, request: Request):
         """Record one card-sort answer (M5's 12-card law sort) and return its why and citation.
@@ -921,12 +1136,14 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return RedirectResponse(f"/lesson/{lesson_id}", status_code=303)
 
     def _safe_back(back: str | None) -> tuple[str, str]:
-        """Resolve an optional internal back path for /law, refusing any external URL."""
+        """Resolve an optional internal back path for /law and /operate, refusing external URLs."""
         if back and back.startswith("/") and not back.startswith("//"):
             if re.fullmatch(r"/lesson/\d+", back):
                 return back, f"Lesson {back.rsplit('/', 1)[-1]}"
             if re.fullmatch(r"/unit/\d+", back):
                 return back, f"Unit {back.rsplit('/', 1)[-1]}"
+            if re.fullmatch(r"/unit/\d+/challenge", back):
+                return back, "Live find"
         return "/", "Home"
 
     @app.get("/law", response_class=HTMLResponse)
@@ -1240,14 +1457,17 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         row is None with no radio, and until the sweep running now has finished a pass: a row kept
         from before a gain step, a retune or a restart was swept under other settings. It is None,
         too, while the newest row is stale: too old to be a reading, or one of the first two rows
-        after a stall (Sweeper.newest).
+        after a stall (Sweeper.newest). Respect a prior release to another receiver when polling.
         """
         sweeper = app.state.sweeper
-        if not sweeper.running:
+        if not sweeper.running and not getattr(sweeper, "released", False):
             try:
-                sweeper.start()
+                _claim_sdr("sweeper", sweeper.start, reclaim=False)
             except SpectrumUnavailable:
                 pass
+            else:
+                _started("spectrum", {"command": sweeper.live_command(),
+                                      "command_from": "process"})
         return sweeper.reading()
 
     def _snapshot():
@@ -1310,8 +1530,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         """Measure the receiver's crystal error against a station's 19 kHz stereo pilot.
 
         rtl_fm needs the dongle to itself, so the measurement claims it like any other tenant and
-        holds the claim until rtl_fm is done: a waterfall poll arriving mid-capture waits rather
-        than taking the radio back (the next spectrum poll after it brings the sweep back). ppm is
+        holds the reservation during capture. A waterfall poll that arrives mid-capture waits,
+        and an unconfirmed exit blocks subsequent claims until reap. ppm is
         None with a reason whenever no pilot is there to measure against — a mono station carries
         none, and a weak one reads the same — never a guessed ppm. It is None with a reason, too,
         when the capture held nothing to measure: rtl_fm stalled and was cut off at its deadline,
@@ -1351,25 +1571,26 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
     # by naming only itself to _claim_sdr, which stands every other consumer down (release) and
     # clears any prior stand-down on the caller (resume). LoRa (meshtasticd) and Flock (wlan1
     # monitor) ride their own radios and are deliberately absent from this set.
-    sdr_consumers = ("sweeper", "decoder", "rds", "adsb", "aprs", "pocsag", "acars", "ais", "dmr",
-                     "apt", "sstv")
-
     unavailable = {
         "ppm": PpmUnavailable, "sweeper": SpectrumUnavailable, "decoder": DecodeUnavailable,
         "rds": RDSUnavailable, "adsb": AdsbUnavailable, "aprs": AprsUnavailable,
         "pocsag": PocsagUnavailable, "acars": AcarsUnavailable, "ais": AisUnavailable,
         "dmr": DmrUnavailable, "apt": AptUnavailable, "sstv": SstvUnavailable,
+        "meteor": MeteorUnavailable,
     }
 
-    def _claim_sdr(target: str, start=None):
+    def _claim_sdr(target: str, start=None, *, reclaim=True):
         """Reserve the radio through stand-down and start, without holding the arbiter mutex."""
         deadline = time.monotonic() + CLAIM_QUEUE_WAIT_S
         refusal = unavailable[target]
-        consumers = {name: getattr(app.state, name) for name in sdr_consumers}
+        consumers = {name: getattr(app.state, name) for name in SDR_CONSUMERS}
         receiver = consumers.get(target)
         intent = None
         prepare = getattr(receiver, "prepare_start", None)
+        calibration = app.state.ppm_calibration
         try:
+            if reason := calibration.release_failure():
+                raise refusal(reason)
             for consumer in consumers.values():
                 failure = getattr(consumer, "release_failure", None)
                 if failure and (reason := failure()):
@@ -1377,6 +1598,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             if prepare is not None:
                 intent = prepare(for_claim=True, deadline=deadline)
             with app.state.radio_arbiter.reserve(target, refusal, deadline):
+                # PPM may have failed to reap since this request joined the queue.
+                if reason := calibration.release_failure():
+                    raise refusal(reason)
+                if not reclaim and getattr(receiver, "released", False):
+                    raise refusal("the radio was released to another program")
                 if prepare is not None:
                     receiver.validate_start(intent)
                 for name, consumer in consumers.items():
@@ -1387,7 +1613,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                             raise refusal(reason)
                 if prepare is not None:
                     return receiver.launch_start(intent, claimed=True)
-                if receiver is not None:
+                if receiver is not None and reclaim:
                     receiver.resume()
                 return start() if start is not None else None
         finally:
@@ -1404,8 +1630,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         if reason.startswith("no RTL-SDR on the USB bus"):
             return {"cause": "no_radio", "message": "No RTL-SDR on the USB bus.",
                     "next_step": "Plug in the RTL-SDR."}
-        if isinstance(exc, AdsbPortOccupied):
-            return {"cause": "unavailable", "next_step": "Free the port, then retry ADS-B."}
+        if isinstance(exc, PortOccupied):
+            label = "ADS-B" if kind == "adsb" else "AIS"
+            return {"cause": "unavailable", "next_step": f"Free the port, then retry {label}."}
         if reason == "no Flipper on USB":
             return {"cause": "no_radio", "message": "No Flipper on USB.",
                     "next_step": "Connect the Flipper over USB."}
@@ -1426,6 +1653,12 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             command = "Run deploy/provision.sh"
             if tool in {"dsd-fme", "satdump", "sstv"}:
                 command += " --with-optional"
+            if tool == "nmcli":
+                # nmcli ships with NetworkManager, so it is missing only where something else runs
+                # the network (dhcpcd, ifupdown). Installing NetworkManager there takes over the
+                # interfaces and can drop a Wi-Fi SSH link, so no one-line command: say why.
+                command = ("NetworkManager doesn't run this box's network, so the survey can't "
+                           "read Wi-Fi here. Switching is a bench job for the box's owner.")
             return {"cause": "missing_tool", "message": f"{tool} is not installed.",
                     "next_step": command}
         return {"cause": "unavailable"}
@@ -1480,7 +1713,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("sweeper", sweeper.start)
             except SpectrumUnavailable as exc:
                 return _refused("spectrum", exc, {"rows": []})
-            _started("spectrum", {"command": " ".join(sweeper.command())})
+            _started("spectrum", {"command": sweeper.live_command(), "command_from": "process"})
         # The span rides along with every response because the waterfall cannot label its axis
         # (or spot a retune) from bare rows of dB values. bin_size is the requested bin — a
         # maximum rtl_power may undercut — while each row's freq_step reports what the hardware
@@ -1500,7 +1733,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "bin_size": sweeper.bin_size,
             "gain": sweeper.gain,
             # The exact rtl_power line running now, for the panel's command strip.
-            "command": shlex.join(sweeper.command()) if sweeper.running else None,
+            "command": sweeper.live_command(),
             # Whether the newest row is still a reading, by the rule the baseline panel's reading
             # follows (Sweeper.newest): null while it is; "stalled" once rtl_power has gone too
             # long without a pass; "resuming" for the first two passes after, which carry levels
@@ -1551,7 +1784,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("decoder", decoder.start)
             except DecodeUnavailable as exc:
                 return _refused("decode", exc, {"decodes": []}, decoder.watch)
-            _started("decode", {"command": decoder.live_command()})
+            _started("decode", {"command": decoder.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1615,7 +1848,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 detector.start()
             except FlockUnavailable as exc:
                 return _refused("flock", exc, {"detections": []}, detector.watch)
-            _started("flock", {"interface": detector.interface})
+            tool = getattr(detector, "tool", None)
+            _started("flock", {"interface": detector.interface, "tool": tool,
+                                "command": detector.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": detector.live_command(),
@@ -1699,7 +1934,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("rds", decoder.start)
             except RDSUnavailable as exc:
                 return _refused("rds", exc, {"station": None}, decoder.watch)
-            _started("rds", {"freq_hz": decoder.freq_hz})
+            _started("rds", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1723,7 +1959,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("adsb", decoder.start)
             except AdsbUnavailable as exc:
                 return _refused("adsb", exc, {"aircraft": []}, decoder.watch)
-            _started("adsb", {"freq_hz": DEFAULT_ADSB_HZ})
+            _started("adsb", {"freq_hz": DEFAULT_ADSB_HZ, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1748,7 +1985,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("aprs", decoder.start)
             except AprsUnavailable as exc:
                 return _refused("aprs", exc, {"stations": []}, decoder.watch)
-            _started("aprs", {"freq_hz": decoder.freq_hz})
+            _started("aprs", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1772,7 +2010,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("pocsag", decoder.start)
             except PocsagUnavailable as exc:
                 return _refused("pocsag", exc, {"pages": []}, decoder.watch)
-            _started("pocsag", {"freq_hz": decoder.freq_hz})
+            _started("pocsag", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                                "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1796,7 +2035,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("acars", decoder.start)
             except AcarsUnavailable as exc:
                 return _refused("acars", exc, {"messages": []}, decoder.watch)
-            _started("acars", {"freq_hz": decoder.freq_hz})
+            _started("acars", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                               "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1804,6 +2044,13 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": decoder.freq_hz,
             "messages": decoder.messages(limit),
         }
+
+    def _log_foreign_ais(count, source_port):
+        try:
+            log_event(app.state.events_path, "ais_foreign_datagrams",
+                      {"count": count, "source_port": source_port})
+        except OSError as exc:
+            logging.getLogger(__name__).warning("could not log rejected AIS datagrams: %s", exc)
 
     @app.get("/api/ais")
     def ais(limit: int | None = None):
@@ -1820,7 +2067,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("ais", decoder.start)
             except AisUnavailable as exc:
                 return _refused("ais", exc, {"vessels": []}, decoder.watch)
-            _started("ais", {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ})
+            _started("ais", {"channel_a_hz": AIS_CHANNEL_A_HZ, "channel_b_hz": AIS_CHANNEL_B_HZ,
+                             "command": decoder.live_command(), "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1845,7 +2093,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("dmr", decoder.start)
             except DmrUnavailable as exc:
                 return _refused("dmr", exc, {"calls": []}, decoder.watch)
-            _started("dmr", {"freq_hz": decoder.freq_hz})
+            _started("dmr", {"freq_hz": decoder.freq_hz, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1869,7 +2118,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("apt", decoder.start)
             except AptUnavailable as exc:
                 return _refused("apt", exc, {"images": []}, decoder.watch)
-            _started("apt", {"freq_hz": DEFAULT_APT_HZ})
+            _started("apt", {"freq_hz": DEFAULT_APT_HZ, "command": decoder.live_command(),
+                             "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1892,7 +2142,8 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 _claim_sdr("sstv", decoder.start)
             except SstvUnavailable as exc:
                 return _refused("sstv", exc, {"images": []}, decoder.watch)
-            _started("sstv", {"freq_hz": DEFAULT_SSTV_HZ})
+            _started("sstv", {"freq_hz": DEFAULT_SSTV_HZ, "command": decoder.live_command(),
+                              "command_from": "process"})
         return {
             "available": True,
             "command": decoder.live_command(),
@@ -1900,6 +2151,27 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             "freq_hz": decoder.freq_hz,
             "images": decoder.images(limit),
         }
+
+    @app.get("/api/meteor")
+    def meteor_status():
+        return app.state.meteor.snapshot()
+
+    @app.post("/api/meteor/listen")
+    def meteor_listen():
+        decoder = app.state.meteor
+        if decoder.running:
+            return decoder.snapshot()
+        try:
+            launched = _claim_sdr("meteor")
+        except MeteorUnavailable as exc:
+            empty = decoder.snapshot()
+            for key in ("available", "reason", "command", "retry_in"):
+                empty.pop(key, None)
+            return _refused("meteor", exc, empty, decoder.watch)
+        status = decoder.snapshot()
+        if launched:
+            _started("meteor", {"freq_hz": status["freq_hz"], "mode": status["mode"]})
+        return status
 
     # The image decoders (APT, SSTV) write their decoded PNGs under data/apt and data/sstv; this
     # serves those files to the panels and nothing else. The path is confined to those two folders
@@ -1924,8 +2196,9 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         elif not radio.present:
             state = "absent"
         else:
-            busy = app.state.radio_arbiter.busy
-            for name in sdr_consumers:
+            busy = (app.state.radio_arbiter.busy
+                    or app.state.ppm_calibration.release_failure() is not None)
+            for name in SDR_CONSUMERS:
                 if busy:
                     break
                 receiver = getattr(app.state, name)
@@ -2030,13 +2303,125 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         app.state.stamp_error = f"a reception badge could not be saved: {exc}"
         app.state.stamp_retry_at = monotonic() + STAMP_RETRY_S
 
+    def _challenge_qualifies(attempt: dict, stamp: dict) -> bool:
+        ch = challenge_for(attempt["unit_id"])
+        return ch is not None and challenge_qualifies(ch, attempt, stamp)
+
+    def _credit_challenges(progress, stamps, *, qualifies_fn=None) -> None:
+        check = qualifies_fn or _challenge_qualifies
+        try:
+            credited = progress.credit_challenges(stamps, check)
+        except (OSError, sqlite3.Error) as exc:
+            app.state.challenge_error = f"a live find pass could not be saved: {exc}"
+            return
+        app.state.challenge_error = None
+        for passed in credited:
+            try:
+                log_event(
+                    app.state.events_path,
+                    "challenge_pass",
+                    {
+                        "unit": passed["unit_id"],
+                        "started_at": passed["started_at"],
+                        "instrument": passed["instrument"],
+                        "digest": passed["digest"],
+                        "event_id": passed.get("event_id"),
+                    },
+                    sync=managed,
+                )
+            except OSError as exc:
+                app.state.challenge_error = f"a live find pass could not be logged: {exc}"
+
+    def _challenge_payload(unit_id: int) -> dict:
+        ch = challenge_for(unit_id)
+        if ch is None or get_unit(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        read_error = None
+        try:
+            saved = app.state.progress.challenge(unit_id)
+        except (OSError, sqlite3.Error) as exc:
+            saved = {"attempt": None, "attempt_pass": None, "latest_pass": None, "passes": 0}
+            read_error = f"the live find state could not be read: {exc}"
+        now = round(clock(), 3)
+        st = challenge_status(
+            ch, saved["attempt"], saved["latest_pass"], now,
+            attempt_pass=saved["attempt_pass"],
+        )
+        shown_pass = (
+            saved["attempt_pass"]
+            if st["state"] == "passed" and saved["attempt_pass"] is not None
+            else saved["latest_pass"]
+        )
+        allowed = [
+            {"key": key, "label": rack_label(key),
+             "href": f"/operate/{key}?back=/unit/{unit_id}/challenge"}
+            for key in ch.allowed
+        ]
+        return {
+            "unit_id": unit_id,
+            "state": st["state"],
+            "prompt": ch.prompt,
+            "allowed": allowed,
+            "window_s": st["window_s"],
+            "started_at": st["started_at"],
+            "remaining_s": st["remaining_s"],
+            "reason": st["reason"],
+            "latest_pass": format_pass_summary(shown_pass),
+            "passes": saved["passes"],
+            "error": (
+                read_error
+                or app.state.challenge_start_errors.get(unit_id)
+                or app.state.challenge_error
+            ),
+        }
+
     def _backfill_stamps(progress, window, appended=()):
         # In append order, including rotations. Remembering each credited event tolerates a
         # clock reset. Compact the watermark when the log rolls without removing earned badges.
-        stamps = stamps_from_log(read_events(app.state.events_path))
+        events_list = read_events(app.state.events_path)
+        start_pos: dict[tuple[int, float], int] = {}
+        legacy: Counter[str] = Counter()
+        stamps_list = []
+        challenge_stamps = []
+        for idx, event in enumerate(events_list):
+            if isinstance(event, dict) and event.get("kind") == "challenge_start":
+                pl = event.get("payload")
+                if (isinstance(pl, dict)
+                        and type(pl.get("unit")) is int
+                        and type(pl.get("started_at")) in (int, float)):
+                    start_pos[(pl["unit"], float(pl["started_at"]))] = idx
+            if (stamp := mint(event)) is None:
+                continue
+            if "event_id" not in event:
+                digest = stamp["digest"]
+                legacy[digest] += 1
+                if legacy[digest] > 1:
+                    # Occurrence belongs in the watermark only; the evidence hash stays canonical.
+                    stamp["watermark"] = f"{digest}{legacy[digest]:016x}"
+            stamps_list.append(stamp)
+            challenge_stamps.append(
+                {**stamp, "event_id": event.get("event_id"), "_log_pos": idx}
+            )
+        tail_pos = len(events_list)
+        for s in appended:
+            stamps_list.append(s)
+            challenge_stamps.append({**s, "_log_pos": tail_pos})
+
+        def _backfill_qualifies(attempt: dict, stamp: dict) -> bool:
+            if not _challenge_qualifies(attempt, stamp):
+                return False
+            # Only receptions logged after the attempt's own challenge_start line can satisfy
+            # it during backfill, so a backward clock step cannot credit a pre-Start reception.
+            # If the start line has already rotated out of the retained log, every retained event
+            # arrived after it and stays eligible.
+            pos = start_pos.get((attempt["unit_id"], float(attempt["started_at"])))
+            log_pos = stamp.get("_log_pos")
+            return pos is None or log_pos is None or log_pos > pos
+
+        _credit_challenges(progress, challenge_stamps, qualifies_fn=_backfill_qualifies)
         # A different log writer may already have rotated out the event this hook just appended.
         # When it is still in the snapshot its event ID makes the second credit a no-op.
-        if progress.record_stamps(chain(stamps, appended), backfill=True):
+        if progress.record_stamps(stamps_list, backfill=True):
             app.state.stamp_window = window
             app.state.stamp_error = None
 
@@ -2096,10 +2481,15 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                 app.state.reception_error = None
                 if app.state.receptions is not None:
                     app.state.receptions.append(without_page_words(event))
+                stamp = mint(event)
+                if stamp is not None:
+                    _credit_challenges(
+                        progress, ({**stamp, "event_id": event.get("event_id")},)
+                    )
                 if monotonic() < app.state.stamp_retry_at:
                     # The log retains this reception for the next recovery pass in append order.
                     return
-                if (stamp := mint(event)) is None:
+                if stamp is None:
                     return
                 try:
                     window = _stamp_window()
@@ -2166,6 +2556,108 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
                      "stamps": rows, "stamp_error": error},
         )
 
+    @app.get("/field", response_class=HTMLResponse)
+    def field_card(request: Request):
+        """Show each rack instrument's real tool and the exact command the console ran.
+
+        Strictly read-only: starts nothing, claims nothing, logs nothing, never calls .command(),
+        and leaves the rack's remembered instrument untouched.
+        """
+        error = app.state.stamp_error
+        try:
+            events = read_events(app.state.events_path)
+        except OSError as exc:
+            events = []
+            error = error or f"the event log could not be read: {exc}"
+        try:
+            earned = app.state.progress.stamps()
+        except (OSError, sqlite3.Error) as exc:
+            earned = []
+            error = error or f"the logbook could not be read: {exc}"
+        rows = build_field_rows(app.state, events, earned)
+        return templates.TemplateResponse(
+            request=request, name="field.html",
+            context={"title": "Field card", "back_href": "/operate", "back_label": "Rack",
+                     "rows": rows, "field_error": error},
+        )
+
+    @app.get("/api/challenges/{unit_id}")
+    def challenge_get(unit_id: int):
+        """Return one unit's live-find challenge state, countdown, rack links, and pass history."""
+        return _challenge_payload(unit_id)
+
+    @app.post("/api/challenges/{unit_id}/start")
+    def challenge_start(unit_id: int):
+        """Start or restart one unit's live-find attempt without altering earned passes (D16)."""
+        ch = challenge_for(unit_id)
+        if ch is None or get_unit(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        start_error = None
+        # Hold reception_lock across reading the clock, storing the attempt, and appending
+        # challenge_start so the log order matches what live receptions see, while preserving
+        # the console's lock order (reception_lock -> Progress._lock -> events._WRITE_LOCK).
+        with reception_lock:
+            started_at = round(clock(), 3)
+            previous = None
+            try:
+                previous = app.state.progress.challenge(unit_id)["attempt"]
+                saved = app.state.progress.start_challenge(unit_id, started_at, ch.window_s)
+            except (OSError, sqlite3.Error) as exc:
+                saved = False
+                start_error = f"the live find could not be started: {exc}"
+            if saved:
+                try:
+                    log_event(
+                        app.state.events_path,
+                        "challenge_start",
+                        {
+                            "unit": unit_id,
+                            "started_at": started_at,
+                            "window_s": ch.window_s,
+                            "allowed": list(ch.allowed),
+                        },
+                        sync=managed,
+                    )
+                except OSError as exc:
+                    start_error = f"the live find start could not be logged: {exc}"
+                    # Undo the saved attempt so a restart after a clock step cannot credit
+                    # a pre-Start reception without a challenge_start line to order against.
+                    try:
+                        app.state.progress.restore_challenge(unit_id, previous)
+                    except (OSError, sqlite3.Error):
+                        pass
+            elif start_error is None:
+                start_error = "the live find store is closed"
+            if start_error is None:
+                app.state.challenge_start_errors.pop(unit_id, None)
+            else:
+                app.state.challenge_start_errors[unit_id] = start_error
+        payload = _challenge_payload(unit_id)
+        if start_error is not None:
+            payload["error"] = start_error
+            return JSONResponse(status_code=500, content=payload)
+        return payload
+
+    @app.get("/unit/{unit_id}/challenge", response_class=HTMLResponse)
+    def challenge_view(request: Request, unit_id: int):
+        """Interactive Tier B live-find screen for a receiving unit."""
+        unit = get_unit(unit_id)
+        if unit is None or challenge_for(unit_id) is None:
+            raise HTTPException(status_code=404, detail=f"unit {unit_id} has no live find")
+        payload = _challenge_payload(unit_id)
+        return templates.TemplateResponse(
+            request=request,
+            name="challenge.html",
+            context={
+                "title": f"Unit {unit.id} · Live find",
+                "back_href": f"/unit/{unit.id}",
+                "back_label": f"Unit {unit.id}",
+                "unit": unit,
+                "challenge": payload,
+                "evidence_text": format_evidence(payload),
+            },
+        )
+
     @app.get("/operate")
     def operate_home():
         """The rack opens on the instrument last used, or the waterfall the first time."""
@@ -2174,7 +2666,7 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
         return RedirectResponse(f"/operate/{key}", status_code=303)
 
     @app.get("/operate/{key}", response_class=HTMLResponse)
-    def operate_view(request: Request, key: str):
+    def operate_view(request: Request, key: str, back: str | None = None):
         """One instrument in the rack, remembered so /operate reopens on it.
 
         The panel's own poll claims the dongle through _claim_sdr exactly as a lesson's does, so
@@ -2194,10 +2686,11 @@ def create_app(*, pack_dir=PACK_DIR, data_dir=DATA_DIR, probe=probe_rtlsdr,
             freq_hz = getattr(receiver, "freq_hz", None)
         if freq_hz is None and len(inst.fixed_hz) == 1:
             freq_hz = inst.fixed_hz[0]
+        back_href, back_label = _safe_back(back)
         return templates.TemplateResponse(
             request=request,
             name="operate.html",
-            context={"title": "Operator mode", "back_href": "/", "back_label": "Home",
+            context={"title": "Operator mode", "back_href": back_href, "back_label": back_label,
                      "instruments": INSTRUMENTS, "inst": inst, "freq_hz": freq_hz,
                      # The pager shows framing only wherever it is tuned; its dial says so.
                      "text_withheld": inst.key == "pager",

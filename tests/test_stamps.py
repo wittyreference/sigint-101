@@ -72,7 +72,10 @@ def test_mint_refuses_non_live_or_incomplete_events(event):
 def test_catalog_matches_receiver_keys_and_uses_instrument_specific_provenance():
     from sigint101.stamps import STAMP_INSTRUMENTS
 
-    assert STAMP_INSTRUMENTS == tuple(inst.key for inst in INSTRUMENTS if inst.key in KEYS) == KEYS
+    # Meteor has badge eligibility before its rack and gallery are registered.
+    assert "meteor" in STAMP_INSTRUMENTS
+    assert tuple(key for key in STAMP_INSTRUMENTS if key != "meteor") == KEYS
+    assert tuple(inst.key for inst in INSTRUMENTS if inst.key in KEYS) == KEYS
     for key in KEYS:
         fields = {}
         if key == "ais":
@@ -510,3 +513,13 @@ def test_the_rack_reception_strip_links_to_the_logbook(tmp_path):
         assert '<a class="rack__log" href="/logbook" data-rack-log' in html
         assert 'data-rack-log-line' in html
         assert client.get("/logbook").status_code == 200
+
+
+def test_meteor_stamp_requires_a_logged_live_picture_with_provenance():
+    image = {"path": "meteor/pass-1/MSU-MR-1.png", "product": "MSU-MR-1", "pass_id": "pass-1"}
+    event = _event("meteor", tool="satdump", command="satdump live meteor_m2-x_lrpt",
+                   freq_hz=137900000, item=image)
+    assert _mint(event)["instrument"] == "meteor"
+    for fields in ({"item": {}}, {"item": {**image, "replay": True}}, {"replay": True},
+                   {"sample": True}, {"radio": None}, {"freq_hz": None}):
+        assert _mint({**event, "payload": {**event["payload"], **fields}}) is None

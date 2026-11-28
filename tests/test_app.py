@@ -23,7 +23,7 @@ from sigint101.ais import AisDecoder
 from sigint101.app import create_app
 from sigint101.aprs import AprsDecoder
 from sigint101.apt import AptDecoder
-from sigint101.childproc import ChildWatch
+from sigint101.childproc import ChildWatch, running_command
 from sigint101.decode import Decoder, parse_decode_line
 from sigint101.dmr import DmrDecoder
 from sigint101.events import log_event, read_events
@@ -44,6 +44,7 @@ from sigint101.spectrum import (
     validate_span,
 )
 from sigint101.sstv import SstvDecoder
+from tests.child_fakes import Child
 from tests.test_spectrum import (
     FM_LINES,
     FailingPipeProc,
@@ -92,20 +93,29 @@ class _StubSweeper:
     boundary — never a fake baked into the product, which the no-mock invariant forbids.
     """
 
-    def __init__(self, rows):
+    def __init__(self, rows, *, proc=None):
         self._rows = list(rows)
         self._started = False
+        self._proc = proc
         self.low, self.high, self.bin_size, self.gain = 88_000_000, 108_000_000, 125_000, None
 
     @property
     def running(self):
-        return self._started
+        return self._started and (self._proc is None or self._proc.poll() is None)
 
     def start(self):
         self._started = True
+        if self._proc is None or self._proc.poll() is not None:
+            self._proc = Child(self.command())
 
     def command(self):
         return ["rtl_power", "-f", f"{self.low}:{self.high}:{self.bin_size}"]
+
+    def live_command(self):
+        if not self._started:
+            return None
+        proc = self._proc if self._proc is not None else Child(self.command())
+        return running_command(proc)
 
     def rows(self, limit=None):
         return self._rows if limit is None else self._rows[-limit:]
@@ -126,12 +136,14 @@ class _StubSweeper:
 
     def release(self):
         self._started = False
+        self._proc = None
 
     def resume(self):
         pass
 
     def stop(self):
         self._started = False
+        self._proc = None
 
 
 def _rows():
@@ -1666,11 +1678,14 @@ def test_spectrum_releases_the_acars_decoder(tmp_path):
 
 
 def test_ais_reports_503_and_a_reason_when_no_radio(tmp_path):
-    # rtl_ais present (injected which) so this pins the no-radio refusal, not a missing-tool one.
+    # A compatible companion makes this pin the no-radio refusal.
+    companion = tmp_path / "rtl_ais-sigint101"
+    companion.write_text("#!/bin/sh\necho sigint101-ais-udp-v1\n", encoding="utf-8")
+    companion.chmod(0o755)
     with _client(tmp_path,
                  ais_factory=lambda: AisDecoder(
-                     radio_present=lambda: False,
-                     which=lambda name: "/usr/bin/" + name)) as client:
+                     radio_present=lambda: False, port=0,
+                     which=lambda _: str(companion))) as client:
         resp = client.get("/api/ais")
     assert resp.status_code == 503
     body = resp.json()
@@ -3104,7 +3119,7 @@ def _fed_sweeper(procs, bus, now):
     restart back-off runs on.
     """
     def spawn(cmd):
-        procs.append(FedProc())
+        procs.append(FedProc(cmd))
         return procs[-1]
     return Sweeper(spawn=spawn, radio_present=lambda: bool(bus),
                    list_devices=lambda: tuple(RtlSdrDevice(i, s) for i, s in enumerate(bus)),

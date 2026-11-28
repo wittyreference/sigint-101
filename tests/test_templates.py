@@ -1543,6 +1543,73 @@ def test_a_grown_refusal_keeps_the_lesson_keys_and_complete_on_screen():
         assert set(_decls(message[1])) == {"max-height", "overflow-y"}, message[1]
 
 
+# --- lesson 39's Wi-Fi census in the fixed panel ----------------------------------------------
+# M39's observe asks the learner to compare channels, so the census has to show more than one row
+# at a time in the fixed 124 px panel. Measured at 800x480 before the fix: a 76 px list window and
+# 61 px rows (a label line over a summary line), so one row and a sliver were in view.
+
+def _survey_list_classes():
+    """The classes on the survey macro's census list."""
+    html = PANELS_HTML.read_text()
+    body = re.search(r"\{% macro survey\([^)]*\) %\}(.*?)\{% endmacro %\}", html, re.S).group(1)
+    ul = re.search(r"<ul\b[^>]*\bdata-survey-list\b[^>]*>", body).group(0)
+    return re.search(r'class="([^"]*)"', ul).group(1).split()
+
+
+def survey_census_rows_in_view(css=None):
+    """Whole census rows the lesson's survey list shows at 800x480, by CSS arithmetic: the panel
+    less its border and head, over one row's padding, grid lines, row gap and rule."""
+    decls = {}
+    for sel, body in _css_rules(css):
+        if sel == ".decoder__item":
+            decls.update(_decls(body))
+    for cls in _survey_list_classes():
+        for sel, body in _css_rules(css):
+            if sel in (f".{cls} > .decoder__item", f".{cls} .decoder__item"):
+                decls.update(_decls(body))
+    lines = len(re.findall(r'"[^"]*"', decls["grid-template-areas"]))
+    pad_y = _px(decls["padding"])
+    row_gap = _px(decls.get("row-gap") or decls["gap"])
+    line = _px(decls["font-size"]) * float(_css_decl("body", "line-height", css))
+    rule = _px(decls["border-bottom"])
+    row = 2 * pad_y + lines * line + (lines - 1) * row_gap + rule
+    window = (_px(_css_decl(".decoder", "height", css))
+              - 2 * _px(_css_decl(".decoder", "border", css)) - DECODER_HEAD_PX)
+    return math.floor(window / row)
+
+
+def test_the_lesson_survey_census_shows_at_least_two_whole_rows():
+    # DECODER_HEAD_PX was measured with this badge size; a change to it must re-measure.
+    assert _css_decl(".decoder__status", "font-size") == DECODER_BADGE_FONT_SIZE
+    assert survey_census_rows_in_view() >= 2
+
+
+def _census_decls(suffix, css=None):
+    """Declarations of every top-level census-list rule whose selector ends with `suffix`."""
+    decls = {}
+    for sel, body in _css_rules(css):
+        for part in _selectors(sel):
+            if part.startswith(".decoder__list--census") and part.endswith(suffix):
+                decls.update(_decls(body))
+    return decls
+
+
+def test_a_census_row_stays_one_line_whatever_the_ssid_lengths():
+    # The row count above holds only while a row is one line. A busy 2.4 GHz channel's SSIDs can
+    # run to 32 characters each; the column holds about 54, so a wrapped summary would show one
+    # row again. Nothing in a row wraps: the SSID names shrink with an ellipsis, and the "+N",
+    # hidden and open counts beside them never shrink. survey.js puts them in these two spans.
+    row = _census_decls("> .decoder__item")
+    assert row.get("white-space") == "nowrap", row
+    read = _census_decls(".decoder__read")
+    assert read.get("display") == "flex" and read.get("min-width") == "0", read
+    names = _census_decls(".census__names")
+    assert names.get("overflow") == "hidden" and names.get("text-overflow") == "ellipsis", names
+    assert names.get("min-width") == "0", names
+    tail = _census_decls(".census__tail")
+    assert tail.get("flex") == "none" or tail.get("flex-shrink") == "0", tail
+
+
 def test_radar_and_gallery_panels_match_the_refusal_hide_rule():
     # app.css hides every direct child of .decoder except head and empty during a refusal. That is
     # what collapses the gallery frame on apt/sstv and gives the radar its full height on adsb.
