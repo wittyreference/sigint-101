@@ -830,3 +830,79 @@ def test_credit_challenges_idempotent_across_double_calls_backfills_and_conflict
         if e["kind"] == "challenge_pass"
     ]
     assert len(pass_events) == 1
+
+
+# --- R2-N1 & R2-N2: failed challenge_start write undoes attempt; start error persists on poll ---
+
+
+def test_start_log_failure_undoes_attempt_so_clock_step_restart_never_credits_old_reception(
+    tmp_path, monkeypatch
+):
+    # Probe P1d: LoRa heard at ts=2000; clock steps back to 1500; Start's challenge_start write
+    # fails (disk full). The attempt must be undone so restart backfill never credits ts=2000.
+    now = [2000.0]
+    _patch_log_clock(monkeypatch, now)
+    real_log = console.log_event
+
+    with _challenge_client(tmp_path, now) as client:
+        _hear_lora(client)
+        now[0] = 1500.0
+
+        def fail_start(path, kind, payload, *args, **kwargs):
+            if kind == "challenge_start":
+                raise OSError("disk full")
+            return real_log(path, kind, payload, *args, **kwargs)
+
+        monkeypatch.setattr(console, "log_event", fail_start)
+        failed = client.post("/api/challenges/9/start")
+        assert failed.status_code == 500
+        body = failed.json()
+        assert body["state"] == "idle"
+        assert body["error"] and "disk full" in body["error"]
+
+        # R2-N2: Start's error reason persists across subsequent GET polls until a clean Start.
+        polled = client.get("/api/challenges/9").json()
+        assert polled["state"] == "idle"
+        assert polled["error"] and "disk full" in polled["error"]
+        # Other units do not inherit Unit 9's start error.
+        assert client.get("/api/challenges/4").json()["error"] is None
+
+    # After restart (with log writes working again), backfill must NOT credit ts=2000.
+    monkeypatch.setattr(console, "log_event", real_log)
+    with _challenge_client(tmp_path, now) as client:
+        after_restart = client.get("/api/challenges/9").json()
+        assert after_restart["state"] == "idle"
+        assert after_restart["passes"] == 0
+        assert after_restart["latest_pass"] is None
+
+        # A clean Start clears any prior start error and begins a live attempt.
+        ok = client.post("/api/challenges/9/start")
+        assert ok.status_code == 200
+        assert ok.json()["state"] == "active"
+        assert ok.json()["error"] is None
+
+        # If a later Try-again Start fails to log, the previous attempt is restored intact.
+        now[0] = 1600.0
+        real_log2 = console.log_event
+
+        def fail_second_start(path, kind, payload, *args, **kwargs):
+            if kind == "challenge_start":
+                raise OSError("read-only fs")
+            return real_log2(path, kind, payload, *args, **kwargs)
+
+        monkeypatch.setattr(console, "log_event", fail_second_start)
+        retry_failed = client.post("/api/challenges/9/start")
+        assert retry_failed.status_code == 500
+        retry_body = retry_failed.json()
+        assert retry_body["state"] == "active"
+        assert retry_body["started_at"] == 1500.0
+        assert retry_body["error"] and "read-only fs" in retry_body["error"]
+        assert client.get("/api/challenges/9").json()["error"] == retry_body["error"]
+
+        # Restoring log writes and succeeding clears the persisted start error.
+        monkeypatch.setattr(console, "log_event", real_log2)
+        recovered = client.post("/api/challenges/9/start")
+        assert recovered.status_code == 200
+        assert recovered.json()["started_at"] == 1600.0
+        assert recovered.json()["error"] is None
+        assert client.get("/api/challenges/9").json()["error"] is None

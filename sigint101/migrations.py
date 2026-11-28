@@ -78,6 +78,16 @@ _PROGRESS_TABLE_DDL: tuple[tuple[str, str], ...] = (
         "PRIMARY KEY (lesson_id, card_key))",
     ),
     (
+        "retrieval",
+        "CREATE TABLE retrieval ("
+        "lesson_id INTEGER PRIMARY KEY, "
+        "box INTEGER NOT NULL DEFAULT 1, "
+        "last_seen REAL NOT NULL, "
+        "seen INTEGER NOT NULL DEFAULT 0, "
+        "correct INTEGER NOT NULL DEFAULT 0, "
+        "last_choice TEXT)",
+    ),
+    (
         "challenges",
         "CREATE TABLE challenges ("
         "unit_id INTEGER PRIMARY KEY, "

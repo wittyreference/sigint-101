@@ -8,6 +8,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from . import retrieval
+
 # The store lives under data/ by default, which .gitignore keeps out of the repo so a
 # learner's progress is never committed. Tests pass an explicit temp path instead, and so
 # never touch this shared file.
@@ -90,6 +92,19 @@ CREATE TABLE IF NOT EXISTS sort_answers (
 );
 """
 
+# Pre-lesson retrieval card schedule: additive table so existing databases gain it on open.
+# Kept apart from responses so answering a recall card never touches a lesson's own check.
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS retrieval (
+    lesson_id   INTEGER PRIMARY KEY,
+    box         INTEGER NOT NULL DEFAULT 1,
+    last_seen   REAL NOT NULL,
+    seen        INTEGER NOT NULL DEFAULT 0,
+    correct     INTEGER NOT NULL DEFAULT 0,
+    last_choice TEXT
+);
+"""
+
 # Tier B live-find attempts and permanent pass history: additive tables so existing databases
 # gain them on open without touching any existing table or gating any lesson (D16).
 SCHEMA += """
@@ -129,6 +144,13 @@ class CheckAlreadyAnswered(RuntimeError):
     """A second answer to a lesson's check.
 
     The feedback after the first answer names the key, so a re-answer would only copy it.
+    """
+
+
+class RecallNotDue(RuntimeError):
+    """A recall answer for a card that is not enrolled or not yet due.
+
+    Refused under the store lock so a resubmitted form cannot climb a box twice.
     """
 
 
@@ -447,6 +469,23 @@ class Progress:
             self._conn.commit()
             return True
 
+    def restore_challenge(self, unit_id: int, previous: dict | None) -> bool:
+        """Restore a unit's previous live-find attempt, or remove it if none existed."""
+        with self._lock:
+            if self._closed:
+                return False
+            if previous is None:
+                self._conn.execute("DELETE FROM challenges WHERE unit_id=?", (unit_id,))
+            else:
+                self._conn.execute(
+                    "INSERT INTO challenges(unit_id, started_at, window_s) VALUES(?, ?, ?) "
+                    "ON CONFLICT(unit_id) DO UPDATE SET "
+                    "started_at=excluded.started_at, window_s=excluded.window_s",
+                    (unit_id, previous["started_at"], previous["window_s"]),
+                )
+            self._conn.commit()
+            return True
+
     def challenge(self, unit_id: int) -> dict:
         """Return a unit's current attempt, its own pass, newest pass overall, and pass count."""
         with self._lock:
@@ -540,6 +579,56 @@ class Progress:
                             remaining.append(attempt)
                     open_attempts = remaining
             return credited
+
+    def enroll_recall(self, lesson_ids, *, now: float) -> None:
+        """Enrol newly eligible completed lessons into box 1 without overwriting existing rows."""
+        ids = [int(lid) for lid in lesson_ids]
+        if not ids:
+            return
+        ts = float(now)
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO retrieval(lesson_id, box, last_seen, seen, correct, last_choice) "
+                "VALUES(?, 1, ?, 0, 0, NULL) ON CONFLICT(lesson_id) DO NOTHING",
+                [(lid, ts) for lid in ids],
+            )
+            self._conn.commit()
+
+    def get_retrieval(self, lesson_ids) -> dict[int, dict]:
+        """Current retrieval rows for the given lesson IDs, keyed by lesson_id."""
+        ids = [int(lid) for lid in lesson_ids]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT lesson_id, box, last_seen, seen, correct, last_choice "
+                f"FROM retrieval WHERE lesson_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {row["lesson_id"]: dict(row) for row in rows}
+
+    def record_recall(self, lesson_id: int, choice: str, *, correct: bool, now: float) -> int:
+        """Record one recall answer and return its new box, refusing if missing or not yet due."""
+        choice = (choice or "").strip()
+        if not choice:
+            raise ValueError("a recall answer cannot be blank")
+        ts = float(now)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT box, last_seen FROM retrieval WHERE lesson_id=?",
+                (int(lesson_id),),
+            ).fetchone()
+            if row is None or not retrieval.is_due(row["box"], row["last_seen"], now=ts):
+                raise RecallNotDue(f"lesson {lesson_id} recall card is not due")
+            new_box = retrieval.next_box(row["box"], correct)
+            self._conn.execute(
+                "UPDATE retrieval SET box=?, last_seen=?, seen=seen + 1, "
+                "correct=correct + ?, last_choice=? WHERE lesson_id=?",
+                (new_box, ts, 1 if correct else 0, choice, int(lesson_id)),
+            )
+            self._conn.commit()
+        return new_box
 
     def close(self) -> None:
         """Close the database and fence any late reception writes under the same lock."""
