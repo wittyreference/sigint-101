@@ -26,6 +26,7 @@ LORA = REPO / "tools" / "render" / "render_lora.py"
 CARD_SORT = REPO / "tools" / "render" / "render_card_sort.py"
 SURVEY = REPO / "tools" / "render" / "render_survey.py"
 RECALL = REPO / "tools" / "render" / "render_recall.py"
+LIVE_FIND = REPO / "tools" / "render" / "render_live_find.py"
 EVAL = REPO / "tools" / "render" / "render_eval.py"
 CHECK = REPO / "tools" / "render" / "render_check.py"
 LIVE_CONSOLE_PORT = 8008   # the kiosk's own console (make run), which a check must never default to
@@ -488,7 +489,7 @@ def render_make(tmp_path, console_url, devtools, strays):
         encoding="utf-8",
     )
     chromium.chmod(0o755)
-    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL):
+    for script in (FIT, SCROLL, FIGURE, LOGBOOK, LORA, CARD_SORT, SURVEY, RECALL, LIVE_FIND):
         (screen / script.name).write_text(
             "import os, sys\n"
             "from pathlib import Path\n"
@@ -558,11 +559,14 @@ def test_make_render_check_fails_when_render_fit_detects_overflow(render_make):
 
 @pytest.mark.parametrize(
     "failing",
-    ["", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name, SURVEY.name,
-     RECALL.name],
+    [
+        "", FIT.name, SCROLL.name, FIGURE.name, LOGBOOK.name, LORA.name, CARD_SORT.name,
+        SURVEY.name, RECALL.name, LIVE_FIND.name,
+    ],
     ids=[
         "all-pass", "fit-fails", "scroll-fails", "figure-fails",
-        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails", "recall-fails",
+        "logbook-fails", "lora-fails", "card-sort-fails", "survey-fails",
+        "recall-fails", "live-find-fails",
     ],
 )
 def test_make_render_check_runs_all_checks_and_reports_failure(render_make, console_url, failing):
@@ -576,6 +580,7 @@ def test_make_render_check_runs_all_checks_and_reports_failure(render_make, cons
         f"ran {CARD_SORT.name} {console_url}",
         f"ran {SURVEY.name} {console_url}",
         f"ran {RECALL.name} {console_url}",
+        f"ran {LIVE_FIND.name} {console_url}",
     ], (proc.stdout, proc.stderr)
     if failing:
         assert proc.returncode != 0
@@ -618,7 +623,7 @@ def test_render_check_without_render_url_measures_a_scratch_console_not_the_kios
     proc = render_make(RENDER_URL=None, PROBE_CONSOLE="1", timeout=120)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     urls = _ran_urls(proc)
-    assert len(urls) == 8, proc.stdout
+    assert len(urls) == 9, proc.stdout
     origins = {url.split("/")[2] for url in urls}
     assert len(origins) == 1, urls
     host, port = origins.pop().split(":")
@@ -743,7 +748,7 @@ def test_render_check_holds_its_own_api_block_across_every_check(render_make):
     calls = render_make.calls()
     methods = [method for method, _ in calls]
     marks = [i for i, method in enumerate(methods) if method == "<mark>"]
-    assert len(marks) == 8, methods
+    assert len(marks) == 9, methods
     blocks = [i for i, (method, params) in enumerate(calls)
               if method == "Network.setBlockedURLs" and "*/api/*" in params.get("urls", [])]
     assert blocks and blocks[0] < marks[0], methods
@@ -1420,6 +1425,102 @@ globalThis.window = {{ fetch: origFetch }};
 """
     node_proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
     assert node_proc.returncode == 0, node_proc.stdout + node_proc.stderr
+
+
+LIVE_FIND_SCREEN_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "controlsFit": True,
+    "keyHeights": [76, 74, 74, 74],
+    "promptFontPx": 20,
+    "evidenceFontPx": 18,
+    "distinctMarks": True,
+}
+LIVE_FIND_TILE_FITS = {
+    "doc": [800, 480],
+    "overflowY": "auto",
+    "tilesWithClippedMeta": 0,
+    "distinctMarks": True,
+}
+LIVE_FIND_RACK_FITS = {
+    "doc": [800, 480],
+    "back": True,
+    "backHref": "/unit/4/challenge",
+    "backLabel": "Live find",
+    "titleUnclipped": True,
+}
+
+
+def _live_find_pages(*, screen_defect=None, tile_defect=None, rack_defect=None):
+    pages = {}
+    for theme in THEMES:
+        for unit in (4, 5):
+            tile = {**LIVE_FIND_TILE_FITS, "theme": theme}
+            screen = {**LIVE_FIND_SCREEN_FITS, "theme": theme}
+            if unit == 5:
+                screen["keyHeights"] = [76, 74, 74, 74, 74, 74, 74]
+            if theme == "red-night" and unit == 5:
+                tile.update(tile_defect or {})
+                screen.update(screen_defect or {})
+            pages[f"measureFindTile({json.dumps(theme)}, {unit})"] = tile
+            pages[f"measureFindScreen({json.dumps(theme)}, {unit})"] = screen
+        rack = {**LIVE_FIND_RACK_FITS, "theme": theme}
+        if theme == "red-night":
+            rack.update(rack_defect or {})
+        pages[f"measureFindRack({json.dumps(theme)})"] = rack
+    return pages
+
+
+def test_live_find_render_checks_tiles_screens_and_rack_in_all_three_themes(devtools):
+    port = devtools(_live_find_pages())
+    proc = run(LIVE_FIND, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert _verdicts(proc) == [
+        "VERDICT: PASS - live-find tile u4 dark",
+        "VERDICT: PASS - live-find screen u4 dark",
+        "VERDICT: PASS - live-find tile u5 dark",
+        "VERDICT: PASS - live-find screen u5 dark",
+        "VERDICT: PASS - live-find rack dark",
+        "VERDICT: PASS - live-find tile u4 sunlight",
+        "VERDICT: PASS - live-find screen u4 sunlight",
+        "VERDICT: PASS - live-find tile u5 sunlight",
+        "VERDICT: PASS - live-find screen u5 sunlight",
+        "VERDICT: PASS - live-find rack sunlight",
+        "VERDICT: PASS - live-find tile u4 red-night",
+        "VERDICT: PASS - live-find screen u4 red-night",
+        "VERDICT: PASS - live-find tile u5 red-night",
+        "VERDICT: PASS - live-find screen u5 red-night",
+        "VERDICT: PASS - live-find rack red-night",
+    ]
+
+
+@pytest.mark.parametrize("kind, defect", [
+    ("screen", {"doc": [800, 481]}),
+    ("screen", {"back": False}),
+    ("screen", {"controlsFit": False}),
+    ("screen", {"keyHeights": [76, 71, 74, 74, 74, 74, 74]}),
+    ("screen", {"keyHeights": [82, 74, 74, 74, 74, 74, 74]}),
+    ("screen", {"promptFontPx": 17}),
+    ("screen", {"evidenceFontPx": 16}),
+    ("screen", {"distinctMarks": False}),
+    ("tile", {"tilesWithClippedMeta": 1}),
+    ("tile", {"distinctMarks": False}),
+    ("rack", {"back": False}),
+    ("rack", {"titleUnclipped": False}),
+])
+def test_live_find_render_fails_on_overflow_undersized_key_or_matching_marks(
+    devtools, kind, defect
+):
+    kwargs = {f"{kind}_defect": defect}
+    port = devtools(_live_find_pages(**kwargs))
+    proc = run(LIVE_FIND, "http://127.0.0.1:9", port=port)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    expected = {
+        "screen": "VERDICT: FAIL - live-find screen u5 red-night",
+        "tile": "VERDICT: FAIL - live-find tile u5 red-night",
+        "rack": "VERDICT: FAIL - live-find rack red-night",
+    }[kind]
+    assert expected in _verdicts(proc)
 
 
 def test_recall_render_console_uses_no_radio_probe(tmp_path, monkeypatch):
