@@ -315,6 +315,7 @@ def test_meteor_managed_publication_syncs_before_reception(
     real_fsync_dir = storage.fsync_dir
     fail_active = [False]
     meteor_dir_syncs = [0]
+    gallery_sync_steps = ("gallery_dir", "gallery_commit", "gallery_commit_fence")
 
     def spy_sync_media(path):
         order.append("png")
@@ -332,6 +333,8 @@ def test_meteor_managed_publication_syncs_before_reception(
             order.append("gallery_index")
             if fail_active[0] and fail_at == "gallery_index":
                 raise OSError("injected gallery_index sync failure")
+        elif name.startswith(".commit-"):
+            order.append("gallery_commit_record")
         return real_fsync_file(path)
 
     def spy_fsync_dir(path):
@@ -342,7 +345,7 @@ def test_meteor_managed_publication_syncs_before_reception(
                 raise OSError("injected pass_dir sync failure")
         elif p.name == "meteor":
             meteor_dir_syncs[0] += 1
-            step = "gallery_dir" if meteor_dir_syncs[0] == 1 else "gallery_commit"
+            step = gallery_sync_steps[meteor_dir_syncs[0] - 1]
             order.append(step)
             if fail_active[0] and fail_at == step:
                 raise OSError(f"injected {step} sync failure")
@@ -404,7 +407,8 @@ def test_meteor_managed_publication_syncs_before_reception(
             if fail_at == "success":
                 assert order == [
                     "png", "manifest", "pass_dir",
-                    "gallery_dir", "gallery_index", "gallery_commit", "reception",
+                    "gallery_dir", "gallery_index", "gallery_commit",
+                    "gallery_commit_record", "gallery_commit_fence", "reception",
                 ]
                 assert len(passes) == 2
                 assert len(receptions) == 2
@@ -417,6 +421,7 @@ def test_meteor_managed_publication_syncs_before_reception(
                 leftovers = (
                     list((gen_dir / "meteor").glob(".publish-*"))
                     + list((gen_dir / "meteor").glob(".gallery-*"))
+                    + list((gen_dir / "meteor").glob(".commit-*"))
                 )
                 assert leftovers == []
     finally:
@@ -701,6 +706,145 @@ def test_f3_failed_final_sync_and_failed_rollback_keeps_media_hidden_after_reope
                 assert reopened.read_media(f"meteor/{child.name}/MSU-MR-ghost.png") is None
     finally:
         reopened.shutdown()
+
+
+def test_failed_index_sync_with_both_rollbacks_refused_preserves_last_commit(
+    tmp_path, monkeypatch,
+):
+    from tests.test_meteor import MeteorChild
+
+    gen_dir = _new_managed_gen(tmp_path)
+    gallery = gen_dir / "meteor"
+    made = []
+
+    def spawn(argv, **kwargs):
+        proc = MeteorChild(argv)
+        made.append(proc)
+        return proc
+
+    decoder = meteor.MeteorDecoder(
+        data_dir=gen_dir, which=lambda name: name, radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")], spawn=spawn, sync_assets=True,
+    )
+    with meteor_client(gen_dir, decoder, managed=True) as client:
+        assert client.post(LISTEN).status_code == 200
+        _complete_pass(decoder, made[-1], pictures=("MSU-MR-good.png",))
+        good, = decoder.passes()
+        good_path = good["images"][0]["path"]
+        assert client.post(LISTEN).status_code == 200
+        bad_id = decoder._run.args[0].id
+        bad_path = f"meteor/{bad_id}/MSU-MR-unconfirmed.png"
+        failed_sync = threading.Event()
+        real_rename = os.rename
+        real_remove = meteor._remove_dir_descriptor
+
+        def fail_final_sync(path):
+            index = gallery / "gallery.json"
+            if (Path(path) == gallery and index.exists()
+                    and bad_id in json.loads(index.read_text())["passes"]):
+                failed_sync.set()
+                raise OSError("injected final index sync failure")
+            storage.fsync_dir(path)
+
+        def fail_index_rollback(src, dst, **kwargs):
+            if dst == "gallery.json" and failed_sync.is_set():
+                raise OSError("injected index rollback failure")
+            return real_rename(src, dst, **kwargs)
+
+        def fail_pass_rollback(parent_fd, name):
+            if name == bad_id:
+                raise OSError("injected pass cleanup failure")
+            real_remove(parent_fd, name)
+
+        monkeypatch.setattr(meteor, "fsync_dir", fail_final_sync)
+        monkeypatch.setattr(os, "rename", fail_index_rollback)
+        monkeypatch.setattr(meteor, "_remove_dir_descriptor", fail_pass_rollback)
+        _complete_pass(decoder, made[-1], pictures=("MSU-MR-unconfirmed.png",))
+        assert failed_sync.is_set()
+        assert (gen_dir / bad_path).exists()
+        assert client.get(STATUS).json()["state"] == "no_picture"
+        assert decoder.passes() == [good]
+        assert client.get(f"/media/{bad_path}").status_code == 404
+
+    reopened = meteor.MeteorDecoder(data_dir=gen_dir, sync_assets=True)
+    with meteor_client(gen_dir, reopened, managed=True) as client:
+        assert reopened.passes() == [good]
+        assert client.get(f"/media/{good_path}").status_code == 200
+        assert client.get(f"/media/{bad_path}").status_code == 404
+        receptions = [e for e in read_events(gen_dir / "events.jsonl")
+                      if e["kind"] == "reception" and e["payload"]["instrument"] == "meteor"]
+        assert [e["payload"]["item"]["path"] for e in receptions] == [good_path]
+        stamps = client.get("/api/stamps").json()["stamps"]
+        assert next(s for s in stamps if s["instrument"] == "meteor")["count"] == 1
+
+
+def test_overlapping_pass_keeps_media_servable_through_its_receipt(rig, tmp_path, monkeypatch):
+    decoder, made, settings = rig
+    monkeypatch.setattr(meteor, "MAX_PUBLISHED_PASSES", 1)
+    first_receipt, finish_receipt, second_publication = (threading.Event() for _ in range(3))
+    served = {}
+
+    def finish_child(run, proc, name):
+        proc.feed(progress_line())
+        proc.feed(MARKER)
+        assert run.physical.wait(2)
+        proc.picture(name)
+        proc.die(0)
+        proc.close_pipe()
+
+    with meteor_client(tmp_path, decoder) as client:
+        hook = decoder.on_reception
+        publish = decoder._publish_pass
+
+        def publishing(run, capture):
+            if run is second_run:
+                second_publication.set()
+            return publish(run, capture)
+
+        def receive(item, *, command=None, freq_hz=None, radio=None):
+            path = item["path"]
+            if path == first_path:
+                first_receipt.set()
+                assert finish_receipt.wait(8)
+            hook(item, command=command, freq_hz=freq_hz, radio=radio)
+            served[path] = client.get(f"/media/{path}").status_code
+
+        settings["utc"] = 1_732_840_100.0
+        assert client.post(LISTEN).status_code == 200
+        first_run = decoder._run
+        first_path = f"meteor/{first_run.args[0].id}/MSU-MR-first.png"
+        second_run = None
+        decoder.on_reception = receive
+        monkeypatch.setattr(decoder, "_publish_pass", publishing)
+        try:
+            finish_child(first_run, made[-1][0], "MSU-MR-first.png")
+            assert first_receipt.wait(3)
+            settings["utc"] = 1_732_800_000.0
+            assert client.post(LISTEN).status_code == 200
+            second_run = decoder._run
+            assert second_run is not first_run
+            finish_child(second_run, made[-1][0], "MSU-MR-second.png")
+            assert second_publication.wait(3)
+            # Let an unprotected second publication run before releasing the first receipt.
+            second_run.complete.wait(1)
+            first_status = client.get(f"/media/{first_path}").status_code
+            assert client.get("/api/spectrum").status_code == 200
+            assert len(client.get(STATUS).json()["passes"]) == 1
+        finally:
+            finish_receipt.set()
+        assert first_run.complete.wait(3)
+        assert second_run.complete.wait(3)
+        second_path = f"meteor/{second_run.args[0].id}/MSU-MR-second.png"
+        receipts = [e["payload"]["item"]["path"]
+                    for e in read_events(tmp_path / "events.jsonl")
+                    if e["kind"] == "reception" and e["payload"]["instrument"] == "meteor"]
+        assert set(receipts) == {first_path, second_path}
+        stamps = client.get("/api/stamps").json()["stamps"]
+        assert next(s for s in stamps if s["instrument"] == "meteor")["count"] == 2
+        assert served == {first_path: 200, second_path: 200}
+        assert first_status == 200
+        assert client.get(f"/media/{second_path}").status_code == 200
+        assert client.get(f"/media/{first_path}").status_code == 404
 
 
 def test_f4_retention_survives_backward_utc_step_and_reconciles_interrupted_eviction(

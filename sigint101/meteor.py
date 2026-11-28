@@ -72,6 +72,8 @@ _CREATE_RETRY_S = 0.05
 _DIR_FLAGS = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _PNG = b"\x89PNG\r\n\x1a\n"
 _GALLERY_INDEX = "gallery.json"
+_GALLERY_COMMIT = "gallery.commit.json"
+_GALLERY_VERSION = 2
 _MAX_LINE = 1024
 _MAX_ENTRIES = 4096
 _MAX_DEPTH = 8
@@ -620,16 +622,16 @@ def _remove_dir_descriptor(parent_fd: int, name: str) -> None:
         os.rmdir(name, dir_fd=parent_fd)
 
 
-def _read_gallery_index(root_fd: int) -> tuple[int, list[str]] | None:
-    """Read committed gallery order from data/meteor/gallery.json without following links."""
-    raw = _read_regular_bytes(root_fd, (_GALLERY_INDEX,), max_bytes=_MAX_MANIFEST_BYTES)
+def _read_gallery_index(root_fd: int, name: str, version: int) -> tuple[int, list[str]] | None:
+    """Read a bounded gallery record without following links."""
+    raw = _read_regular_bytes(root_fd, (name,), max_bytes=_MAX_MANIFEST_BYTES)
     if not raw:
         return None
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return None
-    if not isinstance(data, dict) or data.get("version") != 1:
+    if not isinstance(data, dict) or data.get("version") != version:
         return None
     seq = data.get("seq")
     if type(seq) is not int or seq < 0:
@@ -646,17 +648,17 @@ def _read_gallery_index(root_fd: int) -> tuple[int, list[str]] | None:
     return seq, ordered
 
 
-def _write_gallery_index(root_fd: int, root_path: Path, *, seq: int, pass_ids: list[str],
-                         tmp_name: str, sync: bool) -> None:
-    """Atomically write and optionally fsync the committed gallery index."""
-    payload = {"version": 1, "seq": seq, "passes": pass_ids}
+def _write_gallery_index(root_fd: int, root_path: Path, name: str, *, seq: int,
+                         pass_ids: list[str], tmp_name: str, sync: bool) -> None:
+    """Replace a gallery record after writing and optionally syncing its temporary file."""
+    payload = {"version": _GALLERY_VERSION, "seq": seq, "passes": pass_ids}
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(tmp_name, flags, 0o644, dir_fd=root_fd)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, sort_keys=True)
     if sync:
         fsync_file(root_path / tmp_name)
-    os.rename(tmp_name, _GALLERY_INDEX, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+    os.rename(tmp_name, name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
 
 
 def _public_pass_row(row: dict) -> dict:
@@ -858,9 +860,11 @@ class MeteorDecoder(SupervisedReceiver):
         self._sync_assets = bool(sync_assets)
         self._runs = childproc.RunGuard()
         self._gallery_lock = threading.Lock()
+        self._receipt_done = threading.Event()
+        self._receipt_done.set()
         self._passes: list[dict] = []
         self._seq: int = 0
-        self._has_index: bool = False
+        self._legacy_index = False
         self._root_parent_synced: bool = False
         self._media_index: dict[str, tuple[str, str, int, str]] = {}
         self.watch = childproc.ChildWatch(SATDUMP, finite=True, clock=monotonic)
@@ -923,15 +927,21 @@ class MeteorDecoder(SupervisedReceiver):
             return
         loaded: list[dict] = []
         seq = 0
-        has_index = False
         try:
             with _directory(self.data_dir, private=False) as data_fd:
                 with _directory("meteor", data_fd, private=False) as root_fd:
-                    index = _read_gallery_index(root_fd)
+                    try:
+                        os.stat(_GALLERY_COMMIT, dir_fd=root_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        # Version 1 galleries had no separate commit record. Version 2
+                        # candidates never become visible without their confirmed record.
+                        index = _read_gallery_index(root_fd, _GALLERY_INDEX, 1)
+                        self._legacy_index = index is not None
+                    else:
+                        index = _read_gallery_index(root_fd, _GALLERY_COMMIT, _GALLERY_VERSION)
                     if index is None:
                         return
                     seq, ordered_ids = index
-                    has_index = True
                     root_dev = os.fstat(root_fd).st_dev
                     for pass_id in ordered_ids:
                         try:
@@ -973,7 +983,6 @@ class MeteorDecoder(SupervisedReceiver):
         with self._gallery_lock:
             self._passes = loaded[:max(0, int(MAX_PUBLISHED_PASSES))]
             self._seq = max(seq, len(loaded))
-            self._has_index = has_index
             self._rebuild_media_index_unlocked()
 
     def read_media(self, rel_path: str) -> bytes | None:
@@ -1131,6 +1140,18 @@ class MeteorDecoder(SupervisedReceiver):
 
     def _publish_pass(self, run, capture: _Capture) -> bool:
         """Stage verified PNGs + manifest, sync in order when managed, commit, then emit."""
+        # A replacement may finish decoding while this run reports its pictures. It can
+        # take the radio, but it must leave these pictures servable until their receipts finish.
+        with self._gallery_lock:
+            previous_receipt = self._receipt_done
+            receipt_done = self._receipt_done = threading.Event()
+        try:
+            previous_receipt.wait()
+            return self._commit_and_report(run, capture)
+        finally:
+            receipt_done.set()
+
+    def _commit_and_report(self, run, capture: _Capture) -> bool:
         sink = getattr(self, "reception_sink", None)
         publication = sink.publication() if sink is not None else nullcontext(True)
         with publication as admitted:
@@ -1216,19 +1237,18 @@ class MeteorDecoder(SupervisedReceiver):
 
         candidate_name = f".publish-{capture.id}"
         index_tmp_name = f".gallery-{capture.id}.tmp"
+        commit_tmp_name = f".commit-{capture.id}.tmp"
         root_path = self.data_dir / "meteor"
         candidate_path = root_path / candidate_name
         renamed_pass = False
-        renamed_index = False
+        renamed_commit = False
         with self._gallery_lock:
             cap = max(0, int(MAX_PUBLISHED_PASSES))
             prev_pass_ids = [row["id"] for row in self._passes]
             next_pass_ids = ([capture.id] + prev_pass_ids)[:cap]
             if capture.id not in next_pass_ids:
                 return None
-            prev_seq = self._seq
-            next_seq = prev_seq + 1
-            had_index = self._has_index
+            next_seq = self._seq + 1
             try:
                 with _directory(self.data_dir, private=False) as data_fd:
                     with _directory("meteor", data_fd, create=True) as root_fd:
@@ -1269,47 +1289,54 @@ class MeteorDecoder(SupervisedReceiver):
                             if self._sync_assets:
                                 fsync_dir(root_path)
 
+                            if self._legacy_index:
+                                # Preserve the v1 view before overwriting its only record.
+                                _write_gallery_index(
+                                    root_fd, root_path, _GALLERY_COMMIT,
+                                    seq=self._seq, pass_ids=prev_pass_ids,
+                                    tmp_name=commit_tmp_name, sync=self._sync_assets,
+                                )
+                                if self._sync_assets:
+                                    fsync_dir(root_path)
+                                self._legacy_index = False
+
                             _write_gallery_index(
-                                root_fd, root_path,
+                                root_fd, root_path, _GALLERY_INDEX,
                                 seq=next_seq, pass_ids=next_pass_ids,
                                 tmp_name=index_tmp_name, sync=self._sync_assets,
                             )
-                            renamed_index = True
+                            if self._sync_assets:
+                                fsync_dir(root_path)
 
+                            # Advance the restart record only after the candidate is synced.
+                            _write_gallery_index(
+                                root_fd, root_path, _GALLERY_COMMIT,
+                                seq=next_seq, pass_ids=next_pass_ids,
+                                tmp_name=commit_tmp_name, sync=self._sync_assets,
+                            )
+                            renamed_commit = True
                             if self._sync_assets:
                                 fsync_dir(root_path)
                         except OSError as exc:
                             capture.publish_error = f"could not publish Meteor pass: {exc}"[:160]
-                            if renamed_index:
-                                rb_name = f".gallery-rb-{capture.id}.tmp"
+                            for name in (index_tmp_name, commit_tmp_name):
                                 try:
-                                    if had_index:
-                                        _write_gallery_index(
-                                            root_fd, root_path,
-                                            seq=prev_seq, pass_ids=prev_pass_ids,
-                                            tmp_name=rb_name, sync=False,
-                                        )
-                                    else:
-                                        os.unlink(_GALLERY_INDEX, dir_fd=root_fd)
+                                    os.unlink(name, dir_fd=root_fd)
                                 except OSError:
-                                    try:
-                                        os.unlink(rb_name, dir_fd=root_fd)
-                                    except OSError:
-                                        pass
-                            try:
-                                os.unlink(index_tmp_name, dir_fd=root_fd)
-                            except OSError:
-                                pass
-                            cleanup_target = capture.id if renamed_pass else candidate_name
-                            try:
-                                _remove_dir_descriptor(root_fd, cleanup_target)
-                            except OSError:
-                                pass
+                                    pass
+                            # A failed confirmation fence cannot make an unsynced candidate
+                            # visible. If confirmation was renamed, keep both views' files:
+                            # restart may find either confirmed view after a power loss.
+                            if not renamed_commit:
+                                cleanup_target = capture.id if renamed_pass else candidate_name
+                                try:
+                                    _remove_dir_descriptor(root_fd, cleanup_target)
+                                except OSError:
+                                    pass
                             return None
 
                         self._passes = ([pass_row] + self._passes)[:cap]
                         self._seq = next_seq
-                        self._has_index = True
                         self._rebuild_media_index_unlocked()
                         self._reconcile_gallery_overflow(root_fd, {r["id"] for r in self._passes})
                         return _public_pass_row(pass_row)
