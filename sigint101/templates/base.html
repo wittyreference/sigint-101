@@ -5,6 +5,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=800, height=480, initial-scale=1, user-scalable=no">
+  {#- The console's clock (its epoch and its time now), which action-clock.js stamps each learner
+      action on, so a late request is ordered by when the learner acted. Reading it writes nothing. #}
+  {%- set tuning_gate = request.app.state.tuning_gate if request is defined else none %}
+  {%- if tuning_gate %}
+  {%- set clock = tuning_gate.anchor() %}
+  <meta name="sigint101-clock" content="{{ clock[0] }} {{ clock[1] }}">
+  {%- endif %}
   <title>{% block page_title %}{{ title|default('SIGINT 101') }}{% endblock %} · SIGINT 101</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -126,6 +133,8 @@
       });
     })();
   </script>
+  <!-- Stamps learner actions (tunes, a lesson's restore) on the console's clock, for their posts. -->
+  <script src="/static/action-clock.js"></script>
   <!-- Keyboard scrolling on every screen (the Nomad's keys), home grid and lesson bodies alike. -->
   <script src="/static/scroll-keys.js"></script>
   <!-- The battery gauge redraws itself from /api/battery, so a screen left open stays true. -->

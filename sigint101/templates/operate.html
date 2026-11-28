@@ -129,6 +129,7 @@
       </div>
       <button class="tune-btn" type="button" data-tune-step="1" aria-label="Tune up">+<span class="rack__adjust-label">Freq</span></button>
       {{ step_key(inst.steps) }}
+      {% if inst.key == "ism" %}{{ panels.replay_controls() }}{% endif %}
     </div>
     {% elif inst.key == 'lora' %}
     <div class="rack-lora" data-lora-send-permit="{{ lora_send_permit }}">

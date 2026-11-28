@@ -56,7 +56,13 @@
       {% endfor %}
     </ol>
     {% if not prediction_committed %}<span class="rail__gate">Locked until you predict</span>{% endif %}
+    {# Filled by lesson-tuning.js only when the radios are not yet, or could not be, put on this
+       lesson's frequencies; hidden otherwise. #}
+    <span class="rail__tuning" role="status" data-lesson-tuning hidden><span class="rail__tuning-head" data-lesson-tuning-head></span><span class="rail__tuning-why" data-lesson-tuning-why></span></span>
   </div>
+  {# A reason too long for the rail's line, whole, under the rail. A tap closes it; a tap on the
+     rail's note opens it again. #}
+  <button class="tuning-full" type="button" data-lesson-tuning-full hidden><span class="tuning-full__text" role="status" data-lesson-tuning-full-text></span><span class="tuning-full__close" aria-hidden="true">Tap to close</span></button>
 
   {# ---- One stage at a time. Sealed stages are not rendered at all until a
          prediction is committed: commit-before-reveal is enforced server-side,
@@ -382,6 +388,7 @@
                   <div class="tune__freq">{{ "%.3f"|format(mhz) }}<span>MHz</span></div>
                   <div class="tune__caption">ISM band &middot; rtl_433</div>
                 </div>
+                {{ panels.replay_controls() }}
                 {{ prev_step(loop.first) }}
                 <button class="btn btn--primary tune__next" type="button" data-nav="next">Next step</button>
               </div>
@@ -733,8 +740,9 @@
 {% endblock %}
 
 {% block scripts %}
-<!-- First, ahead of every panel: put the radios on this lesson's frequencies (POST /api/tuning),
-     so the panels' first polls find them there. The page's GET retunes nothing. -->
+<!-- First, ahead of every panel: put the radios on this lesson's frequencies (POST /api/tuning,
+     asynchronous, so the page never freezes). The tuned panels hold their first poll until it
+     answers, or 3 s, so they find the lesson's frequencies. The page's GET retunes nothing. -->
 <script src="/static/lesson-tuning.js" data-lesson-id="{{ lesson.id }}"></script>
 <!-- The live waterfall: polls /api/spectrum and draws one pixel per rtl_power bin, replacing the
      SAMPLE badge with the live (or clearly-labelled no-radio) state. It never invents a signal. -->

@@ -304,7 +304,7 @@ def test_meteor_finisher_cleanup_failure_only_refuses_meteor(rig):
     assert decoder.release_failure(pending=True) is None
     with pytest.raises(MeteorUnavailable, match="finisher"):
         decoder.start()
-    assert "dongle" not in run.failure
+    assert run.failure == "SatDump finisher survived kill"
     proc.die(-9)
     proc.close_pipe()
     assert run.complete.wait(4)
@@ -381,10 +381,20 @@ def test_meteor_wait_error_checks_liveness_and_retries_kill_within_budget(
                 assert run.complete.wait(2) and run.physical.is_set()
             else:
                 assert not run.physical.is_set() and not run.reaped
-                reason = decoder.release_failure(pending=True)
-                assert ("survived kill" in reason) == (outcome == "timeout")
-                if outcome != "timeout":
-                    assert "could not be confirmed stopped" in reason
+                if outcome == "timeout":
+                    assert decoder.release_failure(pending=True) == (
+                        "SatDump survived kill; the dongle may still be held"
+                    )
+                else:
+                    detail = {
+                        "wait-error": "wait failed again",
+                        "signal-error": "kill failed",
+                        "poll-error": "status failed",
+                    }[outcome]
+                    assert decoder.release_failure(pending=True) == (
+                        f"SatDump could not be confirmed stopped; the dongle may still be held: "
+                        f"{detail}"
+                    )
     finally:
         proc.die(-9)
         proc.close_pipe()

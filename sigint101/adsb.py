@@ -22,7 +22,7 @@ from .childproc import (
     command_line,
     spawn,
     stderr_tail,
-    stop_process,
+    stop_and_confirm,
 )
 from .hardware import (
     DUMP1090,
@@ -282,9 +282,9 @@ class _Feed:
                     raise
             self._transport_closed = True
 
-    def stop_child(self) -> bool:
+    def stop_child(self, *, kill_only, wait_s):
         """Stop and reap dump1090 while leaving the SBS socket open to drain queued lines."""
-        return stop_process(self._proc)
+        return stop_and_confirm(self._proc, kill_only=kill_only, wait_s=wait_s)
 
     def close_transport(self) -> None:
         """Close the SBS socket once any natural-exit drain has finished or timed out."""

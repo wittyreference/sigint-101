@@ -140,7 +140,7 @@ class FakeFeed:
         self.terminated = False
 
     def poll(self):
-        return None
+        return 0 if self.terminated else None
 
     def terminate(self):
         self.terminated = True

@@ -1,7 +1,7 @@
-// ABOUTME: Lists live rtl_433 decodes on the console by polling /api/decode (M10's FSK lesson).
-// ABOUTME: On 503 it shows the reason and never invents a sensor read — absence is an honest answer.
+// ABOUTME: Displays live or recorded rtl_433 rows for the ISM panel.
+// ABOUTME: A mode change retires its old requests before they can paint or schedule another poll.
 
-(function () {
+(function (root) {
   "use strict";
 
   // Under node's test runner the file is loaded for its pure formatters — the ones that turn a
@@ -10,6 +10,7 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       formatMHz: formatMHz, summarizeReadings: summarizeReadings, toneLabel: toneLabel,
+      renderRow: renderRow,
     };
     return;
   }
@@ -46,72 +47,197 @@
     return formatMHz(decode.freq_hz) + " MHz";
   }
 
-  // Every instrument stage of a decode lesson carries the same panel (one radio, one decoder), so
-  // all of them are driven. No panel means this is not a decode lesson — nothing to do.
-  var panels = Array.prototype.slice.call(document.querySelectorAll("[data-decode-panel]"));
-  if (!panels.length) return;
-
-  var POLL_MS = 1500;      // rtl_433 reports a read only when a device transmits; no need to spin
-  var RETRY_MS = 5000;     // when the radio is away, poll gently until it returns
-  var stopped = false;
-
-  function esc(value) {
-    var div = document.createElement("div");
-    div.textContent = value == null ? "" : String(value);
-    return div.innerHTML;
+  // Also used by other course screens that show a decoded row.
+  function renderRow(doc, decode, replayMark) {
+    var row = doc.createElement("li");
+    row.className = "decoder__item decoder__item--" + (decode.mod === "FSK" ? "fsk" : "ask");
+    if (replayMark) {
+      row.className += " decoder__item--replay";
+      row.appendChild(replayMark.content.cloneNode(true));
+    }
+    function append(kind, text) {
+      var span = doc.createElement("span");
+      span.className = "decoder__" + kind;
+      span.textContent = text == null ? "" : String(text);
+      row.appendChild(span);
+    }
+    append("model", decode.model);
+    append("mod", decode.mod);
+    append("read", summarizeReadings(decode.readings));
+    append("tone", toneLabel(decode));
+    return row;
   }
 
-  function render(panel, body) {
-    var list = panel.querySelector("[data-decode-list]");
-    var empty = panel.querySelector("[data-decode-empty]");
-    var badge = panel.querySelector("[data-decode-badge]");
-    var decodes = (body.decodes || []).slice().reverse();   // newest first
-    list.innerHTML = "";
-    decodes.forEach(function (d) {
-      var li = document.createElement("li");
-      li.className = "decoder__item decoder__item--" + (d.mod || "").toLowerCase();
-      li.innerHTML =
-        '<span class="decoder__model">' + esc(d.model) + "</span>" +
-        '<span class="decoder__mod">' + esc(d.mod) + "</span>" +
-        '<span class="decoder__read">' + esc(summarizeReadings(d.readings)) + "</span>" +
-        '<span class="decoder__tone">' + esc(toneLabel(d)) + "</span>";
-      list.appendChild(li);
+  root.DecodePanel = { renderRow: renderRow };
+
+  // All instrument stages on this page share one decoder and one replay.
+  var panels = Array.from(document.querySelectorAll("[data-decode-panel]"));
+  if (!panels.length) return;
+  var keys = Array.from(document.querySelectorAll("[data-replay-toggle]"));
+  var mode = "live";
+  var generation = 0;
+  var busy = false;
+  var recording = null;
+
+  function updateKeys(body) {
+    keys.forEach(function (key) {
+      var strip = key.closest(".tune");
+      var replaying = mode === "replay";
+      var dial = strip.querySelector("[data-replay-dial]");
+      strip.classList.toggle("tune--replay", replaying);
+      key.disabled = busy || (!replaying && !recording);
+      key.textContent = replaying ? "Back to live" :
+        recording ? "Replay" : "No recording on this kit yet";
+      if (replaying && body) {
+        dial.querySelector("[data-replay-freq]").textContent =
+          body.frequency_hz ? formatMHz(body.frequency_hz) + " MHz" : "— MHz";
+        dial.querySelector("[data-replay-caption]").textContent =
+          body.recording ? "REPLAY · " + body.recording : "REPLAY";
+      }
     });
-    DecoderPanel.showLive(badge, body);
-    DecoderPanel.showCommand(panel, body.command);
-    if (empty) {
-      empty.hidden = decodes.length > 0;
-      if (!decodes.length) empty.textContent = DecoderPanel.quietText(body, "nothing decoded yet");
+  }
+
+  function read(gen, path, payload) {
+    var init = { cache: "no-store" };
+    if (payload !== undefined) {
+      init.method = "POST";
+      init.headers = { "content-type": "application/json" };
+      init.body = JSON.stringify(payload);
+    }
+    return fetch(path, init).then(async function (reply) {
+      var body = await reply.json();
+      return gen === generation ? { ok: reply.ok, body: body } : null;
+    });
+  }
+
+  async function listRecordings() {
+    // The kit's recordings belong to the page, regardless of which mode is on screen.
+    var reply = await fetch("/api/replay/recordings", { cache: "no-store" });
+    if (reply.ok) {
+      var body = await reply.json();
+      recording = (body.recordings || []).find(function (item) {
+        return item.instrument === "ism";
+      });
+      updateKeys();
     }
   }
 
-  function showEmpty(panel, body) {
-    var list = panel.querySelector("[data-decode-list]");
-    var empty = panel.querySelector("[data-decode-empty]");
-    var badge = panel.querySelector("[data-decode-badge]");
-    if (list) list.innerHTML = "";
-    DecoderPanel.showDown(panel, badge, empty, body);
+  function replayNote(body) {
+    if (body.reason) return body.reason;
+    if (body.state === "finished") return "Replay finished · nothing decoded";
+    if (body.state === "stopped") return "Replay stopped";
+    return body.recording ? "Replaying recordings/" + body.recording + "…" : "Checking replay…";
   }
 
-  function tick() {
-    fetch("/api/decode?limit=12", { cache: "no-store" })
-      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-      .then(function (res) {
-        var waiting = false;
-        if (!res.ok || res.body.available === false) {
-          panels.forEach(function (p) { showEmpty(p, res.body); });
-          waiting = true;
-        } else {
-          panels.forEach(function (p) { render(p, res.body); });
-        }
-        if (!stopped) setTimeout(tick, waiting ? RETRY_MS : POLL_MS);
-      })
-      .catch(function () {
-        if (stopped) return;
-        panels.forEach(function (p) { showEmpty(p, { reason: "Lost contact with the console." }); });
-        setTimeout(tick, RETRY_MS);
-      });
+  function paint(body, ok) {
+    var replaying = mode === "replay";
+    if (replaying) updateKeys(body);
+    panels.forEach(function (panel) {
+      var list = panel.querySelector("[data-decode-list]");
+      var empty = panel.querySelector("[data-decode-empty]");
+      var badge = panel.querySelector("[data-decode-badge]");
+      list.replaceChildren();
+      if (!replaying && !ok) {
+        DecoderPanel.showDown(panel, badge, empty, body);
+        return;
+      }
+      var mark = replaying ? panel.querySelector("[data-replay-mark]") : null;
+      var rows = (body.decodes || []).slice().reverse();
+      rows.forEach(function (row) { list.appendChild(renderRow(document, row, mark)); });
+      DecoderPanel.showLive(badge, replaying ? { mode: "replay" } : body);
+      DecoderPanel.showCommand(panel, replaying && body.command && body.input
+        ? body.command + " < " + body.input : body.command);
+      empty.hidden = rows.length > 0 && !(replaying && body.reason);
+      if (!empty.hidden) empty.textContent = replaying
+        ? replayNote(body) : DecoderPanel.quietText(body, "nothing decoded yet");
+    });
   }
 
-  tick();
-})();
+  function switchMode(next) {
+    mode = next;
+    var gen = ++generation;
+    updateKeys();
+    paint(next === "replay" ? {} : { state: "starting" }, true);
+    return gen;
+  }
+
+  function later(gen, delay) {
+    setTimeout(function () {
+      if (gen === generation) poll(gen);
+    }, delay);
+  }
+
+  async function poll(gen) {
+    var replaying = mode === "replay";
+    try {
+      var result = await read(gen, replaying ? "/api/replay/ism" : "/api/decode?limit=12");
+      if (!result) return;
+      if (!replaying && result.body.cause === "replaying") {
+        poll(switchMode("replay"));
+        return;
+      }
+      var ok = result.ok && result.body.available !== false;
+      paint(result.body, ok);
+      if (replaying && result.body.state === "replaying") later(gen, 500);
+      if (!replaying) later(gen, ok ? 1500 : 5000);
+    } catch (_) {
+      if (gen !== generation) return;
+      paint({ reason: "Lost contact with the console." }, false);
+      later(gen, replaying ? 500 : 5000);
+    }
+  }
+
+  async function toggle() {
+    if (busy || (mode === "live" && !recording)) return;
+    busy = true;
+    var back = mode === "replay";
+    var gen = switchMode("replay");
+    try {
+      if (!back) await listRecordings();
+      if (gen !== generation) return;
+      if (!back && !recording) {
+        poll(switchMode("live"));
+        return;
+      }
+      var result = await read(gen, "/api/replay/ism/" + (back ? "stop" : "start"),
+        back ? {} : { recording: recording.stem });
+      if (!result) return;
+      if (back && result.ok) {
+        poll(switchMode("live"));
+        return;
+      }
+      paint(result.body, result.ok);
+      if (result.body.state === "replaying") later(gen, 500);
+    } catch (_) {
+      if (gen === generation) paint({ reason: "Lost contact with the console." }, false);
+    } finally {
+      busy = false;
+      updateKeys();
+    }
+  }
+
+  keys.forEach(function (key) { key.addEventListener("click", toggle); });
+  listRecordings().catch(function () {});
+
+  // On a lesson page the first live poll waits for the lesson's tuning (lesson-tuning.js), so it
+  // reads the lesson's frequency, not the one the rack left; past the timeout it polls anyway
+  // and the page says the radios are still being tuned. The rack starts at once. The replay
+  // status read claims no radio, so it does not wait: a replay under way shows at once.
+  var tuned = root.LessonTuning ? root.LessonTuning.ready : Promise.resolve();
+  var initial = generation;
+  function goLive() {
+    tuned.then(function () {
+      if (generation === initial) poll(initial);
+    });
+  }
+  read(initial, "/api/replay/ism").then(function (result) {
+    if (!result) return;
+    if (result.body.state === "replaying") {
+      var gen = switchMode("replay");
+      paint(result.body, result.ok);
+      later(gen, 500);
+    } else {
+      goLive();
+    }
+  }).catch(goLive);
+})(this);
