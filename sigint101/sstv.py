@@ -72,6 +72,12 @@ _log = logging.getLogger(__name__)
 # owner's name once its lock is held, so no sweep can find it unlocked while its owner is alive.
 _OWNER_NAME = re.compile(r"[0-9a-f]{32}")
 _OWNER_LOCK = ".owner.lock"
+# A subfolder is made as .new-<name> and renamed once locked. Every console holds this lock shared
+# across that window, so a sweep that takes it exclusively knows any .new- folder is a crash's.
+_PENDING_NAME = re.compile(r"\.new-[0-9a-f]{32}")
+_CREATE_LOCK = ".create.lock"
+# Retired captures queue here (a sibling of the owners' subfolders) until they are unlinked.
+_DISCARD = ".discard"
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _SHARED_WRITE = stat.S_IWGRP | stat.S_IWOTH
 
@@ -93,7 +99,8 @@ def _require_private_dir(info: os.stat_result, what: str) -> None:
         raise _UntrustedStaging(f"the {what} is writable by other accounts")
 
 
-def _open_staging(parent: Path, staging_name: str, gallery_name: str) -> int:
+def _open_staging(parent: Path, staging_name: str,
+                  gallery_name: str) -> tuple[int, os.stat_result]:
     """Open the staging folder by descriptor and prove it is this account's, not the gallery.
 
     The data folder is the configured root and is opened as given. The gallery is opened relative
@@ -128,7 +135,7 @@ def _open_staging(parent: Path, staging_name: str, gallery_name: str) -> int:
             raise
     finally:
         os.close(root)
-    return fd
+    return fd, gallery
 
 
 def _empty_owned(staging_fd: int, name: str, sub_fd: int, sub_info: os.stat_result) -> None:
@@ -136,7 +143,7 @@ def _empty_owned(staging_fd: int, name: str, sub_fd: int, sub_info: os.stat_resu
 
     Every entry belongs to the subfolder's owner. unlink never follows a link, so a symlink goes as
     a link and its target stays. A nested directory is not entered: it stays, and so do the lock
-    and the subfolder, which a later sweep tries again.
+    and the subfolder, which a later sweep tries again. A creation cut short may have no lock yet.
     """
     left = False
     for entry in os.listdir(sub_fd):
@@ -150,7 +157,10 @@ def _empty_owned(staging_fd: int, name: str, sub_fd: int, sub_info: os.stat_resu
             left = True
     if left:
         return
-    os.unlink(_OWNER_LOCK, dir_fd=sub_fd)
+    try:
+        os.unlink(_OWNER_LOCK, dir_fd=sub_fd)
+    except FileNotFoundError:
+        pass
     # rmdir removes only an empty directory, and only the one this descriptor opened.
     if os.path.samestat(os.stat(name, dir_fd=staging_fd, follow_symlinks=False), sub_info):
         os.rmdir(name, dir_fd=staging_fd)
@@ -184,6 +194,20 @@ def _sweep_retired(staging_fd: int, name: str) -> None:
         os.close(sub_fd)
 
 
+def _open_lock_file(dir_fd: int, name: str, *, create: bool) -> int:
+    """Open a lock file in a verified folder, without following links: this account's, regular."""
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = os.open(name, flags | (os.O_CREAT if create else 0), 0o600, dir_fd=dir_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise _UntrustedStaging(f"{name} is not this account's regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _close_all(fds: tuple) -> None:
     for fd in fds:
         try:
@@ -199,8 +223,10 @@ class _StagingOwner:
     unless a pipeline stage that inherited it is still running.
     """
 
-    def __init__(self, staging_fd: int, name: str, sub_fd: int, lock_fd: int):
+    def __init__(self, staging_fd: int, gallery: os.stat_result, name: str, sub_fd: int,
+                 lock_fd: int):
         self.staging_fd = staging_fd
+        self.gallery = gallery
         self.name = name
         self.sub_fd = sub_fd
         self.lock_fd = lock_fd
@@ -209,18 +235,22 @@ class _StagingOwner:
 
     @classmethod
     def create(cls, parent: Path, staging_name: str, gallery_name: str) -> _StagingOwner:
-        staging_fd = _open_staging(parent, staging_name, gallery_name)
+        staging_fd, gallery = _open_staging(parent, staging_name, gallery_name)
         name = uuid.uuid4().hex
         pending = f".new-{name}"
-        sub_fd = lock_fd = None
+        create_fd = sub_fd = lock_fd = None
         try:
+            # Held shared from before .new- exists until it has its owner's name (see sweep).
+            create_fd = _open_lock_file(staging_fd, _CREATE_LOCK, create=True)
+            fcntl.flock(create_fd, fcntl.LOCK_SH)
             os.mkdir(pending, 0o700, dir_fd=staging_fd)
             sub_fd = os.open(pending, _DIR_FLAGS, dir_fd=staging_fd)
             lock_fd = os.open(_OWNER_LOCK, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                               | os.O_CLOEXEC, 0o600, dir_fd=sub_fd)
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             os.rename(pending, name, src_dir_fd=staging_fd, dst_dir_fd=staging_fd)
-            return cls(staging_fd, name, sub_fd, lock_fd)
+            _close_all((create_fd,))
+            return cls(staging_fd, gallery, name, sub_fd, lock_fd)
         except BaseException:
             if lock_fd is not None:
                 _close_all((lock_fd,))
@@ -230,16 +260,24 @@ class _StagingOwner:
                     pass
             if sub_fd is not None:
                 _close_all((sub_fd,))
-            try:
-                os.rmdir(pending, dir_fd=staging_fd)
-            except OSError:
-                pass
+                try:
+                    os.rmdir(pending, dir_fd=staging_fd)
+                except OSError:
+                    pass
+            if create_fd is not None:
+                _close_all((create_fd,))
             _close_all((staging_fd,))
             raise
 
     def sweep(self) -> None:
-        """Remove every other subfolder whose owner is gone. Live owners' locks cannot be taken."""
-        for name in os.listdir(self.staging_fd):
+        """Remove every other subfolder whose owner is gone, and creations cut short by a crash.
+
+        A live owner's lock cannot be taken. A .new- folder is removed only while the creation
+        lock is held exclusively: every console holds it shared from before its .new- folder
+        exists until that folder has its owner's name, so none is being made.
+        """
+        names = os.listdir(self.staging_fd)
+        for name in names:
             if name == self.name or not _OWNER_NAME.fullmatch(name):
                 continue
             try:
@@ -248,6 +286,114 @@ class _StagingOwner:
                 pass  # Retired by another sweep, or never an owner's.
             except OSError as exc:
                 _log.warning("SSTV left staging subfolder %s in place: %s", name, exc)
+        pending = [name for name in names if _PENDING_NAME.fullmatch(name)]
+        if pending:
+            self._tidy_pending(pending)
+
+    def _tidy_pending(self, names: list) -> None:
+        try:
+            create_fd = _open_lock_file(self.staging_fd, _CREATE_LOCK, create=True)
+        except OSError as exc:
+            _log.warning("SSTV left interrupted staging folders in place: %s", exc)
+            return
+        try:
+            try:
+                fcntl.flock(create_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return  # A console is making its subfolder now; a later sweep tries again.
+            for name in names:
+                try:
+                    sub_fd = os.open(name, _DIR_FLAGS, dir_fd=self.staging_fd)
+                    try:
+                        sub_info = os.fstat(sub_fd)
+                        _require_private_dir(sub_info, f"staging folder {name}")
+                        _empty_owned(self.staging_fd, name, sub_fd, sub_info)
+                    finally:
+                        os.close(sub_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    _log.warning("SSTV left staging folder %s in place: %s", name, exc)
+        finally:
+            os.close(create_fd)
+
+    def _open_discard(self, *, create: bool) -> int | None:
+        """The discard queue's descriptor once it is proved private and not the gallery, or None.
+
+        Opened relative to the verified staging descriptor without following links. None when it
+        is absent (and not to be made); a failed check is logged and nothing in it is touched.
+        """
+        if create:
+            try:
+                os.mkdir(_DISCARD, 0o700, dir_fd=self.staging_fd)
+            except FileExistsError:
+                pass
+        try:
+            fd = os.open(_DISCARD, _DIR_FLAGS, dir_fd=self.staging_fd)
+        except FileNotFoundError:
+            if create:
+                raise
+            return None
+        try:
+            info = os.fstat(fd)
+            if any(os.path.samestat(info, other) for other in
+                   (self.gallery, self.sub_info, os.fstat(self.staging_fd))):
+                raise _UntrustedStaging("the discard queue is the gallery or a staging folder")
+            _require_private_dir(info, "discard queue")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def clear_discard(self) -> set:
+        """Unlink every queued picture through the queue's descriptor. Returns the names left."""
+        try:
+            fd = self._open_discard(create=False)
+        except OSError as exc:
+            _log.warning("SSTV left its .discard queue untouched: %s", exc)
+            return set()
+        if fd is None:
+            return set()
+        left = set()
+        try:
+            for name in os.listdir(fd):
+                if not name.endswith(".png"):
+                    continue
+                try:
+                    os.unlink(name, dir_fd=fd)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    left.add(name)
+        finally:
+            os.close(fd)
+        return left
+
+    def discard(self, name: str) -> bool | None:
+        """Move this owner's retired capture into the discard queue, then unlink it there.
+
+        Returns True when it is gone, False when it waits in the queue, and None when it could
+        not be moved (missing, or the queue failed its checks) and still sits in this subfolder.
+        """
+        try:
+            fd = self._open_discard(create=True)
+        except OSError as exc:
+            _log.warning("SSTV did not use its .discard queue: %s", exc)
+            return None
+        try:
+            try:
+                os.rename(name, name, src_dir_fd=self.sub_fd, dst_dir_fd=fd)
+            except OSError:
+                return None
+            try:
+                os.unlink(name, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            return True
+        finally:
+            os.close(fd)
 
     def inherited_lock(self) -> int | None:
         """A duplicate of the lock for one launch to hand its stages, or None once retired."""
@@ -370,7 +516,7 @@ class SstvDecoder(SupervisedReceiver):
         self._staging_dir = self.output_dir.parent / f".{self.output_dir.name}.staging"
         self._discard_dir = self._staging_dir / ".discard"
         self._staged_cleanup: set[Path] = set()
-        self._staging_lock = threading.Lock()
+        self._staging_lock = threading.RLock()
         # This decoder's own staging subfolder, made at its first launch; retired at shutdown.
         self._owner: _StagingOwner | None = None
         self._owner_retired = False
@@ -413,10 +559,10 @@ class SstvDecoder(SupervisedReceiver):
             owned = self._staging_dir / self._own_staging().name
             with self._staging_lock:
                 cleanup = self._staged_cleanup.copy()
-            # Entries only get here by moving the exact owned file after a confirmed reap.
-            cleanup.update(self._discard_dir.glob("*.png"))
             for path in cleanup:
-                self._remove_staged(path)
+                if path.parent != self._discard_dir:
+                    self._remove_staged(path)
+            self._clear_discard()
             capture = self._allocate_capture(self._clock(), number, freq_hz, owned)
         except (OSError, ValueError) as exc:
             raise SstvUnavailable(f"cannot stage the SSTV capture: {exc}") from exc
@@ -470,15 +616,24 @@ class SstvDecoder(SupervisedReceiver):
             super().shutdown()
             clean = True
         finally:
+            # Under the staging lock, so no discard is using the descriptors as they close.
             with self._staging_lock:
                 owner, self._owner = self._owner, None
                 self._owner_retired = True
-                cleanup = self._staged_cleanup.copy()
-            if clean:
-                for path in cleanup:
-                    self._remove_staged(path)
-            if owner is not None:
-                owner.retire(clean=clean)
+                if owner is not None:
+                    if clean:
+                        owner.clear_discard()
+                    owner.retire(clean=clean)
+
+    def _clear_discard(self) -> None:
+        """Empty the discard queue through the verified staging descriptor, never by path."""
+        with self._staging_lock:
+            owner = self._owner
+            if owner is None:
+                return
+            left = owner.clear_discard()
+            self._staged_cleanup = {path for path in self._staged_cleanup
+                                    if path.parent != self._discard_dir or path.name in left}
 
     def _allocate_capture(self, received_at: float, run: int, freq_hz: int,
                           owned: Path) -> _Capture:
@@ -525,17 +680,21 @@ class SstvDecoder(SupervisedReceiver):
                 self._staged_cleanup.discard(path)
 
     def _discard_aborted(self, path: Path) -> None:
-        """Move an owned, reaped capture to the discard queue before unlinking it."""
-        discarded = self._discard_dir / path.name
-        try:
-            self._discard_dir.mkdir(exist_ok=True)
-            path.replace(discarded)
-        except FileNotFoundError:
-            return
-        except OSError:
+        """Move an owned, reaped capture to the discard queue before unlinking it.
+
+        Both steps go through the verified descriptors. If the queue cannot be used (it fails its
+        checks, or the move fails), the capture is removed where it is, in this decoder's folder.
+        """
+        with self._staging_lock:
+            owner = self._owner
+            gone = None
+            if owner is not None and path.parent.name == owner.name:
+                gone = owner.discard(path.name)
+            if gone is False:
+                # It waits in the queue; the next launch's clear removes it by descriptor.
+                self._staged_cleanup.add(self._discard_dir / path.name)
+        if gone is None:
             self._remove_staged(path)
-        else:
-            self._remove_staged(discarded)
 
     def _needs_diagnostics(self, run):
         return run.exit_code == 0 or super()._needs_diagnostics(run)

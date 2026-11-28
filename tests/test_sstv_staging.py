@@ -192,7 +192,7 @@ _CONSOLE = textwrap.dedent("""
         def refuse(*args, **kwargs):
             raise OSError("refused")
 
-        Path.replace = refuse
+        os.rename = refuse
         Path.unlink = refuse
         child.close_pipe()
         dec.stop()
@@ -254,19 +254,23 @@ def test_a_reaped_nonzero_exit_goes_through_the_discard_queue(tmp_path, consoles
     # Case 1: a reaped nonzero exit only went to the in-memory cleanup list.
     dec, launches, heard = consoles()
     moves = []
-    replace = Path.replace
+    rename = os.rename
 
-    def record(path, target):
-        moves.append((Path(path), Path(target)))
-        return replace(path, target)
+    def record(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        moves.append((src, dst, os.fstat(src_dir_fd).st_ino, os.fstat(dst_dir_fd).st_ino))
+        return rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
 
-    monkeypatch.setattr(Path, "replace", record)
     dec.start()
     child, staged = launches[0]
     staged.write_bytes(PNG_BYTES)
+    monkeypatch.setattr(os, "rename", record)
     _finish(child, code=1)
     dec.stop()
-    assert moves == [(staged, _staging(tmp_path) / ".discard" / staged.name)]
+    monkeypatch.undo()
+    discard = _staging(tmp_path) / ".discard"
+    # Moved from this decoder's subfolder into the queue, both by descriptor.
+    assert moves == [(staged.name, staged.name, staged.parent.stat().st_ino,
+                      discard.stat().st_ino)]
     assert not staged.exists()
     assert not (_staging(tmp_path) / ".discard" / staged.name).exists()
     assert dec.images() == [] and heard == []
@@ -636,8 +640,9 @@ def _wait_for_lock(lock: Path) -> None:
     assert taken.is_set(), "the orphaned writer never released the staging lock"
 
 
+@pytest.mark.parametrize("paused", [False, True], ids=["running", "sigstopped"])
 def test_a_writer_that_outlives_its_console_keeps_the_subfolder_until_it_exits(
-        tmp_path, consoles):
+        tmp_path, consoles, paused):
     fifo = tmp_path / "writer.pid"
     os.mkfifo(fifo)
     other = subprocess.Popen([sys.executable, "-c", _ORPHANING_CONSOLE, str(tmp_path), str(fifo)],
@@ -651,6 +656,9 @@ def test_a_writer_that_outlives_its_console_keeps_the_subfolder_until_it_exits(
         reader.start()
         reader.join(10)
         writer = int(box["pid"])
+        if paused:
+            # agy2's probe: a stopped process (state T) still holds its descriptors.
+            os.kill(writer, signal.SIGSTOP)
         (owner / "staged.png").write_bytes(PNG_BYTES)
         other.stdin.write("die\n")
         other.stdin.flush()
@@ -674,3 +682,264 @@ def test_a_writer_that_outlives_its_console_keeps_the_subfolder_until_it_exits(
             other.wait(timeout=5)
         other.stdin.close()
         other.stdout.close()
+
+
+def test_a_paused_stage_keeps_its_live_consoles_subfolder(tmp_path, consoles, monkeypatch):
+    # agy2's probe: a SIGSTOPped middle stage of a live console.
+    dec, _, _ = consoles(**_real_pipeline(monkeypatch, ["sleep", "30"], ["cat"], ["cat"]))
+    dec.start()
+    stages = childproc._stages(dec._run.proc)
+    owner = dec._run.args[0].staged_path.parent
+    (owner / "staged.png").write_bytes(PNG_BYTES)
+    os.kill(stages[1].pid, signal.SIGSTOP)
+    try:
+        other, _, _ = consoles()
+        other.start()
+        assert (owner / "staged.png").read_bytes() == PNG_BYTES
+        assert _holds(stages[1].pid, owner / sstv._OWNER_LOCK)
+    finally:
+        os.kill(stages[1].pid, signal.SIGCONT)
+        dec.stop()
+    dec.shutdown()
+    assert not owner.exists()
+
+
+# Consoles in their own processes that start together: each says it is ready, waits for "go",
+# starts, prints its subfolder, then waits for "exit" and shuts down cleanly.
+_RACING_CONSOLE = textwrap.dedent("""
+    import sys
+    from pathlib import Path
+    from sigint101.sstv import SstvDecoder
+    from tests.child_fakes import LateProc
+
+    data = Path(sys.argv[1])
+    launches = []
+
+    def spawn(freq, device, path):
+        child = LateProc(["sstv", "-o", str(path)])
+        launches.append((child, path))
+        return child
+
+    dec = SstvDecoder(spawn=spawn, radio_present=lambda: True,
+                      which=lambda name: "/usr/bin/" + name,
+                      output_dir=data / "sstv", data_dir=data)
+    print("ready", flush=True)
+    sys.stdin.readline()
+    dec.start()
+    print(launches[0][1].parent, flush=True)
+    sys.stdin.readline()
+    launches[0][0].close_pipe()
+    dec.stop()
+    dec.shutdown()
+""")
+
+
+@pytest.mark.parametrize("staging", ["fresh", "seeded"])
+def test_eight_consoles_starting_at_once_each_own_one_subfolder(tmp_path, staging):
+    # agy2's probe: 8-way concurrent creation and sweeping, with and without retired owners.
+    seeded = 3 if staging == "seeded" else 0
+    retired = [_retired_owner(tmp_path, "staged.png") for _ in range(seeded)]
+    racers = [subprocess.Popen([sys.executable, "-c", _RACING_CONSOLE, str(tmp_path)], cwd=REPO,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+              for _ in range(8)]
+    try:
+        assert all(racer.stdout.readline().strip() == "ready" for racer in racers)
+        for racer in racers:
+            racer.stdin.write("go\n")
+            racer.stdin.flush()
+        owners = [Path(racer.stdout.readline().strip()) for racer in racers]
+        assert len(set(owners)) == 8
+        for owner in owners:
+            assert owner.parent == _staging(tmp_path) and _is_owner_name(owner.name)
+            assert _held(owner / sstv._OWNER_LOCK)
+        assert not any(owner.exists() for owner in retired)
+        assert not [p for p in _staging(tmp_path).iterdir() if p.name.startswith(".new-")]
+        for racer in racers:
+            racer.stdin.write("exit\n")
+            racer.stdin.flush()
+        assert [racer.wait(timeout=20) for racer in racers] == [0] * 8
+        assert not any(owner.exists() for owner in owners)
+    finally:
+        for racer in racers:
+            if racer.poll() is None:  # pragma: no cover - only when an assertion failed early
+                racer.kill()
+                racer.wait(timeout=5)
+            racer.stdin.close()
+            racer.stdout.close()
+
+
+def _is_owner_name(name: str) -> bool:
+    return len(name) == 32 and all(c in "0123456789abcdef" for c in name)
+
+
+def test_a_retired_subfolder_swapped_for_a_symlink_after_its_lock_is_taken(
+        tmp_path, consoles, monkeypatch):
+    # agy2's probe: the subfolder is renamed away and its name made a symlink to the gallery after
+    # the sweep holds its lock. The sweep stays on the descriptor it opened.
+    gallery = _gallery_with_bait(tmp_path)
+    retired = _retired_owner(tmp_path, "staged.png")
+    lock_ino = (retired / sstv._OWNER_LOCK).stat().st_ino
+    moved = tmp_path / "moved-owner"
+    before = _snapshot(gallery)
+    real_flock = fcntl.flock
+    swapped = []
+
+    def flock_then_swap(fd, operation):
+        result = real_flock(fd, operation)
+        if (operation == fcntl.LOCK_EX | fcntl.LOCK_NB and not swapped
+                and os.fstat(fd).st_ino == lock_ino):
+            swapped.append(True)
+            retired.rename(moved)
+            retired.symlink_to(gallery, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(fcntl, "flock", flock_then_swap)
+    dec, _, _ = consoles()
+    dec.start()
+    monkeypatch.undo()
+    assert swapped
+    assert _snapshot(gallery) == before
+    assert retired.is_symlink()
+    assert moved.is_dir() and list(moved.iterdir()) == []
+
+
+# --- the discard queue goes through the verified staging descriptor too (agy2 F1) --------------
+
+
+@pytest.mark.parametrize("target", ["gallery", "elsewhere"])
+def test_a_symlinked_discard_queue_never_reaches_the_gallery(tmp_path, consoles, caplog, target):
+    gallery = _gallery_with_bait(tmp_path)
+    if target == "elsewhere":
+        # Another private folder of this account's, with a picture in it.
+        gallery = tmp_path / "elsewhere"
+        gallery.mkdir(mode=0o700)
+        (gallery / "keep.png").write_bytes(PNG_BYTES)
+    staging = _staging(tmp_path)
+    staging.mkdir(mode=0o700)
+    (staging / ".discard").symlink_to(gallery, target_is_directory=True)
+    before = _snapshot(gallery)
+    dec, launches, heard = consoles()
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        dec.start()
+        assert _snapshot(gallery) == before
+        # A failed capture is removed where it is, never moved through the link.
+        child, staged = launches[0]
+        staged.write_bytes(PNG_BYTES)
+        _finish(child, code=1)
+        dec.stop()
+    assert not staged.exists()
+    assert _snapshot(gallery) == before
+    assert heard == []
+    assert any(".discard" in record.message for record in caplog.records)
+
+
+def test_the_discard_queue_stays_on_the_opened_staging_folder(tmp_path, consoles, monkeypatch):
+    gallery = _gallery_with_bait(tmp_path)
+    (gallery / ".discard").mkdir(mode=0o700)
+    (gallery / ".discard" / "keep.png").write_bytes(PNG_BYTES)
+    staging = _staging(tmp_path)
+    staging.mkdir(mode=0o700)
+    (staging / ".discard").mkdir(mode=0o700)
+    (staging / ".discard" / "old.png").write_bytes(PNG_BYTES)
+    before = _snapshot(gallery)
+    moved_away = tmp_path / ".sstv.staging.moved"
+    real_listdir = os.listdir
+    swapped = []
+
+    def listdir_after_swap(path="."):
+        if isinstance(path, int) and not swapped:
+            swapped.append(True)
+            staging.rename(moved_away)
+            gallery.rename(staging)
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", listdir_after_swap)
+    dec, _, _ = consoles()
+    try:
+        dec.start()
+    except SstvUnavailable:
+        pass  # Only where the cleanup acted matters here.
+    monkeypatch.undo()
+    assert swapped
+    assert not (moved_away / ".discard" / "old.png").exists()
+    assert _snapshot(staging) == before
+
+
+def test_the_discard_queue_is_emptied_through_its_descriptor(tmp_path, consoles, monkeypatch):
+    staging = _staging(tmp_path)
+    staging.mkdir(mode=0o700)
+    discard = staging / ".discard"
+    discard.mkdir(mode=0o700)
+    (discard / "retired.png").write_bytes(PNG_BYTES)
+    (discard / "notes.txt").write_text("not a picture")
+    discard_ino = discard.stat().st_ino
+    calls = []
+    real_unlink = os.unlink
+
+    def recorded_unlink(path, *, dir_fd=None):
+        calls.append((str(path), None if dir_fd is None else os.fstat(dir_fd).st_ino))
+        return real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", recorded_unlink)
+    dec, _, _ = consoles()
+    dec.start()
+    monkeypatch.undo()
+    assert not (discard / "retired.png").exists()
+    assert (discard / "notes.txt").read_text() == "not a picture"
+    assert [call for call in calls if call[0].endswith("retired.png")] == [
+        ("retired.png", discard_ino)]
+
+
+def test_a_discard_queue_writable_by_others_is_left(tmp_path, consoles, caplog):
+    staging = _staging(tmp_path)
+    staging.mkdir(mode=0o700)
+    discard = staging / ".discard"
+    discard.mkdir(mode=0o700)
+    (discard / "retired.png").write_bytes(PNG_BYTES)
+    discard.chmod(0o777)
+    dec, _, _ = consoles()
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        dec.start()
+    assert (discard / "retired.png").is_file()
+    assert any(".discard" in record.message for record in caplog.records)
+
+
+# --- a creation cut short by a crash (agy2 F4) -------------------------------------------------
+
+
+def _pending(tmp_path, *names, lock=True):
+    staging = _staging(tmp_path)
+    staging.mkdir(mode=0o700, exist_ok=True)
+    pending = staging / f".new-{uuid.uuid4().hex}"
+    pending.mkdir(mode=0o700)
+    if lock:
+        (pending / sstv._OWNER_LOCK).touch(mode=0o600)
+    for name in names:
+        (pending / name).write_bytes(PNG_BYTES)
+    return pending
+
+
+@pytest.mark.parametrize("left", ["bare", "locked", "with-a-file"])
+def test_a_creation_cut_short_by_a_crash_is_tidied(tmp_path, consoles, left):
+    pending = _pending(tmp_path, *(["x.png"] if left == "with-a-file" else []),
+                       lock=left != "bare")
+    dec, _, _ = consoles()
+    dec.start()
+    assert not pending.exists()
+
+
+def test_a_creation_still_in_progress_is_not_tidied(tmp_path, consoles):
+    # A console between making its .new- folder and naming it holds the creation lock shared.
+    pending = _pending(tmp_path)
+    lock = _staging(tmp_path) / sstv._CREATE_LOCK
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        first, _, _ = consoles()
+        first.start()  # Creating takes the lock shared too, so it is not held up.
+        assert pending.is_dir() and (pending / sstv._OWNER_LOCK).is_file()
+    finally:
+        os.close(fd)
+    second, _, _ = consoles()
+    second.start()
+    assert not pending.exists()

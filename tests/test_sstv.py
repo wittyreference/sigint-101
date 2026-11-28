@@ -528,19 +528,21 @@ def test_sstv_restart_cleans_an_aborted_capture_after_reap_retry(
     unrelated = staged.with_name("another-capture.png")
     unrelated.touch()
     discarded = dec._discard_dir / staged.name
-    unlink = Path.unlink
+    unlink = os.unlink
 
-    def interrupted_unlink(path, *args, **kwargs):
-        if path == discarded:
+    def interrupted_unlink(path, *, dir_fd=None):
+        # The queue is emptied through its descriptor (C58), so fail that unlink.
+        if dir_fd is not None and path == discarded.name and os.path.samestat(
+                os.fstat(dir_fd), os.stat(discarded.parent)):
             raise OSError("discard cleanup interrupted")
-        return unlink(path, *args, **kwargs)
+        return unlink(path, dir_fd=dir_fd)
 
     try:
         dec.stop()
         assert ticket.reap_failed and not ticket.reaped
         assert staged.exists() and not discarded.exists()
         with monkeypatch.context() as interruption:
-            interruption.setattr(Path, "unlink", interrupted_unlink)
+            interruption.setattr(os, "unlink", interrupted_unlink)
             upstream.die(7)
             assert ticket.complete.wait(3)
             assert ticket.reaped and ticket.reap_failed
