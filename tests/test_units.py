@@ -19,9 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_the_units_are_the_spine_plus_the_extra_tracks():
-    # Six numbered spine units (U1-U6), the counter-surveillance track (U7, 2026-10-29), the
-    # Decode+ Images unit (U8, 2026-10-30), and the Meshtastic mesh mini-track (U9, 2026-10-30).
-    assert [u.id for u in UNITS] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    # Six numbered spine units (U1-U6), counter-surveillance (U7), Images (U8), Mesh (U9),
+    # Flipper (U10), and the closing Field unit (U11).
+    assert [u.id for u in UNITS] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     # Names come from the plan's curriculum spine.
     assert get_unit(1).title == "Instrument"
     assert get_unit(6).slug == "under-the-hood"
@@ -33,6 +33,8 @@ def test_the_units_are_the_spine_plus_the_extra_tracks():
     assert get_unit(9).title == "Mesh"
     assert get_unit(10).slug == "flipper"
     assert get_unit(10).title == "Flipper"
+    assert get_unit(11).slug == "field"
+    assert get_unit(11).title == "Field"
 
 
 def test_units_partition_the_planned_lessons_without_overlap_or_gap():
@@ -40,13 +42,13 @@ def test_units_partition_the_planned_lessons_without_overlap_or_gap():
 
     The numbered spine M1-M23 is fully placed; the Decode+ data/voice/survey group (M26 AIS,
     M27 DMR/P25, M39 Wi-Fi survey) joins Unit 5 Decode, the Images pair (M24 APT, M25 SSTV) forms
-    Unit 8, Meshtastic (M28) forms the Unit 9 mesh mini-track, and the Flipper unit (U10) plans
-    M29-M38 — every lesson id 1..39 now lives in exactly one unit.
+    Unit 8, Meshtastic (M28) forms the Unit 9 mesh mini-track, the Flipper unit (U10) plans
+    M29-M38, and the closing Field unit (U11) holds L40 — every lesson id 1..40 lives in one unit.
     """
     seen = []
     for u in UNITS:
         seen.extend(u.lesson_ids)
-    assert sorted(seen) == list(range(1, 40))
+    assert sorted(seen) == list(range(1, 41))
     assert len(seen) == len(set(seen)), "a lesson id appears in two units"
 
 
@@ -86,7 +88,8 @@ def test_teaching_order_walks_the_units_in_display_order():
     assert order[19:23] == (20, 21, 22, 23)   # Unit 6 Under the Hood
     assert order[23:26] == (17, 18, 19)       # Unit 7 counter-surveillance
     assert order[26:29] == (24, 25, 28)       # Unit 8 Images, Unit 9 Mesh
-    assert order[29:] == tuple(range(29, 39))  # Unit 10 Flipper: M29 intro, then its plan
+    assert order[29:39] == tuple(range(29, 39))  # Unit 10 Flipper: M29 intro, then its plan
+    assert order[39:] == (40,)                   # Unit 11 Field: closing lesson
 
 
 def test_teaching_position_is_where_the_lesson_falls_in_that_order():
@@ -97,6 +100,7 @@ def test_teaching_position_is_where_the_lesson_falls_in_that_order():
     assert teaching_position(17) == 24        # counter-surveillance framing
     assert teaching_position(28) == 29
     assert teaching_position(29) == 30        # Meet the Flipper opens U10, after the mesh
+    assert teaching_position(40) == 40        # Leave the Garden closes the course in U11
     assert teaching_position(999) is None     # not in the curriculum map
 
 
