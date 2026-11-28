@@ -601,9 +601,10 @@ class AisDecoder(SupervisedReceiver):
         if cached is not None and cached[0] == key:
             reason = cached[1]
         elif retry is not None and retry[0] == key and time.monotonic() < retry[1]:
-            reason = "timed out"
+            reason = retry[2]
         else:
             self._capability_retry = None
+            cooldown = False
             try:
                 result = subprocess.run([binary, AIS_CAPABILITY_QUERY], stdin=subprocess.DEVNULL,
                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -611,19 +612,25 @@ class AisDecoder(SupervisedReceiver):
             except subprocess.TimeoutExpired:
                 # subprocess.run kills the query and reaps it before returning this exception.
                 reason = "timed out"
-                self._capability_retry = key, time.monotonic() + AIS_CAPABILITY_RETRY_S
+                cooldown = True
             except OSError as exc:
                 reason = str(exc)
                 if exc.errno in (errno.ENOENT, errno.EACCES):
                     self._capability = key, reason
             else:
-                reason = None
-                if result.returncode < 0:
+                if result.returncode in (126, 127):
+                    # A launcher or loader can fail until a dependency is restored.
+                    reason = f"could not run (exit status {result.returncode})"
+                    cooldown = True
+                elif result.returncode < 0:
                     reason = "was terminated before replying"
-                elif result.returncode or result.stdout != AIS_CAPABILITY:
-                    reason = "did not return the required version"
-                if result.returncode >= 0:
+                else:
+                    reason = None
+                    if result.returncode or result.stdout != AIS_CAPABILITY:
+                        reason = "did not return the required version"
                     self._capability = key, reason
+            if cooldown:
+                self._capability_retry = key, time.monotonic() + AIS_CAPABILITY_RETRY_S, reason
         if reason:
             raise AisUnavailable(
                 f"{AIS_COMPANION} {AIS_CAPABILITY_QUERY} {reason}; run deploy/provision.sh")

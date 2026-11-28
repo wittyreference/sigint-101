@@ -473,6 +473,33 @@ def test_ais_timed_out_capability_is_killed_reaped_and_retried(
         assert len(queries()) == (3 if recovery == "same-binary" else 1)
 
 
+@pytest.mark.parametrize("status", [126, 127])
+def test_ais_capability_retries_loader_failure(tmp_path, monkeypatch, status):
+    launches = _fake_launch(monkeypatch)
+    queries = tmp_path / "queries"
+    library = tmp_path / "library-ready"
+    executable = _script(tmp_path / TOOL, f'echo "$1" >> "{queries}"\n'
+                         f'[ -f "{library}" ] || exit {status}\necho {CAPABILITY}\n')
+    sweep = _StubSweeper([])
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(ais, "time", SimpleNamespace(monotonic=lambda: clock.now, time=time.time))
+
+    with _console(tmp_path, _decoder(executable), sweep) as client:
+        assert client.get("/api/spectrum").status_code == 200
+        denied = client.get("/api/ais")
+        assert denied.status_code == 503
+        library.touch()
+        clock.now = 29.0
+        cooling = client.get("/api/ais")
+        assert cooling.status_code == 503 and cooling.json()["reason"] == denied.json()["reason"]
+        assert queries.read_text(encoding="utf-8").splitlines() == [QUERY]
+        assert sweep.running and not launches
+        clock.now = 30.0
+        assert client.get("/api/ais").status_code == 200 and len(launches) == 1
+        assert queries.read_text(encoding="utf-8").splitlines() == [QUERY, QUERY]
+        assert f"exit status {status}" in denied.json()["reason"]
+
+
 @pytest.mark.parametrize("fault", ["exec-busy", "signalled"])
 def test_ais_capability_transient_query_failure_is_not_cached(monkeypatch, companion, fault):
     receiver = _decoder(companion)
