@@ -238,3 +238,43 @@ def test_meteor_invalid_stderr_bytes_do_not_end_the_drain(rig, monkeypatch):
     assert decoder.snapshot()["lock_ever"]
     assert decoder.snapshot()["reason"] == "The signal locked but no picture was decoded."
     assert made[0][0].stderr.closed
+
+
+def test_meteor_shutdown_does_not_queue_a_retry_of_its_initial_kill(tmp_path, monkeypatch):
+    from sigint101 import meteor, receiver_lifecycle
+
+    for name in ("SIGINT101_METEOR_MODE", "SIGINT101_METEOR_HZ", "SIGINT101_RTLSDR_SERIAL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(receiver_lifecycle, "PHYSICAL_WAIT_S", 2.0)
+    made, waits = [], []
+
+    class Proc(MeteorChild):
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+    def spawn(argv, **_):
+        made.append(Proc(argv, resists_kill=True))
+        return made[-1]
+
+    decoder = meteor.MeteorDecoder(
+        data_dir=tmp_path, which=lambda name: name, radio_present=lambda: True,
+        list_devices=lambda: [RtlSdrDevice(4, "rx")], spawn=spawn,
+    )
+    decoder.start()
+    proc, = made
+    run = decoder._run
+    try:
+        started = time.monotonic()
+        with pytest.raises(meteor.MeteorUnavailable, match="SatDump survived kill"):
+            decoder.shutdown()
+        elapsed = time.monotonic() - started
+        assert run.complete.wait(3)
+        assert proc.sent == ["KILL"]
+        assert len(waits) == 1 and 0 < waits[0] <= meteor.KILL_GRACE_S
+        assert elapsed < receiver_lifecycle.PHYSICAL_WAIT_S
+        assert not run.reaped and decoder.release_failure()
+    finally:
+        proc.die(-9)
+        proc.close_pipe()
+        run.reader.join(3)

@@ -18,6 +18,8 @@ BASH = shutil.which("bash")
 CORE_UTILS = (
     "awk", "basename", "cat", "cut", "date", "dirname", "grep", "mkdir", "paste",
     "readlink", "rm", "sha256sum", "sleep", "sort", "timeout",
+    # install.sh, run for real by the fast-forward test, takes its own lock with flock (C83).
+    "flock",
 )
 
 
@@ -111,11 +113,16 @@ class ProvisionBox:
         _stub(self.bin / "lsusb", 'echo "Bus 001 Device 002: ID 0bda:2838 Realtek"')
         _stub(self.bin / "nmcli", 'exit 0')
 
+        # The box's own runtime dir: install.sh, when a test runs it for real, keeps its lock
+        # there and looks for the watchdog's there, never in the host's /run/user.
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
         self.env = {
             "PATH": str(self.bin),
             "HOME": str(self.home),
             "USER": "learner",
             "LANG": "C.UTF-8",
+            "XDG_RUNTIME_DIR": str(runtime),
         }
 
     def set_node(self, version: str) -> None:
@@ -238,7 +245,8 @@ def ais_install(box):
           '[[ "$*" != *install* ]] || exit 1\n'
           f'printf "%s\\n" "#!{BASH}" "echo ${{CAPABILITY:-sigint101-ais-udp-v1}}" > rtl_ais\n'
           'chmod +x rtl_ais')
-    for tool in ("bash", "chmod", "cp", "touch"):
+    # ls: install.sh reads its lock directory's mode with `ls -ld .` (C86).
+    for tool in ("bash", "chmod", "cp", "touch", "ls"):
         (box.bin / tool).symlink_to(shutil.which(tool))
     _stub(box.bin / "sudo",
           f'echo "sudo $*" >> "{box.log}"\n'
