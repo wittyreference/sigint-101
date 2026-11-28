@@ -1,5 +1,6 @@
 # ABOUTME: The render proxy: a loopback front for the console that the render checks' browser uses.
 # ABOUTME: Forwards GET/HEAD of pages; refuses /api/* (403), other methods (405), redirects away.
+
 import http.client
 import posixpath
 import socket
@@ -7,6 +8,8 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urljoin, urlsplit
+
+RENDER_CHECK = None
 
 # The browser of a render check never gets the console's own address, only this proxy's. So no
 # page, however long it stays loaded and whatever happens to DevTools, can reach the console's

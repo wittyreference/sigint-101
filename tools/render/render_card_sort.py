@@ -1,11 +1,18 @@
 # ABOUTME: Check M5's 12-card legal sort screen and /law reading page at 800x480 over DevTools.
-# ABOUTME: Verifies card-sort fit (12 cards + feedback, 80 px buttons) and /law scroll in 3 themes.
+# ABOUTME: Verifies card-sort fit (every card, each with its miss, 80 px buttons) and /law scroll.
 
 import json
 import sys
 import time
 
 from render_scroll import connect, fence, leave_page
+
+RENDER_CHECK = {
+    "name": "card-sort",
+    "pages": ("/lesson/5", "/law?back=/lesson/5"),
+    "scratch": False,
+    "order": 60,
+}
 
 THEMES = ("dark", "sunlight", "red-night")
 
@@ -36,11 +43,23 @@ function measureCardSort(expectedTheme) {
   const footBtns = [...panel.querySelectorAll('.stage-foot button, .stage-foot a')];
   const intro = panel.querySelector('[data-sort-intro]');
   const card = panel.querySelector('.sort-card');
+  const text = panel.querySelector('[data-sort-text]');
   const fb = panel.querySelector('[data-sort-feedback]');
+  const tag = panel.querySelector('[data-sort-tag]');
+  const deckEl = panel.querySelector('[data-sort-deck]');
   const prevBtn = panel.querySelector('[data-sort-prev]');
   const nextBtn = panel.querySelector('[data-sort-next]');
-  if (choices.length !== 3 || !card || !fb || !prevBtn || !nextBtn) return null;
+  if (choices.length !== 3 || !card || !text || !fb || !deckEl || !prevBtn || !nextBtn) {
+    return null;
+  }
   const introFontPx = intro ? Math.round(parseFloat(getComputedStyle(intro).fontSize) || 0) : 0;
+  // The deck the page was served, which card-sort.js steps through: the walk must reach all of it.
+  let deck = [];
+  try { deck = JSON.parse(deckEl.textContent || '[]'); } catch (_) { deck = []; }
+  if (!Array.isArray(deck)) deck = [];
+  const shown = () => (text.textContent || '').trim();
+  const missShown = () => !fb.hidden && !!fb.classList && fb.classList.contains('verdict--miss') &&
+                          !!tag && (tag.textContent || '').trim() === 'Missed';
 
   // Stub fetch before clicking so the render check never POSTs /api/sort to a live console.
   const origFetch = window.fetch;
@@ -51,19 +70,26 @@ function measureCardSort(expectedTheme) {
   let feedbackFits = true;
   let cardScrolls = false;
   let cardsChecked = 0;
+  let missesChecked = 0;
   let worstDelta = 0;
   let maxDocW = document.documentElement.scrollWidth;
   let maxDocH = document.documentElement.scrollHeight;
   let choiceHeights = choices.map(b => Math.round(b.getBoundingClientRect().height));
 
   try {
-    // Walk back to card 1, then visit every card and tap all 3 choices to measure every state.
-    while (!prevBtn.disabled) prevBtn.click();
+    // Walk back to card 1, then visit every card of the deck and tap all 3 choices to measure
+    // every state. Two of them are wrong, so each card is measured with its "Missed" feedback,
+    // the longest text it shows. A card counts only once the page shows its text, so a step
+    // that does nothing or a Next card that stays disabled ends the walk short, and fails it.
+    for (let k = 0; k < deck.length && !prevBtn.disabled; k += 1) prevBtn.click();
 
-    for (let i = 0; i < 20; i += 1) {
-      cardsChecked += 1;
+    for (let i = 0; i < deck.length; i += 1) {
+      const entry = deck[i] || {};
+      if (shown() !== String(entry.text || '').trim()) break;
+      let missed = false;
       for (const btn of choices) {
         btn.click();
+        if (missShown() && btn.getAttribute('data-sort-choice') !== entry.answer) missed = true;
         maxDocW = Math.max(maxDocW, document.documentElement.scrollWidth);
         maxDocH = Math.max(maxDocH, document.documentElement.scrollHeight);
         const heights = choices.map(b => Math.round(b.getBoundingClientRect().height));
@@ -78,7 +104,9 @@ function measureCardSort(expectedTheme) {
         worstDelta = Math.max(worstDelta, delta);
         if (delta > 0) cardScrolls = true;
       }
-      if (nextBtn.disabled) break;
+      cardsChecked += 1;
+      if (missed) missesChecked += 1;
+      if (i === deck.length - 1 || nextBtn.disabled) break;
       nextBtn.click();
     }
   } finally {
@@ -96,7 +124,9 @@ function measureCardSort(expectedTheme) {
     footerFit,
     feedbackFits,
     cardScrolls,
+    deckSize: deck.length,
     cardsChecked,
+    missesChecked,
     worstDelta,
   };
 }
@@ -182,6 +212,10 @@ def main(console):
                 and sort.get("feedbackFits") is True
                 and sort.get("cardScrolls") is False
                 and sort.get("worstDelta") == 0
+                # It walked the whole deck the page was served, and saw each card's miss.
+                and type(sort.get("deckSize")) is int and sort["deckSize"] > 0
+                and sort.get("cardsChecked") == sort["deckSize"]
+                and sort.get("missesChecked") == sort["deckSize"]
             )
             failed |= verdict(sort_ok, f"card-sort {theme}", sort)
 

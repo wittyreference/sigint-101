@@ -554,6 +554,80 @@ body {
   white-space: nowrap;
 }
 
+/* The lesson's tuning note (lesson-tuning.js): shown only while a slow restore is still running
+   or after one was refused. Two short lines in the rail's height, the verdict over the reason,
+   so each is read whole in the room left beside "Locked until you predict" (113 px at 800 px);
+   a longer reason from the console ends in an ellipsis rather than pushing the steps off. */
+.rail__tuning {
+  flex: 0 1 auto;
+  min-width: 9ch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  line-height: 1.15;
+  color: var(--warn);
+  white-space: nowrap;
+}
+/* An element with display:flex ignores the UA [hidden] rule otherwise. */
+.rail__tuning[hidden] {
+  display: none;
+}
+.rail__tuning-head {
+  font-size: 13px;
+  text-transform: uppercase;
+}
+.rail__tuning-why {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail__tuning-why:empty {
+  display: none;
+}
+
+/* The tuning note's reason, whole, when it is too long for the rail's line: a band under the
+   rail across the screen, over the top of the stage, where it wraps. The whole band is the tap
+   that closes it, a full touch height; tapping the rail's note opens it again. */
+.tuning-full {
+  position: fixed;
+  top: calc(var(--bar-h) + var(--rail-h));
+  left: 0;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: var(--touch);
+  margin: 0;
+  padding: 8px var(--gutter);
+  border: 0;
+  border-bottom: 3px double var(--warn);
+  background: var(--surface);
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  line-height: 1.3;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+}
+.tuning-full[hidden] {
+  display: none;
+}
+.tuning-full__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tuning-full__close {
+  flex: none;
+  font-size: 13px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
 /* ===== Stage view ========================================================= */
 .stage {
   flex: 1 1 auto;
@@ -1197,6 +1271,9 @@ body {
   color: var(--fg);
   border: 2px solid currentColor;
 }
+.decoder__status--replay {
+  border: 4px double currentColor;
+}
 .decoder__status--live {
   color: var(--ok);
 }
@@ -1282,6 +1359,18 @@ body {
   border-bottom: 1px solid var(--border);
   font-size: 15px;
 }
+.decoder__item--replay {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "mark model mod" "mark read tone";
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.decoder__item--replay .logbook-mark {
+  grid-area: mark;
+  align-self: center;
+  font-size: 18px;
+}
+.decoder__item--replay :is(.decoder__mod, .decoder__tone) { font-size: 18px; }
 .decoder__model { grid-area: model; color: var(--accent); font-weight: 600; }
 .decoder__mod { grid-area: mod; font-family: var(--font-mono); font-size: 13px; color: var(--fg); }
 .decoder__item--fsk .decoder__mod { color: var(--ok); }
@@ -2904,6 +2993,25 @@ body {
   gap: 2px;
   line-height: 1;
 }
+.tune .tune-btn--replay {
+  width: 132px;
+  height: var(--touch);
+  padding-inline: 0;
+  font-size: 18px;
+  line-height: 1.15;
+  white-space: normal;
+}
+.tune-btn--replay:disabled { cursor: default; }
+.tune:not(.tune--replay) .tune__dial--replay,
+.tune--replay > :is(.tune__dial:not(.tune__dial--replay), [data-tune-step], [data-step-cycle]) {
+  display: none;
+}
+.tune__dial--replay .tune__caption {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .rack__adjust-label {
   font-size: 18px;
   color: var(--fg-dim);
@@ -2922,6 +3030,10 @@ body {
 }
 .rack__tune .tune__caption {
   font-size: 13px;
+}
+.rack__tune[data-decoder-tune="decode"] [data-tune-caption] {
+  line-height: 1.15;
+  white-space: normal;
 }
 .rack__tune.tune--fixed .tune__dial {
   flex: 1 1 auto;
@@ -3069,6 +3181,10 @@ body {
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
+}
+.logbook__marks {
+  display: inline-flex;
+  gap: 8px;
 }
 .logbook__entry p {
   margin: 5px 0 0;

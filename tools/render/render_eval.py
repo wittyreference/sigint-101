@@ -1,5 +1,6 @@
 # ABOUTME: Load a page at a forced 800x480 over CDP, evaluate a JS expression, print its JSON.
 # ABOUTME: Optional third arg saves a screenshot. Usage: render_eval.py URL 'expr' [out.png].
+
 import base64
 import json
 import os
@@ -8,6 +9,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from render_scroll import connect, fence  # noqa: E402
+
+RENDER_CHECK = None
 
 
 def main():
